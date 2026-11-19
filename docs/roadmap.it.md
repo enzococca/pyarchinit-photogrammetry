@@ -139,7 +139,9 @@ marker in troppo poche foto.
   struttura del problema; `optimize_cameras(engine="ppg")`, `ppg optimize --engine ppg`): su
   blocchi sintetici recupera pose e calibrazione, la scala da due barre, un bias GNSS entro
   2 cm, e porta un blocco con rolling shutter da 1,75 px a 0,002 px; la trincea resta entro le sue
-  soglie. Spostarla nel nucleo nativo è rimandato a quando i blocchi diventeranno troppo grandi per lei.
+  soglie. Dalla 2.0.0 la esegue il nucleo nativo (Levenberg-Marquardt sul complemento di Schur, in Rust):
+  `auto` sceglie il risolutore nativo, con lo stesso costo di COLMAP e 10-20 volte più veloce sui blocchi veri; scipy
+  resta la riserva.
 * Atlanti di texture a più pagine, I3S. Pagine *fatte*: una texture più grande di 8192 px viene divisa in pagine
   (gruppi di facce vicine, o tasselli della pianta per la mappatura ortofoto), portate dalle esportazioni,
   dalla vista 3D, dalle versioni, da annulla, dalle patch e dall'import da Metashape. I3S *fatto*: il modello con

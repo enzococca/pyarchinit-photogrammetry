@@ -67,7 +67,8 @@ by side.
 
 ```bash
 ppg bench run PHOTOS OUT --name NAME [--steps align|all] [--mapper auto|incremental|global] [--repeat N] [--keep] [--records DIR]
-ppg bench synthetic trench|ring OUT [--repeat 3] [--records DIR]
+ppg bench synthetic trench|ring OUT [--repeat 3] [--keep] [--records DIR]
+ppg bench adjust PROJECT --name NAME [--solvers native,colmap,scipy] [--repeat 3] [--records DIR]
 ppg bench table DIR
 ```
 
@@ -87,7 +88,12 @@ ppg bench table DIR
   needs the `bench` extra (`pip install "pyarchinit-photogrammetry[bench]"`: psutil, for the
   memory of the child). `--mapper incremental|global` asks the alignment for that mapper (`auto`,
   the default, picks as `ppg process` does); the record keeps it as `mapper_requested` beside the
-  `mapper` the run used, and the table compares it.
+  `mapper` the run used, and the table compares it. `--seed N` (0 or more) fixes the seed of the
+  RANSAC of the geometric verification of the matches (`PPG_RANSAC_SEED` in the child): runs with
+  the same seed verify the same pairs, so repeats compare like with like; the record keeps it as
+  `ransac_seed`, `-1` without it (a seed from the clock). The seed fixes the verification only: on a
+  computer that shares the pairs between the GPU and the CPU, and since COLMAP's threaded extractor
+  numbers the photos in the order it finishes them, repeated runs can still differ in their pairs.
 * `synthetic trench|ring`: writes the set in a folder of its own, `OUT/synthetic-trench-set/` or
   `OUT/synthetic-ring-set/` (its photos and `gcp.csv`), which must not exist yet, and runs it as
   `synthetic-trench` (28 photos, all the steps of `ppg process` with its defaults - the depth maps at
@@ -102,7 +108,32 @@ ppg bench table DIR
   the `truth_targets` targets found, `truth_camera_rmse`, `truth_camera_height_mean` (estimated minus
   true: heights that landed too high or too low keep their sign) and `truth_camera_height_rmse`,
   against the true targets and poses of the scene. The two sets are synthetic: their coordinates are
-  made up and name no place.
+  made up and name no place. `--keep` keeps the work folder of each run with its project
+  (`OUT/synthetic-trench-<i>/project.ppg`): what `adjust` takes.
+* `adjust PROJECT --name NAME`: the native bundle adjustment, COLMAP's and scipy's on the
+  reconstruction of a kept project (one of `run` or `synthetic` with `--keep`, or any aligned
+  project), on the same plain problem - the tie points, every calibration free but the principal
+  point, the first photo and the farthest from it held -, each solver in a child process of its own:
+  the steps `bundle_native`, `bundle_colmap`, `bundle_scipy` with the seconds of the solve alone
+  (COLMAP's with Ceres' set-up of its problem, as the native solver's hold the core's) and the peak
+  memory of the child. The project is opened and never written: each solver reads the
+  reconstruction from disk for itself, COLMAP adjusts its copy in memory. The results: `photos`,
+  `points`, `observations`, `bundle_cost_initial`; per solver `bundle_cost_<s>`, by one evaluator
+  for the three (the native evaluation of the problem at the solver's end point), `bundle_iterations_<s>`,
+  `bundle_gradient_max_<s>` and `bundle_converged_<s>` (1 or 0); `bundle_gap_colmap` and
+  `bundle_gap_scipy`, the cost of the native solver against the other's, relative (the gate of the
+  native engine asks at most `1e-4` against COLMAP on the same problem and not above scipy's);
+  `bundle_sigma_ratio_scipy`, the largest gap between the native and the scipy parameters over the
+  photo and intrinsic columns, in sigmas of the reduced camera system at scipy's end point (a figure,
+  to read with `bundle_converged_scipy`: where scipy stopped at its budget the gap is not a gate).
+  The settings keep the solvers asked, the linear solver the native solver and COLMAP used,
+  `max_iterations` (200) and the version of pycolmap. `--solvers` names some of the three
+  (`native,colmap`); scipy, the reference of the tests, is left out above 100 photos (hours on a
+  large block), with a warning in the record. Tie points seen by fewer than two photos, which no
+  solver can adjust, are left out of the problem of all three, said in the warnings. The records,
+  and the work folder of each run (its job, the child's log, its result; removed after unless the
+  run failed), go to `--records DIR`, by default the current folder; the set of the record is the
+  project's photos and the disk the project's.
 * `table DIR`: per run, program and step the median, the least and the most of the seconds of the
   valid runs, the highest peak memory, the median of each stage and the engine; then the results as
   medians per run and program (a result present in some of the runs only shows its count beside its

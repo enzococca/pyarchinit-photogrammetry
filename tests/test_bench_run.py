@@ -29,7 +29,7 @@ FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "max_ratio",
             "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets",
-            "mapper_requested"]
+            "mapper_requested", "ransac_seed"]
 
 # Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters under a
 # made-up root (never the mount point of the external disks: a private path is resolved, and no test makes the
@@ -698,7 +698,8 @@ def test_an_unknown_mapper_is_refused_before_any_child(tmp_path, monkeypatch):
 
 # --- the run on the small set -----------------------------------------------------------------------------------------
 
-def test_a_small_run_writes_one_record(small_set, tmp_path):
+def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
+    monkeypatch.delenv("PPG_ENGINE", raising=False)  # the engine the computer asks for is not this run's: auto
     out = tmp_path / "out"
     paths = runner.run(small_set, out, name="t", extra_results=lambda doc: {"chunks": len(doc.chunks)})
     r = the_record(out, paths)
@@ -916,6 +917,30 @@ def test_the_mapper_asked_for_goes_to_the_child_and_is_kept_beside_the_one_the_r
     r = the_record(tmp_path / "auto", runner.run(photos, tmp_path / "auto", name="t", keep=True))
     job = json.loads((tmp_path / "auto" / "t-1" / "job.json").read_text(encoding="utf-8"))
     assert job["mapper"] == "auto" and r["settings"]["mapper_requested"] == "auto"
+
+
+def test_the_seed_goes_to_the_child_as_ppg_ransac_seed_and_is_kept_in_the_record(tmp_path, monkeypatch, stand_in):
+    """``seed`` fixes the RANSAC of the geometric verification in the child through ``PPG_RANSAC_SEED``; the record
+    keeps the seed the child runs with: the one asked for, the one inherited from the environment, or ``-1`` (a seed
+    from the clock) without either."""
+    from pyarchinit_photogrammetry.engine import sfm
+
+    monkeypatch.delenv(sfm.RANSAC_SEED_ENV, raising=False)
+    photos = noise_photos(tmp_path / "photos")
+    r = the_record(tmp_path / "seeded", runner.run(photos, tmp_path / "seeded", name="t", seed=7))
+    (_cmd, kwargs), = stand_in.calls
+    assert kwargs["env"][sfm.RANSAC_SEED_ENV] == "7" and r["settings"]["ransac_seed"] == 7
+    assert list(r["settings"]) == SETTINGS
+    r = the_record(tmp_path / "clock", runner.run(photos, tmp_path / "clock", name="t"))
+    _cmd, kwargs = stand_in.calls[-1]
+    assert sfm.RANSAC_SEED_ENV not in kwargs["env"] and r["settings"]["ransac_seed"] == -1
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "3")
+    r = the_record(tmp_path / "inherited", runner.run(photos, tmp_path / "inherited", name="t"))
+    _cmd, kwargs = stand_in.calls[-1]
+    assert kwargs["env"][sfm.RANSAC_SEED_ENV] == "3" and r["settings"]["ransac_seed"] == 3
+    with pytest.raises(ValueError, match="seed must be 0 or more"):
+        runner.run(photos, tmp_path / "negative", name="t", seed=-1)
+    assert not (tmp_path / "negative").exists() and len(stand_in.calls) == 3
 
 
 def test_the_machine_is_read_again_for_every_repeat(tmp_path, monkeypatch, stand_in):

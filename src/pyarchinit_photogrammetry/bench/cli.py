@@ -28,6 +28,8 @@ STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the p
               "(the default targets detected first; then depth maps, dense cloud, model, texture, DEM, orthophoto)")
 MAPPER_HELP = ("the mapper of the alignment: auto (the one ppg process picks for the set), incremental or global; the "
                "record keeps it as mapper_requested beside the mapper the run used")
+SEED_HELP = ("the seed of the RANSAC of the geometric verification of the matches (PPG_RANSAC_SEED in the child): runs "
+             "with the same seed verify the same pairs; without it a seed from the clock, and the record says -1")
 RECORDS_HELP = "the folder of the records (default: OUT)"
 
 
@@ -39,6 +41,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
                                                            "say the set and what is measured, e.g. trench-28-align"),
               steps: str = typer.Option("align", "--steps", help=STEPS_HELP),
               mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
+              seed: Optional[int] = typer.Option(None, "--seed", min=0, help=SEED_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
               records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
@@ -55,7 +58,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
                                  param_hint="--mapper")
     _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, mapper=mapper))
+              records=records, mapper=mapper, seed=seed))
 
 
 @bench_app.command("synthetic")
@@ -64,6 +67,9 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
                                                          "not exist yet), of the work folders and, without "
                                                          "--records, of the records"),
                     repeat: int = typer.Option(3, "--repeat", help="how many runs: a figure is a baseline with three"),
+                    keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the "
+                                                                    "runs: the project of a kept run is what ppg "
+                                                                    "bench adjust takes"),
                     records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
     """A synthetic set written in a folder of its own under OUT and run as synthetic-trench or synthetic-ring, the
     errors against the truth of the set among the results (the keys that start with truth_). The set stays after
@@ -96,8 +102,33 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
         kwargs = dict(extra_results=lambda doc: truth.ring_truth(doc, scene))
     typer.echo(f"the set is written: {len(scene.cameras)} photos")
     # the synthetic sets are stamped with the targets ppg process detects by default (testing.synthetic._stamp_target)
-    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=steps, repeat=repeat,
+    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=steps, repeat=repeat, keep=keep,
               records=records, targets=child.DEFAULT_TARGETS, **kwargs))
+
+
+@bench_app.command("adjust")
+def bench_adjust(project: Path = typer.Argument(..., help="the project file (.ppg) of a kept run - of ppg bench run or "
+                                                          "synthetic with --keep - or any aligned project; it is "
+                                                          "opened and never written"),
+                 name: str = typer.Option(..., "--name", help="the name of the run (letters, digits, '.', '_', '-'): "
+                                                              "say the set, e.g. trench-28-adjust"),
+                 solvers: Optional[str] = typer.Option(None, "--solvers", help="the solvers to time, separated by "
+                                                                              "commas: native, colmap, scipy (all "
+                                                                              "three by default; scipy is left out "
+                                                                              "above 100 photos)"),
+                 repeat: int = typer.Option(3, "--repeat", help="how many runs: a figure is a baseline with three"),
+                 records: Optional[Path] = typer.Option(None, "--records", help="the folder of the records and of the "
+                                                                               "work folder of each run (default: "
+                                                                               "the current folder)")):
+    """The native adjustment, COLMAP's and scipy's on the reconstruction of a kept project, on the same plain problem
+    (the tie points, every calibration free but the principal point, two photos held): each solver timed in a child
+    process with its memory, the cost of the three by one evaluator and the gaps between them; one record per run.
+    The project is never written."""
+    from . import adjust
+
+    words = adjust.SOLVERS if solvers is None else tuple(s.strip() for s in solvers.split(","))
+    _, records_folder = _check(adjust.check, project, name, words, repeat, records)
+    _say(_run(adjust.run, records_folder, name, project, name, solvers=words, repeat=repeat, records=records))
 
 
 @bench_app.command("table")

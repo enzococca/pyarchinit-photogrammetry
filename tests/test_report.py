@@ -324,6 +324,30 @@ def test_the_parameters_name_the_engine_of_a_step_that_fell_back():
         ["Photo alignment", "Quality", "high"], ["Depth maps", "Engine used", "native"], ["", "Quality", "medium"]]
 
 
+def test_the_parameters_name_the_solver_of_our_own_adjustment():
+    """``optimize_cameras(engine="ppg")`` keeps which solver ran under ``meta["sfm"]["optimize"]["solver"]``: the
+    native one is a row of the optimisation's parameters, after its engine, as is scipy standing in for it with the
+    reason; scipy doing what was asked is no row, and the figures of the solve are not printed."""
+
+    def rows(ch, language):
+        w = rc.Words(language)
+        return [(label, value) for step, label, value in rc.parameter_rows(ch, w) if step == w("step_optimize")]
+
+    reason = "camera model OPENCV_FISHEYE is not in the native solver"
+    fell_back = {"requested": "native", "used": "scipy", "fallback": reason, "seconds": 1.5, "linear_solver": None}
+    ch = ppg.Document().add_chunk()
+    ch.meta["sfm"] = {"optimize": {"engine": "ppg", "converged": True, "solver": fell_back}}
+    assert rows(ch, "it") == [("Motore", "ppg"), ("Risolutore", f"scipy ({reason})"), ("Convergenza", "si")]
+    assert rows(ch, "en") == [("Engine", "ppg"), ("Solver", f"scipy ({reason})"), ("Converged", "yes")]
+    ch.meta["sfm"]["optimize"]["solver"] = {"requested": "native", "used": "native", "fallback": None,
+                                            "seconds": 0.02, "linear_solver": "dense"}
+    assert rows(ch, "it") == [("Motore", "ppg"), ("Risolutore", "native"), ("Convergenza", "si")]
+    for requested in ("auto", "scipy"):  # scipy doing what was asked: nothing to say
+        ch.meta["sfm"]["optimize"]["solver"] = {"requested": requested, "used": "scipy", "fallback": None,
+                                                "seconds": 1.5, "linear_solver": None}
+        assert rows(ch, "it") == [("Motore", "ppg"), ("Convergenza", "si")]
+
+
 def test_multispectral_and_thermal_parts(tmp_path):
     """A chunk with a reflectance orthomosaic, an index and its zones gets the multispectral part
     (bands, calibration, balance, false colour, the index on its ramp with its statistics, the

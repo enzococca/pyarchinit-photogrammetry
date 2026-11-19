@@ -498,7 +498,11 @@ retriangulated; on the 57 photos of the Tell Sultan tutorial 58 s against 293 s,
 within 2 cm) or `auto`: global from 40 photos of a survey from the air (their GPS spread over the site),
 incremental for fewer, for objects and close-range scenes, for 360-degree rigs and
 calibrations held fixed, when the global one places less than 90 % of the photos, and when its
-cameras do not fit the GPS of the photos. `meta["sfm"]["mapper"]` says which ran. Photos are aligned
+cameras do not fit the GPS of the photos. `meta["sfm"]["mapper"]` says which ran. The global block is
+judged against the GPS of the photos right after global positioning, before its adjustment:
+`meta["sfm"]["global_check"]` keeps that verdict (`after`, `fits`, `residual_m`, the 90th percentile of
+the horizontal residuals of the cameras on their GPS), and the key is absent when positioning was never
+reached. Photos are aligned
 with one focal length (square pixels): fitting fx and fy separately can drift into a degenerate
 solution. The result stays in the sensor model (`OPENCV` with fx = fy, no tangential distortion); a
 sensor calibrated with fx != fy or tangential distortion is aligned as it is, and `optimize_cameras()`
@@ -548,7 +552,9 @@ tell it from the distance to the ground). Fixed points are `engine.sfm.fixed_poi
 use_markers)`, the one rule of both engines and of the dialog; `engine.sfm.gnss_hold(chunk)` says what
 the positions will do. `report["gnss"]` says how many photos held the block, with the `termination` of
 the solve and whether it is `usable` (a solve that is not holds nothing), `report["focal_held"]`
-whether the focal length of the alignment was kept; `gnss="off"` leaves the positions out. A safety
+why the focal length of the alignment was kept (`"the camera positions hold the block"`; with our own
+adjustment also `"no references: the focal length cannot be told from the depth"`, below), None when
+it was refined; `gnss="off"` leaves the positions out. A safety
 net for every engine: when the cameras end farther from their accurate positions than 3 times the
 offset before and 0.3 m more than it (root mean square; once the best similarity places the block when
 the optimisation fits a new georeference; each position less the bias of its flight after our
@@ -561,14 +567,44 @@ there was none).
 
 `engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both refine
 the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the
-block and no fixed points do, else `"off"`) and `rolling_shutter=True`.
+block and no fixed points do, else `"off"`), `rolling_shutter=True` and `solver="auto"`, `"native"` or
+`"scipy"` (below; an option of our own adjustment: with `engine="colmap"` any word but `"auto"` is
+refused before any work). On a block nothing places - fewer than three control points and fewer than
+three camera positions in the adjustment: no references at all, or scale bars alone - the focal length
+is held whatever was asked, and `report["focal_held"]` says why: photos of flat ground taken from one
+height cannot tell the focal length from the depth, the two scale together at the same cost, and the
+native solver, a Newton method, walks that valley (the first photo and the farthest from it hold the
+place and the size of such a block; `bundle.Problem.absolute` says whether the references place it).
+`report["solver"]` says which solver ran: `requested`, `used`, `fallback`
+(why the native one did not run though it was wanted), the `seconds` of the solve, `linear_solver`;
+the processing report prints a *Solver* row when the native one ran or when scipy stood in for it,
+with the reason (`ppg optimize --engine ppg --solver native`).
 
 ### Our own bundle adjustment
 
 `engine.bundle.problem_from_chunk(chunk, rec, use_markers, gnss, rolling_shutter)`,
-`bundle.adjust(problem)` and `bundle.write_back(...)`: sparse trust-region least squares (scipy; the
-Jacobian by finite differences grouped by the structure: a residual depends on one photo, one point,
-one camera), projection with the COLMAP camera models. Control points pulled to their reference by
+`bundle.adjust(problem, solver="auto")` and `bundle.write_back(...)`: the problem (`bundle.Problem`)
+solved by one of two solvers. scipy's sparse trust-region least squares is the reference
+(`solver="scipy"`; the Jacobian by finite differences grouped by the structure: a residual depends on
+one photo, one point, one camera; projection with the COLMAP camera models). The native solver of the
+core (`solver="native"`, `ppg_core` API 12) is the same problem in Rust: Levenberg-Marquardt over the
+camera system reduced by the Schur complement, analytic Jacobians, a robust loss (`loss="huber"` or
+`"cauchy"` with `loss_scale`) on the tie points; it takes the six camera models of the native engine
+(SIMPLE_PINHOLE, PINHOLE, SIMPLE_RADIAL, RADIAL, OPENCV, FULL_OPENCV) and no rigs. `solver="auto"` is
+the native solver since it passed its gate (`bundle.NATIVE_BY_DEFAULT`; it was scipy before, and
+`PPG_ENGINE=native` still asks for it by name). Where the native solver cannot run - the core missing
+or older than API 12, switched off
+by `PPG_NATIVE=0`, another camera model - scipy adjusts the block, `Result.fallback` says why and the
+log has a line: never an error (a robust loss is then dropped on a block with references, the reason
+saying so). `bundle.Result` carries the adjusted block and what the solve was: `cost`,
+`gradient_max`, `solver`, `fallback`, `seconds`, `linear_solver` (`dense`, `sparse`, `pcg`),
+`termination`; `bundle.evaluate(problem)` gives the residuals, gradient and Jacobian of a problem by
+the native engine, `bundle.problem_at(problem, result)` a problem started where a result ended. On the
+synthetic problems of `testing.bundle_problems` (one per kind of residual and per camera model) the
+native solver reaches scipy's optimum - a cost not above scipy's, the parameters within a tenth of
+their standard deviation - in a few iterations where scipy takes a hundred evaluations.
+
+Control points pulled to their reference by
 their accuracy (not fixed), control scale bars as distances between their markers, GNSS positions of
 the photos with a bias per flight (`bundle.flights`: per sensor, a new flight after 20 minutes
 without photos), rolling shutter (a linear and an angular velocity per photo, the time of an

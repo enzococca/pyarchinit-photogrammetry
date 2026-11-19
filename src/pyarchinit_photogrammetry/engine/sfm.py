@@ -46,6 +46,36 @@ def set_engine_verbosity(verbose: bool = False) -> None:
 
 set_engine_verbosity()
 
+# the seed of the RANSAC of the geometric verification of the matches (COLMAP's ``ransac.random_seed``): a whole
+# number, 0 or more, in this variable makes two matchings of the same photos verify the same pairs with the same
+# inliers, so the repeats of ``ppg bench run --seed`` and the tests compare like with like; unset or empty, COLMAP's
+# default (-1) seeds from the clock, another seed at every run
+RANSAC_SEED_ENV = "PPG_RANSAC_SEED"
+
+
+def ransac_seed(environ=None) -> int:
+    """The seed of the geometric verification: :data:`RANSAC_SEED_ENV` in ``environ`` (the process's environment
+    when not given) as a whole number, 0 or more; ``-1`` when the variable is unset or empty. Any other text
+    raises ValueError naming the variable."""
+    text = (os.environ if environ is None else environ).get(RANSAC_SEED_ENV, "").strip()
+    if not text:
+        return -1
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"{RANSAC_SEED_ENV} must be a whole number, 0 or more, not {text!r}")
+    return int(text)
+
+
+def verification_options():
+    """COLMAP's options of the geometric verification of the matches (``TwoViewGeometryOptions``, its defaults)
+    with ``ransac.random_seed`` from :func:`ransac_seed`. Every verification of the classic engine takes its
+    options from here: COLMAP's matchers (``verification_options=``), ``verify_matches`` of the pairs matched
+    on the GPU and of the learned matches."""
+    import pycolmap
+
+    opts = pycolmap.TwoViewGeometryOptions()
+    opts.ransac.random_seed = ransac_seed()
+    return opts
+
 
 def mapping_camera(sensor) -> tuple[str, list[float]]:
     """COLMAP model and parameters used to align the photos of ``sensor``: a single focal
@@ -513,7 +543,7 @@ def _preselected_pairs(chunk: Chunk, work: Path, root, by_sensor: dict, masks,
                 pycolmap.extract_features(str(db_path), str(root), image_names=image_names,
                                           camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                                           extraction_options=ext)
-            pycolmap.match_exhaustive(str(db_path))
+            pycolmap.match_exhaustive(str(db_path), verification_options=verification_options())
         con = sqlite3.connect(str(db_path))
         try:
             ids = dict(con.execute("SELECT image_id, name FROM images"))
@@ -684,6 +714,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
         finally:
             d.close()
 
+    vopts = verification_options()  # the one verification for the chunks of the CPU and the pairs of the GPUs
     threads = [threading.Thread(target=gpu_stream, args=(d,), name=f"ppg-gpu-matching-{d}", daemon=True)
                for d in devices]
     started = time.perf_counter()
@@ -709,7 +740,8 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
             popts = pycolmap.ImportedPairingOptions()
             popts.match_list_path = str(list_path)
             t0 = time.perf_counter()
-            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+            pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                       verification_options=vopts)
             cpu_rate = n / max(time.perf_counter() - t0, 1e-3)
             with lock:
                 done["cpu"] += n
@@ -727,7 +759,7 @@ def _match_with_gpu(db_path: Path, pairs, mopts, devices: list[int], progress: P
         progress(0.95, f"Verifying {len(gpu_pairs):,} pairs matched on the GPU")
         gpu_list = work / "pairs_gpu.txt"
         gpu_list.write_text("\n".join(f"{a} {b}" for a, b in gpu_pairs))
-        pycolmap.verify_matches(str(db_path), str(gpu_list), pycolmap.TwoViewGeometryOptions())
+        pycolmap.verify_matches(str(db_path), str(gpu_list), vopts)
     return {"gpu_pairs": done["gpu"], "cpu_pairs": done["cpu"], "by_device": by_device}
 
 
@@ -900,6 +932,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         raise ValueError(f"apply_masks: one of {', '.join(MASK_MODES)}")
     if matcher not in learned.MATCHERS:
         raise ValueError(f"matcher: one of {', '.join(learned.MATCHERS)}")
+    ransac_seed()  # a PPG_RANSAC_SEED that is not a whole number is refused before the points are detected
     generic, reference = _preselection(pair_selection, generic, reference)
     try:  # the matching needs no system: what the alignment would refuse is only said here
         gcp.preflight(chunk)
@@ -1097,7 +1130,8 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                 learned.match_pairs(db_path, pairs, feats, progress.sub(0.55, 0.4))
         elif pairs is None:
             with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-                pycolmap.match_exhaustive(str(db_path), matching_options=mopts)
+                pycolmap.match_exhaustive(str(db_path), matching_options=mopts,
+                                          verification_options=verification_options())
         elif pairs and devices:
             shares = _match_with_gpu(db_path, pairs, mopts, devices, progress, work)
         elif pairs:
@@ -1106,7 +1140,8 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
             popts = pycolmap.ImportedPairingOptions()
             popts.match_list_path = str(list_path)
             with colmap_log.relay(progress.sub(0.55, 0.4), work, phases=blocks):
-                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts)
+                pycolmap.match_image_pairs(str(db_path), matching_options=mopts, pairing_options=popts,
+                                           verification_options=verification_options())
     removed = remove_stationary_matches(db_path) if exclude_stationary else None
     old = chunk.meta.get("sfm") or {}
     chunk.meta["sfm"] = {"image_root": str(root), "names": {str(k): v for k, v in names.items()}, "features": features,
@@ -1261,18 +1296,79 @@ def limit_tie_points(db_path: Path, out_path: Path, per_image: int, progress: Pr
             "photos_pruned": pruned_images}
 
 
+class GlobalBlockRejected(RuntimeError):
+    """The block of the global mapper refused by :func:`_global_check` right after global positioning,
+    before any adjustment of it; ``why`` says why, in the words of ``global_fallback``."""
+
+    def __init__(self, why: str) -> None:
+        super().__init__(why)
+        self.why = why
+
+
 def _global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int):
     """All the cameras at once (COLMAP's global SfM, GLOMAP): rotations averaged over every pair,
     then positions, then the bundle adjustment on a selection of the tracks - ``tiepoint_limit / 4``
     per photo, as the tie point limit of Metashape, retriangulated afterwards. Tell Sultan sample
-    (57 photos): 58 s against 293 s one photo at a time, the same cameras within 2 cm."""
+    (57 photos): 58 s against 293 s one photo at a time, the same cameras within 2 cm.
+
+    The block is judged right after global positioning, before its adjustment (:func:`_global_check`),
+    in the model-update callback of the pipeline: COLMAP calls it with the positioned block first, then
+    after each round of the adjustment and after the retriangulation - for each component of the
+    matches, the largest first. A block that placed too few photos or cannot fit their GPS raises
+    :class:`GlobalBlockRejected` there, and the adjustment it would have gone through (an hour on a
+    thousand photos) is not paid. Returns the reconstructions by index, as ``pycolmap.global_mapping``
+    does, written in ``out``."""
     import pycolmap
 
     per_view = max(500, int((chunk.meta.get("sfm") or {}).get("tiepoint_limit", 8000)) // 4)
     opts = pycolmap.GlobalPipelineOptions()
+    opts.image_path = opts.mapper.image_path = root  # as pycolmap.global_mapping sets them: the colours of the points
     opts.mapper.track_required_tracks_per_view = per_view
     opts.mapper.keep_max_num_tracks = per_view * max(n, 1)
-    return pycolmap.global_mapping(str(db_path), root, str(out), opts)
+    manager = pycolmap.ReconstructionManager()
+    judged = False
+
+    def on_model_update() -> None:
+        nonlocal judged
+        if judged:
+            return
+        judged = True
+        why = _global_check(chunk, {i: manager.get(i) for i in range(manager.size())}, n)
+        if why:
+            raise GlobalBlockRejected(why)
+
+    database = pycolmap.Database.open(str(db_path))
+    try:
+        pipeline = pycolmap.GlobalPipeline(opts, database, manager)
+        pipeline.add_callback(pycolmap.GlobalPipelineCallback.MODEL_UPDATE_CALLBACK, on_model_update)
+        pipeline.run()
+    finally:
+        database.close()
+    manager.write(str(out))
+    return {i: manager.get(i) for i in range(manager.size())}
+
+
+def _global_check(chunk: Chunk, recs: dict, n: int, *, record: bool = True) -> str | None:
+    """Why the block of a global attempt - ``recs``, its reconstructions of ``n`` photos; the largest is
+    judged - is refused, in the words of ``global_fallback``: it placed fewer than 90 % of the photos, or
+    its cameras do not sit on the GPS of the photos (:func:`_block_fits_references`: parts at different
+    scales, with the matches sound). None when the block passes or cannot be judged (no GPS, few photos,
+    a trench: :func:`fits_references`). ``record`` keeps the verdict in ``chunk.meta["sfm"]["global_check"]``
+    as the check made right after global positioning: ``after``, ``fits`` (whether the block went on),
+    ``residual_m`` (the 90th percentile of the horizontal residuals of the cameras on their GPS, metres;
+    None when the block cannot be judged or placed too few photos to be measured)."""
+    best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
+    placed = best.num_reg_images() if best is not None else 0
+    residual = float("nan")
+    if placed < 0.9 * n:
+        why = f"placed {placed} of {n} photos"
+    else:
+        fits, residual = _block_fits_references(chunk, best)
+        why = None if fits else f"built a block whose cameras miss the GPS of the photos by {residual:.0f} m"
+    if record:
+        chunk.meta["sfm"]["global_check"] = {"after": "global_positioning", "fits": why is None,
+                                            "residual_m": None if np.isnan(residual) else float(residual)}
+    return why
 
 
 GLOBAL_FIT_FACTOR = 3.0  # cameras of a global block may miss their GPS by this times its accuracy (median, horizontal)
@@ -1602,7 +1698,9 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     global one failed now and then without noticing on a room photographed from a few stations,
     the incremental one never), for 360-degree rigs and calibrations held fixed, and whenever the
     global one leaves photos out or builds a block whose cameras do not sit on the GPS of the photos
-    (:func:`fits_references`).
+    (:func:`fits_references`) - judged right after global positioning, before the adjustment of the
+    block, and again on the adjusted block (:func:`_global_check`; the first verdict is kept in
+    ``chunk.meta["sfm"]["global_check"]``).
 
     ``use_gps`` (None: when the photos have them): the reference positions of the photos, with
     their accuracy, hold the block during the incremental alignment - COLMAP's pose priors,
@@ -1661,19 +1759,17 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     recs = {}
     if mapper == "global":
         progress(0.0, f"Aligning {n} cameras at once (global)")
+        info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
+        why = None
         try:
             with colmap_log.relay(progress.sub(0.0, 0.8), work, total=n, phases={"stage": (0.0, 1.0)}, stages=stages):
                 recs = _global_mapping(chunk, db_path, root, out, n)
+        except GlobalBlockRejected as exc:  # judged right after global positioning: no adjustment paid
+            why = exc.why
         except Exception as exc:  # pragma: no cover - a block the global solver cannot handle
             progress(0.05, f"Global alignment failed ({exc}): one photo at a time")
-        best = max(recs.values(), key=lambda r: r.num_reg_images()) if recs else None
-        why = None
-        if best is None or best.num_reg_images() < 0.9 * n:
-            why = f"placed {best.num_reg_images() if best else 0} of {n} photos"
-        else:
-            fits, residual = _block_fits_references(chunk, best)
-            if not fits:  # parts at different scales (Tell Tuqan): the matches are sound, the block is not
-                why = f"built a block whose cameras miss the GPS of the photos by {residual:.0f} m"
+        if why is None:  # the final check, on the block the adjustment and the retriangulation left
+            why = _global_check(chunk, recs, n, record=False)
         if why:
             log.warning("global alignment %s: aligning one photo at a time", why)
             progress(0.1, f"Global alignment {why}: one photo at a time")
@@ -2286,6 +2382,9 @@ GNSS_PRIOR_MAX_M = 0.5  # m: positions this accurate (mean horizontal accuracy: 
 GNSS_PRIOR_SPREAD = 50.0  # the positions must spread across the block this many times their accuracy
 BEND_FACTOR = 3.0  # an optimisation that leaves the cameras farther from their accurate positions than this
 BEND_MARGIN_M = 0.3  # many times the offsets before, and this much more, is undone
+# why optimize_cameras kept the focal length of the alignment: report["focal_held"] (None when it was refined)
+FOCAL_HELD_BY_POSITIONS = "the camera positions hold the block"
+FOCAL_HELD_NO_REFERENCES = "no references: the focal length cannot be told from the depth"
 
 
 def accurate_gnss(camera) -> bool:
@@ -2609,10 +2708,15 @@ def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: P
 
 
 def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gnss: str, rolling_shutter: bool,
-                  progress: Progress, hold_focal: bool = False) -> float:
+                  progress: Progress, hold_focal: bool = False, *, solver: str = "auto") -> float:
     """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
     their accuracy, scale bars as distances, GNSS positions of the photos (with a bias per flight),
-    rolling shutter; ``hold_focal``: the focal length of the alignment kept."""
+    rolling shutter; ``hold_focal``: the focal length of the alignment kept (the positions hold the block).
+    On a block whose references do not place it (:attr:`bundle.Problem.absolute` False: fewer than three
+    control points and fewer than three positions) the focal length is kept whatever was asked - photos of
+    flat ground from one height cannot tell it from the depth, and the native solver walks that valley -
+    and ``report["focal_held"]`` says why it was kept (None when it was refined); ``solver``: the one of
+    :func:`bundle.adjust` (``report["solver"]`` says which ran)."""
     from ..markers import gcp
     from . import bundle
 
@@ -2627,7 +2731,12 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
                                         rolling_shutter=rolling_shutter, fit_principal_point=fit_principal_point,
                                         hold_focal=hold_focal)
-    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85))
+    if not pb.absolute:  # nothing places the block: the focal length and the depth scale together at the same cost
+        bundle.hold_focal_length(pb)
+        focal_held = FOCAL_HELD_NO_REFERENCES
+    else:
+        focal_held = FOCAL_HELD_BY_POSITIONS if hold_focal else None
+    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
     chunk._before_product_write("reconstruction")
@@ -2642,10 +2751,12 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     key_of = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
     held = [chunk.camera(key_of[rec.images[ids["images"][i]].name]) for i, *_ in pb.gnss]
     report = {"engine": "ppg", "reprojection_error": err, "iterations": res.iterations, "converged": res.success,
+              "solver": {"requested": solver, "used": res.solver, "fallback": res.fallback,
+                         "seconds": float(res.seconds), "linear_solver": res.linear_solver},
               "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
               "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()},
               "gnss": {"mode": gnss, "photos": len(held), "states": _gnss_states(held)},
-              "focal_held": bool(hold_focal)}
+              "focal_held": focal_held}
     if res.rolling_shutter is not None:
         speed = np.linalg.norm(lin @ res.rolling_shutter[:, :3].T, axis=0)
         report["rolling_shutter_m"] = {"median": float(np.median(speed)), "max": float(speed.max())}
@@ -2659,7 +2770,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
 
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
                      marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
-                     gnss: str = "auto", rolling_shutter: bool = False) -> float:
+                     gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto") -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
     With ``use_markers`` the control points and the control scale bars take part in it, as in
@@ -2687,7 +2798,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     ``"off"``: the positions take no part (the adjustment of before). Fixed points:
     :func:`fixed_points_hold`. ``report["gnss"]`` says how many photos held the block (``photos``,
     ``states``; ``termination`` and ``usable`` of the solve: a solve that cannot be used holds
-    nothing), ``report["focal_held"]`` whether the focal length of the alignment was kept.
+    nothing), ``report["focal_held"]`` why the focal length of the alignment was kept
+    (:data:`FOCAL_HELD_BY_POSITIONS`; with ``engine="ppg"`` also :data:`FOCAL_HELD_NO_REFERENCES`,
+    below), None when it was refined.
 
     A safety net for every engine: with accurate positions, the root mean square distance of the
     cameras from them is measured before and after (:func:`_undo_a_bend`; when the optimisation fits a
@@ -2704,7 +2817,19 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     markers, the GNSS positions of the photos (``gnss`` "plain", or "bias" with a bias per
     flight, the focal length refined; "auto" is "plain" with the focal length of the alignment
     kept when the positions can hold the block and no fixed points do, else "off") and the
-    ``rolling_shutter`` of the camera (a velocity per photo)."""
+    ``rolling_shutter`` of the camera (a velocity per photo). On a block nothing places (fewer than
+    three control points and fewer than three positions in the adjustment: no references, or scale
+    bars alone; :attr:`bundle.Problem.absolute`) the focal length is held whatever was asked, and
+    ``report["focal_held"]`` says why: photos of flat ground from one height cannot tell it from the
+    depth, the two scale together at the same cost, and the native solver, a Newton method, walks
+    that valley. ``solver`` (an option of ``engine="ppg"``, :data:`bundle.SOLVERS`): ``"auto"`` the
+    solver of the program (the native one since it passed its gate, :data:`bundle.NATIVE_BY_DEFAULT`;
+    scipy where it cannot run), ``"native"`` the Levenberg-Marquardt of the core, ``"scipy"`` the
+    reference; where the native one cannot run scipy adjusts the block and ``report["solver"]`` says
+    so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``). With
+    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
+    from .bundle import SOLVERS
+
     progress = as_progress(progress)
     if engine not in ("colmap", "ppg"):
         raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
@@ -2712,6 +2837,10 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
         raise ValueError(f"gnss: one of {', '.join(GNSS_MODES)}, not {gnss!r}")
     if engine == "colmap" and gnss in ("plain", "bias"):
         raise ValueError(f"gnss={gnss!r} is an option of engine='ppg': COLMAP's adjustment takes 'auto' or 'off'")
+    if solver not in SOLVERS:
+        raise ValueError(f"solver {solver!r}: auto, native or scipy")
+    if engine == "colmap" and solver != "auto":
+        raise ValueError(f"solver={solver!r} is an option of engine='ppg': COLMAP's adjustment has no solver to choose")
     before = {False: _gnss_offsets(chunk), True: _gnss_offsets(chunk, placed=True)}
     kept = None
     try:
@@ -2724,7 +2853,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                         _held_positions(chunk, chunk.aligned_cameras)[0])
                     mode, hold_focal = ("plain", True) if held else ("off", False)
                 err = _optimize_own(chunk, fit_principal_point, use_markers, mode, rolling_shutter, progress,
-                                    hold_focal=hold_focal)
+                                    hold_focal=hold_focal, solver=solver)
             else:
                 err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
             if kept is not None:
@@ -2844,7 +2973,7 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     holding = bool(solver and solver["usable"])  # a solve that cannot be used held nothing
     report["gnss"] = {"mode": gnss, "photos": len(priors) if holding else 0,
                       "states": _gnss_states(held) if holding else {}, **(solver or {})}
-    report["focal_held"] = holding
+    report["focal_held"] = FOCAL_HELD_BY_POSITIONS if holding else None
     if points or gcp.control_scalebars(chunk):
         gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:

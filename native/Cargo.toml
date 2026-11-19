@@ -18,8 +18,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # the kernels, without Python (folder engine)
 ppg_engine = { path = "engine" }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
-numpy = "0.22"
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
+numpy = "0.30"
 rayon = "1.10"
 
 [build-dependencies]
@@ -33,3 +33,8 @@ codegen-units = 1
 # Rust strips debug info by default; the stripped library is refused by macOS 26/27
 # ("mis-aligned LINKEDIT string pool"), so it is kept
 strip = false
+
+# the tests of the bundle adjustment solve blocks of hundreds of photos: unoptimised they would take
+# minutes on each runner of the CI
+[profile.test]
+opt-level = 2

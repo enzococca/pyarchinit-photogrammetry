@@ -768,7 +768,7 @@ fn decode(src: &Path, dst: &Path) -> Result<()> {
 pub fn crx2rnx(py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
     let name = Path::new(src).file_name().map_or_else(|| src.to_string(), |n| n.to_string_lossy().into_owned());
     let (src, dst) = (PathBuf::from(src), PathBuf::from(dst));
-    match py.allow_threads(move || decode(&src, &dst)) {
+    match py.detach(move || decode(&src, &dst)) {
         Ok(()) => Ok(()),
         Err(Failure::Format { line, what }) => Err(PyValueError::new_err(format!("{name}, line {line}: {what}"))),
         Err(Failure::Io(error)) => Err(error.into()),

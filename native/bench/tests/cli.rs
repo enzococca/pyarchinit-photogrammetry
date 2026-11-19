@@ -87,16 +87,57 @@ fn an_adapter_that_is_named_and_does_not_exist_is_an_error() {
 }
 
 #[test]
+fn adjust_brings_a_synthetic_block_back_and_says_which_solver_it_used() {
+    let record = printed(&["adjust", "--photos", "20", "--points", "300"]);
+    let expected = ["cost", "cost_initial", "iterations", "observations", "photos", "points", "seconds", "solver"];
+    assert_eq!(keys(&record), expected, "{record}");
+    assert_eq!(record["photos"], json!(20));
+    assert_eq!(record["points"], json!(300));
+    assert!(record["observations"].as_u64().is_some_and(|n| n > 300), "{record}");
+    // 20 photos are far below the dense limit: `auto` is the dense solver
+    assert_eq!(record["solver"], json!("dense"));
+    assert!(record["iterations"].as_u64().is_some_and(|k| k > 0), "{record}");
+    assert!(record["seconds"].as_f64().is_some_and(|seconds| seconds > 0.0), "{record}");
+    // the observations are exact: the perturbed block comes back to a cost of nothing
+    let (cost, initial) = (record["cost"].as_f64().expect("cost"), record["cost_initial"].as_f64().expect("initial"));
+    assert!(initial > 0.0 && cost < 1e-12 * initial, "{record}");
+}
+
+#[test]
+fn adjust_takes_the_solver_and_the_seed_it_is_given() {
+    let mut costs = Vec::new();
+    for (word, used) in [("dense", "dense"), ("sparse", "sparse"), ("pcg", "pcg"), ("auto", "dense")] {
+        let record = printed(&["adjust", "--photos", "6", "--points", "60", "--solver", word, "--seed", "2"]);
+        assert_eq!(record["solver"], json!(used), "{record}");
+        assert_eq!((&record["photos"], &record["points"]), (&json!(6), &json!(60)), "{record}");
+        let cost = record["cost"].as_f64().expect("cost");
+        let initial = record["cost_initial"].as_f64().expect("initial");
+        assert!(cost < 1e-12 * initial, "--solver {word}: {record}");
+        costs.push(initial);
+    }
+    // the same seed gives the same block to every solver; another seed another block
+    assert!(costs.iter().all(|c| *c == costs[0]), "{costs:?}");
+    let other = printed(&["adjust", "--photos", "6", "--points", "60", "--seed", "3"]);
+    assert_ne!(other["cost_initial"].as_f64(), Some(costs[0]), "{other}");
+}
+
+#[test]
 fn a_command_line_the_binary_does_not_know_is_refused() {
-    let refused: [&[&str]; 8] = [
-        &[],                          // no command
-        &["bogus"],                   // not a command
-        &["adapters", "--n", "8"],    // adapters takes no option
-        &["match", "--dim", "64"],    // the descriptors of the kernel have one length: there is no --dim
-        &["match", "--n"],            // no value
-        &["match", "--n", "many"],    // not a number
-        &["match", "--n", "0"],       // nothing to match
-        &["match", "--device", "-1"], // not an index
+    let refused: [&[&str]; 14] = [
+        &[],                           // no command
+        &["bogus"],                    // not a command
+        &["adapters", "--n", "8"],     // adapters takes no option
+        &["match", "--dim", "64"],     // the descriptors of the kernel have one length: there is no --dim
+        &["match", "--n"],             // no value
+        &["match", "--n", "many"],     // not a number
+        &["match", "--n", "0"],        // nothing to match
+        &["match", "--device", "-1"],  // not an index
+        &["adjust", "--n", "8"],       // adjust has no --n
+        &["adjust", "--photos", "0"],  // no photo to adjust
+        &["adjust", "--points", "0"],  // no point to adjust
+        &["adjust", "--solver"],       // no value
+        &["adjust", "--solver", "lu"], // not one of the solvers
+        &["adjust", "--seed", "-1"],   // not a seed
     ];
     for args in refused {
         let output = ppg_bench(args);

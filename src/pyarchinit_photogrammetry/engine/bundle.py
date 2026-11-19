@@ -8,23 +8,35 @@
 * rolling shutter: the camera moving and turning while the rows of the sensor are read out (most
   drones), a linear and an angular velocity per photo, the time of an observation from its row.
 
-:func:`adjust` solves a :class:`Problem` (sparse trust-region least squares of scipy; the Jacobian
-by finite differences grouped by the structure of the problem - a residual depends on one photo,
-one point, one camera - so a few dozen evaluations give all of it; projection with the COLMAP
-camera models of pycolmap). :func:`problem_from_chunk` builds it from the alignment of a chunk
-and its markers, bars and camera references; :func:`write_back` puts the result in the
-reconstruction, the markers and the cameras.
+:func:`adjust` solves a :class:`Problem` with one of two solvers. scipy's sparse trust-region least
+squares is the reference: the Jacobian by finite differences grouped by the structure of the
+problem - a residual depends on one photo, one point, one camera - so a few dozen evaluations give
+all of it; projection with the COLMAP camera models of pycolmap. The native solver of the core
+(``ppg_core``, API 12) is the same problem solved in Rust: Levenberg-Marquardt over the camera
+system reduced by the Schur complement, analytic Jacobians, a robust loss on the tie points; it is
+chosen with ``solver=`` (:data:`SOLVERS`), and where it cannot run scipy adjusts the block and the
+result says why (:func:`native_ready`). :func:`evaluate` gives the residuals, gradient and
+Jacobian of a problem by the native engine; :func:`problem_at` a problem started where a result
+ended. :func:`problem_from_chunk` builds the problem from the alignment of a chunk and its markers,
+bars and camera references; :func:`write_back` puts the result in the reconstruction, the markers
+and the cameras.
 
 Units are those of the reconstruction (the internal frame of the chunk); accuracies given in
 metres are divided by the scale of the chunk.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+import os
+import time
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
+from .. import _native
 from ..core.progress import Progress, as_progress
+
+log = logging.getLogger(__name__)
 
 MARKER_PIXEL_ACCURACY = 0.5  # px, as Metashape's default and :data:`sfm.MARKER_PIXEL_ACCURACY`
 # rolling shutter: a weak prior towards a still camera (metres and radians while a frame is read)
@@ -33,6 +45,17 @@ ROLLING_SHUTTER_SIGMA_RAD = 0.005
 # ... for a chunk, as the pixels the motion would shift the image by: a still camera unless the photos say otherwise
 ROLLING_SHUTTER_SIGMA_PX = 2.0
 FLIGHT_GAP_S = 20 * 60  # photos taken more than this apart belong to different flights
+# the solvers of adjust(): "auto" is the native one since it passed its gate (NATIVE_BY_DEFAULT; it was scipy
+# before, and PPG_ENGINE=native still asks for it by name), scipy where it cannot run (native_ready) or by name
+SOLVERS = ("auto", "native", "scipy")
+NATIVE_BY_DEFAULT = True
+LOSSES = ("none", "huber", "cauchy")  # on the tie points; the scale in the units of the residuals
+# relative decrease of the cost that ends the adjustment: scipy's ftol and the native solver's; under Huber and
+# Cauchy the native solver applies at least ROBUST_FUNCTION_TOLERANCE (the cost of a wrong track is a plateau
+# along which it would gain 1e-8 of the cost per iteration for ever)
+FUNCTION_TOLERANCE = 1e-9
+ROBUST_FUNCTION_TOLERANCE = 1e-6
+NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not installed"
 
 
 @dataclass
@@ -68,6 +91,14 @@ class Problem:
     marker_sigma: float = MARKER_PIXEL_ACCURACY
     rs_sigma: float | np.ndarray = ROLLING_SHUTTER_SIGMA_M  # units of the problem (one, or one per photo)
     rs_sigma_angular: float | np.ndarray = ROLLING_SHUTTER_SIGMA_RAD
+
+    @property
+    def absolute(self) -> bool:
+        """The references place the block: three control points or more, or three GNSS positions or more
+        (scale bars give it a size, not a place). Else :func:`problem_from_chunk` holds a photo - two,
+        without bars - and the camera optimisation holds the focal length, which a block nothing places
+        cannot tell from the depth of the scene (:func:`hold_focal_length`)."""
+        return len(self.gcps) >= 3 or len(self.gnss) >= 3
 
 
 def _rodrigues(rotvecs: np.ndarray) -> np.ndarray:
@@ -261,6 +292,15 @@ class _Model:
 
 @dataclass
 class Result:
+    """What :func:`adjust` gives: the adjusted block (``bias`` per flight, ``rolling_shutter`` (n, 6)
+    when it was adjusted), the RMS of the whole residual vector and the reprojection RMS of the tie
+    points before and after, and, after ``success``, what the solve was: its ``cost`` (0.5 sum
+    rho(r^2) at the end: scipy's ``cost``, the native solver's), the largest entry of the gradient at
+    the end, which ``solver`` ran, why the native one did not though it was wanted (``fallback``), the
+    ``seconds`` of the solve alone, the native ``linear_solver`` (``dense``, ``sparse``, ``pcg``; None for
+    scipy) and the ``termination`` (``function``, ``gradient``, ``parameters``, ``max_iterations``,
+    ``no_progress``; scipy's status as a word)."""
+
     rotations: np.ndarray
     centres: np.ndarray
     camera_params: list
@@ -274,6 +314,26 @@ class Result:
     reprojection_after: float
     iterations: int
     success: bool
+    cost: float = float("nan")
+    gradient_max: float = float("nan")
+    solver: str = "scipy"
+    fallback: str | None = None
+    seconds: float = float("nan")
+    linear_solver: str | None = None
+    termination: str | None = None
+
+
+@dataclass
+class Evaluation:
+    """A problem evaluated at the parameters it holds by the native engine (:func:`evaluate`): the
+    cost ``0.5 sum(rho(r^2))``, the residuals (the rows of :meth:`_Model.residuals`), the gradient of
+    the cost in the columns of :class:`_Layout` and the Jacobian of the residuals (``scipy.sparse``
+    CSR) on the structure of :meth:`_Model.sparsity`."""
+
+    cost: float
+    residuals: np.ndarray
+    gradient: np.ndarray
+    jacobian: object
 
 
 def _reprojection_rms(model: _Model, x: np.ndarray) -> float:
@@ -285,25 +345,285 @@ def _reprojection_rms(model: _Model, x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(e * e))) if len(e) else float("nan")
 
 
-def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = None) -> Result:
-    """Least squares of every residual of ``pb`` (see the module docstring)."""
-    from scipy.optimize import least_squares
+def _rms(r: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(r * r))) if len(r) else float("nan")
 
-    progress = as_progress(progress)
-    model = _Model(pb)
+
+# ---------------------------------------------------------------- the solvers
+def _native_missing() -> str | None:
+    """Why the native solver cannot run at all - switched off, not installed, older than API 12 - or None."""
+    if not _native.enabled():
+        return "the native core is switched off by PPG_NATIVE=0"
+    if not _native.has("bundle") or (_native.api() or 0) < _native.BUNDLE_API:
+        return NATIVE_MISSING
+    return None
+
+
+def native_ready(pb: Problem) -> str | None:
+    """``None`` when the native solver can take ``pb``, else why not: the core switched off, missing or
+    older than API 12, or a camera model that is not among the six of its projection kernels."""
+    reason = _native_missing()
+    if reason is not None:
+        return reason
+    for model, *_ in pb.cameras:
+        if not _native.supports(model):
+            return f"camera model {model} is not in the native solver"
+    return None
+
+
+def _native_function(name: str):
+    """``ppg_core.name`` (``bundle_adjust``, ``bundle_evaluate``); RuntimeError when the core cannot run."""
+    reason = _native_missing()
+    if reason is not None:
+        raise RuntimeError(reason)
+    return _native.kernel(name)
+
+
+def _referenced(pb: Problem) -> bool:
+    """``pb`` has residuals besides the tie points: measured markers, control points, scale bars, GNSS
+    positions or the rolling shutter. scipy would weigh them by a robust loss too (the native solver weighs
+    the tie points only), so a robust loss on such a block needs the native solver."""
+    return bool(len(pb.mobs_image) or pb.gcps or pb.bars or pb.gnss or pb.rolling_shutter)
+
+
+def _choose(solver: str, pb: Problem, loss: str) -> tuple[str, str, str | None]:
+    """The solver that runs for the word ``solver``, the loss it runs with, and, when the native one was
+    wanted and cannot run, the reason: a warning in the log when it was asked for (``"native"``, or
+    ``PPG_ENGINE=native``), a line when ``"auto"`` had turned to it on its own. A fallback is never an
+    error: a robust loss on a block with references (:func:`_referenced`) is dropped for the squared loss,
+    and the reason says so - a warning whichever way the native solver was wanted."""
+    asked = os.environ.get("PPG_ENGINE", "").strip().lower() == "native"
+    wanted = solver if solver != "auto" else ("native" if NATIVE_BY_DEFAULT or asked else "scipy")
+    if wanted == "scipy":
+        return "scipy", loss, None
+    reason = native_ready(pb)
+    if reason is None:
+        return "native", loss, None
+    dropped = loss != "none" and _referenced(pb)
+    if dropped:
+        reason += (f"; scipy adjusts the block with the squared loss instead of {loss} (a robust loss on a block "
+                   "with references needs the native core)")
+        loss = "none"
+        line = reason
+    else:
+        line = f"{reason}; scipy adjusts the block instead"
+    level = logging.WARNING if solver == "native" or asked or dropped else logging.INFO
+    log.log(level, "Bundle adjustment: %s", line)
+    return "scipy", loss, reason
+
+
+def _adjustable(pb: Problem) -> np.ndarray:
+    """Which tie points have at least two observations in front of a camera at the start of ``pb``. A
+    point with fewer cannot be adjusted: the native solver holds it, scipy would move it along its ray;
+    :func:`adjust` leaves it out of both and in the result where it started."""
+    rel = pb.points[pb.obs_point] - pb.centres[pb.obs_image]
+    depth = np.einsum("nj,nj->n", pb.rotations[pb.obs_image, 2, :], rel)
+    seen = np.bincount(pb.obs_point[depth > 1e-9], minlength=len(pb.points))
+    return seen >= 2
+
+
+def _without_held(pb: Problem, keep: np.ndarray) -> Problem:
+    """``pb`` without the tie points not in ``keep`` and their observations."""
+    index = np.cumsum(keep) - 1
+    sel = keep[pb.obs_point]
+    return replace(pb, points=pb.points[keep], obs_image=pb.obs_image[sel], obs_point=index[pb.obs_point[sel]],
+                   obs_xy=pb.obs_xy[sel])
+
+
+def _start(model: _Model, progress: Progress, solver: str, held: int) -> tuple[np.ndarray, np.ndarray, float]:
+    """The start of an adjustment: its parameters, residuals and reprojection RMS, reported."""
+    pb = model.pb
     x0 = model.start()
     r0 = model.residuals(x0)
-    rep0 = _reprojection_rms(model, x0)
-    progress(0.1, f"Bundle adjustment: {len(pb.centres)} photos, {len(pb.points)} points, "
+    note = f" ({held} seen by fewer than two photos held)" if held else ""
+    progress(0.1, f"Bundle adjustment ({solver}): {len(pb.centres)} photos, {len(pb.points)} points{note}, "
                   f"{len(pb.obs_image)} observations, {model.lay.size} unknowns")
+    return x0, r0, _reprojection_rms(model, x0)
+
+
+_SCIPY_STATUS = {-1: "improper_input", 0: "max_iterations", 1: "gradient", 2: "function", 3: "parameters",
+                 4: "function_and_parameters"}
+
+
+def _adjust_scipy(pb: Problem, max_iterations: int, progress: Progress, loss: str, loss_scale: float,
+                  held: int) -> Result:
+    """The trust-region least squares of scipy (the reference). scipy weighs every residual by a robust
+    loss where the native solver weighs the tie points only: a loss is taken on a problem of tie points alone."""
+    from scipy.optimize import least_squares
+
+    if loss != "none" and _referenced(pb):
+        raise ValueError(f"loss {loss!r} with the scipy solver: scipy would weigh the measured markers, control "
+                         "points, scale bars, GNSS positions or rolling shutter by the loss too; it takes a robust "
+                         "loss on tie points alone, the native solver on any problem")
+    model = _Model(pb)
+    x0, r0, rep0 = _start(model, progress, "scipy", held)
+    t0 = time.perf_counter()
     sol = least_squares(model.residuals, x0, jac_sparsity=model.sparsity(), method="trf", tr_solver="lsmr",
-                        x_scale="jac", max_nfev=max_iterations, xtol=1e-9, ftol=1e-9, gtol=1e-9)
+                        x_scale="jac", max_nfev=max_iterations, xtol=1e-9, ftol=FUNCTION_TOLERANCE, gtol=1e-9,
+                        loss="linear" if loss == "none" else loss, f_scale=loss_scale)
+    seconds = time.perf_counter() - t0
     rot, cen, params, pts, mks, rs, bias = model.unpack(sol.x)
-    rms = lambda r: float(np.sqrt(np.mean(r * r)))  # noqa: E731
-    out = Result(rot, cen, params, pts, mks, rs, {f: np.asarray(v, float) for f, v in bias.items()}, rms(r0),
-                 rms(sol.fun), rep0, _reprojection_rms(model, sol.x), int(sol.nfev), bool(sol.success))
-    progress(1.0, f"Reprojection error {out.reprojection_before:.3f} -> {out.reprojection_after:.3f} px")
+    out = Result(rot, cen, params, pts, mks, rs, {f: np.asarray(v, float) for f, v in bias.items()}, _rms(r0),
+                 _rms(sol.fun), rep0, _reprojection_rms(model, sol.x), int(sol.nfev), bool(sol.success),
+                 cost=float(sol.cost), gradient_max=float(np.abs(sol.grad).max()) if sol.grad.size else 0.0,
+                 solver="scipy", seconds=seconds, termination=_SCIPY_STATUS.get(int(sol.status), str(sol.status)))
+    progress(1.0, f"Reprojection error {out.reprojection_before:.3f} -> {out.reprojection_after:.3f} px "
+                  f"(scipy, {out.iterations} evaluations, {out.termination})")
     return out
+
+
+def _adjust_native(pb: Problem, max_iterations: int, progress: Progress, loss: str, loss_scale: float,
+                   held: int) -> Result:
+    """The Levenberg-Marquardt of the core (``ppg_core.bundle_adjust``), reported once per iteration."""
+    fn = _native_function("bundle_adjust")
+    model = _Model(pb)
+    x0, r0, rep0 = _start(model, progress, "native", held)
+    options = {"max_iterations": int(max_iterations), "loss": loss, "loss_scale": float(loss_scale),
+               "linear_solver": "auto", "function_tolerance": FUNCTION_TOLERANCE}
+    span = max(int(max_iterations), 1)
+
+    def report(iteration: int, cost: float) -> None:  # raises on cancel, as every step's progress does
+        progress(0.1 + 0.8 * min(iteration / span, 1.0), f"Bundle adjustment: iteration {iteration}, cost {cost:.6g}")
+
+    problem = _to_native(pb)
+    t0 = time.perf_counter()
+    out = fn(problem, options, report)
+    seconds = time.perf_counter() - t0
+    rot, cen, params, pts, mks, rs, bias = _from_native(out)
+    # the residuals at the end as the reference computes them (the velocities and biases set in its vector)
+    end = _Model(_problem_at(pb, rot, cen, params, pts, mks))
+    x1 = end.start()
+    if rs is not None:
+        x1[end.lay.rs_col[:, None] + np.arange(6)] = rs
+    for flight, col in end.lay.bias_col.items():
+        x1[col:col + 3] = bias[flight]
+    termination = str(out["termination"])
+    res = Result(rot, cen, params, pts, mks, rs, bias, _rms(r0), _rms(end.residuals(x1)), rep0,
+                 _reprojection_rms(end, x1), int(out["iterations"]),
+                 termination not in ("max_iterations", "no_progress"), cost=float(out["cost"]),
+                 gradient_max=float(out["gradient_max"]), solver="native", seconds=seconds,
+                 linear_solver=str(out["linear_solver"]), termination=termination)
+    tolerance = FUNCTION_TOLERANCE if loss == "none" else max(FUNCTION_TOLERANCE, ROBUST_FUNCTION_TOLERANCE)
+    progress(1.0, f"Reprojection error {res.reprojection_before:.3f} -> {res.reprojection_after:.3f} px (native, "
+                  f"{res.linear_solver}, {res.iterations} iterations, {termination}, function tolerance {tolerance:g})")
+    return res
+
+
+def _to_native(pb: Problem) -> dict:
+    """``pb`` as the dict ``ppg_core.bundle_adjust`` and ``bundle_evaluate`` read: the arrays in the dtypes
+    the bindings extract (float64, int64, bool), the lists of tuples as arrays, ``fixed_images`` as a flag
+    per photo, ``rs_sigma`` and ``rs_sigma_angular`` one value per photo."""
+    n = len(pb.centres)
+    free = pb.free_intrinsics if pb.free_intrinsics is not None else [list(range(len(c[1]))) for c in pb.cameras]
+
+    def f64(a, shape):
+        return np.ascontiguousarray(np.asarray(a, np.float64)).reshape(shape)
+
+    def i64(a):
+        return np.ascontiguousarray(np.asarray(a, np.int64)).reshape(-1)
+
+    def triples(values):
+        return f64([np.broadcast_to(np.asarray(v, np.float64), (3,)) for v in values], (-1, 3))
+
+    return {
+        "rotations": f64(pb.rotations, (n, 3, 3)), "centres": f64(pb.centres, (n, 3)),
+        "image_camera": i64(pb.image_camera),
+        "camera_models": [str(c[0]) for c in pb.cameras],
+        "camera_params": [[float(v) for v in c[1]] for c in pb.cameras],
+        "camera_sizes": f64([[c[2], c[3]] for c in pb.cameras], (-1, 2)),
+        "free_intrinsics": [[int(k) for k in f] for f in free],
+        "points": f64(pb.points, (-1, 3)), "obs_image": i64(pb.obs_image), "obs_point": i64(pb.obs_point),
+        "obs_xy": f64(pb.obs_xy, (-1, 2)),
+        "markers": f64(pb.markers, (-1, 3)), "mobs_image": i64(pb.mobs_image), "mobs_marker": i64(pb.mobs_marker),
+        "mobs_xy": f64(pb.mobs_xy, (-1, 2)),
+        "gcp_marker": i64([m for m, _, _ in pb.gcps]), "gcp_target": triples(t for _, t, _ in pb.gcps),
+        "gcp_sigma": triples(s for _, _, s in pb.gcps),
+        "bar_a": i64([a for a, *_ in pb.bars]), "bar_b": i64([b for _, b, *_ in pb.bars]),
+        "bar_distance": f64([d for _, _, d, _ in pb.bars], (-1,)), "bar_sigma": f64([s for *_, s in pb.bars], (-1,)),
+        "gnss_image": i64([i for i, *_ in pb.gnss]), "gnss_target": triples(t for _, t, *_ in pb.gnss),
+        "gnss_sigma": triples(s for _, _, s, _ in pb.gnss), "gnss_flight": i64([f for *_, f in pb.gnss]),
+        "fixed_images": np.array([i in pb.fixed_images for i in range(n)], bool),
+        "rolling_shutter": bool(pb.rolling_shutter), "gnss_bias": bool(pb.gnss_bias),
+        "pixel_sigma": float(pb.pixel_sigma), "marker_sigma": float(pb.marker_sigma),
+        "rs_sigma": f64(np.broadcast_to(np.asarray(pb.rs_sigma, np.float64), (n,)), (n,)),
+        "rs_sigma_angular": f64(np.broadcast_to(np.asarray(pb.rs_sigma_angular, np.float64), (n,)), (n,)),
+    }
+
+
+def _from_native(out: dict) -> tuple:
+    """The block of a dict ``ppg_core.bundle_adjust`` returned, as :meth:`_Model.unpack` orders it."""
+    rs = out["rolling_shutter"]
+    return (np.asarray(out["rotations"], float), np.asarray(out["centres"], float),
+            [np.asarray(p, float) for p in out["camera_params"]], np.asarray(out["points"], float).reshape(-1, 3),
+            np.asarray(out["markers"], float).reshape(-1, 3), None if rs is None else np.asarray(rs, float),
+            {int(f): np.asarray(b, float) for f, b in out["bias"].items()})
+
+
+def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = None, solver: str = "auto",
+           loss: str = "none", loss_scale: float = 1.0) -> Result:
+    """Least squares of every residual of ``pb`` (see the module docstring) by ``solver``: ``"scipy"``
+    the trust-region least squares of scipy (the reference), ``"native"`` the Levenberg-Marquardt of the
+    core (API 12), ``"auto"`` the native one since it passed its gate (:data:`NATIVE_BY_DEFAULT`; it was
+    scipy before, and ``PPG_ENGINE=native`` still asks for the native one by name). Where the native
+    solver cannot run (:func:`native_ready`) scipy adjusts the block, ``Result.fallback`` says why and the
+    log has a line (a warning when the native solver was asked for by name): never an error. ``loss`` ``"huber"`` or
+    ``"cauchy"`` with ``loss_scale`` (in the units of the residuals: pixels over ``pixel_sigma``) weighs the
+    tie points robustly; scipy applies a loss to every residual, so asked for by name it takes a robust
+    loss on a problem of tie points alone (ValueError otherwise), and on the fallback from the native
+    solver a block with references is adjusted with the squared loss, ``fallback`` saying so. Tie points
+    with fewer than two observations in front of a camera cannot be adjusted: they are left out of the
+    adjustment and stay where they start (the RMS figures of the result are of the rest)."""
+    if solver not in SOLVERS:
+        raise ValueError(f"solver {solver!r}: auto, native or scipy")
+    if loss not in LOSSES:
+        raise ValueError(f"loss {loss!r}: none, huber or cauchy")
+    if not loss_scale > 0:
+        raise ValueError(f"loss_scale must be positive, not {loss_scale}")
+    progress = as_progress(progress)
+    chosen, loss, fallback = _choose(solver, pb, loss)
+    keep = _adjustable(pb)
+    held = int(len(keep) - keep.sum())
+    solved = pb if held == 0 else _without_held(pb, keep)
+    run = _adjust_native if chosen == "native" else _adjust_scipy
+    res = run(solved, max_iterations, progress, loss, loss_scale, held)
+    res.fallback = fallback
+    if held:
+        points = np.array(pb.points, float)
+        points[keep] = res.points
+        res.points = points
+    return res
+
+
+def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evaluation:
+    """``pb`` evaluated at the parameters it holds by the native engine (API 12; RuntimeError without
+    it): the cost, the residual vector of the reference (:meth:`_Model.residuals`), the gradient of the
+    cost in the columns of :class:`_Layout` and the Jacobian of the residuals on the structure of
+    :meth:`_Model.sparsity`; ``loss`` with ``loss_scale`` on the tie points, as :func:`adjust` takes them.
+    The problem is evaluated as given: the tie points :func:`adjust` leaves out (seen by fewer than two
+    photos) count here, so on a problem with such points the cost is not that of a :class:`Result`."""
+    from scipy.sparse import csr_matrix
+
+    if loss not in LOSSES:
+        raise ValueError(f"loss {loss!r}: none, huber or cauchy")
+    fn = _native_function("bundle_evaluate")
+    residuals, gradient, rows, cols, values, cost = fn(_to_native(pb), loss, float(loss_scale))
+    jacobian = csr_matrix((values, (rows, cols)), shape=(len(residuals), _Layout(pb).size))
+    return Evaluation(float(cost), np.asarray(residuals, float), np.asarray(gradient, float), jacobian)
+
+
+def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers) -> Problem:
+    cameras = [(model, [float(v) for v in params], width, height)
+               for (model, _old, width, height), params in zip(pb.cameras, camera_params)]
+    return replace(pb, rotations=np.array(rotations, float), centres=np.array(centres, float), cameras=cameras,
+                   points=np.array(points, float).reshape(-1, 3), markers=np.array(markers, float).reshape(-1, 3))
+
+
+def problem_at(pb: Problem, res: Result) -> Problem:
+    """``pb`` started where ``res`` ended: its rotations, centres, intrinsics, points and markers replaced
+    by those of ``res`` and nothing else (the other fields are shared with ``pb``; the rolling-shutter
+    velocities and the GNSS biases of a result have no place in a problem, which starts them at zero; the
+    tie points :func:`adjust` left out are kept, where they started)."""
+    return _problem_at(pb, res.rotations, res.centres, res.camera_params, res.points, res.markers)
 
 
 # ---------------------------------------------------------------- a chunk as a problem
@@ -334,23 +654,43 @@ def flights(cameras) -> dict:
     return out
 
 
-def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", rolling_shutter: bool = False,
-                       fit_principal_point: bool = False, hold_focal: bool = False) -> tuple[Problem, dict]:
-    """The adjustment of ``chunk`` (its reconstruction ``rec``, internal frame): tie points; with
-    ``use_markers`` the measured projections of the markers, the control points (enabled
-    reference, not check points) with their accuracy and the enabled control scale bars; with
-    ``gnss`` "plain" or "bias" the camera references (with a bias per flight); rolling shutter.
-    ``hold_focal``: the focal lengths are not refined (photos looking down from one height cannot
-    tell them from the distance to the ground). Returns the problem and the ids that
-    :func:`write_back` needs."""
-    from ..markers import gcp
-    from .sfm import _rec_fixed_cameras
+# the COLMAP camera models with one focal length (f, cx, cy, ...): the others have two (fx, fy, cx, cy, ...)
+_SINGLE_FOCAL = ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
 
+
+def _principal_point(model_name: str) -> tuple[int, int]:
+    """The indices of the principal point among the parameters of a COLMAP camera model."""
+    return (1, 2) if model_name in _SINGLE_FOCAL else (2, 3)
+
+
+def _focal_indices(model_name: str) -> tuple[int, ...]:
+    """The indices of the focal length among the parameters of a COLMAP camera model: one (f) or two (fx, fy)."""
+    return (0,) if model_name in _SINGLE_FOCAL else (0, 1)
+
+
+def hold_focal_length(pb: Problem) -> None:
+    """The focal length of every camera of ``pb`` taken out of its free parameters, in place (what ``hold_focal``
+    of :func:`problem_from_chunk` does as the problem is built); the rest of the calibration stays as free as it
+    was. The camera optimisation does this to a block whose references do not place it (:attr:`Problem.absolute`
+    False): photos of flat ground taken from one height cannot tell the focal length from the depth of the scene,
+    the two scale together at the same cost, and a Newton solver walks that valley."""
+    if pb.free_intrinsics is None:  # the solvers' default: every parameter free
+        pb.free_intrinsics = [list(range(len(c[1]))) for c in pb.cameras]
+    for n, (model_name, *_rest) in enumerate(pb.cameras):
+        focal = _focal_indices(model_name)
+        pb.free_intrinsics[n] = [k for k in pb.free_intrinsics[n] if k not in focal]
+
+
+def problem_from_reconstruction(rec) -> tuple[Problem, dict]:
+    """The plain adjustment of a reconstruction (its internal frame): the tie points of its posed images and
+    nothing else - no markers, no references -, every camera with its focal length and distortion free and
+    its principal point held, the first posed image and the one farthest from it held as the place and the
+    size of the block. It is the tie part of :func:`problem_from_chunk`, which starts from it, and the
+    problem ``ppg bench adjust`` gives COLMAP, the native solver and scipy alike. Returns the problem and
+    the ids :func:`write_back` needs (``markers`` empty). A reconstruction with rigs (faces of 360-degree
+    photos) is refused (ValueError)."""
     if any(len(list(f.image_ids)) > 1 for f in rec.frames.values()):
         raise ValueError("the reconstruction has rigs (faces of 360-degree photos): use COLMAP's adjustment")
-    s = float(chunk.scale) if chunk.transform is not None else 1.0
-    names = chunk.meta["sfm"]["names"]
-    key_of = {v: int(k) for k, v in names.items()}
     image_ids = [iid for iid, img in rec.images.items() if img.has_pose]
     index = {iid: n for n, iid in enumerate(image_ids)}
     cam_ids = sorted({rec.images[iid].camera_id for iid in image_ids})
@@ -374,9 +714,38 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 op.append(pindex[pid])
                 oxy.append(rec.images[el.image_id].points2D[el.point2D_idx].xy)
     points = np.array([rec.points3D[pid].xyz for pid in point_ids], float).reshape(-1, 3)
-    pb = Problem(np.array(rotations), np.array(centres), np.array([cam_index[rec.images[i].camera_id] for i in image_ids]),
-                 cameras, points, np.array(oi, int), np.array(op, int), np.array(oxy, float).reshape(-1, 2),
-                 rolling_shutter=rolling_shutter, gnss_bias=gnss == "bias")
+    image_camera = np.array([cam_index[rec.images[i].camera_id] for i in image_ids])
+    pb = Problem(np.array(rotations), np.array(centres), image_camera, cameras, points, np.array(oi, int),
+                 np.array(op, int), np.array(oxy, float).reshape(-1, 2))
+    pb.free_intrinsics = [[k for k in range(len(params)) if k not in _principal_point(model)]
+                          for model, params, _width, _height in cameras]
+    if len(image_ids) >= 2:  # the block needs a place and a size: the first photo and the farthest hold them
+        far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
+        pb.fixed_images = {0, far}
+    return pb, {"images": image_ids, "cameras": cam_ids, "points": point_ids, "markers": []}
+
+
+def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", rolling_shutter: bool = False,
+                       fit_principal_point: bool = False, hold_focal: bool = False) -> tuple[Problem, dict]:
+    """The adjustment of ``chunk`` (its reconstruction ``rec``, internal frame): tie points
+    (:func:`problem_from_reconstruction`, whose gauge and free calibration give way to the chunk's own: the
+    photos and sensors held, the focal length and the principal point as asked, a photo held only when the
+    block has no references to place it); with ``use_markers`` the measured projections of the markers, the
+    control points (enabled reference, not check points) with their accuracy and the enabled control scale
+    bars; with ``gnss`` "plain" or "bias" the camera references (with a bias per flight); rolling shutter.
+    ``hold_focal``: the focal lengths are not refined (photos looking down from one height cannot
+    tell them from the distance to the ground). Returns the problem and the ids that
+    :func:`write_back` needs."""
+    from ..markers import gcp
+    from .sfm import _rec_fixed_cameras
+
+    pb, ids = problem_from_reconstruction(rec)
+    s = float(chunk.scale) if chunk.transform is not None else 1.0
+    names = chunk.meta["sfm"]["names"]
+    key_of = {v: int(k) for k, v in names.items()}
+    image_ids, cam_ids, cameras = ids["images"], ids["cameras"], pb.cameras
+    index = {iid: n for n, iid in enumerate(image_ids)}
+    pb.rolling_shutter, pb.gnss_bias = rolling_shutter, gnss == "bias"
     if rolling_shutter:  # the prior as pixels of shift: the depth of the scene and the focal length of each photo
         focal = np.array([float(cameras[c][1][0]) for c in pb.image_camera])
         depth = np.ones(len(image_ids))
@@ -387,21 +756,20 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 depth[n] = float(np.median(z[z > 0])) if (z > 0).any() else 1.0
         pb.rs_sigma = ROLLING_SHUTTER_SIGMA_PX * depth / focal
         pb.rs_sigma_angular = ROLLING_SHUTTER_SIGMA_PX / focal
-    # what stays as it is
-    fixed = _rec_fixed_cameras(chunk, rec)
-    pb.fixed_images = {index[i] for i in image_ids if i in fixed}
+    # what stays as it is (in place of the gauge and the free calibration of the plain problem)
+    fixed = _rec_fixed_cameras(chunk, rec)  # the COLMAP camera ids whose calibration is held
+    pb.fixed_images = set()  # no pose is held here: the gauge is decided below, from the references of the block
     pb.free_intrinsics = []
     for c in cam_ids:
         model_name = rec.cameras[c].model.name
         n = len(rec.cameras[c].params)
         held = {chunk.sensors[chunk.camera(key_of[rec.images[i].name]).sensor_key].fixed
                 for i in image_ids if rec.images[i].camera_id == c and rec.images[i].name in key_of}
-        if True in held:
+        if True in held or c in fixed:
             pb.free_intrinsics.append([])
             continue
-        single = model_name in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
-        principal = (1, 2) if single else (2, 3)
-        focal = ((0,) if single else (0, 1)) if hold_focal else ()
+        principal = _principal_point(model_name)
+        focal = _focal_indices(model_name) if hold_focal else ()
         pb.free_intrinsics.append([k for k in range(n) if (fit_principal_point or k not in principal) and k not in focal])
     marker_keys = []
     if use_markers:
@@ -451,13 +819,12 @@ def problem_from_chunk(chunk, rec, use_markers: bool = True, gnss: str = "off", 
                 target = chunk.to_internal(np.asarray([positions[cam.key]], float))[0]
                 sigma = np.maximum(np.asarray(cam.reference.accuracy, float), 1e-6) / s
                 pb.gnss.append((index[iid], target, sigma, groups.get(cam.key, 0)))
-    absolute = len(pb.gcps) >= 3 or len(pb.gnss) >= 3
-    if not absolute and not pb.fixed_images and len(image_ids) >= 2:
+    if not pb.absolute and not pb.fixed_images and len(image_ids) >= 2:  # nothing places the block
         pb.fixed_images = {0}  # the block needs a place: the first photo holds it
         if not pb.bars:  # and a size: the second one too
             far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
             pb.fixed_images.add(far)
-    ids = {"images": image_ids, "cameras": cam_ids, "points": point_ids, "markers": marker_keys}
+    ids["markers"] = marker_keys
     return pb, ids
 
 

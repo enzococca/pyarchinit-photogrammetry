@@ -132,7 +132,7 @@ pub fn raw_to_rinex(py: Python<'_>, format: &str, src: &str, obs: &str, nav: &st
     let (obs, nav) = (PathBuf::from(obs), PathBuf::from(nav));
 
     let since = CANCELS.load(Ordering::SeqCst); // before waiting for the lock
-    let (code, message, counts) = py.allow_threads(move || {
+    let (code, message, counts) = py.detach(move || {
         let mut msg = vec![0u8; MSGLEN];
         let mut counts: [c_int; 4] = [0; 4];
         let _guard = rtklib::lock(); // shared with ppk_solve (ppk.rs)

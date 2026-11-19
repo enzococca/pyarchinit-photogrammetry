@@ -132,12 +132,11 @@ def test_auto_mapper_looks_at_the_photos_to_align_before_the_alignment(tmp_path)
     assert sfm.auto_mapper(left_out, 40) == "incremental"  # nor the photos left out of the alignment
 
 
-def test_auto_takes_the_global_mapper_for_a_ring_flight_with_gps(tmp_path):
-    """The synthetic ring flight (72 photos around a mound, a GPS position in the EXIF of each) is a survey from
-    the air of more than ``GLOBAL_FROM`` photos: the automatic choice aligns all the cameras at once - on the
-    fresh alignment, when nothing is aligned yet - and records it. Photos of 640 x 480: on 320 x 240 the global
-    mapper finds no tracks and the alignment goes back to one photo at a time, as it should."""
-    from pyarchinit_photogrammetry.core import geometry
+def _matched_ring(tmp_path, accuracy=None):
+    """The synthetic ring flight (72 photos around a mound, a GPS position in the EXIF of each), its photos
+    matched: ``(scene, doc, chunk)``. ``accuracy`` (metres: in plan, in plan, in height) replaces the one of every
+    position. Photos of 640 x 480: on 320 x 240 the global mapper finds no tracks and the alignment goes back to
+    one photo at a time, as it should."""
     from pyarchinit_photogrammetry.testing.synthetic import write_ring_dataset
 
     scene = write_ring_dataset(tmp_path / "ring", n=72, size=(640, 480))
@@ -145,9 +144,21 @@ def test_auto_takes_the_global_mapper_for_a_ring_flight_with_gps(tmp_path):
     ch = doc.add_chunk("Anello")
     doc.save(tmp_path / "ring.ppg")
     ch.add_photos([tmp_path / "ring" / "photos"])
+    if accuracy is not None:
+        for cam in ch.cameras:
+            cam.reference.accuracy = list(accuracy)
+    ch.match_photos(quality="highest")  # small photos: every pixel of them
+    return scene, doc, ch
+
+
+def test_auto_takes_the_global_mapper_for_a_ring_flight_with_gps(tmp_path):
+    """The synthetic ring flight is a survey from the air of more than ``GLOBAL_FROM`` photos: the automatic
+    choice aligns all the cameras at once - on the fresh alignment, when nothing is aligned yet - and records it."""
+    from pyarchinit_photogrammetry.core import geometry
+
+    scene, _doc, ch = _matched_ring(tmp_path)
     assert sum(1 for c in ch.cameras if c.reference.enabled and c.reference.location) == 72
     assert not ch.aligned_cameras
-    ch.match_photos(quality="highest")  # small photos: every pixel of them
     n = ch.align_cameras()  # mapper="auto"
     info = ch.meta["sfm"]
     assert info["mapper"] == "global", info.get("global_fallback")
@@ -160,6 +171,52 @@ def test_auto_takes_the_global_mapper_for_a_ring_flight_with_gps(tmp_path):
     m = geometry.umeyama(src, dst, with_scale=True)
     err = np.linalg.norm((m[:3, :3] @ src.T).T + m[:3, 3] - dst, axis=1)
     assert float(np.sqrt(np.mean(err ** 2))) < 0.5
+
+
+JUDGEABLE_ACCURACY = (0.5, 0.5, 1.0)  # m: 60 m of ring is more than ten times it, so the GPS check judges the block
+
+
+def test_a_global_block_that_misses_its_gps_stops_before_its_adjustment(tmp_path, monkeypatch):
+    """A block the global mapper positioned whose cameras do not sit on the GPS of the photos (parts at
+    different scales on a real site; patched here) is refused right after global positioning: the alignment
+    goes back to one photo at a time without the adjustment and the retriangulation of the block (an hour on a
+    thousand photos), and the record says what was judged, when, and with what residual."""
+    _scene, _doc, ch = _matched_ring(tmp_path, accuracy=JUDGEABLE_ACCURACY)
+    monkeypatch.setattr(sfm, "_block_fits_references", lambda *args, **kwargs: (False, 99.0))
+    assert ch.align_cameras(mapper="global") >= 0.9 * len(ch.cameras)
+    info = ch.meta["sfm"]
+    assert info["mapper"] == "incremental" and "99 m" in info["global_fallback"]
+    assert info["global_check"] == {"after": "global_positioning", "fits": False, "residual_m": 99.0}
+    stages = ch.meta["timings"]["align_cameras"]["stages"]
+    assert "global_positioning" in stages
+    assert not {"iterative_bundle_adjustment", "iterative_retriangulation_and_refinement"} & set(stages)
+
+
+def test_a_global_block_that_fits_goes_on_to_its_adjustment(tmp_path):
+    """The same ring, nothing patched: the positioned block sits on the GPS of the photos within their noise, the
+    global alignment goes on to its adjustment and places every photo; the check is recorded with its residual."""
+    _scene, _doc, ch = _matched_ring(tmp_path, accuracy=JUDGEABLE_ACCURACY)
+    n = ch.align_cameras(mapper="global")
+    info = ch.meta["sfm"]
+    assert info["mapper"] == "global", info.get("global_fallback")
+    assert "global_fallback" not in info
+    assert n >= 0.9 * len(ch.cameras)  # as many as keep the global block (all 72 here)
+    check = info["global_check"]
+    assert check["after"] == "global_positioning" and check["fits"] is True
+    assert isinstance(check["residual_m"], float) and np.isfinite(check["residual_m"])
+    assert "iterative_bundle_adjustment" in ch.meta["timings"]["align_cameras"]["stages"]
+
+
+def test_a_global_block_that_cannot_be_judged_goes_on(scene_dir, tmp_path):
+    """The trench: no GPS on its photos, so the check cannot judge the block and says so (``residual_m`` None);
+    the global alignment goes on and keeps its accuracy on the control points."""
+    _doc, ch = _matched(scene_dir, tmp_path, "exhaustive")
+    assert ch.align_cameras(mapper="global") == len(ch.cameras)
+    info = ch.meta["sfm"]
+    assert info["mapper"] == "global"
+    assert info["global_check"] == {"after": "global_positioning", "fits": True, "residual_m": None}
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    assert ch.update_transform()["control_rmse"] < 0.002  # as test_global_alignment_keeps_the_accuracy
 
 
 def test_reference_preselections_pick_the_pairs(scene_dir, scene, tmp_path):
@@ -431,3 +488,79 @@ def test_tie_point_limit_and_hierarchical_mapper(scene_dir, tmp_path):
     assert ch.align_cameras(mapper="hierarchical") == len(ch.cameras)
     assert ch.meta["sfm"]["mapper"] == "hierarchical"
     assert ch.update_transform()["control_rmse"] < 0.002
+
+
+def test_a_fixed_ransac_seed_gives_the_same_pairs(scene_dir, tmp_path, monkeypatch):
+    """With the seed of the geometric verification fixed (``PPG_RANSAC_SEED``), the verification of the
+    same matches on two copies of the project's database leaves ``two_view_geometries`` equal row by
+    row, on every core; without the seed it differs. Two separate matchings are not compared pair by
+    pair: COLMAP's threaded extractor numbers the photos in the order it finishes them, and a GPU
+    shares the pairs with the CPU by speed (the seed fixes the verification only)."""
+    import shutil
+    import sqlite3
+
+    import pycolmap
+
+    _doc, ch = _matched(scene_dir, tmp_path, "exhaustive")
+    db = ch.data_dir / "sfm" / "database.db"
+    columns = ("pair_id", "rows", "config", "data", "F", "E", "H")
+
+    def verified_again(label, seed):
+        """``two_view_geometries`` of a copy of the database, verified again from its matches with ``seed``."""
+        copy = tmp_path / f"{label}.db"
+        shutil.copy(db, copy)
+        con = sqlite3.connect(str(copy))
+        try:
+            ids = dict(con.execute("SELECT image_id, name FROM images"))
+            pairs = [pycolmap.pair_id_to_image_pair(int(p))
+                     for (p,) in con.execute("SELECT pair_id FROM matches WHERE rows > 0")]
+            con.execute("DELETE FROM two_view_geometries")
+            con.commit()
+        finally:
+            con.close()
+        lst = tmp_path / f"{label}.txt"
+        lst.write_text("\n".join(f"{ids[a]} {ids[b]}" for a, b in pairs))
+        if seed is None:
+            monkeypatch.delenv(sfm.RANSAC_SEED_ENV, raising=False)
+        else:
+            monkeypatch.setenv(sfm.RANSAC_SEED_ENV, str(seed))
+        pycolmap.verify_matches(str(copy), str(lst), sfm.verification_options())
+        con = sqlite3.connect(str(copy))
+        try:
+            return con.execute(f"SELECT {', '.join(columns)} FROM two_view_geometries ORDER BY pair_id").fetchall()
+        finally:
+            con.close()
+
+    def differing(first, second):
+        counts = {name: sum(1 for a, b in zip(first, second) if a[i] != b[i]) for i, name in enumerate(columns)}
+        return {name: n for name, n in counts.items() if n}
+
+    one, two = verified_again("seven-one", 7), verified_again("seven-two", 7)
+    assert len(one) == len(two) > 0 and not differing(one, two), (len(one), len(two), differing(one, two))
+    # without the seed the same verification differs: the equality above is the seed's doing
+    assert differing(verified_again("clock-one", None), verified_again("clock-two", None))
+
+
+def test_the_ransac_seed_is_checked(scene_dir, tmp_path, monkeypatch):
+    import pycolmap
+
+    monkeypatch.delenv(sfm.RANSAC_SEED_ENV, raising=False)
+    assert sfm.verification_options().ransac.random_seed == -1  # COLMAP's default: a seed from the clock
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "")
+    assert sfm.verification_options().ransac.random_seed == -1
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "7")
+    opts = sfm.verification_options()
+    assert opts.ransac.random_seed == 7
+    mine, theirs = opts.todict(), pycolmap.TwoViewGeometryOptions().todict()  # COLMAP's defaults otherwise
+    assert {k: v for k, v in mine.items() if k != "ransac"} == {k: v for k, v in theirs.items() if k != "ransac"}
+    assert ({k: v for k, v in mine["ransac"].items() if k != "random_seed"}
+            == {k: v for k, v in theirs["ransac"].items() if k != "random_seed"})
+    for text in ("seven", "-1", "1.5", "0x7"):
+        monkeypatch.setenv(sfm.RANSAC_SEED_ENV, text)
+        with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
+            sfm.verification_options()
+    # the matching refuses it before any point is detected
+    _doc, ch = _project(scene_dir, tmp_path)
+    with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
+        ch.match_photos(quality="high")
+    assert not (ch.data_dir / "sfm" / "database.db").exists()

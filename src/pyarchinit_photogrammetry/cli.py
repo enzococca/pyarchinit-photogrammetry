@@ -1284,11 +1284,14 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                                                    "plain (every position by its accuracy) or bias (with a bias per "
                                                    "flight), both refining the focal length"),
              rolling_shutter: bool = typer.Option(False, help="with --engine ppg: a velocity per photo while it is read"),
+             solver: str = typer.Option("auto", "--solver", hidden=True,
+                                        help="with --engine ppg: auto, native (the core), scipy (the reference)"),
              chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
     held by the accurate GNSS positions of the photos; an optimisation that takes the cameras away from those
     positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
     references to keep it)."""
+    from .engine.bundle import SOLVERS
     from .engine.sfm import GNSS_MODES
 
     if gnss not in GNSS_MODES:
@@ -1296,9 +1299,15 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     if engine == "colmap" and gnss in ("plain", "bias"):
         raise typer.BadParameter(f"{gnss} needs --engine ppg (COLMAP's adjustment takes auto or off)",
                                  param_hint="--gnss")
+    if solver not in SOLVERS:
+        raise typer.BadParameter(f"one of {', '.join(SOLVERS)}", param_hint="--solver")
+    if engine == "colmap" and solver != "auto":
+        raise typer.BadParameter(f"{solver} needs --engine ppg (COLMAP's adjustment has no solver to choose)",
+                                 param_hint="--solver")
     doc, ch = _open(project, chunk)
     err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
-                              progress=print_progress, engine=engine, gnss=gnss, rolling_shutter=rolling_shutter)
+                              progress=print_progress, engine=engine, gnss=gnss, rolling_shutter=rolling_shutter,
+                              solver=solver)
     if any(m.reference.location for m in ch.markers) or ch.scalebars:
         ch.update_transform()
     doc.save()
@@ -1320,7 +1329,11 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
         text += (f", the adjustment held by the GNSS positions failed ({held['termination']}): the block is left as "
                  "the alignment made it")
     if rep.get("focal_held"):
-        text += ", focal length of the alignment held"
+        why = rep["focal_held"] if isinstance(rep["focal_held"], str) else ""  # the reason (yes alone before it)
+        text += ", focal length of the alignment held" + (f" ({why})" if why else "")
+    ran = rep.get("solver") or {}
+    if ran.get("fallback") or ran.get("used") == "native":  # scipy doing what was asked has nothing to say
+        text += f", solver {ran['used']}" + (f" ({ran['fallback']})" if ran.get("fallback") else "")
     if offsets:
         text += f", camera offsets from their GNSS positions {offsets['before']:.3f} -> {offsets['after']:.3f} m (RMS)"
     b, a = rep.get("before", {}), rep.get("after", {})
