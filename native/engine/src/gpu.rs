@@ -502,7 +502,7 @@ impl Matcher {
         }
         enc.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
         self.queue.submit(Some(enc.finish()));
-        let words: Vec<u32> = bytemuck::cast_slice(&read_back(&self.device, &staging, out_size)?).to_vec();
+        let words: Vec<u32> = read_back(&self.device, &staging, out_size)?;
         if a_key == 0 { a_buf.destroy(); }
         if b_key == 0 { b_buf.destroy(); }
         Ok(words.chunks_exact(4).map(|w| [w[0], w[1], w[2]]).collect())
@@ -542,10 +542,13 @@ pub(crate) fn wait_idle(device: &wgpu::Device) {
 }
 
 /// The first `size` bytes of the staging buffer `buffer` (``MAP_READ``) once the submissions
-/// before this call have completed: mapped for reading, waited for with [`wait_idle`], copied out
-/// and unmapped. The mapping is done by the poll that finds the copy complete, at the latest by
-/// the one after the queue is empty.
-pub(crate) fn read_back(device: &wgpu::Device, buffer: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, String> {
+/// before this call have completed, as a vector of `T` (words, key points, bytes): mapped for
+/// reading, waited for with [`wait_idle`], copied into a vector whose alignment is the type's
+/// whatever the mapping's, and unmapped. The mapping is done by the poll that finds the copy
+/// complete, at the latest by the one after the queue is empty. `size` is a multiple of the size
+/// of `T` (a last partial element would come back zero-padded).
+pub(crate) fn read_back<T: bytemuck::NoUninit + bytemuck::AnyBitPattern>(device: &wgpu::Device, buffer: &wgpu::Buffer,
+                                                                          size: u64) -> Result<Vec<T>, String> {
     let slice = buffer.slice(..size);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
@@ -558,9 +561,14 @@ pub(crate) fn read_back(device: &wgpu::Device, buffer: &wgpu::Buffer, size: u64)
         }
     };
     mapped.map_err(|e| e.to_string())?;
-    let bytes = slice.get_mapped_range().to_vec();
+    // copied into a vector of T (what bytemuck's pod_collect_to_vec does, behind a feature this
+    // crate is not built with): the mapping's alignment never reaches the caller
+    let bytes = slice.get_mapped_range();
+    let mut data = vec![T::zeroed(); bytes.len().div_ceil(std::mem::size_of::<T>())];
+    bytemuck::cast_slice_mut::<T, u8>(&mut data)[..bytes.len()].copy_from_slice(&bytes);
+    drop(bytes);
     buffer.unmap();
-    Ok(bytes)
+    Ok(data)
 }
 
 fn distance(score: u32) -> f32 {

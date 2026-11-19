@@ -647,14 +647,13 @@ impl Sift {
             enc.copy_buffer_to_buffer(&descs, 0, &st_descs, 0, (MAX_ORIENTED * DESC) as u64);
             self.queue.submit(Some(enc.finish()));
             // waited for on the device's fence (gpu::read_back), never with Maintain::Wait, which
-            // wgpu 24 gives up after 60 s and treats as done
-            let read = |b: &wgpu::Buffer| read_back(&self.device, b, b.size());
-            let c: Vec<u32> = bytemuck::cast_slice(&read(&st_counts)?).to_vec();
+            // wgpu 24 gives up after 60 s and treats as done; the counts first, then as many key
+            // points and descriptors as there are, typed by the read
+            let c: Vec<u32> = read_back(&self.device, &st_counts, 16)?;
             let n_or = (c[1] as usize).min(MAX_ORIENTED);
             if n_or > 0 {
-                let kp_raw = read(&st_kps)?;
-                let kp: &[[f32; 4]] = bytemuck::cast_slice(&kp_raw[..n_or * 16]);
-                let ds = read(&st_descs)?;
+                let kp: Vec<[f32; 4]> = read_back(&self.device, &st_kps, (n_or * 16) as u64)?;
+                let ds: Vec<u8> = read_back(&self.device, &st_descs, (n_or * DESC) as u64)?;
                 for (i, k) in kp.iter().enumerate() {
                     keypoints.push([k[0] * xper, k[1] * xper, k[2] * xper, k[3]]);
                     descriptors.extend_from_slice(&ds[i * DESC..(i + 1) * DESC]);
