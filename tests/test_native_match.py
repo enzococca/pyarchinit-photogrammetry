@@ -64,7 +64,8 @@ def trench_store(scene_dir, tmp_path_factory):
     photos = _photos(scene_dir)
     calls = []
     report = ppg_core.native_features(str(root / "features"), str(root / "small"), _jobs(photos), MAX_FEATURES,
-                                      SMALL_POINTS, [], True, True, 2, lambda d, t, m: calls.append((d, t, m)))
+                                      SMALL_POINTS, [], True, True, 2, lambda d, t, m: calls.append((d, t, m)),
+                                      min_interval=0)
     return root / "features", root / "small", report, [p.name for p in photos], calls
 
 
@@ -140,7 +141,7 @@ def test_native_features_on_the_trench_photos(trench_store):
         small_header = ppg_core.native_store_header(str(small), name)
         assert 0 < small_header["points"] <= SMALL_POINTS and small_header["max_image_size"] == SMALL
     _monotonic(calls, PHOTOS)
-    assert len(calls) == PHOTOS + 1  # at the start, then after every photo: no throttle in the binding
+    assert len(calls) == PHOTOS + 1  # at the start, then after every photo: min_interval 0
 
 
 def test_the_gpu_store_has_cpu_twins(trench_store, tmp_path, gpu_test_device, scene_dir):
@@ -175,14 +176,43 @@ def test_progress_that_raises_stops_the_step(scene_dir, tmp_path):
 
     with pytest.raises(Cancelled, match="stop"):
         ppg_core.native_features(str(tmp_path / "f"), None, _jobs(_photos(scene_dir), small_limit=None), MAX_FEATURES,
-                                 SMALL_POINTS, [], True, True, 2, progress)
+                                 SMALL_POINTS, [], True, True, 2, progress, min_interval=0)
     names = ppg_core.native_store_names(str(tmp_path / "f"))
     assert 1 <= len(names) < PHOTOS, len(names)
-    assert len(calls) < PHOTOS and calls[0][:2] == (0, PHOTOS) and calls[1][0] >= 1
+    assert len(calls) == 2 and calls[0][:2] == (0, PHOTOS) and calls[1][0] >= 1  # not called again after it raised
     assert [p for p in tmp_path.rglob("*.tmp")] == []
     for name in names:  # what is in the store is whole
         kp, desc, _ = ppg_core.native_store_read(str(tmp_path / "f"), name)
         assert len(kp) == len(desc) > 0
+
+
+def test_the_progress_is_throttled(scene_dir, tmp_path):
+    """With the default ``min_interval`` of half a second the callback is called at the start, then at most every
+    half second (the GIL taken for those calls only, not once per photo), and with the last state when the step
+    ends: fewer calls than photos, the first ``(0, n)``, the last ``(n, n)``, half a second at least between two
+    calls but the last, ``done`` never falling. A callback that sleeps makes every call slow, so a step that
+    called it once per photo would show in the count and in the time."""
+    import time
+
+    calls = []
+
+    def slow_progress(done, total, message):
+        calls.append((time.monotonic(), done, total))
+        time.sleep(0.02)
+
+    started = time.monotonic()
+    ppg_core.native_features(str(tmp_path / "f"), None, _jobs(_photos(scene_dir), small_limit=None), MAX_FEATURES,
+                             SMALL_POINTS, [], True, True, 2, slow_progress)
+    elapsed = time.monotonic() - started
+    assert calls[0][1:] == (0, PHOTOS) and calls[-1][1:] == (PHOTOS, PHOTOS)
+    assert 2 <= len(calls) <= elapsed / 0.5 + 2 < PHOTOS + 1, (len(calls), elapsed)
+    gaps = [b[0] - a[0] for a, b in zip(calls, calls[1:-1])]  # between the calls, the last one excepted
+    assert all(gap >= 0.45 for gap in gaps), gaps
+    done = [d for _, d, _ in calls]
+    assert done == sorted(done)
+    with pytest.raises(ValueError, match="min_interval"):
+        ppg_core.native_features(str(tmp_path / "g"), None, [], MAX_FEATURES, SMALL_POINTS, [], True, True, 2, None,
+                                 min_interval=-1.0)
 
 
 def test_a_photo_given_as_pixels(scene_dir, tmp_path):
@@ -226,7 +256,7 @@ def test_a_tiny_photo_is_refused_not_an_error(tmp_path):
     given = ppg_core.native_features_pixels(store, None, "tiny.png", np.full((5, 7), 128, np.uint8), (7, 5), 0, None,
                                             MAX_FEATURES, SMALL_POINTS, [])
     assert given["done"] == 0 and given["unsupported"] == ["tiny.png"] and given["points"] == 0
-    assert any("tiny.png" in line and "8 x 8" in line for line in given["log"]), given["log"]
+    assert given["log"] == [line for line in report["log"] if "tiny.png" in line]  # the words of the step
     assert ppg_core.native_store_names(store) == []
     # a reduction never goes below 8 x 8 (COLMAP clamps it): a thin photo given with a limit is done
     thin = np.random.default_rng(0).integers(0, 255, (12, 400), np.uint8)
@@ -246,6 +276,14 @@ def test_the_features_step_refuses_what_it_cannot_do(tmp_path):
     with pytest.raises(TypeError):
         ppg_core.native_features_pixels(store, None, "float.png", np.zeros((20, 20), np.float32), (20, 20), 0, None,
                                         MAX_FEATURES, SMALL_POINTS, [])
+    # pixels smaller than a reduction asked for (the filter would stretch them): refused, naming the two sizes
+    with pytest.raises(ValueError, match=r"300 x 225.*600 x 450"):
+        ppg_core.native_features_pixels(store, None, "small.png", np.zeros((225, 300), np.uint8), (1200, 900), 600,
+                                        None, MAX_FEATURES, SMALL_POINTS, [])
+    with pytest.raises(ValueError, match=r"600 x 450.*1024 x 768"):
+        ppg_core.native_features_pixels(store, str(tmp_path / "small"), "small.png", np.zeros((450, 600), np.uint8),
+                                        (1200, 900), 600, 1024, MAX_FEATURES, SMALL_POINTS, [])
+    assert ppg_core.native_store_names(store) == []
     (tmp_path / "broken").mkdir()
     (tmp_path / "broken" / "index.json").write_text("{}")
     with pytest.raises(RuntimeError, match="index.json"):
@@ -293,7 +331,8 @@ def preselected(trench_store):
     """The preselection of the trench on its small store, on the CPU: ``(report, progress calls)``."""
     _, small, _, names, _ = trench_store
     calls = []
-    report = ppg_core.native_preselect(str(small), _cameras(names), [], 15, lambda d, t, m: calls.append((d, t, m)))
+    report = ppg_core.native_preselect(str(small), _cameras(names), [], 15, lambda d, t, m: calls.append((d, t, m)),
+                                       min_interval=0)
     return report, calls
 
 
@@ -314,25 +353,27 @@ def test_native_preselect_finds_the_overlapping_pairs(trench_store, preselected)
 
 
 def test_a_preselection_with_nothing_to_count_reports_no_zero_total(tmp_path):
-    """One photo (or none) gives no pair to try: no progress call carries a total of zero, and the result is
-    empty; a photo without a camera is an error naming it."""
+    """One photo (or none) gives no pair to try: nothing is reported (the engine's scale would be a total of zero,
+    which never reaches Python) and the result is empty; a photo without a camera is an error naming it."""
     rng = np.random.default_rng(2)
     small = str(tmp_path / "small")
     kp = np.column_stack([rng.uniform(0, 1200, 50), rng.uniform(0, 900, 50), np.ones(50), np.zeros(50)])
     ppg_core.native_store_write(small, "only.jpg", kp.astype(np.float32), rng.integers(0, 256, (50, 128), np.uint8),
                                 1200, 900, None)
     calls = []
-    report = ppg_core.native_preselect(small, _cameras(["only.jpg"]), [], 15, lambda d, t, m: calls.append((d, t)))
+    report = ppg_core.native_preselect(small, _cameras(["only.jpg"]), [], 15, lambda d, t, m: calls.append((d, t)),
+                                       min_interval=0)
     assert report == {"weights": [], "pairs_tried": 0, "log": []}
-    assert all(t > 0 for _, t in calls), calls
+    assert calls == []
     with pytest.raises(RuntimeError, match="only.jpg: no camera"):
         ppg_core.native_preselect(small, {}, [], 15, None)
     ppg_core.native_store_write(str(tmp_path / "empty"), "x.jpg", kp[:1].astype(np.float32),
                                 rng.integers(0, 256, (1, 128), np.uint8), 10, 10, None)
     (tmp_path / "empty" / "index.json").write_text('{"version": 1, "next": 2, "photos": {}}')
     calls = []
-    report = ppg_core.native_preselect(str(tmp_path / "empty"), {}, [], 15, lambda d, t, m: calls.append((d, t)))
-    assert report["pairs_tried"] == 0 and report["weights"] == [] and all(t > 0 for _, t in calls)
+    report = ppg_core.native_preselect(str(tmp_path / "empty"), {}, [], 15, lambda d, t, m: calls.append((d, t)),
+                                       min_interval=0)
+    assert report["pairs_tried"] == 0 and report["weights"] == [] and calls == []
 
 
 # ------------------------------------------------------------------------------------- the matching of pairs
@@ -350,7 +391,7 @@ def test_native_match_pairs_fills_the_match_store(trench_store, preselected, tmp
     matches = str(tmp_path / "matches")
     calls = []
     out = ppg_core.native_match_pairs(str(store), matches, pairs, _cameras(names), [], OPTIONS,
-                                      lambda d, t, m: calls.append((d, t, m)))
+                                      lambda d, t, m: calls.append((d, t, m)), min_interval=0)
     assert out["done"] == len(pairs) == out["guided"] + out["brute_force"] + out["dropped"]
     assert out["by_device"] == {"CPU": len(pairs)} and isinstance(out["log"], list)
     _monotonic(calls, len(pairs))
@@ -414,6 +455,6 @@ def test_a_progress_that_raises_stops_the_matching(trench_store, tmp_path):
 
     matches = str(tmp_path / "matches")
     with pytest.raises(Cancelled, match="enough"):
-        ppg_core.native_match_pairs(str(store), matches, pairs, _cameras(names), [], OPTIONS, progress)
+        ppg_core.native_match_pairs(str(store), matches, pairs, _cameras(names), [], OPTIONS, progress, min_interval=0)
     done = ppg_core.native_match_pairs_list(matches)
     assert 1 <= len(done) < len(pairs) and [p for p in tmp_path.rglob("*.tmp")] == []

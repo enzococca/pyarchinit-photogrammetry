@@ -5,16 +5,19 @@
 //! (`store`), and the photos read and reduced as COLMAP reads them (`image`, for the tests).
 //!
 //! Every step runs without the GIL, on the GPUs and the CPU together ([`run_native`]).
-//! `progress(done, total, message)` is called with the GIL taken back at the start of a step and
-//! after every unit, one call at a time, with no throttle here (the `Progress` of the Python side
-//! keeps its own); `done` never falls between two calls (the two phases of the preselection
-//! share one scale) and a step with nothing to count (a preselection of one photo) reports
-//! nothing, so a total of zero never reaches Python. An exception the callback raises sets the
-//! cancel flag of the step, which ends after the units being done (what they did is on disk), and
-//! comes out again as it was. An error of the engine or a panic is a RuntimeError with its
-//! message; what the bindings check before any work - a camera model the engine does not know,
-//! an option that is not one, arrays of the wrong shape - is a ValueError; a photo or a pair a
-//! store does not hold is a KeyError or None, as each reader says.
+//! `progress(done, total, message)` is called with the GIL taken back at the start of a step,
+//! then at most every `min_interval` seconds (0.5 unless the caller says otherwise; the GIL is
+//! taken only for a call that is made, never once per unit), and with the last state when the
+//! step ends: the final `done == total` at once, or the state a cancel or an error left it in. The
+//! calls are made one at a time under the relay's own lock, so `done` never falls as Python sees
+//! it (the two phases of the preselection share one scale), and a step with nothing to count (a
+//! preselection of one photo) reports nothing, so a total of zero never reaches Python. An
+//! exception the callback raises sets the cancel flag of the step, which ends after the units
+//! being done (what they did is on disk), and comes out again as it was (a panic of the engine
+//! after it goes with it as a note, where Python has them). An error of the engine or a panic is
+//! a RuntimeError with its message; what the bindings check before any work - a camera model the
+//! engine does not know, an option that is not one, arrays of the wrong shape - is a ValueError;
+//! a photo or a pair a store does not hold is a KeyError or None, as each reader says.
 //!
 //! A feature store or a match store named by a step is opened when its folder holds one and made
 //! otherwise, so that a step interrupted keeps what it did and the next run adds to it; the
@@ -26,6 +29,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -67,28 +71,48 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The progress callback of a step relayed to Python: `done` kept from falling and within the
-/// total, a total of zero not reported, the exception of the callback kept for the caller and the
-/// step cancelled by it (and the callback not called again).
+/// The seconds between two calls of a progress callback unless the caller says otherwise: the
+/// classic step's own figure.
+const MIN_INTERVAL: f64 = 0.5;
+
+/// What a relay has seen of its step and given to Python.
+struct Seen {
+    /// The latest state of the step, `done` never falling and within `total`.
+    done: usize,
+    total: usize,
+    /// When the callback was last called; None before the first call.
+    called_at: Option<Instant>,
+    /// The state the callback had last.
+    delivered: Option<(usize, usize)>,
+}
+
+/// The progress callback of a step relayed to Python at most every `interval` (the first call,
+/// a `done == total` and the last state when the step ends always made), under one lock, so that
+/// two calls never cross and `done` never falls as Python sees it; a total of zero not reported;
+/// the exception of the callback kept for the caller and the step cancelled by it (the callback
+/// not called again).
 struct Relay<'a> {
     callback: Option<&'a Py<PyAny>>,
     message: &'static str,
+    interval: Duration,
     cancel: &'a AtomicBool,
-    last: Mutex<usize>,
+    seen: Mutex<Seen>,
     raised: Mutex<Option<PyErr>>,
 }
 
 impl Relay<'_> {
-    fn report(&self, done: usize, total: usize) {
-        let Some(callback) = self.callback else { return };
-        if total == 0 || self.cancel.load(Ordering::SeqCst) {
-            return;
-        }
-        let done = {
-            let mut last = lock(&self.last);
-            *last = (*last).max(done.min(total));
-            *last
-        };
+    fn new<'a>(callback: Option<&'a Py<PyAny>>, message: &'static str, interval: Duration, cancel: &'a AtomicBool)
+        -> Relay<'a> {
+        let seen = Seen { done: 0, total: 0, called_at: None, delivered: None };
+        Relay { callback, message, interval, cancel, seen: Mutex::new(seen), raised: Mutex::new(None) }
+    }
+
+    /// The callback called with the state of `seen`, under its lock (the GIL taken for this call
+    /// only); its exception kept and the step cancelled.
+    fn call(&self, seen: &mut Seen, callback: &Py<PyAny>) {
+        let (done, total) = (seen.done, seen.total);
+        seen.called_at = Some(Instant::now());
+        seen.delivered = Some((done, total));
         Python::attach(|py| {
             if let Err(e) = callback.call1(py, (done, total, self.message)) {
                 *lock(&self.raised) = Some(e);
@@ -96,28 +120,85 @@ impl Relay<'_> {
             }
         });
     }
+
+    /// A state of the step: given to Python now when it is the first, the last (`done == total`)
+    /// or `interval` has passed since the last call; kept for the next call or [`Relay::finish`]
+    /// otherwise.
+    fn report(&self, done: usize, total: usize) {
+        let Some(callback) = self.callback else { return };
+        if total == 0 || self.cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut seen = lock(&self.seen);
+        seen.done = seen.done.max(done.min(total));
+        seen.total = total;
+        let due = match seen.called_at {
+            None => true,
+            Some(at) => seen.done == total || at.elapsed() >= self.interval,
+        };
+        if due {
+            self.call(&mut seen, callback);
+        }
+    }
+
+    /// The last state of the step given to Python when the step ends, if the callback has not
+    /// had it (a step cancelled, or ended by an error, between two calls).
+    fn finish(&self) {
+        let Some(callback) = self.callback else { return };
+        if self.cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut seen = lock(&self.seen);
+        if seen.total > 0 && seen.delivered != Some((seen.done, seen.total)) {
+            self.call(&mut seen, callback);
+        }
+    }
+}
+
+/// The seconds of `min_interval` as a duration; a negative or not finite number is a ValueError.
+fn interval(min_interval: f64) -> PyResult<Duration> {
+    if !(min_interval.is_finite() && min_interval >= 0.0) {
+        return Err(PyValueError::new_err(format!("min_interval must be seconds, 0 or more, not {min_interval}")));
+    }
+    Ok(Duration::from_secs_f64(min_interval))
 }
 
 /// A step of the engine run without the GIL: `f` gets the cancel flag of the step and its progress
-/// callback (`progress` relayed, with `message` as the third argument of every call). The error of
-/// the step, or a panic, is a RuntimeError with the message, unless the progress callback raised:
-/// then its exception comes out as it was, the step having been cancelled for it.
-fn run_native<T: Send>(py: Python<'_>, progress: Option<&Py<PyAny>>, message: &'static str,
+/// callback (`progress` relayed by a [`Relay`] at most every `interval`, with `message` as the
+/// third argument of every call). The error of the step, or a panic, is a RuntimeError with the
+/// message, unless the progress callback raised: then its exception comes out as it was, the step
+/// having been cancelled for it, a panic that followed attached to it as a note.
+fn run_native<T: Send>(py: Python<'_>, progress: Option<&Py<PyAny>>, message: &'static str, interval: Duration,
                        f: impl FnOnce(&AtomicBool, &(dyn Fn(usize, usize) + Sync)) -> Result<T, String> + Send)
     -> PyResult<T> {
     let cancel = AtomicBool::new(false);
-    let relay = Relay { callback: progress, message, cancel: &cancel, last: Mutex::new(0), raised: Mutex::new(None) };
+    let relay = Relay::new(progress, message, interval, &cancel);
     let outcome = py.detach(|| {
         let report = |done: usize, total: usize| relay.report(done, total);
-        catch_unwind(AssertUnwindSafe(|| f(&cancel, &report)))
+        let outcome = catch_unwind(AssertUnwindSafe(|| f(&cancel, &report)));
+        relay.finish();
+        outcome
     });
     let raised = lock(&relay.raised).take();
     match outcome {
         Ok(Ok(value)) => raised.map_or(Ok(value), Err),
         Ok(Err(problem)) => Err(raised.unwrap_or_else(|| PyRuntimeError::new_err(problem))),
-        Err(payload) => Err(PyRuntimeError::new_err(format!("{message}: {}", panic_text(&*payload)))),
+        Err(payload) => {
+            let text = format!("{message}: {}", panic_text(&*payload));
+            match raised {
+                Some(e) => {
+                    // the user's exception is the error; the panic goes with it (add_note, Python 3.11+)
+                    let _ = e.value(py).call_method1("add_note", (text,));
+                    Err(e)
+                }
+                None => Err(PyRuntimeError::new_err(text)),
+            }
+        }
     }
 }
+
+/// No progress to relay: the readers and writers of the stores.
+const NO_PROGRESS: Duration = Duration::ZERO;
 
 /// The feature store in `dir`: opened when the folder holds one, made otherwise.
 fn feature_store(dir: &str) -> Result<FeatureStore, String> {
@@ -155,20 +236,12 @@ fn cameras(given: HashMap<String, CameraArg>) -> PyResult<(HashMap<String, Camer
     Ok((cams, calibrated))
 }
 
-/// The best GPU of the computer, as `gpu::Matcher::new(None)` chooses it: by the kind of the
-/// device (`gpu::rank`: discrete, integrated, virtual, other, a software rasteriser last) and the
-/// lowest index among equals; None without an adapter.
-fn best_adapter() -> Option<usize> {
-    const KINDS: [&str; 5] = ["DiscreteGpu", "IntegratedGpu", "VirtualGpu", "Other", "Cpu"];
-    let rank = |kind: &str| KINDS.iter().position(|k| *k == kind).unwrap_or(KINDS.len());
-    gpu::adapters().into_iter().min_by_key(|a| (rank(&a.device_type), a.index)).map(|a| a.index)
-}
-
 /// The devices of a step from what Python gives (`_native.gpu_devices`): -1 is the best GPU of the
-/// computer (a ValueError without one), an index is kept as it is (one that no adapter has is the
-/// step's to log), another negative number is a ValueError; each once.
+/// computer as the kernels choose it (`gpu::best_adapter`; a ValueError without one), an index is
+/// kept as it is (one that no adapter has is the step's to log), another negative number is a
+/// ValueError; each once.
 fn devices(py: Python<'_>, given: Vec<i64>) -> PyResult<Vec<usize>> {
-    let best = if given.contains(&-1) { py.detach(best_adapter) } else { None };
+    let best = if given.contains(&-1) { py.detach(gpu::best_adapter) } else { None };
     let mut out = Vec::with_capacity(given.len());
     for d in given {
         let index = if d == -1 {
@@ -210,18 +283,20 @@ fn features_dict<'py>(py: Python<'py>, r: &FeatureReport) -> PyResult<Bound<'py,
 /// (adapter indices, -1 the best GPU) and the CPU together (``cpu_share``: a CPU worker beside the GPUs;
 /// without a GPU the CPU does every photo whatever it says); ``dct`` decodes a JPEG at the DCT scale its
 /// reduction allows, ``readers`` is the number of decoding threads. ``progress(done, total, message)``
-/// after every photo.
-/// Returns ``done``, ``unreadable`` (files no decoder reads), ``unsupported`` (files this engine does
-/// not decode, to be given as pixels to :func:`native_features_pixels`, and photos too small for the
-/// kernels), ``gpu``, ``cpu`` (the photos each did) and ``log``. The GIL is released (`features::extract_all`).
+/// counts the photos: at the start, then at most every ``min_interval`` seconds, and with the last state
+/// when the step ends. Returns ``done``, ``unreadable`` (files no decoder reads), ``unsupported`` (files
+/// this engine does not decode, to be given as pixels to :func:`native_features_pixels`, and photos too
+/// small for the kernels), ``gpu``, ``cpu`` (the photos each did) and ``log``. The GIL is released
+/// (`features::extract_all`).
 #[pyfunction]
 #[pyo3(signature = (store, small_store, photos, max_features, small_max_features, devices, dct=true, cpu_share=true,
-                    readers=2, progress=None))]
+                    readers=2, progress=None, min_interval=MIN_INTERVAL))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn native_features<'py>(py: Python<'py>, store: &str, small_store: Option<&str>, photos: Vec<PhotoArg>,
                                    max_features: usize, small_max_features: usize, devices: Vec<i64>, dct: bool,
-                                   cpu_share: bool, readers: usize, progress: Option<Py<PyAny>>)
+                                   cpu_share: bool, readers: usize, progress: Option<Py<PyAny>>, min_interval: f64)
     -> PyResult<Bound<'py, PyDict>> {
+    let interval = self::interval(min_interval)?;
     let devices = self::devices(py, devices)?;
     let jobs: Vec<PhotoJob> = photos
         .into_iter()
@@ -229,7 +304,7 @@ pub(crate) fn native_features<'py>(py: Python<'py>, store: &str, small_store: Op
         .collect();
     // the CPU SIFT runs on the threads of rayon by itself: one CPU worker is its share
     let o = FeatureOptions { sift: sift_options(max_features), dct, readers, cpu_threads: usize::from(cpu_share) };
-    let report = run_native(py, progress.as_ref(), "extracting features", |cancel, progress| {
+    let report = run_native(py, progress.as_ref(), "extracting features", interval, |cancel, progress| {
         let store = feature_store(store)?;
         let small = small_store.map(feature_store).transpose()?;
         let small = small.as_ref().map(|s| (s, small_max_features));
@@ -238,26 +313,43 @@ pub(crate) fn native_features<'py>(py: Python<'py>, store: &str, small_store: Op
     features_dict(py, &report)
 }
 
+/// The sizes a photo of full size `full` is reduced to by the step: under `limit`, and under
+/// `small_limit` when a small store is filled (`features::reduce`).
+fn reductions(full: (usize, usize), limit: usize, small_limit: Option<usize>) -> Vec<(usize, usize)> {
+    std::iter::once(limit).chain(small_limit).map(|cap| image::colmap_size(full.0, full.1, cap)).collect()
+}
+
 /// Why a photo of full size `full` reduced under `limit` (and, when a small store is filled, under
 /// `small_limit`) is refused by the kernels: a reduction below [`LEAST_SIDE`] on a side, worded as
 /// the features step words it; `None` when it is large enough.
 fn too_small(full: (usize, usize), limit: usize, small_limit: Option<usize>) -> Option<String> {
-    for cap in std::iter::once(limit).chain(small_limit) {
-        let (w, h) = image::colmap_size(full.0, full.1, cap);
-        if w < LEAST_SIDE || h < LEAST_SIDE {
-            return Some(format!("reduced to {w} x {h}, below the {LEAST_SIDE} x {LEAST_SIDE} the SIFT takes"));
-        }
+    let small = |&(w, h): &(usize, usize)| w < LEAST_SIDE || h < LEAST_SIDE;
+    let (w, h) = reductions(full, limit, small_limit).into_iter().find(small)?;
+    Some(format!("reduced to {w} x {h}, below the {LEAST_SIDE} x {LEAST_SIDE} the SIFT takes"))
+}
+
+/// The pixels given for a photo of full size `full` checked against the reductions asked of it: a
+/// raster smaller than one of them (which the filter would stretch into features of nothing) is
+/// a ValueError naming the two sizes.
+fn check_pixels(name: &str, given: (usize, usize), full: (usize, usize), limit: usize, small_limit: Option<usize>)
+    -> PyResult<()> {
+    let larger = |&(w, h): &(usize, usize)| given.0 < w || given.1 < h;
+    match reductions(full, limit, small_limit).into_iter().find(larger) {
+        Some((w, h)) => Err(PyValueError::new_err(format!(
+            "{name}: the pixels given are {} x {}, the reduction asked for is {w} x {h}: give the full photo, or a \
+             reduction at least that large", given.0, given.1))),
+        None => Ok(()),
     }
-    None
 }
 
 /// The features of one photo given as pixels - ``grey`` its raster as a uint8 array (the full photo,
-/// or a reduction of it at least as large as the reductions asked for), ``full_size`` ``(width, height)``
-/// of the full photo - extracted into ``store`` (and ``small_store``) as :func:`native_features` extracts
-/// a photo it reads itself, on the first GPU of ``devices`` that opens, else on the CPU: for a file the
-/// step reported ``unsupported`` and Python decoded. Returns the dict of :func:`native_features` for this
-/// one photo, with ``points`` (the key points stored, 0 when it was not): a photo too small for the
-/// kernels is ``unsupported``, never an error. The GIL is released (`features::extract_pixels`).
+/// or a reduction of it at least as large as the reductions asked for: a smaller one is a ValueError),
+/// ``full_size`` ``(width, height)`` of the full photo - extracted into ``store`` (and ``small_store``) as
+/// :func:`native_features` extracts a photo it reads itself, on the first GPU of ``devices`` that opens,
+/// else on the CPU: for a file the step reported ``unsupported`` and Python decoded. Returns the dict of
+/// :func:`native_features` for this one photo, with ``points`` (the key points stored, 0 when it was
+/// not): a photo too small for the kernels is ``unsupported``, never an error. The GIL is released
+/// (`features::extract_pixels`).
 #[pyfunction]
 #[pyo3(signature = (store, small_store, name, grey, full_size, limit, small_limit, max_features, small_max_features,
                     devices))]
@@ -269,12 +361,14 @@ pub(crate) fn native_features_pixels<'py>(py: Python<'py>, store: &str, small_st
     let devices = self::devices(py, devices)?;
     let a = grey.as_array();
     let (height, width) = a.dim();
+    let small_limit_wanted = small_limit.filter(|_| small_store.is_some());
+    check_pixels(&name, (width, height), full_size, limit, small_limit_wanted)?;
     let pixels = Grey { width, height, pixels: a.iter().copied().collect() };
     let job = PhotoJob { name: name.clone(), path: None, mask: None, limit, small_limit };
     // the GPU takes the photo when one opens, the CPU otherwise (the step makes a CPU worker then)
     let o = FeatureOptions { sift: sift_options(max_features), dct: true, readers: 1, cpu_threads: 0 };
-    let refused = too_small(full_size, limit, small_limit.filter(|_| small_store.is_some()));
-    let outcome = run_native(py, None, "extracting features", |_, _| match refused {
+    let refused = too_small(full_size, limit, small_limit_wanted);
+    let outcome = run_native(py, None, "extracting features", NO_PROGRESS, |_, _| match refused {
         Some(why) => Ok(Err(why)),
         None => {
             let store = feature_store(store)?;
@@ -295,7 +389,8 @@ pub(crate) fn native_features_pixels<'py>(py: Python<'py>, store: &str, small_st
             }
         }
         Err(why) => {
-            report.log.push(format!("{name}: skipped ({why})"));
+            // the words of the step for the same refusal (`features::extract_all`)
+            report.log.push(format!("{name}: not decoded here ({why})"));
             report.unsupported.push(name);
         }
     }
@@ -310,16 +405,18 @@ pub(crate) fn native_features_pixels<'py>(py: Python<'py>, store: &str, small_st
 /// of the store (`preselect::run`). Returns ``weights``, the pairs with at least ``min_inliers`` inlier
 /// matches as ``(a, b, inliers)`` with ``a < b`` and sorted, ``pairs_tried`` and ``log``.
 /// ``progress(done, total, message)`` counts on one scale, twice the pairs tried: the matching to the
-/// pairs tried, the verification after it. The GIL is released.
+/// pairs tried, the verification after it; at the start, then at most every ``min_interval`` seconds, and
+/// with the last state when the step ends. The GIL is released.
 #[pyfunction]
-#[pyo3(signature = (small_store, cameras, devices, min_inliers, progress=None))]
+#[pyo3(signature = (small_store, cameras, devices, min_inliers, progress=None, min_interval=MIN_INTERVAL))]
 pub(crate) fn native_preselect<'py>(py: Python<'py>, small_store: &str, cameras: HashMap<String, CameraArg>,
-                                    devices: Vec<i64>, min_inliers: usize, progress: Option<Py<PyAny>>)
-    -> PyResult<Bound<'py, PyDict>> {
+                                    devices: Vec<i64>, min_inliers: usize, progress: Option<Py<PyAny>>,
+                                    min_interval: f64) -> PyResult<Bound<'py, PyDict>> {
+    let interval = self::interval(min_interval)?;
     let devices = self::devices(py, devices)?;
     let (cams, calibrated) = self::cameras(cameras)?;
     let o = PreselectOptions { min_inliers, matching: MATCHING, two_view: two_view::Options::default() };
-    let report = run_native(py, progress.as_ref(), "preselecting pairs", |cancel, progress| {
+    let report = run_native(py, progress.as_ref(), "preselecting pairs", interval, |cancel, progress| {
         let store = open_feature_store(small_store)?;
         preselect::run(&store, &cams, &calibrated, &devices, &o, cancel, progress)
     })?;
@@ -336,8 +433,8 @@ pub(crate) fn native_preselect<'py>(py: Python<'py>, small_store: &str, cameras:
 /// match) have COLMAP's defaults - with the verification's under ``two_view_*`` and its RANSAC's under
 /// ``ransac_*`` (the keys of :func:`two_view_defaults`); a key that is not one of them is a ValueError.
 fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
-    let mut o = pairs::Options { stage1_points: 0, trust_inliers: 0, drop_inliers: 0, max_ratio: 0.8, max_distance: 0.7,
-                                 cross_check: true, max_num_matches: MAX_NUM_MATCHES,
+    let mut o = pairs::Options { stage1_points: 0, trust_inliers: 0, drop_inliers: 0, max_ratio: 0.8,
+                                 max_distance: 0.7, cross_check: true, max_num_matches: MAX_NUM_MATCHES,
                                  two_view: two_view::Options::default() };
     const THRESHOLDS: [&str; 3] = ["stage1_points", "trust_inliers", "drop_inliers"];
     let mut given = [false; 3];
@@ -403,20 +500,23 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
 /// ``max_num_matches`` COLMAP's unless given; the verification's under ``two_view_*`` and ``ransac_*``).
 /// Returns ``done``, ``guided``, ``brute_force``, ``dropped`` (the pairs by route), ``by_device`` (the pairs
 /// whose first stage each device did, by its name, ``CPU`` for the threads) and ``log``.
-/// ``progress(done, total, message)`` counts the pairs. The GIL is released (`pairs::match_all`).
+/// ``progress(done, total, message)`` counts the pairs: at the start, then at most every ``min_interval``
+/// seconds, and with the last state when the step ends. The GIL is released (`pairs::match_all`).
 #[pyfunction]
-#[pyo3(signature = (features, matches, pairs, cameras, devices, options, progress=None, cpu_share=true))]
+#[pyo3(signature = (features, matches, pairs, cameras, devices, options, progress=None, cpu_share=true,
+                    min_interval=MIN_INTERVAL))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn native_match_pairs<'py>(py: Python<'py>, features: &str, matches: &str,
                                       pairs: Vec<(String, String, bool)>, cameras: HashMap<String, CameraArg>,
                                       devices: Vec<i64>, options: &Bound<'py, PyDict>, progress: Option<Py<PyAny>>,
-                                      cpu_share: bool) -> PyResult<Bound<'py, PyDict>> {
+                                      cpu_share: bool, min_interval: f64) -> PyResult<Bound<'py, PyDict>> {
+    let interval = self::interval(min_interval)?;
     let devices = self::devices(py, devices)?;
     let (cams, calibrated) = self::cameras(cameras)?;
     let o = pairs_options(options)?;
     // one CPU worker per core beside the GPUs (and alone without one); none when the GPUs are to work alone
     let cpu_threads = if cpu_share || devices.is_empty() { None } else { Some(0) };
-    let report = run_native(py, progress.as_ref(), "matching pairs", |cancel, progress| {
+    let report = run_native(py, progress.as_ref(), "matching pairs", interval, |cancel, progress| {
         let store = open_feature_store(features)?;
         let out = match_store(matches)?;
         pairs::match_all(&pairs, &store, &cams, &calibrated, &out, &devices, cpu_threads, &o, cancel, progress)
@@ -442,7 +542,7 @@ pub(crate) fn native_match_pairs<'py>(py: Python<'py>, features: &str, matches: 
 #[pyfunction]
 pub(crate) fn native_store_read<'py>(py: Python<'py>, store: &str, name: &str)
     -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u8>>, &'static str)> {
-    let found = run_native(py, None, "reading the feature store", |_, _| {
+    let found = run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| {
         let store = open_feature_store(store)?;
         let view = store.get(name);
         Ok(view.map(|v| (v.keypoints().to_vec(), v.descriptors().to_vec(), v.header().implementation)))
@@ -479,7 +579,7 @@ pub(crate) fn native_store_write<'py>(py: Python<'py>, store: &str, name: &str, 
     let descriptors: Vec<u8> = descriptors.as_array().iter().copied().collect();
     let f = PhotoFeatures { width, height, implementation: Impl::Imported, image_id, params: ExtractParams::default(),
                             keypoints, descriptors };
-    run_native(py, None, "writing the feature store", |_, _| {
+    run_native(py, None, "writing the feature store", NO_PROGRESS,|_, _| {
         let store = feature_store(store)?;
         store.put(name, &f).map_err(|e| e.to_string())
     })
@@ -488,7 +588,7 @@ pub(crate) fn native_store_write<'py>(py: Python<'py>, store: &str, name: &str, 
 /// The names of the photos of the feature store ``store``, sorted.
 #[pyfunction]
 pub(crate) fn native_store_names(py: Python<'_>, store: &str) -> PyResult<Vec<String>> {
-    run_native(py, None, "reading the feature store", |_, _| Ok(open_feature_store(store)?.names()))
+    run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| Ok(open_feature_store(store)?.names()))
 }
 
 /// The header of the photo ``name`` of the feature store ``store``: ``width`` and ``height`` of the full
@@ -497,7 +597,7 @@ pub(crate) fn native_store_names(py: Python<'_>, store: &str) -> PyResult<Vec<St
 /// photo the store does not hold is a KeyError.
 #[pyfunction]
 pub(crate) fn native_store_header<'py>(py: Python<'py>, store: &str, name: &str) -> PyResult<Bound<'py, PyDict>> {
-    let header: Option<FeatureHeader> = run_native(py, None, "reading the feature store", |_, _| {
+    let header: Option<FeatureHeader> = run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| {
         Ok(open_feature_store(store)?.get(name).map(|v| v.header().clone()))
     })?;
     let h = header.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?;
@@ -520,7 +620,7 @@ pub(crate) fn native_store_header<'py>(py: Python<'py>, store: &str, name: &str)
 #[pyfunction]
 pub(crate) fn native_match_read<'py>(py: Python<'py>, matches: &str, a: &str, b: &str)
     -> PyResult<Option<Bound<'py, PyDict>>> {
-    let found = run_native(py, None, "reading the match store", |_, _| {
+    let found = run_native(py, None, "reading the match store", NO_PROGRESS,|_, _| {
         let store = MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?;
         Ok(store.get(a, b))
     })?;
@@ -537,7 +637,7 @@ pub(crate) fn native_match_read<'py>(py: Python<'py>, matches: &str, a: &str, b:
 /// sorted.
 #[pyfunction]
 pub(crate) fn native_match_pairs_list(py: Python<'_>, matches: &str) -> PyResult<Vec<(String, String)>> {
-    run_native(py, None, "reading the match store", |_, _| {
+    run_native(py, None, "reading the match store", NO_PROGRESS,|_, _| {
         Ok(MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?.pairs())
     })
 }
@@ -556,7 +656,7 @@ fn grey_array(py: Python<'_>, g: Grey) -> Bound<'_, PyArray2<u8>> {
 #[pyfunction]
 pub(crate) fn read_grey<'py>(py: Python<'py>, path: &str, min_long_side: usize, dct: bool)
     -> PyResult<(Bound<'py, PyArray2<u8>>, (usize, usize))> {
-    let (grey, full) = run_native(py, None, "reading a photo", |_, _| {
+    let (grey, full) = run_native(py, None, "reading a photo", NO_PROGRESS,|_, _| {
         image::read_grey(Path::new(path), min_long_side, dct).map_err(|e| format!("{path}: {e}"))
     })?;
     Ok((grey_array(py, grey), full))
@@ -571,6 +671,6 @@ pub(crate) fn rescale_as_colmap<'py>(py: Python<'py>, grey: PyReadonlyArray2<'py
     let a = grey.as_array();
     let (height, width) = a.dim();
     let img = Grey { width, height, pixels: a.iter().copied().collect() };
-    let out = run_native(py, None, "reducing a photo", |_, _| Ok(image::rescale_as_colmap(&img, w, h)))?;
+    let out = run_native(py, None, "reducing a photo", NO_PROGRESS,|_, _| Ok(image::rescale_as_colmap(&img, w, h)))?;
     Ok(grey_array(py, out))
 }

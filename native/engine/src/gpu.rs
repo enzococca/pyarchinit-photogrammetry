@@ -561,6 +561,18 @@ pub(crate) fn rank(t: wgpu::DeviceType) -> u8 {
     }
 }
 
+/// The adapter of `all` the kernels take when given no index: the best by the kind of device
+/// (`rank`: a discrete GPU first, a software rasteriser last), the lowest index among equals.
+pub(crate) fn best_of(all: &[wgpu::Adapter]) -> Option<usize> {
+    (0..all.len()).min_by_key(|&i| (rank(all[i].get_info().device_type), i))
+}
+
+/// The index (as [`adapters`] numbers them) of the adapter `Matcher::new(None)` and the other
+/// kernels given no index choose, the Python side's device -1; None without an adapter.
+pub fn best_adapter() -> Option<usize> {
+    best_of(&instance().enumerate_adapters(wgpu::Backends::all()))
+}
+
 /// The environment variable of a test hook: set, the kernels of a block are refused as a backend
 /// compiler would refuse them, so that a test sees the preselection leave the device to the others
 /// on a computer whose GPU takes them.
@@ -688,7 +700,7 @@ impl Matcher {
         let chosen = match index {
             Some(i) if i < all.len() => i,
             Some(i) => return Err(format!("GPU adapter {i} does not exist: {} found", all.len())),
-            None => (0..all.len()).min_by_key(|&i| (rank(all[i].get_info().device_type), i)).unwrap(),
+            None => best_of(&all).expect("the adapters are not empty"),
         };
         let info = describe(&all[chosen], chosen);
         let adapter = all.swap_remove(chosen);
