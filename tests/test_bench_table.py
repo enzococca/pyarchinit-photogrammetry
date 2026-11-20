@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import sqlite3
 import types
 from pathlib import Path
 
@@ -19,10 +21,11 @@ import pytest
 from typer.testing import CliRunner
 
 import pyarchinit_photogrammetry as ppg
-from pyarchinit_photogrammetry.bench import record, runner, table, truth
+from pyarchinit_photogrammetry.bench import pairs, record, runner, table, truth
 from pyarchinit_photogrammetry.bench import steps as child
 from pyarchinit_photogrammetry.cli import app
 from pyarchinit_photogrammetry.core.camera import Camera
+from pyarchinit_photogrammetry.engine import sfm
 from pyarchinit_photogrammetry.testing import synthetic
 
 MACHINE = {"system": "Darwin", "release": "27.0.0", "arch": "arm64", "cpu": "CPU A", "cores": 12, "memory_gb": 24.0,
@@ -30,11 +33,43 @@ MACHINE = {"system": "Darwin", "release": "27.0.0", "arch": "arm64", "cpu": "CPU
 DISK = {"bus": "PCI-Express", "link_mbps": None, "read_mb_s": 400.0, "solid_state": True}
 SET = {"photos": 28, "bytes": 1, "online_only": 0, "gps": 0}
 SETTINGS = {"pairs": 378, "matcher": "sift", "quality": "high", "gpu": "GPU A", "gpu_pairs": 100, "cpu_pairs": 278,
-            "mapper": "incremental", "global_fallback": None, "max_ratio": 0.8, "max_distance": 0.7,
-            "cross_check": True, "pycolmap": "4.2.1", "photo_cache_mb": None, "georeferencing": "markers",
-            "targets": "aruco_4x4_50", "mapper_requested": "auto"}
+            "mapper": "incremental", "global_fallback": None, "engine": None, "features": "gpu", "routes": None,
+            "max_ratio": 0.8, "max_distance": 0.7, "cross_check": True, "pycolmap": "4.2.1", "photo_cache_mb": None,
+            "georeferencing": "markers", "targets": "aruco_4x4_50", "mapper_requested": "auto",
+            "engine_requested": "auto"}
 ENGINE = {"requested": "auto", "used": "classic", "fallback": None}
+NATIVE = {"requested": "native", "used": "native", "fallback": None}
+# the record of a native matching: what the native engine writes in chunk.meta["sfm"] beside the classic keys, which
+# differ between repeats of one run (the routes count what each pair took, the features where they were found)
+NATIVE_SETTINGS = {"engine_requested": "native", "engine": "native", "features": "gpu+cpu",
+                   "routes": {"guided": 300, "brute_force": 70, "dropped": 8}}
 TABLE_LOG = "pyarchinit_photogrammetry.bench.table"
+PAIRS_LINE = re.compile(r"^verified A (\d+), verified B (\d+), lost (\d+) \((\d+\.\d\d) %\), gained (\d+)$")
+
+
+def colmap_database(path: Path, names: list[str], geometries: dict[tuple[str, str], tuple[int, int]],
+                    ids: dict[str, int] | None = None) -> Path:
+    """A database with the two tables of COLMAP's the bench reads, ``images`` (``image_id``, ``name``) and
+    ``two_view_geometries`` (``pair_id``, ``rows``, ``config``, the rest NULL): ``names`` numbered from 1 in their
+    order (or by ``ids``), ``geometries`` a row per pair of names with its inlier count and its configuration, keyed
+    as COLMAP keys a pair (the lower image id first)."""
+    ids = ids or {name: i for i, name in enumerate(names, 1)}
+    con = sqlite3.connect(str(path))
+    try:
+        con.execute("CREATE TABLE images (image_id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, "
+                    "camera_id INTEGER NOT NULL)")
+        con.execute("CREATE TABLE two_view_geometries (pair_id INTEGER PRIMARY KEY NOT NULL, rows INTEGER NOT NULL, "
+                    "cols INTEGER NOT NULL, data BLOB, config INTEGER NOT NULL, F BLOB, E BLOB, H BLOB, qvec BLOB, "
+                    "tvec BLOB)")
+        con.executemany("INSERT INTO images VALUES (?, ?, 1)", [(ids[name], name) for name in names])
+        for (a, b), (rows, config) in geometries.items():
+            low, high = sorted((ids[a], ids[b]))
+            con.execute("INSERT INTO two_view_geometries (pair_id, rows, cols, config) VALUES (?, ?, 2, ?)",
+                        (low * sfm.COLMAP_MAX_IMAGES + high, rows, config))
+        con.commit()
+    finally:
+        con.close()
+    return path
 
 
 def a_record(seconds: float, *, link=None, stages=None, peak=100.0, results=None, name="t", program=None,
@@ -204,6 +239,42 @@ def test_runs_that_differ_in_the_mapper_asked_for_are_a_mix_under_one_name_and_t
         [("t-auto", 12.0, False, True), ("t-global", 6.0, False, True)]
 
 
+def test_runs_that_differ_in_the_engine_asked_for_are_a_mix_under_one_name_and_two_rows_under_two():
+    """The engine a run was asked for (--engine) is a setting and is compared; what the record of the matching says
+    the run did - its engine, where the features were found, the routes the pairs took - are facts of the run:
+    three native repeats that differ in them are one measurement. Native and classic runs under one name are a mix
+    (the engine column says both); under two names, two baselines side by side."""
+    assert "engine_requested" not in table.RUN_FACTS
+    assert {"engine", "features", "routes"} <= set(table.RUN_FACTS)
+    classic = [a_record(s, step="match_photos") for s in (10.0, 12.0, 30.0)]
+    native = [a_record(s, step="match_photos", engine=NATIVE, settings={**NATIVE_SETTINGS, "routes": {
+        "guided": 300 + i, "brute_force": 70 - i, "dropped": 8}, "features": ("gpu", "gpu+cpu", "cpu")[i]})
+        for i, s in enumerate((5.0, 6.0, 7.0))]
+    rows, _ = table.summarise(native)
+    assert [(r["engine"], r["mixed_settings"], r["baseline"]) for r in rows] == [("native", False, True)]
+    rows, _ = table.summarise(classic + native)
+    assert [(r["name"], r["engine"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t", "classic/native", True, False)]
+    assert "| not a baseline (mixed settings) |" in table.render(rows, {})
+    for rec in native:
+        rec["name"] = "t-native"
+    rows, _ = table.summarise(classic + native)
+    assert [(r["name"], r["engine"], r["seconds"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t", "classic", 12.0, False, True), ("t-native", "native", 6.0, False, True)]
+
+
+def test_the_two_results_of_the_matching_gate_come_right_after_the_photos_aligned():
+    results = {"zeta": 1.0, "reprojection_rms_px": 0.5, "tie_points_per_photo": 812.4, "verified_pairs": 370,
+               "aligned": 28, "cameras": 28, "control_rmse": 0.002}
+    rows, left_out = table.summarise([a_record(10.0, results=results)])
+    text = table.render(rows, left_out)
+    assert "| name | program | runs | cameras | aligned | verified_pairs | tie_points_per_photo | " \
+           "reprojection_rms_px | control_rmse | zeta |" in text
+    assert "| 28 | 28 | 370 | 812.4 | 0.5 | 0.002 | 1 |" in text
+    assert table.FIRST_RESULTS[:5] == ("cameras", "aligned", "verified_pairs", "tie_points_per_photo",
+                                       "reprojection_rms_px")
+
+
 def test_every_reason_of_a_record_left_out_is_counted_before_its_colon():
     failed = a_record(2.0, link=480)
     failed["error"] = "align_cameras: RuntimeError: no model"
@@ -262,6 +333,10 @@ def test_run_checks_its_arguments_before_the_runner_starts(tmp_path, monkeypatch
     assert result.exit_code == 2 and "--steps" in plain(result)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--mapper", "hierarchical"])
     assert result.exit_code == 2 and "--mapper" in plain(result) and "not 'hierarchical'" in plain(result)
+    result = invoke(["run", str(photos), str(out), "--name", "n", "--engine", "turbo"])
+    assert result.exit_code == 2 and "--engine" in plain(result) and "not 'turbo'" in plain(result)
+    result = invoke(["synthetic", "ring", str(tmp_path / "s"), "--engine", "turbo"])
+    assert result.exit_code == 2 and "--engine" in plain(result) and "not 'turbo'" in plain(result)
     # the wording of the range error is Click's and changes between versions: the exit code and the option named
     # are what matter (that --seed exists and reaches the runner is shown by test_run_passes_its_options...)
     result = invoke(["run", str(photos), str(out), "--name", "n", "--seed", "-1"])
@@ -296,12 +371,19 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
                      "--keep", "--records", str(tmp_path / "r")])
     assert result.exit_code == 0, result.output
     assert calls == [(photos, tmp_path / "o", "n", {"steps": "all", "repeat": 2, "keep": True,
-                                                   "records": tmp_path / "r", "mapper": "auto", "seed": None})]
+                                                   "records": tmp_path / "r", "mapper": "auto", "seed": None,
+                                                   "engine": "auto"})]
     assert "not valid (slow disk link: 480 Mb/s)" in result.output and "1.5 s" in result.output
     result = invoke(["run", str(photos), str(tmp_path / "o2"), "--name", "n", "--mapper", "global", "--seed", "7"])
     assert result.exit_code == 0, result.output
     assert calls[1][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "global",
-                           "seed": 7}
+                           "seed": 7, "engine": "auto"}
+    # the matching alone on the native engine: the time gate of the native matching on a large set
+    result = invoke(["run", str(photos), str(tmp_path / "o3"), "--name", "n", "--steps", "match", "--engine",
+                     "native"])
+    assert result.exit_code == 0, result.output
+    assert calls[2][3] == {"steps": "match", "repeat": 1, "keep": False, "records": None, "mapper": "auto",
+                           "seed": None, "engine": "native"}
 
 
 def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_records_written(tmp_path, monkeypatch):
@@ -366,10 +448,12 @@ def test_synthetic_writes_each_set_in_a_folder_of_its_own_and_runs_its_own_photo
     assert seen == ["IMG_0000.jpg"]
     assert kwargs["steps"] == "all" and kwargs["repeat"] == 3 and kwargs["records"] is None
     assert "mapper" not in kwargs  # the synthetic sets keep the default mapper, auto
+    assert kwargs["engine"] == "auto"  # --engine chooses the engine of the matching, auto without it
     assert kwargs["targets"] == child.DEFAULT_TARGETS == "aruco_4x4_50"
     assert kwargs["reference"] == out / "synthetic-trench-set" / "gcp.csv" and kwargs["crs"] == "EPSG:3004"
     assert kwargs["extra_results"] is truth.trench_truth
-    result = invoke(["synthetic", "ring", str(out), "--repeat", "1", "--records", str(tmp_path / "rec")])
+    result = invoke(["synthetic", "ring", str(out), "--repeat", "1", "--records", str(tmp_path / "rec"), "--engine",
+                     "native"])
     assert result.exit_code == 0, result.output
     photos, out_, name, kwargs, seen = stand_ins[-1]
     assert (photos, out_, name) == (out / "synthetic-ring-set" / "photos", out, "synthetic-ring")
@@ -377,6 +461,7 @@ def test_synthetic_writes_each_set_in_a_folder_of_its_own_and_runs_its_own_photo
     assert kwargs["steps"] == "align" and kwargs["repeat"] == 1 and kwargs["records"] == tmp_path / "rec"
     assert kwargs["targets"] == child.DEFAULT_TARGETS and "reference" not in kwargs and "crs" not in kwargs
     assert "mapper" not in kwargs and callable(kwargs["extra_results"]) and len(stand_ins) == 2
+    assert kwargs["engine"] == "native"
     assert (out / "synthetic-trench-set" / "photos" / "IMG_0000.jpg").exists()  # the set stays after the runs
     # the work folders (the projects) go unless --keep asks for them: the project of a kept run is what
     # ppg bench adjust takes
@@ -460,6 +545,104 @@ def test_an_os_error_of_the_checks_is_an_error_without_a_traceback_or_a_path(tmp
         assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
         assert "error: PermissionError: Permission denied" in result.output and "secret" not in result.output
     assert stand_ins == [] and not (tmp_path / "b").exists()
+
+
+# --- the pairs two runs verified --------------------------------------------------------------------------------------
+
+def test_a_pair_is_verified_with_colmaps_least_inliers_and_a_configuration_the_mapper_takes():
+    """What makes a two-view geometry a verified pair is COLMAP's: at least ``min_num_inliers`` inlier matches (a
+    pair below it is DEGENERATE, its matches dropped) and a configuration other than UNDEFINED, DEGENERATE and
+    WATERMARK (the ones the mapper does not use)."""
+    import pycolmap
+
+    assert pairs.MIN_INLIERS == pycolmap.TwoViewGeometryOptions().min_num_inliers == 15
+    config = pycolmap.TwoViewGeometryConfiguration
+    assert pairs.NOT_VERIFIED == frozenset({int(config.UNDEFINED), int(config.DEGENERATE), int(config.WATERMARK)})
+    assert pairs.NOT_VERIFIED == frozenset({0, 1, 7})
+
+
+def test_compare_counts_the_verified_pairs_by_photo_name_and_what_the_second_run_lost(tmp_path):
+    """The two databases number their photos as their extractors finished them: pairs are compared by the names
+    of the photos. Two copies of one database lose nothing; one verified row set to DEGENERATE in the second is
+    one pair lost (and nothing gained), a row below 15 inliers or marked WATERMARK was no verified pair before."""
+    names = ["IMG_0001.jpg", "IMG_0002.jpg", "sub dir/IMG_0003.jpg", "IMG_0004.jpg"]
+    geometries = {("IMG_0001.jpg", "IMG_0002.jpg"): (40, 2), ("IMG_0001.jpg", "sub dir/IMG_0003.jpg"): (15, 3),
+                  ("IMG_0002.jpg", "sub dir/IMG_0003.jpg"): (14, 2), ("IMG_0002.jpg", "IMG_0004.jpg"): (200, 7),
+                  ("sub dir/IMG_0003.jpg", "IMG_0004.jpg"): (60, 4), ("IMG_0001.jpg", "IMG_0004.jpg"): (0, 1)}
+    (tmp_path / "a").mkdir()
+    db_a = colmap_database(tmp_path / "a" / "database.db", names, geometries)
+    assert pairs.verified(db_a) == {("IMG_0001.jpg", "IMG_0002.jpg"), ("IMG_0001.jpg", "sub dir/IMG_0003.jpg"),
+                                    ("IMG_0004.jpg", "sub dir/IMG_0003.jpg")}
+    (tmp_path / "copy").mkdir()
+    db_copy = Path(shutil.copy(db_a, tmp_path / "copy" / "database.db"))
+    assert pairs.compare(db_a, db_copy) == {"verified_a": 3, "verified_b": 3, "lost": 0, "lost_percent": 0.0,
+                                            "gained": 0}
+    # the same pairs in a database whose photos are numbered the other way round: nothing lost
+    (tmp_path / "b").mkdir()
+    db_b = colmap_database(tmp_path / "b" / "database.db", names, geometries,
+                           ids={name: len(names) - i for i, name in enumerate(names)})
+    assert pairs.compare(db_a, db_b)["lost"] == 0 and pairs.compare(db_a, db_b)["gained"] == 0
+    con = sqlite3.connect(str(db_b))
+    con.execute("UPDATE two_view_geometries SET config = 1, rows = 0 WHERE rows = 60")  # a verified row, degenerate
+    con.execute("UPDATE two_view_geometries SET config = 1 WHERE rows = 14")  # no verified pair before: no loss
+    con.commit()
+    con.close()
+    assert pairs.compare(db_a, db_b) == {"verified_a": 3, "verified_b": 2, "lost": 1, "lost_percent": 33.33,
+                                         "gained": 0}
+    assert pairs.describe(pairs.compare(db_a, db_b)) == "verified A 3, verified B 2, lost 1 (33.33 %), gained 0"
+    assert pairs.compare(db_b, db_a) == {"verified_a": 2, "verified_b": 3, "lost": 0, "lost_percent": 0.0,
+                                         "gained": 1}
+    # the databases are opened read-only: nothing is written to them
+    before = {p: p.read_bytes() for p in (db_a, db_b)}
+    pairs.compare(db_a, db_b)
+    assert {p: p.read_bytes() for p in (db_a, db_b)} == before
+    assert not list((tmp_path / "a").glob("database.db-*")) and not list((tmp_path / "b").glob("database.db-*"))
+
+
+def test_the_pairs_command_takes_two_kept_work_folders_and_prints_numbers_only(tmp_path):
+    """``ppg bench pairs A B``: a kept work folder each (``OUT/<name>-<i>`` of a run with ``--keep``: the project's
+    ``database.db`` lies under it), one line of numbers; a folder with no ``database.db`` under it, or with two,
+    is a usage error that says the count and never a path."""
+    names = ["Scavo Nord/IMG_0001.jpg", "Scavo Nord/IMG_0002.jpg", "Scavo Nord/IMG_0003.jpg"]
+    geometries = {(names[0], names[1]): (40, 2), (names[0], names[2]): (30, 2), (names[1], names[2]): (25, 2)}
+    a = tmp_path / "t-1" / "project.ppg.files" / "chunk_0" / "sfm"
+    b = tmp_path / "t-2" / "project.ppg.files" / "chunk_0" / "sfm"
+    a.mkdir(parents=True)
+    b.mkdir(parents=True)
+    colmap_database(a / "database.db", names, geometries)
+    colmap_database(b / "database.db", names, {**geometries, (names[1], names[2]): (12, 1)})
+    result = invoke(["pairs", str(tmp_path / "t-1"), str(tmp_path / "t-2")])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["verified A 3, verified B 2, lost 1 (33.33 %), gained 0"]
+    assert PAIRS_LINE.match(result.output.strip())
+    assert str(tmp_path) not in result.output and "IMG_" not in result.output and "Scavo" not in result.output
+    assert pairs.database(tmp_path / "t-1", "A") == a / "database.db"
+    # a second database under B (a copy left by hand), none under C, a folder that is not there
+    shutil.copy(a / "database.db", tmp_path / "t-2" / "database.db")
+    result = invoke(["pairs", str(tmp_path / "t-1"), str(tmp_path / "t-2")])
+    assert result.exit_code == 2 and "B holds 2 database.db" in plain(result) and str(tmp_path) not in result.output
+    (tmp_path / "t-3").mkdir()
+    result = invoke(["pairs", str(tmp_path / "t-3"), str(tmp_path / "t-1")])
+    assert result.exit_code == 2 and "A holds 0 database.db" in plain(result) and str(tmp_path) not in result.output
+    result = invoke(["pairs", str(tmp_path / "t-1"), str(tmp_path / "nowhere")])
+    assert result.exit_code == 2 and "B is not a folder" in plain(result) and str(tmp_path) not in result.output
+    with pytest.raises(ValueError, match="A holds 0 database.db"):
+        pairs.database(tmp_path / "t-3", "A")
+
+
+@pytest.mark.slow
+def test_the_verified_pairs_of_the_trench_are_counted_in_its_database(processed):
+    """On a real database of COLMAP (the session's trench): the verified pairs are pairs of the chunk's photos, there
+    are as many as the matching with the mapper could use, and a database compared with itself loses nothing."""
+    _, ch, _ = processed
+    db = ch.data_dir / "sfm" / "database.db"
+    assert db.is_file()
+    verified = pairs.verified(db)
+    photos = {name for _key, name in sfm.image_root_and_names(ch)[1].items()}
+    assert 27 <= len(verified) <= 378 and all(a in photos and b in photos and a < b for a, b in verified)
+    assert len(verified) == child.matching_results(ch)["verified_pairs"]
+    assert pairs.compare(db, db) == {"verified_a": len(verified), "verified_b": len(verified), "lost": 0,
+                                     "lost_percent": 0.0, "gained": 0}
 
 
 # --- the truth of the synthetic sets ----------------------------------------------------------------------------------

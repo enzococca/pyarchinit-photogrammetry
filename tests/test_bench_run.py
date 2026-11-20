@@ -22,14 +22,17 @@ import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry import _native, cli
 from pyarchinit_photogrammetry.bench import machine, record, runner, steps
 from pyarchinit_photogrammetry.core.chunk import Chunk
+from pyarchinit_photogrammetry.engine import switch
+from test_bench_table import colmap_database
 
 # the only reasons a record is not valid for, and the name of its file
 REASONS = (r"slow disk link: \d+ Mb/s", r"slow disk: \d+ MB/s", r"online-only photos: \d+", r"failed: .+")
 FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
-SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "max_ratio",
-            "max_distance", "cross_check", "pycolmap", "photo_cache_mb", "georeferencing", "targets",
-            "mapper_requested", "ransac_seed"]
+SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
+            "features", "routes", "max_ratio", "max_distance", "cross_check", "pycolmap", "photo_cache_mb",
+            "georeferencing", "targets", "mapper_requested", "engine_requested", "ransac_seed"]
+CLASSIC = {"requested": "classic", "used": "classic", "fallback": None}
 
 # Made-up paths for the texts of real exceptions: a home, a photo folder with spaces and non-ASCII letters under a
 # made-up root (never the mount point of the external disks: a private path is resolved, and no test makes the
@@ -149,13 +152,15 @@ def said_by_name(caplog, folder: str, tmp_path: Path) -> bool:
     return bool(lines) and not any(str(tmp_path) in line or "/" in line or "\\" in line for line in lines)
 
 
-def stub_chunk(calls: list, saves: list, gps: bool = False, scalebars: bool = False, report=None):
+def stub_chunk(calls: list, saves: list, gps: bool = False, scalebars: bool = False, report=None, data_dir=None):
     """A chunk whose methods only note their call: the chain of the child without an engine. ``report`` is what
-    ``update_transform`` returns."""
+    ``update_transform`` returns; ``data_dir`` the folder of its data (one that is not there, by default: no
+    database, no reconstruction)."""
     camera = types.SimpleNamespace(reference=types.SimpleNamespace(location=[1.0, 2.0, 3.0] if gps else None),
                                    aligned=True)
     chunk = types.SimpleNamespace(meta={}, cameras=[camera], aligned_cameras=[camera],
                                   scalebars=[object()] if scalebars else [], product_path=lambda name: None,
+                                  data_dir=Path(data_dir) if data_dir else Path("no-such-chunk-data"),
                                   document=types.SimpleNamespace(save=lambda: saves.append(1)))
 
     def method(step):
@@ -448,7 +453,12 @@ def test_the_chain_of_all_is_the_one_of_ppg_process():
                                                      "build_point_cloud", "build_model", "build_texture", "build_dem",
                                                      "build_orthomosaic"]
     assert steps.ALL_STEPS[:len(steps.ALIGN_STEPS)] == steps.ALIGN_STEPS
-    assert steps.CHAINS == {"align": steps.ALIGN_STEPS, "all": steps.ALL_STEPS}
+    # match: the matching alone (the time gate of the native matching on a large set, without the mapper); the
+    # markers before it, when the job names targets, as in the two other chains
+    assert steps.CHAINS == {"align": steps.ALIGN_STEPS, "all": steps.ALL_STEPS, "match": steps.MATCH_STEPS}
+    assert steps.MATCH_STEPS == ("detect_markers", "match_photos") == steps.ALIGN_STEPS[:2]
+    # the engines ``run`` chooses from (--engine), the first its default: those of the switch, whose default is auto
+    assert steps.ENGINES == switch.ENGINES == ("auto", "classic", "native") and steps.ENGINES[0] == "auto"
 
 
 def test_the_arguments_of_the_steps_are_the_defaults_of_today():
@@ -458,6 +468,9 @@ def test_the_arguments_of_the_steps_are_the_defaults_of_today():
             assert params[key].default == value, (step, key)
     assert steps.ARGUMENTS["match_photos"] == {"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000,
                                                "pair_selection": "auto"}
+    # the engine reaches the three switched steps from the job (steps.call), never through the arguments
+    assert not any("engine" in arguments for arguments in steps.ARGUMENTS.values())
+    assert all("engine" in inspect.signature(getattr(Chunk, step)).parameters for step in switch.STEPS)
     process = inspect.signature(cli.process).parameters
     assert process["quality"].default == steps.ARGUMENTS["match_photos"]["quality"]
     assert process["dense_quality"].default == steps.ARGUMENTS["build_depth_maps"]["quality"]
@@ -530,10 +543,14 @@ def test_the_child_runs_the_chain_of_all_with_the_arguments_written_out(tmp_path
     job = {"steps": "all", "targets": "aruco_4x4_50", "reference": "/data/gcp.csv", "crs": "EPSG:3004",
            "mapper": "global"}
     assert steps.run_chain(chunk, job, result) is True
-    assert calls == [("detect_markers", ("aruco_4x4_50",), {}), ("match_photos", (), steps.ARGUMENTS["match_photos"]),
-                     ("align_cameras", (), {"mapper": "global"}),
+    # the engine of the job (auto when it names none) goes to the matching alone: the alignment and the depth maps,
+    # the two other steps that take one, run classic whatever the job or the computer asks (the bench measures the
+    # matching; PPG_ENGINE of the parent never reaches the child)
+    assert calls == [("detect_markers", ("aruco_4x4_50",), {}),
+                     ("match_photos", (), {**steps.ARGUMENTS["match_photos"], "engine": "auto"}),
+                     ("align_cameras", (), {"mapper": "global", "engine": "classic"}),
                      ("import_reference", ("/data/gcp.csv",), {"crs": "EPSG:3004"}),
-                     ("update_transform", (), {}), ("build_depth_maps", (), {"quality": "medium"}),
+                     ("update_transform", (), {}), ("build_depth_maps", (), {"quality": "medium", "engine": "classic"}),
                      ("build_point_cloud", (), {}), ("build_model", (), {"surface": "arbitrary"}),
                      ("build_texture", (), {}), ("build_dem", (), {}), ("build_orthomosaic", (), {})]
     assert len(saves) == len(steps.ALL_STEPS)  # the project saved after every step
@@ -549,10 +566,61 @@ def test_the_child_runs_the_chain_of_all_with_the_arguments_written_out(tmp_path
     calls, saves = [], []
     assert steps.run_chain(stub_chunk(calls, saves), align, steps.Result(tmp_path / "align.json")) is True
     assert [c[0] for c in calls] == ["match_photos", "align_cameras"]
-    assert calls[1] == ("align_cameras", (), {"mapper": "auto"})  # a job that names no mapper: the default
+    assert calls[1] == ("align_cameras", (), {"mapper": "auto", "engine": "classic"})  # no mapper named: the default
     calls = []
     steps.run_chain(stub_chunk(calls, [], gps=True, report=REPORT), align, steps.Result(tmp_path / "gps.json"))
     assert [c[0] for c in calls] == ["match_photos", "align_cameras", "update_transform"]
+
+
+def test_the_engine_of_the_job_reaches_the_matching_and_the_matching_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    for engine in steps.ENGINES:
+        calls = []
+        job = {"steps": "all", "targets": None, "reference": None, "crs": None, "engine": engine}
+        assert steps.run_chain(stub_chunk(calls, []), job, steps.Result(tmp_path / f"{engine}.json")) is True
+        by_step = {step: kwargs for step, _args, kwargs in calls}
+        assert by_step["match_photos"]["engine"] == engine
+        assert by_step["align_cameras"]["engine"] == by_step["build_depth_maps"]["engine"] == "classic"
+        assert not any("engine" in kwargs for step, kwargs in by_step.items() if step not in switch.STEPS)
+
+
+def test_the_match_chain_stops_after_the_matching(tmp_path, monkeypatch):
+    """``--steps match``: the markers (when the job names targets) and the matching, nothing after them; the
+    results hold what the matching gives and no number of an alignment."""
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    calls, saves = [], []
+    job = {"steps": "match", "targets": "aruco_4x4_50", "reference": "/data/gcp.csv", "crs": "EPSG:3004",
+           "engine": "native"}
+    result = steps.Result(tmp_path / "result.json")
+    assert steps.run_chain(stub_chunk(calls, saves, gps=True, report=REPORT), job, result) is True
+    assert [c[0] for c in calls] == ["detect_markers", "match_photos"] and len(saves) == 2
+    assert calls[1][2]["engine"] == "native"
+    data = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert data["done"] is True and data["error"] is None and [e["step"] for e in data["steps"]] == ["detect_markers",
+                                                                                                    "match_photos"]
+    assert data["results"] == {} and "georeferencing" not in data["settings"]  # a stub: no database to count in
+    calls = []
+    plain = {"steps": "match", "targets": None, "reference": None, "crs": None}
+    assert steps.run_chain(stub_chunk(calls, []), plain, steps.Result(tmp_path / "plain.json")) is True
+    assert [c[0] for c in calls] == ["match_photos"]
+
+
+def test_the_verified_pairs_are_noted_after_the_matching_from_the_database_of_the_chunk(tmp_path, monkeypatch):
+    """After ``match_photos`` the results hold ``verified_pairs``, counted in ``database.db`` of the sfm folder of the
+    chunk (:func:`pairs.verified`: at least 15 inliers and a configuration the mapper takes); nothing when the
+    database is not there."""
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    data_dir = tmp_path / "chunk_0"
+    (data_dir / "sfm").mkdir(parents=True)
+    colmap_database(data_dir / "sfm" / "database.db", ["a.jpg", "b.jpg", "c.jpg"],
+                    {("a.jpg", "b.jpg"): (40, 2), ("a.jpg", "c.jpg"): (15, 3), ("b.jpg", "c.jpg"): (14, 2)})
+    assert steps.matching_results(stub_chunk([], [], data_dir=data_dir)) == {"verified_pairs": 2}
+    assert steps.matching_results(stub_chunk([], [])) == {}
+    calls = []
+    job = {"steps": "align", "targets": None, "reference": None, "crs": None}
+    result = steps.Result(tmp_path / "result.json")
+    assert steps.run_chain(stub_chunk(calls, [], data_dir=data_dir), job, result) is True
+    assert result.data["results"] == {"verified_pairs": 2, "cameras": 1, "aligned": 1}
 
 
 def test_an_error_after_a_step_is_recorded_like_an_error_of_the_step(tmp_path, monkeypatch):
@@ -696,10 +764,25 @@ def test_an_unknown_mapper_is_refused_before_any_child(tmp_path, monkeypatch):
         runner.check(tmp_path / "out", "t", mapper=mapper)  # the three choices pass the checks
 
 
+def test_an_unknown_engine_is_refused_before_any_child(tmp_path, monkeypatch):
+    pytest.importorskip("psutil")
+    photos = noise_photos(tmp_path / "photos")
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
+    for engine in ("turbo", "Native", "", None):
+        with pytest.raises(ValueError, match="engine must be auto, classic or native"):
+            runner.run(photos, tmp_path / "out", name="t", engine=engine)
+        with pytest.raises(ValueError, match="engine must be"):
+            runner.check(tmp_path / "out", "t", engine=engine)
+    assert not (tmp_path / "out").exists()
+    for engine in steps.ENGINES:
+        runner.check(tmp_path / "out", "t", engine=engine)  # the three choices pass the checks
+    runner.check(tmp_path / "out", "t", steps="match")  # the chain of the matching alone is one of the three
+
+
 # --- the run on the small set -----------------------------------------------------------------------------------------
 
 def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
-    monkeypatch.delenv("PPG_ENGINE", raising=False)  # the engine the computer asks for is not this run's: auto
+    monkeypatch.setenv("PPG_ENGINE", "classic")  # the engine the computer asks for is not this run's: the job's, auto
     out = tmp_path / "out"
     paths = runner.run(small_set, out, name="t", extra_results=lambda doc: {"chunks": len(doc.chunks)})
     r = the_record(out, paths)
@@ -707,12 +790,20 @@ def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
     assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras"]
     for s in r["steps"]:
         assert set(s) == STEP_KEYS and s["seconds"] > 0 and s["peak_memory_mb"] > 0
-        assert s["engine"] == {"requested": "auto", "used": "classic", "fallback": None}
+    # the matching with the engine of the run (auto, the default: classic until the native matching has passed its
+    # gate), the alignment classic by the bench's own word
+    assert r["steps"][0]["engine"] == {"requested": "auto", "used": "classic", "fallback": None}
+    assert r["steps"][1]["engine"] == CLASSIC
     assert {"features", "pairs"} <= set(r["steps"][0]["stages"]) and isinstance(r["steps"][1]["stages"], dict)
     assert r["set"] == {"photos": 14, "bytes": sum(p.stat().st_size for p in small_set.iterdir()), "online_only": 0,
                         "gps": 0}
     assert r["results"]["aligned"] == r["set"]["photos"] == r["results"]["cameras"] == 14
     assert r["results"]["reprojection_rms_px"] > 0 and r["results"]["chunks"] == 1
+    # the pairs the matching verified (14 photos: at most 91) and the tie points a registered photo sees on average
+    # (to a tenth), the two numbers the gate of the native matching reads against the classic one
+    assert 14 <= r["results"]["verified_pairs"] <= 91 and isinstance(r["results"]["verified_pairs"], int)
+    assert r["results"]["tie_points_per_photo"] > 100 and r["results"]["tie_points_per_photo"] == \
+        round(r["results"]["tie_points_per_photo"], 1)
     assert list(r["settings"]) == SETTINGS
     # pairs: None when every pair of a small set is matched on the CPU alone (no GPU, as on the CI runners): the
     # exhaustive matching of COLMAP lists no pairs (engine/sfm.py, the pair step of match_photos)
@@ -720,6 +811,10 @@ def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
     assert r["settings"]["quality"] == "high" and (pairs is None or pairs > 0) and r["settings"]["mapper"]
     # the mapper asked for (the default) beside the one the run used: auto picks incremental on 14 photos without GPS
     assert r["settings"]["mapper_requested"] == "auto" and r["settings"]["mapper"] == "incremental"
+    # the engine asked for beside what the record of the matching says: the classic record names no engine, its
+    # features cpu or gpu, no routes (those are the native matching's)
+    assert r["settings"]["engine_requested"] == "auto" and r["settings"]["engine"] is None
+    assert r["settings"]["features"] in ("cpu", "gpu") and r["settings"]["routes"] is None
     assert r["settings"]["max_ratio"] == 0.8 and r["settings"]["cross_check"] is True
     assert isinstance(r["settings"]["pycolmap"], str) and r["settings"]["pycolmap"]
     assert r["settings"]["photo_cache_mb"] is None and r["settings"]["georeferencing"] is None
@@ -732,6 +827,18 @@ def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
     for where, text in strings_of(r):
         assert str(tmp_path) not in text, where
         assert not any(p.name in text or p.stem in text for p in small_set.iterdir()), where
+    assert not (out / "t-1").exists()
+
+
+def test_a_match_run_on_the_small_set_matches_and_stops(small_set, tmp_path):
+    """``--steps match`` on the smallest set: the matching alone, done, its verified pairs the one result."""
+    out = tmp_path / "out"
+    r = the_record(out, runner.run(small_set, out, name="t", steps="match"))
+    assert [s["step"] for s in r["steps"]] == ["match_photos"] and r["error"] is None
+    assert r["steps"][0]["engine"] == {"requested": "auto", "used": "classic", "fallback": None}
+    assert list(r["results"]) == ["verified_pairs"] and 14 <= r["results"]["verified_pairs"] <= 91
+    assert r["settings"]["engine_requested"] == "auto" and r["settings"]["mapper"] is None  # no alignment ran
+    assert list(r["settings"]) == SETTINGS and r["valid"] == (r["invalid_reasons"] == [])
     assert not (out / "t-1").exists()
 
 
@@ -868,7 +975,7 @@ def test_finish_keeps_the_work_folder_of_a_failed_run_and_removes_the_one_of_a_c
         work = tmp_path / "out" / f"{name}-1"
         work.mkdir(parents=True)
         (work / runner.LOG).write_text("the child's log\n", encoding="utf-8")
-        plan = runner._Plan(name=name, steps="align", mapper="auto", local=(), out=tmp_path / "out",
+        plan = runner._Plan(name=name, steps="align", mapper="auto", engine="auto", local=(), out=tmp_path / "out",
                             records=tmp_path / "out", keep=keep, env={}, disk={}, set={}, settings={},
                             private=(tmp_path,), names=(), extra_results=None, targets=None, reference=None, crs=None)
         r = rec()
@@ -917,6 +1024,32 @@ def test_the_mapper_asked_for_goes_to_the_child_and_is_kept_beside_the_one_the_r
     r = the_record(tmp_path / "auto", runner.run(photos, tmp_path / "auto", name="t", keep=True))
     job = json.loads((tmp_path / "auto" / "t-1" / "job.json").read_text(encoding="utf-8"))
     assert job["mapper"] == "auto" and r["settings"]["mapper_requested"] == "auto"
+
+
+def test_the_engine_asked_for_goes_to_the_child_in_the_job_and_never_through_the_environment(tmp_path, monkeypatch,
+                                                                                            stand_in):
+    """``engine`` reaches the child in the job (``steps.call`` gives it to the matching) and the record keeps it as
+    ``engine_requested``; ``PPG_ENGINE`` of the parent's environment is not passed on, so the engine the computer
+    asks for never changes what a run measures, nor the steps the bench keeps classic."""
+    monkeypatch.setenv("PPG_ENGINE", "native")
+    photos = noise_photos(tmp_path / "photos")
+    r = the_record(tmp_path / "classic", runner.run(photos, tmp_path / "classic", name="t", engine="classic",
+                                                    keep=True))
+    job = json.loads((tmp_path / "classic" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    (_cmd, kwargs), = stand_in.calls
+    assert job["engine"] == "classic" and r["settings"]["engine_requested"] == "classic"
+    assert "PPG_ENGINE" not in kwargs["env"] and list(r["settings"]) == SETTINGS
+    r = the_record(tmp_path / "native", runner.run(photos, tmp_path / "native", name="t", engine="native", keep=True))
+    job = json.loads((tmp_path / "native" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["engine"] == "native" and r["settings"]["engine_requested"] == "native"
+    r = the_record(tmp_path / "auto", runner.run(photos, tmp_path / "auto", name="t", keep=True))
+    job = json.loads((tmp_path / "auto" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["engine"] == "auto" and r["settings"]["engine_requested"] == "auto"
+    assert all("PPG_ENGINE" not in kwargs["env"] for _cmd, kwargs in stand_in.calls)
+    # the chain of the matching alone goes to the child as its steps
+    r = the_record(tmp_path / "match", runner.run(photos, tmp_path / "match", name="t", steps="match", keep=True))
+    job = json.loads((tmp_path / "match" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["steps"] == "match" and job["targets"] is None and r["settings"]["targets"] is None
 
 
 def test_the_seed_goes_to_the_child_as_ppg_ransac_seed_and_is_kept_in_the_record(tmp_path, monkeypatch, stand_in):
