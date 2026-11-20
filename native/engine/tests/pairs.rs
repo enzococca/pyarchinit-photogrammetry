@@ -3,7 +3,8 @@
 //! descriptors from a seeded generator, the twins noisy copies - and the match store: a good pair
 //! goes guided along the epipolar lines and finds the true matches, a pair whose large-scale
 //! points have no twin goes to brute force when preselected and is dropped otherwise, a photo
-//! without points is dropped, the cap keeps the best matches, the store round-trips, and
+//! without points is dropped, a distorted camera is guided in the frame of its model, the cap
+//! keeps the best matches, the store round-trips and retries a failed index write, and
 //! `match_all` gives the same results on the CPU, on every GPU adapter and with a device that
 //! fails in the middle of the run.
 
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 use ppg_engine::camera::Camera;
-use ppg_engine::geometry::two_view::{self, Config, TwoView};
+use ppg_engine::geometry::two_view::{self, pair_seed, Config, TwoView};
 use ppg_engine::gpu::{self, Matcher, DIM};
 use ppg_engine::matching;
 use ppg_engine::pairs::{self, Device, Options, PairResult, Route};
@@ -119,8 +120,20 @@ fn camera() -> Camera {
     Camera::new("SIMPLE_PINHOLE", &[FOCAL, CX, CY], WIDTH, HEIGHT).unwrap()
 }
 
-fn calibration() -> Matrix3<f64> {
-    Matrix3::new(FOCAL, 0.0, CX, 0.0, FOCAL, CY, 0.0, 0.0, 1.0)
+/// An OpenCV camera with the same focal length and principal point and a barrel distortion: a
+/// point 800 px from the centre moves by about 4 px, a corner by 13.
+fn distorted_camera() -> Camera {
+    Camera::new("OPENCV", &[FOCAL, FOCAL, CX, CY, -0.01, 0.002, 0.001, -0.0005], WIDTH, HEIGHT).unwrap()
+}
+
+fn calibration_of(cam: &Camera) -> Matrix3<f64> {
+    Matrix3::new(cam.fx, 0.0, cam.cx, 0.0, cam.fy, cam.cy, 0.0, 0.0, 1.0)
+}
+
+/// The key point `kp` as an ideal pixel of `cam`: undistorted.
+fn ideal(cam: &Camera, kp: [f32; 4]) -> (f64, f64) {
+    let (u, v) = cam.normalised(f64::from(kp[0]), f64::from(kp[1]));
+    (cam.fx * u + cam.cx, cam.fy * v + cam.cy)
 }
 
 /// The pixel of the point `p` in the camera at the origin.
@@ -137,13 +150,16 @@ fn features(keypoints: Vec<[f32; 4]>, descriptors: Vec<u8>) -> PhotoFeatures {
                     params: ExtractParams::default(), keypoints, descriptors }
 }
 
-/// A pair of photos: the second camera a small rotation and a translation of 0.8 units along x
-/// from the first (`r`, `t` are cam2_from_cam1), `shared` points seen by both at a depth in
-/// `shared_depth` (the key points with `PIXEL_NOISE`, the descriptors noisy copies of one
-/// descriptor), `own` points of each photo alone at a depth in `own_depth` (descriptors of their
-/// own), the scale of every key point `SCALE_AT_UNIT` over its depth; the points of both photos
-/// shuffled. `truth` are the true correspondences (index in A, index in B).
+/// A pair of photos, the first taken with `cam_a` and the second with `cam_b`: the second camera
+/// a small rotation and a translation of 0.8 units along x from the first (`r`, `t` are
+/// cam2_from_cam1), `shared` points seen by both at a depth in `shared_depth` (the key points
+/// with `PIXEL_NOISE`, the descriptors noisy copies of one descriptor), `own` points of each photo
+/// alone at a depth in `own_depth` (descriptors of their own), the scale of every key point
+/// `SCALE_AT_UNIT` over its depth; the points of both photos shuffled. `truth` are the true
+/// correspondences (index in A, index in B).
 struct Scene {
+    cam_a: Camera,
+    cam_b: Camera,
     a: PhotoFeatures,
     b: PhotoFeatures,
     truth: Vec<[u32; 2]>,
@@ -151,7 +167,8 @@ struct Scene {
     t: Vector3<f64>,
 }
 
-fn pair_scene(seed: u64, shared: usize, shared_depth: (f64, f64), own: usize, own_depth: (f64, f64)) -> Scene {
+fn pair_scene(seed: u64, cam_a: &Camera, cam_b: &Camera, shared: usize, shared_depth: (f64, f64), own: usize,
+              own_depth: (f64, f64)) -> Scene {
     let mut random = Lcg(seed);
     let axis = Vector3::new(random.uniform_in(-1.0, 1.0), random.uniform_in(-1.0, 1.0), random.uniform_in(-1.0, 1.0))
         .normalize();
@@ -163,10 +180,14 @@ fn pair_scene(seed: u64, shared: usize, shared_depth: (f64, f64), own: usize, ow
     while kp_a.len() < shared {
         let (x, y) = (random.uniform_in(50.0, WIDTH - 50.0), random.uniform_in(50.0, HEIGHT - 50.0));
         let z = random.uniform_in(shared_depth.0, shared_depth.1);
-        let p = Vector3::new((x - CX) / FOCAL * z, (y - CY) / FOCAL * z, z);
+        let (u, v) = cam_a.normalised(x, y);
+        let p = Vector3::new(u * z, v * z, z);
         let q = r * p + t;
-        let (xb, yb) = project(&q);
-        if q.z <= 0.0 || !inside(xb, yb) {
+        if q.z <= 0.0 {
+            continue;
+        }
+        let (xb, yb) = cam_b.pixel(q.x / q.z, q.y / q.z);
+        if !inside(xb, yb) {
             continue;
         }
         kp_a.push([(x + PIXEL_NOISE * random.normal()) as f32, (y + PIXEL_NOISE * random.normal()) as f32, scale(z),
@@ -204,21 +225,24 @@ fn pair_scene(seed: u64, shared: usize, shared_depth: (f64, f64), own: usize, ow
         at_b[old] = new as u32;
     }
     let truth = (0..shared).map(|i| [at_a[i], at_b[i]]).collect();
-    Scene { a, b, truth, r, t }
+    Scene { cam_a: cam_a.clone(), cam_b: cam_b.clone(), a, b, truth, r, t }
 }
 
 impl Scene {
-    /// The fundamental matrix of the pair, `x_b^T F x_a = 0`.
+    /// The fundamental matrix of the pair in ideal pixels, `x_b^T F x_a = 0`.
     fn fundamental(&self) -> Matrix3<f64> {
-        let k_inverse = calibration().try_inverse().unwrap();
-        k_inverse.transpose() * skew(&self.t) * self.r * k_inverse
+        let ka_inverse = calibration_of(&self.cam_a).try_inverse().unwrap();
+        let kb_inverse = calibration_of(&self.cam_b).try_inverse().unwrap();
+        kb_inverse.transpose() * skew(&self.t) * self.r * ka_inverse
     }
 
-    /// The distance of the point of B of the match `m` from the epipolar line of its point of A.
+    /// The distance of the point of B of the match `m` from the epipolar line of its point of A,
+    /// in ideal pixels (where the true geometry holds).
     fn epipolar_distance(&self, m: [u32; 2]) -> f64 {
-        let (pa, pb) = (self.a.keypoints[m[0] as usize], self.b.keypoints[m[1] as usize]);
-        let l = self.fundamental() * Vector3::new(f64::from(pa[0]), f64::from(pa[1]), 1.0);
-        (l.x * f64::from(pb[0]) + l.y * f64::from(pb[1]) + l.z).abs() / (l.x * l.x + l.y * l.y).sqrt()
+        let (xa, ya) = ideal(&self.cam_a, self.a.keypoints[m[0] as usize]);
+        let (xb, yb) = ideal(&self.cam_b, self.b.keypoints[m[1] as usize]);
+        let l = self.fundamental() * Vector3::new(xa, ya, 1.0);
+        (l.x * xb + l.y * yb + l.z).abs() / (l.x * l.x + l.y * l.y).sqrt()
     }
 }
 
@@ -255,12 +279,90 @@ fn dot(x: &[u8], y: &[u8]) -> u32 {
     x.iter().zip(y).map(|(&p, &q)| u32::from(p) * u32::from(q)).sum()
 }
 
+/// The inverse calibration of `cam`, as the matching builds it: ideal pixels to normalised
+/// coordinates.
+fn inverse_calibration_of(cam: &Camera) -> Matrix3<f64> {
+    Matrix3::new(1.0 / cam.fx, 0.0, -cam.cx / cam.fx, 0.0, 1.0 / cam.fy, -cam.cy / cam.fy, 0.0, 0.0, 1.0)
+}
+
+/// The model of the first stage as `match_pair` finds it: the `stage1_points` points of the
+/// largest scale of each photo (the lowest index first among equal scales) matched by the CPU
+/// twin with COLMAP's tests and verified with the seed of the pair `("a.jpg", "b.jpg")`.
+fn stage1_model(a: &FeatureView, b: &FeatureView, cam_a: &Camera, cam_b: &Camera, calibrated: bool, o: &Options)
+                -> TwoView {
+    let largest = |view: &FeatureView| -> Vec<u32> {
+        let kp = view.keypoints();
+        let mut order: Vec<u32> = (0..kp.len() as u32).collect();
+        order.sort_by(|&i, &j| kp[j as usize][2].total_cmp(&kp[i as usize][2]).then(i.cmp(&j)));
+        order.truncate(o.stage1_points);
+        order.sort_unstable();
+        order
+    };
+    let gather = |view: &FeatureView, chosen: &[u32]| -> Vec<u8> {
+        let d = view.descriptors();
+        chosen.iter().flat_map(|&i| d[i as usize * DIM..(i as usize + 1) * DIM].iter().copied()).collect()
+    };
+    let (ia, ib) = (largest(a), largest(b));
+    let bests = matching::bests_cpu(&gather(a, &ia), &gather(b, &ib));
+    let matches = gpu::select_matches(&bests, ia.len(), ib.len(), o.max_ratio, o.max_distance, o.cross_check);
+    let quality = gpu::match_quality(&bests, &matches);
+    let whole: Vec<[u32; 2]> = matches.iter().map(|m| [ia[m[0] as usize], ib[m[1] as usize]]).collect();
+    two_view::verify(cam_a, a.keypoints(), cam_b, b.keypoints(), &whole, &quality, calibrated, &o.two_view,
+                     pair_seed("a.jpg", "b.jpg"))
+}
+
+/// The matches of the second stage computed the slow way, on the points `pa` of A and `pb` of
+/// B (one frame of the key points) under `f`: for every point of A the points of B within `e` of
+/// its epipolar line, the best and second best among them by dot product with the rule of the
+/// kernels (the lowest index on a tie, the second equal to the best), the same seen from B over
+/// the points of A whose band reached it, then COLMAP's tests.
+fn band_matches(a: &FeatureView, b: &FeatureView, pa: &[(f64, f64)], pb: &[(f64, f64)], f: &Matrix3<f64>, e: f64,
+                o: &Options) -> Vec<[u32; 2]> {
+    let (n_a, n_b) = (pa.len(), pb.len());
+    let mut rows = vec![(-1i64, 0u32, -1i64); n_a];
+    let mut cols = vec![(-1i64, 0u32, -1i64); n_b];
+    let see = |best: &mut (i64, u32, i64), score: u32, j: u32| {
+        let score = i64::from(score);
+        if score > best.0 {
+            best.2 = best.0;
+            best.0 = score;
+            best.1 = j;
+        } else if score == best.0 {
+            best.2 = score;
+            if j < best.1 {
+                best.1 = j;
+            }
+        } else if score > best.2 {
+            best.2 = score;
+        }
+    };
+    for (i, &(x, y)) in pa.iter().enumerate() {
+        let l = f * Vector3::new(x, y, 1.0);
+        let norm = (l.x * l.x + l.y * l.y).sqrt();
+        if !(norm > 0.0 && norm.is_finite()) {
+            continue;
+        }
+        let (la, lb, lc) = (l.x / norm, l.y / norm, l.z / norm);
+        let qa = &a.descriptors()[i * DIM..(i + 1) * DIM];
+        for (j, &(xb, yb)) in pb.iter().enumerate() {
+            if (la * xb + lb * yb + lc).abs() <= e {
+                let score = dot(qa, &b.descriptors()[j * DIM..(j + 1) * DIM]);
+                see(&mut rows[i], score, j as u32);
+                see(&mut cols[j], score, i as u32);
+            }
+        }
+    }
+    let out = |(best, index, second): (i64, u32, i64)| [best.max(0) as u32, index, second.max(0) as u32];
+    let bests: Vec<[u32; 3]> = rows.into_iter().chain(cols).map(out).collect();
+    gpu::select_matches(&bests, n_a, n_b, o.max_ratio, o.max_distance, o.cross_check)
+}
+
 #[test]
 fn a_good_pair_goes_guided_and_finds_the_true_matches() {
     let dir = folder("good");
     // 2,500 points seen by both, 4 to 6 units away; 500 of each photo's own, farther (smaller
     // scales): the 1,000 largest points of each photo are shared ones
-    let scene = pair_scene(11, 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let scene = pair_scene(11, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
     let (_store, a, b) = views(&dir, &scene);
     let o = options(1000);
     let cam = camera();
@@ -299,7 +401,7 @@ fn a_pair_without_large_scale_matches_goes_to_brute_force() {
     let dir = folder("brute");
     // the 2,000 shared points are far (small scales); the 1,000 points of each photo's own are
     // close (the largest scales): the first stage, on the 1,000 largest of each, sees no twin
-    let scene = pair_scene(12, 2000, (8.0, 12.0), 1000, (2.0, 3.0));
+    let scene = pair_scene(12, &camera(), &camera(), 2000, (8.0, 12.0), 1000, (2.0, 3.0));
     let (_store, a, b) = views(&dir, &scene);
     let o = options(1000);
     let cam = camera();
@@ -319,13 +421,78 @@ fn a_pair_without_large_scale_matches_goes_to_brute_force() {
     let n_a = a.keypoints().len();
     let n_b = b.keypoints().len();
     assert_eq!(brute.matches, gpu::select_matches(&bests, n_a, n_b, 0.8, 0.7, true));
+    // no first stage at all: nothing is asked of the device for it; a preselected pair goes
+    // straight to brute force (the same result) and any other is dropped without a call
+    let calls = std::cell::Cell::new(0usize);
+    let mut counting = |_: u64, a: &[u8], _: u64, b: &[u8]| {
+        assert!(!a.is_empty() && !b.is_empty(), "bests asked on an empty set");
+        calls.set(calls.get() + 1);
+        Ok(matching::bests_cpu(a, b))
+    };
+    let none = options(0);
+    let r = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, false, &none, &mut counting).unwrap();
+    assert_eq!((r.route, calls.get()), (Route::Dropped, 0));
+    let r = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, true, &none, &mut counting).unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(r, brute);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_distorted_pair_is_guided_in_the_frame_of_its_model() {
+    let dir = folder("distorted");
+    // two different cameras, the first with a barrel distortion and the second a pinhole: the
+    // raw and the ideal pixels of a point differ by up to tens of pixels in the first photo and
+    // not at all in the second, so a band drawn in the wrong frame holds other candidates (with
+    // one camera the distortion moves a point and its twin almost alike and the frames can
+    // hardly be told apart)
+    let (cam_a, cam_b) = (distorted_camera(), camera());
+    let scene = pair_scene(15, &cam_a, &cam_b, 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let (_store, a, b) = views(&dir, &scene);
+    let o = options(1000);
+    let n = scene.truth.len();
+    let e = o.two_view.ransac.max_error;
+    let raw = |view: &FeatureView| -> Vec<(f64, f64)> {
+        view.keypoints().iter().map(|k| (f64::from(k[0]), f64::from(k[1]))).collect()
+    };
+    let ideal_of = |view: &FeatureView, cam: &Camera| -> Vec<(f64, f64)> {
+        view.keypoints().iter().map(|&k| ideal(cam, k)).collect()
+    };
+    let (raw_a, raw_b) = (raw(&a), raw(&b));
+    let (ideal_a, ideal_b) = (ideal_of(&a, &cam_a), ideal_of(&b, &cam_b));
+    // with a prior focal length the essential matrix of the first stage guides, on the key points
+    // undistorted to ideal pixels: the matches are those of its band there, not those of the same
+    // band on the raw key points, and the true geometry holds for them
+    let calibrated = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam_a, &cam_b, true, false, &o, &mut cpu).unwrap();
+    assert_eq!((calibrated.route, calibrated.two_view.config), (Route::Guided, Config::Calibrated));
+    let stage1 = stage1_model(&a, &b, &cam_a, &cam_b, true, &o);
+    assert_eq!(stage1.config, Config::Calibrated);
+    let f_ideal = inverse_calibration_of(&cam_b).transpose() * stage1.e.unwrap() * inverse_calibration_of(&cam_a);
+    assert_eq!(calibrated.matches, band_matches(&a, &b, &ideal_a, &ideal_b, &f_ideal, e, &o));
+    assert_ne!(calibrated.matches, band_matches(&a, &b, &raw_a, &raw_b, &f_ideal, e, &o));
+    let among = found(&scene.truth, &calibrated.two_view.inliers);
+    assert!(among * 100 >= n * 95, "{among} of {n} true correspondences among the inliers, calibrated");
+    for m in &calibrated.matches {
+        let d = scene.epipolar_distance(*m);
+        assert!(d <= e, "match {m:?} is {d:.2} px from its epipolar line in ideal pixels");
+    }
+    // without one the fundamental matrix of the first stage guides, on the raw key points it was
+    // estimated on: the matches are those of its band there, not of the same band on the
+    // undistorted points
+    let plain = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam_a, &cam_b, false, false, &o, &mut cpu).unwrap();
+    assert_eq!((plain.route, plain.two_view.config), (Route::Guided, Config::Uncalibrated));
+    let stage1 = stage1_model(&a, &b, &cam_a, &cam_b, false, &o);
+    let f_raw = stage1.f.unwrap();
+    assert_eq!(plain.matches, band_matches(&a, &b, &raw_a, &raw_b, &f_raw, e, &o));
+    assert_ne!(plain.matches, band_matches(&a, &b, &ideal_a, &ideal_b, &f_raw, e, &o));
+    assert!(plain.two_view.inliers.len() >= o.trust_inliers, "{} inliers", plain.two_view.inliers.len());
     fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn a_photo_without_points_is_not_verified() {
     let dir = folder("empty");
-    let mut scene = pair_scene(13, 300, (4.0, 6.0), 100, (8.0, 12.0));
+    let mut scene = pair_scene(13, &camera(), &camera(), 300, (4.0, 6.0), 100, (8.0, 12.0));
     scene.b = features(Vec::new(), Vec::new());
     let (store, a, b) = views(&dir, &scene);
     assert_eq!(b.keypoints().len(), 0);
@@ -347,7 +514,7 @@ fn a_photo_without_points_is_not_verified() {
 #[test]
 fn the_cap_keeps_the_best_matches() {
     let dir = folder("cap");
-    let scene = pair_scene(14, 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let scene = pair_scene(14, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
     let (_store, a, b) = views(&dir, &scene);
     let cam = camera();
     let all = Options { max_num_matches: usize::MAX, ..options(1000) };
@@ -476,6 +643,22 @@ fn the_store_round_trips() {
     fs::write(&path, &good[..good.len() - 100]).unwrap();
     let refused = MatchStore::open(&dir).err().expect("a short file is refused").to_string();
     assert!(refused.contains(&segments[0]), "{refused}");
+    // a count the table cannot hold is refused before anything is allocated for it, and a
+    // record placed inside the table too
+    let mut bad = good.clone();
+    bad[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&path, &bad).unwrap();
+    let refused = MatchStore::open(&dir).err().expect("a wild count is refused").to_string();
+    assert!(refused.contains(&segments[0]) && refused.contains("4294967295"), "{refused}");
+    let word = |at: usize| u32::from_le_bytes(good[at..at + 4].try_into().unwrap()) as usize;
+    let len_a = word(16);
+    let len_b = word(16 + 4 + len_a);
+    let offset_at = 16 + 4 + len_a + 4 + len_b;
+    let mut bad = good.clone();
+    bad[offset_at..offset_at + 8].copy_from_slice(&8u64.to_le_bytes());
+    fs::write(&path, &bad).unwrap();
+    let refused = MatchStore::open(&dir).err().expect("a record inside the table is refused").to_string();
+    assert!(refused.contains(&segments[0]) && refused.contains("outside"), "{refused}");
     fs::write(&path, &good).unwrap();
     assert!(MatchStore::open(&dir).is_ok());
 
@@ -500,6 +683,57 @@ fn the_store_round_trips() {
     drop(many);
     fs::remove_dir_all(&dir).unwrap();
     fs::remove_dir_all(&dir_many).unwrap();
+}
+
+#[test]
+fn a_failed_index_write_is_retried_by_the_next_flush() {
+    let dir = folder("store_stale");
+    let store = MatchStore::create(&dir).unwrap();
+    // a folder where the temporary file of the index goes: the next write of the index fails
+    let obstacle = dir.join("index.json.tmp");
+    fs::create_dir(&obstacle).unwrap();
+    let mut random = Lcg(8);
+    let mut results = Vec::new();
+    let mut failed = None;
+    for k in 0..2000 {
+        let r = result(&mut random, 2000, 1000, Config::Calibrated, Route::Guided, true, true);
+        let put = store.put(&format!("p{k:04}.jpg"), "q.jpg", &r);
+        results.push(r);
+        if let Err(e) = put {
+            failed = Some((k, e));
+            break;
+        }
+    }
+    let (k, error) = failed.expect("a put sealed a segment and the write of the index failed");
+    assert!(error.to_string().contains("index.json.tmp"), "{error}");
+    assert!(k > 100, "{k}: a seal before the buffer was full");
+    // the segment is in place and its pairs are served; the index on disk does not name it yet
+    let segments = |dir: &Path| {
+        let segment = |e: &fs::DirEntry| e.path().extension().is_some_and(|x| x == "ppgm");
+        fs::read_dir(dir).unwrap().filter(|e| segment(e.as_ref().unwrap())).count()
+    };
+    assert_eq!(segments(&dir), 1);
+    assert_eq!(store.len(), k + 1);
+    assert_eq!(store.get(&format!("p{k:04}.jpg"), "q.jpg").as_ref(), Some(&results[k]));
+    let listed = |dir: &Path| {
+        let index: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("index.json")).unwrap()).unwrap();
+        index["segments"].as_array().unwrap().len()
+    };
+    assert_eq!(listed(&dir), 0);
+    // a flush with the obstacle still there fails again, and says so; once it is gone the next
+    // flush writes the index, with nothing buffered, and a reopened store holds every pair
+    assert!(store.flush().is_err());
+    fs::remove_dir(&obstacle).unwrap();
+    store.flush().unwrap();
+    assert_eq!((segments(&dir), listed(&dir)), (1, 1));
+    drop(store);
+    let reopened = MatchStore::open(&dir).unwrap();
+    assert_eq!(reopened.len(), k + 1);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(reopened.get(&format!("p{i:04}.jpg"), "q.jpg").as_ref(), Some(r), "pair {i}");
+    }
+    drop(reopened);
+    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Whether an adapter that opens no matcher fails the test: the one `ppg-bench` takes when none
@@ -581,14 +815,28 @@ fn scene(dir: &Path, photos: usize, group: usize, alone: usize) -> FeatureStore 
     store
 }
 
-/// A device that answers with the CPU twin: one breaks at its `fail_at`-th call and raises
-/// `broken`; the other waits for `broken` before its first call, so that the broken one has
-/// pairs to itself until it fails and its pair must go back to the queue for the patient one.
+/// A device that answers with the CPU twin. The broken one (`fail_at` set) waits at its first
+/// call until the patient one holds a pair, then breaks at its `fail_at`-th call and raises
+/// `broken`; the patient one raises `started` at its first call and waits for `broken` before
+/// it answers. So the broken device alone takes pairs, in the order of the queue, until it
+/// breaks, and the pair it breaks on goes back to the queue for the patient one: the same
+/// interleaving on every run.
 struct Fake {
     name: &'static str,
     calls: usize,
     fail_at: Option<usize>,
+    started: Arc<AtomicBool>,
     broken: Arc<AtomicBool>,
+}
+
+impl Fake {
+    fn wait_for(flag: &AtomicBool, what: &str) {
+        let since = Instant::now();
+        while !flag.load(Ordering::SeqCst) {
+            assert!(since.elapsed() < Duration::from_secs(30), "{what}");
+            thread::yield_now();
+        }
+    }
 }
 
 impl Device for Fake {
@@ -598,11 +846,12 @@ impl Device for Fake {
 
     fn bests(&mut self, _: u64, a: &[u8], _: u64, b: &[u8]) -> Result<Vec<[u32; 3]>, String> {
         self.calls += 1;
-        if self.fail_at.is_none() && self.calls == 1 {
-            let started = Instant::now();
-            while !self.broken.load(Ordering::SeqCst) {
-                assert!(started.elapsed() < Duration::from_secs(30), "the broken device never broke");
-                thread::yield_now();
+        if self.calls == 1 {
+            if self.fail_at.is_some() {
+                Fake::wait_for(&self.started, "the patient device never took a pair");
+            } else {
+                self.started.store(true, Ordering::SeqCst);
+                Fake::wait_for(&self.broken, "the broken device never broke");
             }
         }
         if self.fail_at == Some(self.calls) {
@@ -642,7 +891,8 @@ fn match_all_is_the_same_on_every_device() {
     let calls = Mutex::new(Vec::new());
     let progress = |done: usize, total: usize| calls.lock().unwrap().push((done, total));
     let on_cpu = MatchStore::create(&dir.join("cpu")).unwrap();
-    let report = pairs::match_all(&list, &store, &cams, &calibrated, &on_cpu, &[], &o, &never, &progress).unwrap();
+    let report =
+        pairs::match_all(&list, &store, &cams, &calibrated, &on_cpu, &[], None, &o, &never, &progress).unwrap();
     assert_eq!(report.done, total);
     assert_eq!(report.by_route, (2 * PHOTOS - 3, 1, 1), "guided, brute force, dropped");
     assert_eq!(report.stage1_by_device, vec![("CPU".to_owned(), total)]);
@@ -699,24 +949,38 @@ fn match_all_is_the_same_on_every_device() {
         assert!(on.log.is_empty(), "{what}: {:?}", on.log);
         // through the adapter index, with the CPU threads sharing the queue
         let both = MatchStore::create(&dir.join(format!("both{}", adapter.index))).unwrap();
-        let on = pairs::match_all(&list, &store, &cams, &calibrated, &both, &[adapter.index], &o, &never, &|_, _| {})
+        let on = pairs::match_all(&list, &store, &cams, &calibrated, &both, &[adapter.index], None, &o, &never,
+                                  &|_, _| {})
             .unwrap_or_else(|p| panic!("{what}: {p}"));
         same(&both, &format!("{what} with the CPU"));
         assert_eq!(on.stage1_by_device.iter().map(|(_, n)| n).sum::<usize>(), total, "{what}");
         assert_eq!(on.stage1_by_device.len(), 2, "{what}: {:?}", on.stage1_by_device);
+        // and alone, through the adapter index with no CPU thread
+        let alone = MatchStore::create(&dir.join(format!("alone{}", adapter.index))).unwrap();
+        let on = pairs::match_all(&list, &store, &cams, &calibrated, &alone, &[adapter.index], Some(0), &o, &never,
+                                  &|_, _| {})
+            .unwrap_or_else(|p| panic!("{what}: {p}"));
+        same(&alone, &format!("{what} alone"));
+        assert_eq!(on.stage1_by_device.len(), 1, "{what}: {:?}", on.stage1_by_device);
+        assert_eq!(on.stage1_by_device[0].1, total, "{what}: {:?}", on.stage1_by_device);
         eprintln!("{what}: the results of the CPU");
     }
 
-    // a device that breaks at its fifth call, beside one that waits for the break before it
-    // starts and no CPU thread: the broken device alone takes the pairs in order - three whole
-    // pairs (the fourth in that order, which shares nothing, takes two calls) - and the pair it
-    // breaks on goes back to the queue for the patient device, which does the rest; the results
-    // are the same and the log says what happened
+    // two fake devices and no CPU thread, one breaking at its fifth call. The first four pairs
+    // of the queue are those of photo 00 (with 01, 02, 04 and 05); the patient device holds one
+    // of the first two and waits, the broken one does the other and the next two - 04 in one
+    // call, 05 in two (it shares nothing and is preselected: brute force after the first stage)
+    // - four calls and three pairs, and its fifth call, on the pair (01, 02), breaks: that pair
+    // goes back to the queue for the patient device, with every pair after it. The split is
+    // exact, the results are the same and the log says what happened.
+    let started = Arc::new(AtomicBool::new(false));
     let broken = Arc::new(AtomicBool::new(false));
     let on_fake = MatchStore::create(&dir.join("fake")).unwrap();
     let devices: Vec<Box<dyn Device>> = vec![
-        Box::new(Fake { name: "broken GPU", calls: 0, fail_at: Some(5), broken: broken.clone() }),
-        Box::new(Fake { name: "patient GPU", calls: 0, fail_at: None, broken: broken.clone() }),
+        Box::new(Fake { name: "broken GPU", calls: 0, fail_at: Some(5), started: started.clone(),
+                        broken: broken.clone() }),
+        Box::new(Fake { name: "patient GPU", calls: 0, fail_at: None, started: started.clone(),
+                        broken: broken.clone() }),
     ];
     let on = pairs::match_on(&list, &store, &cams, &calibrated, &on_fake, devices, 0, &o, &never, &|_, _| {})
         .unwrap();
@@ -726,17 +990,26 @@ fn match_all_is_the_same_on_every_device() {
     assert_eq!(on.log.len(), 1, "{:?}", on.log);
     let line = &on.log[0];
     assert!(line.starts_with("broken GPU") && line.contains("broken on purpose") && line.contains("retired"), "{line}");
+    assert!(started.load(Ordering::SeqCst));
     assert_eq!(on.stage1_by_device, vec![("broken GPU".to_owned(), 3), ("patient GPU".to_owned(), total - 3)]);
     // no device and no CPU thread is an error before any work
     let nobody = MatchStore::create(&dir.join("nobody")).unwrap();
     let r = pairs::match_on(&list, &store, &cams, &calibrated, &nobody, Vec::new(), 0, &o, &never, &|_, _| {});
     assert!(r.as_ref().is_err_and(|p| p.contains("no worker")), "{r:?}");
     assert!(nobody.is_empty());
+    // the CPU share by number: one thread does every pair; none, with no GPU, is no worker
+    let one = MatchStore::create(&dir.join("one")).unwrap();
+    let on = pairs::match_all(&list, &store, &cams, &calibrated, &one, &[], Some(1), &o, &never, &|_, _| {}).unwrap();
+    same(&one, "one CPU thread");
+    assert_eq!(on.stage1_by_device, vec![("CPU".to_owned(), total)]);
+    let none = MatchStore::create(&dir.join("none")).unwrap();
+    let r = pairs::match_all(&list, &store, &cams, &calibrated, &none, &[], Some(0), &o, &never, &|_, _| {});
+    assert!(r.as_ref().is_err_and(|p| p.contains("no worker")), "{r:?}");
 
     // an adapter that does not exist is logged and the CPU does the work
     let beyond = adapters.len();
     let fallen_back = MatchStore::create(&dir.join("beyond")).unwrap();
-    let on = pairs::match_all(&list, &store, &cams, &calibrated, &fallen_back, &[beyond], &o, &never, &|_, _| {})
+    let on = pairs::match_all(&list, &store, &cams, &calibrated, &fallen_back, &[beyond], None, &o, &never, &|_, _| {})
         .unwrap();
     same(&fallen_back, "an adapter that does not exist");
     assert!(on.log.iter().any(|l| l.contains(&format!("GPU {beyond}"))), "{:?}", on.log);
@@ -744,15 +1017,15 @@ fn match_all_is_the_same_on_every_device() {
     // a cancel set before the run, a photo without a camera, a photo the store has not
     let cancelled = AtomicBool::new(true);
     let refused = MatchStore::create(&dir.join("refused")).unwrap();
-    let r = pairs::match_all(&list, &store, &cams, &calibrated, &refused, &[], &o, &cancelled, &|_, _| {});
+    let r = pairs::match_all(&list, &store, &cams, &calibrated, &refused, &[], None, &o, &cancelled, &|_, _| {});
     assert_eq!(r.err().as_deref(), Some("cancelled"));
     assert!(refused.is_empty());
     let mut without = cams.clone();
     without.remove(&photo_name(3));
-    let r = pairs::match_all(&list, &store, &without, &calibrated, &refused, &[], &o, &never, &|_, _| {});
+    let r = pairs::match_all(&list, &store, &without, &calibrated, &refused, &[], None, &o, &never, &|_, _| {});
     assert!(r.as_ref().is_err_and(|p| p.contains(&photo_name(3))), "{r:?}");
     let unknown = vec![(photo_name(0), "nowhere.jpg".to_owned(), true)];
-    let r = pairs::match_all(&unknown, &store, &cams, &calibrated, &refused, &[], &o, &never, &|_, _| {});
+    let r = pairs::match_all(&unknown, &store, &cams, &calibrated, &refused, &[], None, &o, &never, &|_, _| {});
     assert!(r.as_ref().is_err_and(|p| p.contains("nowhere.jpg")), "{r:?}");
     drop((on_cpu, on_fake, fallen_back, refused, store));
     fs::remove_dir_all(&dir).unwrap();

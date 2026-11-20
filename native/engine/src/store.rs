@@ -33,10 +33,12 @@
 //! pair, the offset and length of its record) and the records. `put` buffers the records; a
 //! buffer of [`SEGMENT_BYTES`] or more is sealed into a new segment file written to a temporary
 //! name and renamed into place, then the index is rewritten the same way; [`MatchStore::flush`]
-//! seals what is buffered and dropping the store does too. A pair put again replaces its result
-//! (the latest record wins, within a segment and across them). `open` reads the header and the
-//! table of every segment the index names and refuses the store at the first whose magic,
-//! version or length is wrong, naming the file and what was read.
+//! seals what is buffered and dropping the store does too. A segment in place whose index write
+//! failed is remembered: the next `flush` (or seal) writes the index again, or returns that error,
+//! so that `flush` never says "on disk" of a segment the index does not name. A pair put again
+//! replaces its result (the latest record wins, within a segment and across them). `open` reads
+//! the header and the table of every segment the index names and refuses the store at the first
+//! whose magic, version, table or record bounds are wrong, naming the file and what was read.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -561,6 +563,8 @@ const S_MAGIC: usize = 0;
 const S_VERSION: usize = 4;
 const S_COUNT: usize = 8;
 const S_TOC_BYTES: usize = 12;
+/// The fewest bytes of an entry of the table of contents: two empty names, the offset, the length.
+const LEAST_TOC_ENTRY: usize = 20;
 
 // a record: the route, the configuration, the counts, the flags of the optional parts, a reserved
 // word, then the matches, the inliers (8 bytes each), the models (9 f64 each) and the pose (7 f64)
@@ -753,10 +757,15 @@ fn encode_toc(entries: &[TocEntry]) -> Vec<u8> {
     buf
 }
 
-/// The table of contents of a segment out of its bytes: `count` entries, each record within
-/// `file_len`.
+/// The table of contents of a segment out of its bytes: `count` entries, each record after the
+/// table and within `file_len`. A count the table cannot hold is refused before anything is
+/// allocated for it.
 fn decode_toc(buf: &[u8], count: usize, file_len: u64, path: &Path) -> io::Result<Vec<TocEntry>> {
     let name = path.display();
+    if count.checked_mul(LEAST_TOC_ENTRY).is_none_or(|least| least > buf.len()) {
+        return Err(invalid(format!("{name}: {count} pairs in a table of contents of {} bytes", buf.len())));
+    }
+    let records_from = (SEGMENT_HEADER + buf.len()) as u64;
     let mut at = 0;
     let mut entries = Vec::with_capacity(count);
     let text = |at: usize, len: usize| -> io::Result<String> {
@@ -782,9 +791,10 @@ fn decode_toc(buf: &[u8], count: usize, file_len: u64, path: &Path) -> io::Resul
             .ok_or_else(|| invalid(format!("{name}: the table of contents is cut short")))?;
         let bytes = word(at + 8)?;
         at += 12;
-        if offset.checked_add(u64::from(bytes)).is_none_or(|end| end > file_len) {
-            let what = format!("{name}: the record of ({a:?}, {b:?}) at {offset} of {bytes} bytes is beyond the \
-                                {file_len} bytes of the file");
+        let end = offset.checked_add(u64::from(bytes));
+        if offset < records_from || end.is_none_or(|end| end > file_len) {
+            let what = format!("{name}: the record of ({a:?}, {b:?}) at {offset} of {bytes} bytes is outside the \
+                                records of the file ({records_from} to {file_len})");
             return Err(invalid(what));
         }
         entries.push(TocEntry { a, b, offset, bytes });
@@ -852,6 +862,9 @@ struct MatchIndex {
     /// The entries of the segment being filled, their offsets into `data`.
     pending: Vec<TocEntry>,
     data: Vec<u8>,
+    /// The index on disk does not name every segment in place: its last write failed, and the
+    /// next seal writes it again whether or not anything is buffered.
+    index_stale: bool,
 }
 
 impl MatchIndex {
@@ -871,7 +884,8 @@ impl MatchIndex {
             .iter()
             .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| invalid(format!("{name}: a segment without a name"))))
             .collect::<io::Result<Vec<String>>>()?;
-        Ok(MatchIndex { next, segments, pairs: BTreeMap::new(), pending: Vec::new(), data: Vec::new() })
+        Ok(MatchIndex { next, segments, pairs: BTreeMap::new(), pending: Vec::new(), data: Vec::new(),
+                        index_stale: false })
     }
 
     /// The index written to `dir`, whole: a temporary file renamed into place.
@@ -880,12 +894,20 @@ impl MatchIndex {
         write_whole(&dir.join(format!("{INDEX_FILE}.tmp")), &dir.join(INDEX_FILE), &bytes)
     }
 
+    /// The index written, and remembered as stale when the write failed, so that the next seal
+    /// writes it again.
+    fn write_index(&mut self, dir: &Path) -> io::Result<()> {
+        let written = self.write(dir);
+        self.index_stale = written.is_err();
+        written
+    }
+
     /// The buffered records sealed into a new segment file of `dir` (written whole to a
-    /// temporary name, renamed into place), the index rewritten; nothing when nothing is
-    /// buffered.
+    /// temporary name, renamed into place), the index rewritten; with nothing buffered, only the
+    /// index when its last write failed, else nothing.
     fn seal(&mut self, dir: &Path) -> io::Result<()> {
         if self.pending.is_empty() {
-            return Ok(());
+            return if self.index_stale { self.write_index(dir) } else { Ok(()) };
         }
         let file = format!("{:08}.{MATCH_EXTENSION}", self.next);
         let toc_bytes: usize = self.pending.iter().map(toc_entry_bytes).sum();
@@ -901,7 +923,8 @@ impl MatchIndex {
         bytes.extend_from_slice(&self.data);
         write_whole(&dir.join(format!("{file}.tmp")), &dir.join(&file), &bytes)?;
         // the file is in place: the index knows it from now on, on disk once written below (a
-        // failure there leaves the file an orphan until the next successful write names it)
+        // failure there leaves the file an orphan, and the index stale, until the next seal
+        // writes the index and names it)
         self.next += 1;
         self.segments.push(file);
         let segment = self.segments.len() - 1;
@@ -911,7 +934,7 @@ impl MatchIndex {
         }
         self.pending.clear();
         self.data.clear();
-        self.write(dir)
+        self.write_index(dir)
     }
 }
 
@@ -930,8 +953,8 @@ impl MatchStore {
             let what = format!("{}: a match store is there already", dir.display());
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, what));
         }
-        let index =
-            MatchIndex { next: 1, segments: Vec::new(), pairs: BTreeMap::new(), pending: Vec::new(), data: Vec::new() };
+        let index = MatchIndex { next: 1, segments: Vec::new(), pairs: BTreeMap::new(), pending: Vec::new(),
+                                 data: Vec::new(), index_stale: false };
         index.write(dir)?;
         Ok(MatchStore { dir: dir.to_path_buf(), index: Mutex::new(index) })
     }
@@ -982,8 +1005,9 @@ impl MatchStore {
         Ok(())
     }
 
-    /// The buffered records sealed into a segment file and the index rewritten: everything put
-    /// so far is on disk. Dropping the store does the same, without a word on a failure.
+    /// The buffered records sealed into a segment file and the index rewritten (again, when its
+    /// last write failed): everything put so far is on disk and named by the index once this
+    /// returns `Ok`. Dropping the store does the same, without a word on a failure.
     pub fn flush(&self) -> io::Result<()> {
         self.index().seal(&self.dir)
     }

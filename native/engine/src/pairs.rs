@@ -3,10 +3,12 @@
 //! of each photo (COLMAP's three tests on their bests, from a GPU or the CPU twin) and verifies
 //! them (`geometry::two_view`). Trusted - `trust_inliers` inlier matches or more - the second
 //! stage matches every point of the first photo against the points of the second that lie within
-//! `max_error` of its epipolar line under the model of the first stage (the key points
-//! undistorted once, the points of the second photo in a grid of cells), with the ratio and the
-//! distance test among those candidates and the mutual check from the second photo; the matches
-//! are verified again and the pair is `Route::Guided`. Not trusted, a pair that still has
+//! `max_error` of its epipolar line under the model of the first stage, in the frame of that
+//! model: the essential matrix of a calibrated pair on the key points undistorted once to ideal
+//! pixels, the fundamental matrix on the raw key points it was estimated on (the points of the
+//! second photo in a grid of cells in either frame), with the ratio and the distance test among
+//! those candidates and the mutual check from the second photo; the matches are verified again
+//! and the pair is `Route::Guided`. Not trusted, a pair that still has
 //! `drop_inliers` inliers, or that the preselection chose, is matched point against point
 //! (`Route::BruteForce`); any other pair is `Route::Dropped` with nothing matched. In every route
 //! the matches that go to the verification are capped to `max_num_matches`, the smallest
@@ -40,7 +42,9 @@ pub use crate::store::{PairResult, Route};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Options {
     /// The points of the largest scale of each photo the first stage matches; a photo with fewer
-    /// points goes whole.
+    /// points goes whole. The first stage ignores `max_num_matches` (it gives at most this many
+    /// matches). Zero is no first stage: nothing is asked of the device for it, a preselected pair
+    /// goes straight to brute force and any other pair is dropped.
     pub stage1_points: usize,
     /// The inlier matches of the first stage from which it is trusted and the second stage
     /// follows the epipolar lines.
@@ -261,9 +265,13 @@ struct Prepared {
     /// set is then the photo's own.
     subset: Vec<u8>,
     all_in_stage1: bool,
-    /// The key points as ideal pixels: `Camera::normalised`, then the pinhole of the camera.
+    /// The key points as they are, the frame of a fundamental matrix, and their grid.
+    raw: Vec<[f64; 2]>,
+    grid_raw: Grid,
+    /// The key points as ideal pixels (`Camera::normalised`, then the pinhole of the camera), the
+    /// frame of an essential matrix, and their grid.
     ideal: Vec<[f64; 2]>,
-    grid: Grid,
+    grid_ideal: Grid,
 }
 
 impl Prepared {
@@ -293,15 +301,17 @@ impl Prepared {
             }
             subset
         };
-        let ideal: Vec<[f64; 2]> = kp
+        let raw: Vec<[f64; 2]> = kp.iter().map(|k| [f64::from(k[0]), f64::from(k[1])]).collect();
+        let ideal: Vec<[f64; 2]> = raw
             .iter()
-            .map(|k| {
-                let (u, v) = cam.normalised(f64::from(k[0]), f64::from(k[1]));
+            .map(|&[x, y]| {
+                let (u, v) = cam.normalised(x, y);
                 [cam.fx * u + cam.cx, cam.fy * v + cam.cy]
             })
             .collect();
-        let grid = Grid::new(&ideal, cell);
-        Prepared { stage1, subset, all_in_stage1, ideal, grid }
+        let grid_raw = Grid::new(&raw, cell);
+        let grid_ideal = Grid::new(&ideal, cell);
+        Prepared { stage1, subset, all_in_stage1, raw, grid_raw, ideal, grid_ideal }
     }
 
     /// The descriptors of the first stage of the photo `name` and their key on a device.
@@ -349,21 +359,37 @@ impl Best {
     }
 }
 
+/// The frame a guide is written in, which is the frame its band is walked in: ideal pixels (the
+/// key points undistorted) for an essential matrix, the raw key points for a fundamental matrix,
+/// which `verify` estimates on them. With distortion the two differ by pixels to tens of pixels
+/// towards the borders, more than the band is wide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Frame {
+    Ideal,
+    Raw,
+}
+
 /// The bests of the second stage, in the layout of the kernels: for every point of A over the
-/// points of B within `e` of its epipolar line under `f` (`x_b^T F x_a = 0`, ideal pixels), and
-/// for every point of B over the points of A whose band reached it (the mutual check).
-fn guided_bests(da: &[u8], pa: &Prepared, db: &[u8], pb: &Prepared, f: &Matrix3<f64>, e: f64) -> Vec<[u32; 3]> {
-    let (n_a, n_b) = (pa.ideal.len(), pb.ideal.len());
+/// points of B within `e` of its epipolar line under `f` (`x_b^T F x_a = 0`, in the pixels of
+/// `frame`), and for every point of B over the points of A whose band reached it (the mutual
+/// check).
+fn guided_bests(da: &[u8], pa: &Prepared, db: &[u8], pb: &Prepared, f: &Matrix3<f64>, frame: Frame, e: f64)
+                -> Vec<[u32; 3]> {
+    let (points_a, points_b, grid_b) = match frame {
+        Frame::Ideal => (&pa.ideal, &pb.ideal, &pb.grid_ideal),
+        Frame::Raw => (&pa.raw, &pb.raw, &pb.grid_raw),
+    };
+    let (n_a, n_b) = (points_a.len(), points_b.len());
     let mut out = Vec::with_capacity(n_a + n_b);
     let mut cols = vec![Best::NONE; n_b];
-    for (i, p) in pa.ideal.iter().enumerate() {
+    for (i, p) in points_a.iter().enumerate() {
         let mut row = Best::NONE;
         let l = f * Vector3::new(p[0], p[1], 1.0);
         let norm = (l.x * l.x + l.y * l.y).sqrt();
         if norm > 0.0 && norm.is_finite() && p.iter().all(|v| v.is_finite()) {
             let line = [l.x / norm, l.y / norm, l.z / norm];
             let qa = descriptor(da, i);
-            pb.grid.along(line, e, &pb.ideal, |j| {
+            grid_b.along(line, e, points_b, |j| {
                 let score = dot(qa, descriptor(db, j as usize));
                 row.see(score, j);
                 cols[j as usize].see(score, i as u32);
@@ -380,18 +406,19 @@ fn inverse_calibration(cam: &Camera) -> Matrix3<f64> {
     Matrix3::new(1.0 / cam.fx, 0.0, -cam.cx / cam.fx, 0.0, 1.0 / cam.fy, -cam.cy / cam.fy, 0.0, 0.0, 1.0)
 }
 
-/// The fundamental matrix that guides the second stage, in ideal pixels: from the essential
-/// matrix of a calibrated pair (`K_b^-T E K_a^-1`), the fundamental matrix of the first stage
-/// otherwise (a homography configuration keeps it: the true correspondences of a plane or a
-/// panorama satisfy the fundamental matrix that explained them too); none for a watermark or a
-/// degenerate pair, which is not trusted.
-fn guide(stage1: &TwoView, cam_a: &Camera, cam_b: &Camera) -> Option<Matrix3<f64>> {
+/// The fundamental matrix that guides the second stage, and its frame: from the essential matrix
+/// of a calibrated pair (`K_b^-T E K_a^-1`, ideal pixels), the fundamental matrix of the first
+/// stage otherwise, in the raw pixels it was estimated on (a homography configuration keeps it:
+/// the true correspondences of a plane or a panorama satisfy the fundamental matrix that
+/// explained them too); none for a watermark or a degenerate pair, which is not trusted.
+fn guide(stage1: &TwoView, cam_a: &Camera, cam_b: &Camera) -> Option<(Matrix3<f64>, Frame)> {
+    let raw = stage1.f.map(|f| (f, Frame::Raw));
     match stage1.config {
         Config::Calibrated => stage1
             .e
-            .map(|e| inverse_calibration(cam_b).transpose() * e * inverse_calibration(cam_a))
-            .or(stage1.f),
-        Config::Uncalibrated | Config::Planar | Config::Panoramic | Config::PlanarOrPanoramic => stage1.f,
+            .map(|e| (inverse_calibration(cam_b).transpose() * e * inverse_calibration(cam_a), Frame::Ideal))
+            .or(raw),
+        Config::Uncalibrated | Config::Planar | Config::Panoramic | Config::PlanarOrPanoramic => raw,
         Config::Undefined | Config::Degenerate | Config::Watermark => None,
     }
 }
@@ -433,10 +460,11 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
     let seed = pair_seed(name_a, name_b);
     let (da, db) = (a.descriptors(), b.descriptors());
 
-    // the first stage: the largest scales
+    // the first stage: the largest scales (none with `stage1_points` 0: nothing asked of the
+    // device, no match, no inlier)
     let (key_a, set_a) = pa.stage1_set(a, name_a);
     let (key_b, set_b) = pb.stage1_set(b, name_b);
-    let bests1 = bests(key_a, set_a, key_b, set_b)?;
+    let bests1 = if set_a.is_empty() || set_b.is_empty() { Vec::new() } else { bests(key_a, set_a, key_b, set_b)? };
     let (m1, q1) = selected(&bests1, set_a.len() / DIM, set_b.len() / DIM, o, usize::MAX);
     let m1: Vec<[u32; 2]> = m1.iter().map(|m| [pa.stage1[m[0] as usize], pb.stage1[m[1] as usize]]).collect();
     let stage1 = verify(cam_a, kp_a, cam_b, kp_b, &m1, &q1, calibrated, &o.two_view, seed);
@@ -444,8 +472,8 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
 
     // the second stage: along the epipolar lines of the model of the first
     if inliers >= o.trust_inliers {
-        if let Some(f) = guide(&stage1, cam_a, cam_b) {
-            let bests2 = guided_bests(da, pa, db, pb, &f, o.two_view.ransac.max_error);
+        if let Some((f, frame)) = guide(&stage1, cam_a, cam_b) {
+            let bests2 = guided_bests(da, pa, db, pb, &f, frame, o.two_view.ransac.max_error);
             let (matches, quality) = selected(&bests2, n_a, n_b, o, o.max_num_matches);
             let two_view = verify(cam_a, kp_a, cam_b, kp_b, &matches, &quality, calibrated, &o.two_view, seed);
             return Ok(PairResult { matches, two_view, route: Route::Guided });
@@ -645,11 +673,15 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
 }
 
 /// [`match_on`] with the GPUs `devices` (adapter indices; one that opens no matcher is logged
-/// and left to the others) and a CPU worker per core.
+/// and left to the others) and `cpu_threads` CPU workers beside them: `None` for one per core
+/// (the CPU takes the pairs the GPUs do not reach, and all of them without a GPU), `Some(n)` for
+/// `n`, `Some(0)` for the GPUs alone - an error (no worker) when none of them opens. The share
+/// changes who does which pair, never a pair's result.
 #[allow(clippy::too_many_arguments)]
 pub fn match_all(pairs: &[(String, String, bool)], features: &FeatureStore, cams: &HashMap<String, Camera>,
-                 calibrated: &HashSet<String>, out: &MatchStore, devices: &[usize], o: &Options, cancel: &AtomicBool,
-                 progress: &(dyn Fn(usize, usize) + Sync)) -> Result<PairsReport, String> {
+                 calibrated: &HashSet<String>, out: &MatchStore, devices: &[usize], cpu_threads: Option<usize>,
+                 o: &Options, cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync))
+                 -> Result<PairsReport, String> {
     let mut log = Vec::new();
     let mut opened: Vec<Box<dyn Device>> = Vec::new();
     for &index in devices {
@@ -658,7 +690,7 @@ pub fn match_all(pairs: &[(String, String, bool)], features: &FeatureStore, cams
             Err(problem) => log.push(format!("GPU {index} not opened ({problem}): the other workers do its share")),
         }
     }
-    let threads = thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = cpu_threads.unwrap_or_else(|| thread::available_parallelism().map_or(1, |n| n.get()));
     match match_on(pairs, features, cams, calibrated, out, opened, threads, o, cancel, progress) {
         Ok(mut report) => {
             log.append(&mut report.log);
