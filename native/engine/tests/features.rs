@@ -599,12 +599,27 @@ fn a_unit_that_fails_on_two_workers_is_given_up_not_every_worker() {
     let want: Vec<(u32, u32)> = units.iter().map(|&u| (u, if u == 7 { 0 } else { u * 10 })).collect();
     assert_eq!(run.results, want);
     assert_eq!(run.log.len(), 2, "{:?}", run.log);
-    assert!(run.log[0].contains("retired"), "{:?}", run.log);
-    assert!(run.log[1].contains("unit 7 of 20") && run.log[1].contains("given up"), "{:?}", run.log);
+    // in either order: the retired worker writes its line after its unit went back
+    assert!(run.log.iter().any(|l| l.contains("retired")), "{:?}", run.log);
+    assert!(run.log.iter().any(|l| l.contains("unit 7 of 20") && l.contains("given up")), "{:?}", run.log);
     // a worker that cannot give a unit up: every worker retires on it, as before
     let (reason, log) = sched::run(units.clone(), vec![], cpus(false), 3, &never, &quiet).err().unwrap();
     assert!(reason.contains("no worker left"), "{reason}");
     assert_eq!(log.len(), 3, "{log:?}");
+}
+
+#[test]
+fn a_unit_two_gpus_fail_is_done_by_the_cpu_not_given_up() {
+    // unit 7 fails on both GPUs (beyond what the two adapters take): each GPU is retired in turn
+    // and the CPU worker does the unit, which is given up only when a CPU worker fails it too
+    let units: Vec<u32> = (1..=20).collect();
+    let want: Vec<(u32, u32)> = units.iter().map(|&u| (u, u * 10)).collect();
+    let never = AtomicBool::new(false);
+    let gpus = vec![picky("GPU 0 (fake)", Some(7), None, true), picky("GPU 1 (fake)", Some(7), None, true)];
+    let cpu: Option<sched::Factory<'static, u32, u32>> = Some(Box::new(|| picky("CPU", None, None, true)));
+    let run = sched::run(units.clone(), gpus, cpu, 1, &never, &|_, _| {}).unwrap();
+    assert_eq!(run.results, want);
+    assert!(run.log.iter().all(|l| !l.contains("given up")), "{:?}", run.log);
 }
 
 #[test]

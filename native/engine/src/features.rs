@@ -564,11 +564,11 @@ impl Worker<usize, Outcome> for FeatureWorker<'_> {
         }
     }
 
-    /// A photo whose kernels failed on two devices: skipped as unreadable with the reason, its
+    /// A photo whose kernels failed on another device and then on the CPU: skipped as unreadable with the reason, its
     /// pixels dropped.
     fn give_up(&mut self, unit: &usize, why: &str) -> Option<Outcome> {
         self.ctx.pantry.done(*unit);
-        Some(Outcome::Skipped(Problem::Unreadable(format!("the kernels failed on two devices: {why}"))))
+        Some(Outcome::Skipped(Problem::Unreadable(format!("the kernels failed on the CPU too: {why}"))))
     }
 }
 

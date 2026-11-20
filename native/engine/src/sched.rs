@@ -3,9 +3,10 @@
 //! its own pace and the split between them is decided by their speeds, not in advance (the
 //! calibration pass of the design is left out on purpose: the queue needs none). A worker whose
 //! unit fails is retired and its unit goes back to the queue for the others - a lost GPU gives
-//! its units back - with a line in the log; a unit that fails again, on a second worker, is the
-//! unit's fault, not the device's: the worker gives it up ([`Worker::give_up`]) and goes on, so
-//! that one unit no device can do does not retire every worker. A worker that finds the queue
+//! its units back - with a line in the log; a unit that fails again on a CPU worker, after failing
+//! on another worker, is the unit's fault, not the device's: the CPU worker gives it up
+//! ([`Worker::give_up`]) and goes on, so that one unit no device can do does not retire every
+//! worker (a GPU never gives a unit up: the CPU tries it first). A worker that finds the queue
 //! empty while another is still on a unit waits for it, since that unit comes back if its worker
 //! fails; when every worker is retired with units left, CPU workers standing by take them
 //! ([`run_with_standby`]), and without them the run is an error; `cancel` set stops every worker
@@ -30,8 +31,8 @@ pub trait Worker<U, R>: Send {
     fn name(&self) -> String;
     fn run(&mut self, unit: &U) -> Result<R, String>;
 
-    /// The result of a unit that failed on another worker before and has just failed on this one
-    /// with `why`: the unit is given up with it and the worker goes on; `None` (the default) when
+    /// The result of a unit that failed on another worker before and has just failed on this one,
+    /// a CPU worker, with `why`: the unit is given up with it and the worker goes on; `None` (the default) when
     /// the unit cannot be given up - the worker is retired and the unit goes back, as on a first
     /// failure.
     fn give_up(&mut self, _unit: &U, _why: &str) -> Option<R> {
@@ -164,8 +165,10 @@ fn serve<U, R>(worker: &mut dyn Worker<U, R>, side: Side, shared: &Shared<U, R>,
                     done.failures[i] += 1;
                     done.failures[i] > 1
                 };
-                // a unit that failed on another worker before: the unit's fault, given up when it can be
-                let given_up = if failed_before { worker.give_up(&unit, &problem) } else { None };
+                // a unit that failed on another worker before and now fails on the CPU: the unit's fault, given
+                // up when it can be; a GPU that fails it retires as on a first failure, and the CPU tries it
+                let on_cpu = matches!(side, Side::Back);
+                let given_up = if failed_before && on_cpu { worker.give_up(&unit, &problem) } else { None };
                 match given_up {
                     Some(result) => {
                         let line = format!("{}: unit {} of {total} failed again ({problem}); it is given up, the \

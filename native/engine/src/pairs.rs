@@ -592,9 +592,9 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
         Ok((result.route, self.slot))
     }
 
-    /// A pair that failed on two workers (a photo whose features cannot be mapped any more, or a
-    /// defect on that pair): dropped, unless the match store failed - the step's error, not the
-    /// pair's.
+    /// A pair that failed on another worker and then on the CPU (a photo whose features cannot be
+    /// mapped any more, or a defect on that pair): dropped, unless the match store failed - the
+    /// step's error, not the pair's.
     fn give_up(&mut self, _unit: &usize, _why: &str) -> Option<(Route, usize)> {
         (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot))
     }
@@ -613,8 +613,9 @@ fn failed(reason: String, lines: Vec<String>) -> String {
 /// and put into `out`, through the queue of `sched`: one worker per device of `devices` and
 /// `cpu_threads` CPU workers (none with no device is an error); with no CPU worker beside the
 /// devices, one per core stands by for the pairs left when every device is lost. A pair that
-/// fails on two workers is dropped, with a line in the log; a device keeps its own count in
-/// `stage1_by_device`, two devices of one name told apart by their place (`#2`). `features` holds the photos,
+/// fails on another worker and then on the CPU is dropped, with a line in the log; a device keeps
+/// its own count in `stage1_by_device`, two devices of one name told apart by their place (`#2`).
+/// `features` holds the photos,
 /// `cams` their cameras (one per name; a pair of a photo without one, or not in the store, is an
 /// error before any work), `calibrated` names the photos with a prior focal length (a pair is
 /// calibrated when both are in it). `progress(done, total)` counts the pairs. The store is
