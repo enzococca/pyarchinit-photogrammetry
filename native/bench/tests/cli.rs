@@ -283,9 +283,55 @@ fn features_extracts_the_photos_of_a_folder_and_prints_its_record() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// What every record of `preselect` on six photos of 256 descriptors says, whatever the device.
+fn matched_the_neighbours(record: &Value) -> u64 {
+    let mut expected =
+        vec!["device", "matches", "ms_per_pair", "pairs", "pairs_per_second", "photos", "points", "seconds"];
+    if record["device"] != json!("cpu") {
+        expected.push("workgroup_kb");
+        expected.sort_unstable();
+    }
+    assert_eq!(keys(record), expected, "{record}");
+    assert_eq!((&record["photos"], &record["points"]), (&json!(6), &json!(256)), "{record}");
+    assert_eq!(record["pairs"], json!(15), "{record}");
+    // five pairs of neighbours share 64 descriptors each: most of them match, and nothing much else
+    let matches = record["matches"].as_u64().expect("matches is a whole number");
+    assert!(matches >= 5 * 56 && matches <= 5 * 64 + 15, "{matches} matches: {record}");
+    for key in ["seconds", "pairs_per_second", "ms_per_pair"] {
+        assert!(record[key].as_f64().is_some_and(|v| v > 0.0), "{key}: {record}");
+    }
+    matches
+}
+
+#[test]
+fn preselect_matches_the_neighbours_on_the_cpu_and_on_the_gpu_alike_or_says_that_it_skipped() {
+    let on_cpu = printed(&["preselect", "--photos", "6", "--points", "256", "--cpu"]);
+    assert_eq!(on_cpu["device"], json!("cpu"), "{on_cpu}");
+    let matches = matched_the_neighbours(&on_cpu);
+    let on_gpu = printed(&["preselect", "--photos", "6", "--points", "256"]);
+    let Some(adapter) = first_gpu() else {
+        assert_eq!(on_gpu, json!({"skipped": "no adapter"}));
+        assert_eq!(printed(&["preselect", "--photos", "6", "--points", "256", "--workgroup-kb", "16"]),
+                   json!({"skipped": "no adapter"}));
+        return;
+    };
+    assert_eq!(on_gpu["device"], json!(adapter.name), "{on_gpu}");
+    assert_eq!(matched_the_neighbours(&on_gpu), matches, "the GPU and the CPU twin disagree");
+    assert!(on_gpu["workgroup_kb"] == json!(16) || on_gpu["workgroup_kb"] == json!(32), "{on_gpu}");
+    let small = printed(&["preselect", "--photos", "6", "--points", "256", "--workgroup-kb", "16"]);
+    assert_eq!(small["workgroup_kb"], json!(16), "{small}");
+    assert_eq!(matched_the_neighbours(&small), matches, "the small tiles and the CPU twin disagree");
+}
+
 #[test]
 fn a_command_line_the_binary_does_not_know_is_refused() {
-    let refused: [&[&str]; 26] = [
+    let refused: [&[&str]; 32] = [
+        &["preselect", "--photos", "1"],                     // a pair needs two photos
+        &["preselect", "--points", "0"],                     // no descriptor matches nothing
+        &["preselect", "--n", "8"],                          // preselect has no --n
+        &["preselect", "--workgroup-kb", "24"],              // the kernels come in 16 and 32 KiB
+        &["preselect", "--cpu", "--device", "0"],            // the CPU twin has no adapter
+        &["preselect", "--cpu", "--workgroup-kb", "16"],     // ... and no workgroup memory
         &["features"],                                       // no folder
         &["features", "--cpu"],                              // the folder comes first
         &["features", "photos", "--n", "8"],                 // features has no --n

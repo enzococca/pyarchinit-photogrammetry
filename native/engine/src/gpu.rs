@@ -16,6 +16,12 @@
 //! bests bit for bit: the lowest index wins a tie in both directions, and on a tie the second
 //! best equals the best. Apple M4 Pro, large tiles: 2.06 TFLOP/s, 198 ms for 40 000 x 40 000
 //! descriptors, both directions.
+//!
+//! The same kernels, made segment-aware (`Matcher::bests_block`), match two blocks of small photos
+//! in one dispatch - every photo of A against every photo of B, the photos padded to whole tiles
+//! so that no tile holds two, the bests of the rows flushed per photo of B and the partials of
+//! the columns merged per photo of A - for the preselection, whose pairs of a thousand
+//! descriptors would each take a dispatch of eight workgroups.
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
@@ -89,7 +95,112 @@ struct Params {
     _pad: u32,
 }
 
-/// The two kernels for `tile`, generated: the inner loop is written out in full (the
+/// The parameters of the block kernels: the padded rows of A and columns of B in all, the tiles
+/// and the photos of each side.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlockParams {
+    n_a: u32,
+    n_b: u32,
+    tiles_a: u32,
+    photos_b: u32,
+    tiles_b: u32,
+    photos_a: u32,
+    _pad: [u32; 2],
+}
+
+/// The layout of a block of photos on the device: the photos of A one after the other, each
+/// padded to whole tiles of `rows` descriptors, those of B padded to whole tiles of `cols`, the
+/// empty photos left out; and the table of segments the block kernels read (`Kernel::block`).
+struct BlockLayout {
+    /// For every photo of A given: its index among the photos sent and its first padded row;
+    /// `None` for a photo without descriptors.
+    a: Vec<Option<(usize, usize)>>,
+    /// The same for B, with the first padded column.
+    b: Vec<Option<(usize, usize)>>,
+    n_a: usize,
+    n_b: usize,
+    tiles_a: usize,
+    tiles_b: usize,
+    photos_a: usize,
+    photos_b: usize,
+    seg: Vec<[u32; 4]>,
+}
+
+impl BlockLayout {
+    /// The layout of photos of `a` and `b` descriptors each (counts) with the tiles `tile`.
+    fn new(tile: Tile, a: &[usize], b: &[usize]) -> BlockLayout {
+        let mut layout = BlockLayout { a: Vec::with_capacity(a.len()), b: Vec::with_capacity(b.len()), n_a: 0, n_b: 0,
+                                       tiles_a: 0, tiles_b: 0, photos_a: 0, photos_b: 0, seg: Vec::new() };
+        let mut tiles_b = Vec::new();
+        let mut photos_a = Vec::new();
+        for &n in a {
+            if n == 0 {
+                layout.a.push(None);
+                continue;
+            }
+            let tiles = n.div_ceil(tile.rows);
+            let (begin, end) = (layout.n_a, layout.n_a + n);
+            for _ in 0..tiles {
+                layout.seg.push([layout.photos_a as u32, begin as u32, end as u32, 0]);
+            }
+            photos_a.push([layout.tiles_a as u32, tiles as u32, 0, 0]);
+            layout.a.push(Some((layout.photos_a, begin)));
+            layout.n_a += tiles * tile.rows;
+            layout.tiles_a += tiles;
+            layout.photos_a += 1;
+        }
+        for &n in b {
+            if n == 0 {
+                layout.b.push(None);
+                continue;
+            }
+            let tiles = n.div_ceil(tile.cols);
+            let (begin, end) = (layout.n_b, layout.n_b + n);
+            for t in 0..tiles {
+                let last = u32::from(t + 1 == tiles);
+                tiles_b.push([layout.photos_b as u32, begin as u32, end as u32, last]);
+            }
+            layout.b.push(Some((layout.photos_b, begin)));
+            layout.n_b += tiles * tile.cols;
+            layout.tiles_b += tiles;
+            layout.photos_b += 1;
+        }
+        layout.seg.extend(tiles_b);
+        layout.seg.extend(photos_a);
+        layout
+    }
+
+    /// The bytes of the two working buffers of the block: the results (the bests of every
+    /// padded row of A for every photo of B, then of every padded column of B for every photo
+    /// of A, 16 bytes each) and the partials of the columns (8 bytes for every tile of A and
+    /// every padded column of B).
+    fn bytes(&self) -> (u64, u64) {
+        let out = (self.n_a * self.photos_b + self.photos_a * self.n_b) as u64 * 16;
+        let partials = (self.tiles_a * self.n_b) as u64 * 8;
+        (out, partials)
+    }
+}
+
+/// What differs between the kernel of a pair and the kernel of a block, in the code the two
+/// share: which rows of the tile of A and which columns of the tile of B being visited are
+/// valid, and where the bests of a row are written.
+struct Seg {
+    /// One past the last valid row of A of this workgroup's tile: every row below `n_a` for a
+    /// pair, the end of the photo the tile belongs to for a block.
+    a_end: &'static str,
+    /// One past the last valid column of the tile of B being visited.
+    b_end: &'static str,
+    /// The entry of `out` that takes the bests of the row `row`.
+    row_out: &'static str,
+    /// The column written with them: its index in B for a pair, within its photo for a block.
+    col: &'static str,
+}
+
+const PAIR: Seg = Seg { a_end: "p.n_a", b_end: "p.n_b", row_out: "row", col: "w_col" };
+const BLOCK: Seg = Seg { a_end: "sa.z", b_end: "sb.z", row_out: "row * p.photos_b + sb.x", col: "w_col - sb.y" };
+
+/// The code of a kernel for `tile`, generated: the inner loop is written out in full (the
 /// accumulators in registers; arrays indexed in loops are kept in memory by some compilers), and
 /// the sizes of the tiles, of the loads and of the merges follow the tile.
 ///
@@ -99,27 +210,44 @@ struct Params {
 /// threads therefore compares indices on equal scores, to make the lowest index win as a scan
 /// does. The columns are merged over thread rows and tiles that hold rows in increasing order, so
 /// there a strict comparison is the lowest index.
-fn shader(tile: Tile) -> String {
-    let Tile { rows, cols } = tile;
-    let (per_row, per_col) = (rows / 16, cols / 16); // dot products of a thread: per_row x per_col
-    let half = rows / 2; // rows merged at a time: scratch holds 16 threads x half
-    let scratch = tile.scratch();
-    let (a_words, b_words) = (rows * 32, cols * 32);
-    let a_loads = a_words / 256; // words of the A tile each thread loads
-    let b_threads = 256 / cols; // threads that load one column of the B tile ...
-    let b_loads = 32 / b_threads; // ... and the words each of them loads
-    debug_assert!(rows % 16 == 0 && cols % 16 == 0 && a_words % 256 == 0 && 256 % cols == 0);
-    debug_assert!(32 % b_threads == 0 && half == 8 * per_row && rows <= 256);
-    debug_assert!(scratch >= 16 * cols && scratch >= 16 * half);
-    let mut s = String::new();
-    s.push_str(&format!(r#"
-struct Params {{ n_a: u32, n_b: u32, tiles_a: u32, pad: u32 }};
+struct Kernel {
+    tile: Tile,
+    per_row: usize,
+    per_col: usize,
+    half: usize,
+    b_threads: usize,
+    b_loads: usize,
+    a_loads: usize,
+}
+
+impl Kernel {
+    fn new(tile: Tile) -> Kernel {
+        let Tile { rows, cols } = tile;
+        let (per_row, per_col) = (rows / 16, cols / 16); // dot products of a thread: per_row x per_col
+        let half = rows / 2; // rows merged at a time: scratch holds 16 threads x half
+        let scratch = tile.scratch();
+        let (a_words, b_words) = (rows * 32, cols * 32);
+        let a_loads = a_words / 256; // words of the A tile each thread loads
+        let b_threads = 256 / cols; // threads that load one column of the B tile ...
+        let b_loads = 32 / b_threads; // ... and the words each of them loads
+        debug_assert!(rows % 16 == 0 && cols % 16 == 0 && a_words % 256 == 0 && 256 % cols == 0);
+        debug_assert!(32 % b_threads == 0 && half == 8 * per_row && rows <= 256);
+        debug_assert!(scratch >= 16 * cols && scratch >= 16 * half && b_words == cols * 32);
+        Kernel { tile, per_row, per_col, half, b_threads, b_loads, a_loads }
+    }
+
+    /// The declarations: `params` as the fields of the `Params` struct, `more` the bindings after
+    /// the five every kernel has, the three arrays of workgroup memory and `unpack`.
+    fn declarations(&self, params: &str, more: &str) -> String {
+        let (a_words, b_words, scratch) = (self.tile.rows * 32, self.tile.cols * 32, self.tile.scratch());
+        format!(r#"
+struct Params {{ {params} }};
 @group(0) @binding(0) var<storage, read> a: array<u32>;
 @group(0) @binding(1) var<storage, read> b: array<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read_write> col_part: array<vec2<u32>>;
 @group(0) @binding(4) var<uniform> p: Params;
-
+{more}
 var<workgroup> a_tile: array<u32, {a_words}>;
 var<workgroup> b_tile: array<u32, {b_words}>;
 var<workgroup> scratch: array<vec2<u32>, {scratch}>;
@@ -127,77 +255,114 @@ var<workgroup> scratch: array<vec2<u32>, {scratch}>;
 fn unpack(v: u32) -> vec4<f32> {{
     return vec4<f32>(f32(v & 255u), f32((v >> 8u) & 255u), f32((v >> 16u) & 255u), f32(v >> 24u));
 }}
+"#)
+    }
 
-@compute @workgroup_size(16, 16)
-fn gemm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
-        @builtin(local_invocation_index) li: u32) {{
-    let a0 = wg.x * {rows}u;
+    /// The tile of A of this workgroup loaded (its rows from `a0`, those at `a_end` and beyond
+    /// zero), the rows and columns of the thread, and the running bests of its rows: nothing seen
+    /// is -1 with the column `0xffffffff`, so that a thread that saw no valid column loses every
+    /// tie of the merge.
+    fn a_tile(&self, a_end: &str) -> String {
+        let (rows, a_loads, per_row, per_col) = (self.tile.rows, self.a_loads, self.per_row, self.per_col);
+        let mut s = format!(r#"    let a0 = wg.x * {rows}u;
     for (var e = 0u; e < {a_loads}u; e++) {{
         let idx = e * 256u + li;
         let k = idx / {rows}u;
         let row = idx % {rows}u;
         let g = a0 + row;
-        a_tile[idx] = select(0u, a[g * 32u + k], g < p.n_a);
+        a_tile[idx] = select(0u, a[g * 32u + k], g < {a_end});
     }}
     workgroupBarrier();
     let tr = lid.y * {per_row}u;
     let tc = lid.x * {per_col}u;
-"#));
-    for r in 0..per_row {
-        s.push_str(&format!("    var rb1_{r}: f32 = -1.0; var rb2_{r}: f32 = -1.0; var ri_{r}: u32 = 0u;\n"));
+"#);
+        for r in 0..per_row {
+            s.push_str(&format!("    var rb1_{r}: f32 = -1.0; var rb2_{r}: f32 = -1.0; "));
+            s.push_str(&format!("var ri_{r}: u32 = 0xffffffffu;\n"));
+        }
+        s
     }
-    s.push_str(&format!(r#"
-    let tiles_b = (p.n_b + {}u) / {cols}u;
-    for (var t = 0u; t < tiles_b; t++) {{
-        let b0 = t * {cols}u;
-        {{
+
+    /// The running bests of the rows of the thread set back to nothing seen (assignments: a
+    /// `var` here would declare new variables in the block and leave the outer ones as they are).
+    fn reset_rows(&self) -> String {
+        (0..self.per_row)
+            .map(|r| format!("            rb1_{r} = -1.0; rb2_{r} = -1.0; ri_{r} = 0xffffffffu;\n"))
+            .collect()
+    }
+
+    /// The tile `t` of B, from the column `b0`, loaded (its columns at `b_end` and beyond zero).
+    fn b_tile(&self, b_end: &str) -> String {
+        let (cols, b_threads, b_loads) = (self.tile.cols, self.b_threads, self.b_loads);
+        format!(r#"        {{
             let col = li / {b_threads}u;
             let k0 = (li % {b_threads}u) * {b_loads}u;
             let g = b0 + col;
             for (var e = 0u; e < {b_loads}u; e++) {{
-                b_tile[(k0 + e) * {cols}u + col] = select(0u, b[g * 32u + k0 + e], g < p.n_b);
+                b_tile[(k0 + e) * {cols}u + col] = select(0u, b[g * 32u + k0 + e], g < {b_end});
             }}
         }}
         workgroupBarrier();
-"#, cols - 1));
-    for r in 0..per_row {
-        for c in 0..per_col {
-            s.push_str(&format!("        var acc_{r}{c}: f32 = 0.0;\n"));
-        }
+"#)
     }
-    s.push_str(&format!(
-        "        for (var k = 0u; k < 32u; k++) {{\n            let kb = k * {cols}u + tc;\n            let ka = k * {rows}u + tr;\n"));
-    for c in 0..per_col {
-        s.push_str(&format!("            let bv{c} = unpack(b_tile[kb + {c}u]);\n"));
-    }
-    for r in 0..per_row {
-        s.push_str(&format!("            let av{r} = unpack(a_tile[ka + {r}u]);\n"));
-    }
-    for r in 0..per_row {
-        for c in 0..per_col {
-            s.push_str(&format!("            acc_{r}{c} += dot(av{r}, bv{c});\n"));
-        }
-    }
-    s.push_str("        }\n");
-    for c in 0..per_col {
-        s.push_str(&format!("        let jc{c} = b0 + tc + {c}u;\n"));
-    }
-    for r in 0..per_row {
-        for c in 0..per_col {
-            s.push_str(&format!(
-                "        if (jc{c} < p.n_b) {{ if (acc_{r}{c} > rb1_{r}) {{ rb2_{r} = rb1_{r}; rb1_{r} = acc_{r}{c}; ri_{r} = jc{c}; }} else if (acc_{r}{c} > rb2_{r}) {{ rb2_{r} = acc_{r}{c}; }} }}\n"));
-        }
-    }
-    for c in 0..per_col {
-        s.push_str(&format!("        var cb1_{c}: f32 = -1.0; var cb2_{c}: f32 = -1.0; var cr_{c}: u32 = 0u;\n"));
-        for r in 0..per_row {
-            s.push_str(&format!(
-                "        if (acc_{r}{c} > cb1_{c}) {{ cb2_{c} = cb1_{c}; cb1_{c} = acc_{r}{c}; cr_{c} = tr + {r}u; }} else if (acc_{r}{c} > cb2_{c}) {{ cb2_{c} = acc_{r}{c}; }}\n"));
+
+    /// The dot products of the thread's rows and columns over the two tiles.
+    fn dot_products(&self) -> String {
+        let (rows, cols) = (self.tile.rows, self.tile.cols);
+        let mut s = String::new();
+        for r in 0..self.per_row {
+            for c in 0..self.per_col {
+                s.push_str(&format!("        var acc_{r}{c}: f32 = 0.0;\n"));
+            }
         }
         s.push_str(&format!(
-            "        scratch[lid.y * {cols}u + tc + {c}u] = vec2<u32>((u32(max(cb1_{c}, 0.0)) << 8u) | cr_{c}, u32(max(cb2_{c}, 0.0)));\n"));
+            "        for (var k = 0u; k < 32u; k++) {{\n            let kb = k * {cols}u + tc;\n            let ka = k * {rows}u + tr;\n"));
+        for c in 0..self.per_col {
+            s.push_str(&format!("            let bv{c} = unpack(b_tile[kb + {c}u]);\n"));
+        }
+        for r in 0..self.per_row {
+            s.push_str(&format!("            let av{r} = unpack(a_tile[ka + {r}u]);\n"));
+        }
+        for r in 0..self.per_row {
+            for c in 0..self.per_col {
+                s.push_str(&format!("            acc_{r}{c} += dot(av{r}, bv{c});\n"));
+            }
+        }
+        s.push_str("        }\n");
+        s
     }
-    s.push_str(&format!(r#"
+
+    /// The running bests of the thread's rows updated with the valid columns of the tile.
+    fn row_update(&self, b_end: &str) -> String {
+        let mut s = String::new();
+        for c in 0..self.per_col {
+            s.push_str(&format!("        let jc{c} = b0 + tc + {c}u;\n"));
+        }
+        for r in 0..self.per_row {
+            for c in 0..self.per_col {
+                s.push_str(&format!(
+                    "        if (jc{c} < {b_end}) {{ if (acc_{r}{c} > rb1_{r}) {{ rb2_{r} = rb1_{r}; rb1_{r} = acc_{r}{c}; ri_{r} = jc{c}; }} else if (acc_{r}{c} > rb2_{r}) {{ rb2_{r} = acc_{r}{c}; }} }}\n"));
+            }
+        }
+        s
+    }
+
+    /// The bests of the tile's columns over the thread's rows, merged over the 16 thread rows
+    /// through `scratch` and written to the partials of this tile of A (the row within the tile
+    /// packed in the low 8 bits), for the valid columns.
+    fn column_partials(&self, b_end: &str) -> String {
+        let cols = self.tile.cols;
+        let mut s = String::new();
+        for c in 0..self.per_col {
+            s.push_str(&format!("        var cb1_{c}: f32 = -1.0; var cb2_{c}: f32 = -1.0; var cr_{c}: u32 = 0u;\n"));
+            for r in 0..self.per_row {
+                s.push_str(&format!(
+                    "        if (acc_{r}{c} > cb1_{c}) {{ cb2_{c} = cb1_{c}; cb1_{c} = acc_{r}{c}; cr_{c} = tr + {r}u; }} else if (acc_{r}{c} > cb2_{c}) {{ cb2_{c} = acc_{r}{c}; }}\n"));
+            }
+            s.push_str(&format!(
+                "        scratch[lid.y * {cols}u + tc + {c}u] = vec2<u32>((u32(max(cb1_{c}, 0.0)) << 8u) | cr_{c}, u32(max(cb2_{c}, 0.0)));\n"));
+        }
+        s.push_str(&format!(r#"
         workgroupBarrier();
         if (li < {cols}u) {{
             let col = li;
@@ -210,21 +375,30 @@ fn gemm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
                 else {{ second = max(second, max(sc, e.y)); }}
             }}
             let j = b0 + col;
-            if (j < p.n_b) {{ col_part[wg.x * p.n_b + j] = vec2<u32>(best, second); }}
+            if (j < {b_end}) {{ col_part[wg.x * p.n_b + j] = vec2<u32>(best, second); }}
         }}
         workgroupBarrier();
-    }}
 "#));
-    for h in 0..2 {
-        let first = h * half; // the first row of this half of the tile
-        s.push_str(&format!(
-            "    {{\n        workgroupBarrier();\n        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
-        for r in 0..per_row {
-            s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb1_{r}, 0.0)), ri_{r});\n"));
-        }
-        s.push_str(&format!(r#"        }}
+        s
+    }
+
+    /// The running bests of the rows merged across the 16 thread columns, half the tile at a
+    /// time through `scratch`, and written out for the valid rows: the best, its column, the
+    /// second best (the second of the winning thread or the best of another).
+    fn row_merge(&self, seg: &Seg) -> String {
+        let (half, per_row) = (self.half, self.per_row);
+        let (a_end, row_out, col) = (seg.a_end, seg.row_out, seg.col);
+        let mut s = String::new();
+        for h in 0..2 {
+            let first = h * half; // the first row of this half of the tile
+            s.push_str(&format!(
+                "    {{\n        workgroupBarrier();\n        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
+            for r in 0..per_row {
+                s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb1_{r}, 0.0)), ri_{r});\n"));
+            }
+            s.push_str(&format!(r#"        }}
         workgroupBarrier();
-        var w_x: u32 = 0u; var w_best: u32 = 0u; var w_col: u32 = 0u; var sob: u32 = 0u;
+        var w_x: u32 = 0u; var w_best: u32 = 0u; var w_col: u32 = 0xffffffffu; var sob: u32 = 0u;
         if (li < {half}u) {{
             for (var x = 0u; x < 16u; x++) {{
                 let e = scratch[x * {half}u + li];
@@ -234,24 +408,47 @@ fn gemm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
         }}
         workgroupBarrier();
 "#));
-        s.push_str(&format!(
-            "        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
-        for r in 0..per_row {
-            s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb2_{r}, 0.0)), 0u);\n"));
-        }
-        s.push_str(&format!(r#"        }}
+            s.push_str(&format!(
+                "        if (lid.y / 8u == {h}u) {{\n            let base = lid.x * {half}u + (tr - {first}u);\n"));
+            for r in 0..per_row {
+                s.push_str(&format!("            scratch[base + {r}u] = vec2<u32>(u32(max(rb2_{r}, 0.0)), 0u);\n"));
+            }
+            s.push_str(&format!(r#"        }}
         workgroupBarrier();
         if (li < {half}u) {{
             let row = a0 + {first}u + li;
-            if (row < p.n_a) {{
+            if (row < {a_end}) {{
                 let second = max(sob, scratch[w_x * {half}u + li].x);
-                out[row] = vec4<u32>(w_best, w_col, second, 0u);
+                out[{row_out}] = vec4<u32>(w_best, {col}, second, 0u);
             }}
         }}
     }}
 "#));
+        }
+        s
     }
-    s.push_str(&format!(r#"}}
+
+    /// The two kernels of a pair: `gemm`, one workgroup per tile of A over every tile of B, the
+    /// bests of the rows written at the end and the partials of the columns per tile; `merge`,
+    /// the partials of every column merged over the tiles of A.
+    fn pair(&self) -> String {
+        let (rows, cols) = (self.tile.rows, self.tile.cols);
+        let mut s = self.declarations("n_a: u32, n_b: u32, tiles_a: u32, pad: u32", "");
+        s.push_str(r#"
+@compute @workgroup_size(16, 16)
+fn gemm(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
+        @builtin(local_invocation_index) li: u32) {
+"#);
+        s.push_str(&self.a_tile(PAIR.a_end));
+        s.push_str(&format!("    let tiles_b = (p.n_b + {}u) / {cols}u;\n", cols - 1));
+        s.push_str(&format!("    for (var t = 0u; t < tiles_b; t++) {{\n        let b0 = t * {cols}u;\n"));
+        s.push_str(&self.b_tile(PAIR.b_end));
+        s.push_str(&self.dot_products());
+        s.push_str(&self.row_update(PAIR.b_end));
+        s.push_str(&self.column_partials(PAIR.b_end));
+        s.push_str("    }\n");
+        s.push_str(&self.row_merge(&PAIR));
+        s.push_str(&format!(r#"}}
 
 @compute @workgroup_size(256)
 fn merge(@builtin(global_invocation_id) gid: vec3<u32>) {{
@@ -269,7 +466,75 @@ fn merge(@builtin(global_invocation_id) gid: vec3<u32>) {{
     out[p.n_a + j] = vec4<u32>(best, row, second, 0u);
 }}
 "#));
-    s
+        s
+    }
+
+    /// The two kernels of a block of photos, the photos of A concatenated and padded to whole
+    /// tiles of rows, those of B to whole tiles of columns, so that no tile holds two photos
+    /// (`BlockLayout`). `seg` describes the tiles: for every tile of A its photo, the first and
+    /// one past the last of its rows; for every tile of B its photo, its first and one past its
+    /// last column, and whether it is the last tile of its photo; for every photo of A its first
+    /// tile and how many it has. `gemm_block` runs the rows of its tile of A over every tile of B
+    /// as `gemm` does, but flushes the bests of the rows at the last tile of each photo of B
+    /// (into `out[row * photos_b + photo]`, the column counted within the photo) and starts them
+    /// again; the partials of the columns are those of `gemm`. `merge_block` merges the partials
+    /// of every valid column of B over the tiles of each photo of A (into `out[n_a * photos_b +
+    /// photo_a * n_b + column]`, the row counted within the photo).
+    fn block(&self) -> String {
+        let (rows, cols) = (self.tile.rows, self.tile.cols);
+        let params = "n_a: u32, n_b: u32, tiles_a: u32, photos_b: u32, tiles_b: u32, photos_a: u32, \
+                      pad0: u32, pad1: u32";
+        let mut s = self.declarations(params, "@group(0) @binding(5) var<storage, read> seg: array<vec4<u32>>;");
+        s.push_str(r#"
+@compute @workgroup_size(16, 16)
+fn gemm_block(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
+              @builtin(local_invocation_index) li: u32) {
+    let sa = seg[wg.x];
+"#);
+        s.push_str(&self.a_tile(BLOCK.a_end));
+        s.push_str("    for (var t = 0u; t < p.tiles_b; t++) {\n        let sb = seg[p.tiles_a + t];\n");
+        s.push_str(&format!("        let b0 = t * {cols}u;\n"));
+        s.push_str(&self.b_tile(BLOCK.b_end));
+        s.push_str(&self.dot_products());
+        s.push_str(&self.row_update(BLOCK.b_end));
+        s.push_str(&self.column_partials(BLOCK.b_end));
+        s.push_str("        if (sb.w == 1u) {\n");
+        s.push_str(&self.row_merge(&BLOCK));
+        s.push_str(&self.reset_rows());
+        s.push_str("        }\n    }\n");
+        s.push_str(&format!(r#"}}
+
+@compute @workgroup_size(256)
+fn merge_block(@builtin(global_invocation_id) gid: vec3<u32>) {{
+    let pa = gid.y;
+    let j = gid.x;
+    if (j >= p.n_b || pa >= p.photos_a) {{ return; }}
+    if (j >= seg[p.tiles_a + j / {cols}u].z) {{ return; }}
+    let sp = seg[p.tiles_a + p.tiles_b + pa];
+    var best: u32 = 0u;
+    var row: u32 = 0u;
+    var second: u32 = 0u;
+    for (var k = 0u; k < sp.y; k++) {{
+        let e = col_part[(sp.x + k) * p.n_b + j];
+        let sc = e.x >> 8u;
+        if (sc > best) {{ second = max(best, e.y); best = sc; row = k * {rows}u + (e.x & 255u); }}
+        else {{ second = max(second, max(sc, e.y)); }}
+    }}
+    out[p.n_a * p.photos_b + pa * p.n_b + j] = vec4<u32>(best, row, second, 0u);
+}}
+"#));
+        s
+    }
+}
+
+/// The two kernels of a pair for `tile` (`Kernel::pair`).
+fn shader(tile: Tile) -> String {
+    Kernel::new(tile).pair()
+}
+
+/// The two kernels of a block for `tile` (`Kernel::block`).
+fn block_shader(tile: Tile) -> String {
+    Kernel::new(tile).block()
 }
 
 fn instance() -> wgpu::Instance {
@@ -308,6 +573,10 @@ pub struct Matcher {
     merge: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
+    block_gemm: wgpu::ComputePipeline,
+    block_merge: wgpu::ComputePipeline,
+    block_layout: wgpu::BindGroupLayout,
+    block_params: wgpu::Buffer,
     out: Option<(wgpu::Buffer, wgpu::Buffer, u64)>,
     partials: Option<(wgpu::Buffer, u64)>,
     cache: HashMap<u64, (wgpu::Buffer, usize)>,
@@ -390,9 +659,30 @@ impl Matcher {
             compilation_options: Default::default(), cache: None });
         let gemm = make("gemm");
         let merge = make("merge");
-        let params = device.create_buffer(&wgpu::BufferDescriptor { label: Some("params"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        Ok(Matcher { info, tile, device, queue, gemm, merge, layout, params, out: None, partials: None,
-                     cache: HashMap::new(), order: VecDeque::new(), cached_bytes: 0, limit: cache_limit() })
+        let uniform = |size: u64, label: &str| device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false });
+        let params = uniform(16, "params");
+        // the kernels of a block: the same bindings and one more, the table of segments
+        let block_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("match_block"), source: wgpu::ShaderSource::Wgsl(block_shader(tile).into()) });
+        let block_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
+            buffer(0, true), buffer(1, true), buffer(2, false), buffer(3, false),
+            wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None } },
+            buffer(5, true),
+        ] });
+        let block_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&block_layout], push_constant_ranges: &[] });
+        let make_block = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry), layout: Some(&block_pipeline_layout), module: &block_module, entry_point: Some(entry),
+            compilation_options: Default::default(), cache: None });
+        let block_gemm = make_block("gemm_block");
+        let block_merge = make_block("merge_block");
+        let block_params = uniform(32, "block_params");
+        Ok(Matcher { info, tile, device, queue, gemm, merge, layout, params, block_gemm, block_merge, block_layout,
+                     block_params, out: None, partials: None, cache: HashMap::new(), order: VecDeque::new(),
+                     cached_bytes: 0, limit: cache_limit() })
     }
 
     fn upload(&self, data: &[u8]) -> wgpu::Buffer {
@@ -517,6 +807,103 @@ impl Matcher {
         let bests = self.bests(a_key, a, b_key, b)?;
         Ok(select_matches(&bests, n_a, n_b, max_ratio, max_distance, cross_check))
     }
+
+    /// The most bytes a working buffer of a block may take on this device: the storage binding
+    /// it allows, or its largest buffer when that is less.
+    pub fn block_limit(&self) -> u64 {
+        let limits = self.device.limits();
+        u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size)
+    }
+
+    /// The bytes of the largest working buffer [`bests_block`](Self::bests_block) needs for
+    /// photos of `a` and `b` descriptors each (the counts), with the tiles of this matcher: to be
+    /// held under [`block_limit`](Self::block_limit) by whoever sizes the blocks.
+    pub fn block_bytes(&self, a: &[usize], b: &[usize]) -> u64 {
+        let (out, partials) = BlockLayout::new(self.tile, a, b).bytes();
+        out.max(partials)
+    }
+
+    /// The bests of every pair of two blocks of photos in one dispatch: for the photos `a[i]` and
+    /// `b[j]` (n x 128 bytes each) the entry `i * b.len() + j` of the answer is what
+    /// [`bests`](Self::bests) gives for that pair, bit for bit (nothing for a pair with an empty
+    /// photo). The descriptors are not kept on the device. An error when a set is not whole
+    /// descriptors or when the working buffers of the block are above
+    /// [`block_limit`](Self::block_limit), naming the bytes.
+    pub fn bests_block(&mut self, a: &[&[u8]], b: &[&[u8]]) -> Result<Vec<Vec<[u32; 3]>>, String> {
+        if a.iter().chain(b).any(|d| d.len() % DIM != 0) {
+            return Err("descriptors are 128 bytes each".into());
+        }
+        let counts = |set: &[&[u8]]| -> Vec<usize> { set.iter().map(|d| d.len() / DIM).collect() };
+        let (count_a, count_b) = (counts(a), counts(b));
+        let layout = BlockLayout::new(self.tile, &count_a, &count_b);
+        let mut result = vec![Vec::new(); a.len() * b.len()];
+        if layout.photos_a == 0 || layout.photos_b == 0 {
+            return Ok(result);
+        }
+        let (out_size, part_size) = layout.bytes();
+        let limit = self.block_limit();
+        if out_size.max(part_size) > limit {
+            return Err(format!("a block of {} x {} photos needs a working buffer of {} bytes, more than the {limit} \
+                                this device binds", layout.photos_a, layout.photos_b, out_size.max(part_size)));
+        }
+        let padded = |set: &[&[u8]], map: &[Option<(usize, usize)>], n: usize| -> Vec<u8> {
+            let mut bytes = vec![0u8; n * DIM];
+            for (d, m) in set.iter().zip(map) {
+                if let Some((_, begin)) = m {
+                    bytes[begin * DIM..begin * DIM + d.len()].copy_from_slice(d);
+                }
+            }
+            bytes
+        };
+        let a_buf = self.upload(&padded(a, &layout.a, layout.n_a));
+        let b_buf = self.upload(&padded(b, &layout.b, layout.n_b));
+        let seg_buf = self.upload(bytemuck::cast_slice(&layout.seg));
+        let (out, staging, part) = self.working(out_size, part_size);
+        let params = BlockParams { n_a: layout.n_a as u32, n_b: layout.n_b as u32, tiles_a: layout.tiles_a as u32,
+                                   photos_b: layout.photos_b as u32, tiles_b: layout.tiles_b as u32,
+                                   photos_a: layout.photos_a as u32, _pad: [0; 2] };
+        self.queue.write_buffer(&self.block_params, 0, bytemuck::bytes_of(&params));
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &self.block_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: a_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: b_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: part.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.block_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: seg_buf.as_entire_binding() },
+            ],
+        });
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.block_gemm);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(layout.tiles_a as u32, 1, 1);
+            pass.set_pipeline(&self.block_merge);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(layout.n_b.div_ceil(256) as u32, layout.photos_a as u32, 1);
+        }
+        enc.copy_buffer_to_buffer(&out, 0, &staging, 0, out_size);
+        self.queue.submit(Some(enc.finish()));
+        let words: Vec<u32> = read_back(&self.device, &staging, out_size)?;
+        a_buf.destroy();
+        b_buf.destroy();
+        seg_buf.destroy();
+        let entry = |k: usize| [words[4 * k], words[4 * k + 1], words[4 * k + 2]];
+        let columns_from = layout.n_a * layout.photos_b;
+        for (i, ma) in layout.a.iter().enumerate() {
+            for (j, mb) in layout.b.iter().enumerate() {
+                let (Some((pa, begin_a)), Some((pb, begin_b))) = (ma, mb) else { continue };
+                let (n_a, n_b) = (count_a[i], count_b[j]);
+                let mut pair = Vec::with_capacity(n_a + n_b);
+                pair.extend((0..n_a).map(|r| entry((begin_a + r) * layout.photos_b + pb)));
+                pair.extend((0..n_b).map(|c| entry(columns_from + pa * layout.n_b + begin_b + c)));
+                result[i * b.len() + j] = pair;
+            }
+        }
+        Ok(result)
+    }
 }
 
 /// Block until every submission of the queue of `device` has completed, reading its fence
@@ -580,6 +967,20 @@ fn passes(best: u32, second: u32, max_ratio: f32, max_distance: f32) -> bool {
     d1 <= max_distance && d1 < max_ratio * distance(second)
 }
 
+/// The quality of every match of `matches` (pairs of indices into A and B) out of the bests of
+/// the pair: the ratio of the two best distances of its descriptor of A, lower for a match that
+/// stands out - the order of the PROSAC sampling of the verification (`geometry::two_view`). A
+/// second best of 0 is the distance of orthogonal descriptors, so the ratio is always finite.
+pub fn match_quality(bests: &[[u32; 3]], matches: &[[u32; 2]]) -> Vec<f32> {
+    matches
+        .iter()
+        .map(|m| {
+            let [best, _, second] = bests[m[0] as usize];
+            distance(best) / distance(second)
+        })
+        .collect()
+}
+
 /// The matches out of the bests of both directions (:meth:`Matcher::bests`).
 pub fn select_matches(bests: &[[u32; 3]], n_a: usize, n_b: usize, max_ratio: f32, max_distance: f32,
                       cross_check: bool) -> Vec<[u32; 2]> {
@@ -625,6 +1026,41 @@ mod tests {
         for declared in ["a_tile: array<u32, 4096>", "b_tile: array<u32, 2048>", "scratch: array<vec2<u32>, 1024>"] {
             assert!(large.contains(declared), "the large kernel has no {declared}");
         }
+        // the block kernels declare the same arrays, their entry points and the table of segments
+        for tile in [SMALL_TILE, LARGE_TILE] {
+            let block = block_shader(tile);
+            let same = shader(tile);
+            for declared in ["a_tile: array<u32, ", "b_tile: array<u32, ", "scratch: array<vec2<u32>, "] {
+                let line = |s: &str| s.lines().find(|l| l.contains(declared)).map(str::to_owned);
+                assert_eq!(line(&block), line(&same), "{declared} of the block kernel");
+            }
+            let named = ["fn gemm_block(", "fn merge_block(", "var<storage, read> seg: array<vec4<u32>>", "sb.w == 1u"];
+            for name in named {
+                assert!(block.contains(name), "the block kernel has no {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_block_is_laid_out_in_whole_tiles_with_the_empty_photos_left_out() {
+        let layout = BlockLayout::new(LARGE_TILE, &[300, 0, 129], &[65, 0, 1]);
+        assert_eq!(layout.a, vec![Some((0, 0)), None, Some((1, 384))]);
+        assert_eq!(layout.b, vec![Some((0, 0)), None, Some((1, 128))]);
+        // 300 rows take three tiles of 128, 129 take two; 65 columns take two tiles of 64, 1 takes one
+        assert_eq!((layout.n_a, layout.tiles_a, layout.photos_a), (640, 5, 2));
+        assert_eq!((layout.n_b, layout.tiles_b, layout.photos_b), (192, 3, 2));
+        // the segments: the tiles of A (photo, first row, one past the last), those of B (with the
+        // last tile of each photo flagged), the photos of A (first tile, tiles)
+        let tiles_a = [[0, 0, 300, 0], [0, 0, 300, 0], [0, 0, 300, 0], [1, 384, 513, 0], [1, 384, 513, 0]];
+        let tiles_b = [[0, 0, 65, 0], [0, 0, 65, 1], [1, 128, 129, 1]];
+        let photos_a = [[0, 3, 0, 0], [3, 2, 0, 0]];
+        let seg: Vec<[u32; 4]> = tiles_a.iter().chain(&tiles_b).chain(&photos_a).copied().collect();
+        assert_eq!(layout.seg, seg);
+        // the results: 640 rows x 2 photos of B plus 2 photos of A x 192 columns, 16 bytes each;
+        // the partials: 5 tiles x 192 columns, 8 bytes each
+        assert_eq!(layout.bytes(), ((640 * 2 + 2 * 192) * 16, 5 * 192 * 8));
+        let empty = BlockLayout::new(SMALL_TILE, &[0, 0], &[10]);
+        assert_eq!((empty.photos_a, empty.photos_b, empty.n_b, empty.tiles_b), (0, 1, 32, 1));
     }
 
     #[test]

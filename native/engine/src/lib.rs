@@ -3,8 +3,8 @@
 //! CPU twins of the descriptor matching (`matching`) and of SIFT (`sift_cpu`), the photos read
 //! as COLMAP reads them (`image`), the feature store (`store`), the queue of units shared by the
 //! GPUs and the CPU (`sched`), the features step built on them (`features`), the minimal solvers
-//! of two views and the geometric verification of a pair (`geometry`) - so that they are built
-//! and tested on their own
+//! of two views and the geometric verification of a pair (`geometry`), the generic preselection
+//! of the pairs to match (`preselect`) - so that they are built and tested on their own
 //! (`cargo test -p ppg_engine`) and timed by the binary `ppg-bench` (folder bench). The Python
 //! extension `ppg_core`, the root package of the workspace, turns numpy arrays into their
 //! arguments.
@@ -21,6 +21,7 @@ pub mod gpu_sift;
 pub mod image;
 pub mod matching;
 pub mod patchmatch;
+pub mod preselect;
 pub mod sched;
 pub mod sift_cpu;
 pub mod store;
