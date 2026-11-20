@@ -6,6 +6,7 @@ total, message)``, whose exception stops the step. Skipped without a core that c
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -489,7 +490,8 @@ def test_a_progress_that_raises_stops_the_matching(trench_store, tmp_path):
 # ------------------------------------------------------------------- the step behind engine="native" (native_match.py)
 def _verified_pairs(db_path) -> dict:
     """The pairs of ``db_path`` with a verified geometry (15 inliers or more, a configuration that is not undefined,
-    degenerate or a watermark), by the names of their photos: ``(config, inliers)``."""
+    degenerate or a watermark), by the names of their photos in the order of the names (not of the image ids, which
+    COLMAP's CPU extractor gives in the order its threads finish the photos): ``(config, inliers)``."""
     import sqlite3
 
     from pyarchinit_photogrammetry.engine import sfm
@@ -501,7 +503,7 @@ def _verified_pairs(db_path) -> dict:
         for pair_id, rows, config in con.execute("SELECT pair_id, rows, config FROM two_view_geometries"):
             a, b = divmod(int(pair_id), sfm.COLMAP_MAX_IMAGES)
             if rows >= 15 and config not in (0, 1, 7):
-                out[names[a], names[b]] = (int(config), int(rows))
+                out[tuple(sorted((names[a], names[b])))] = (int(config), int(rows))
         return out
     finally:
         con.close()
@@ -768,7 +770,13 @@ def test_the_exported_database_imports_back_as_the_stores(processed_native, tmp_
 
 def test_native_preselection_finds_the_classic_pairs(scene_dir, tmp_path, monkeypatch):
     """``generic=True`` on the trench, classic then native: of the pairs verified by the classic database at most
-    2 per cent are not verified in the native one, and the timings hold the stage ``preselection``."""
+    2 per cent are not verified in the native one when both found the points with one SIFT (the classic step with
+    the core's GPU kernel, the native step with it or its CPU twin), at most 4 per cent when the classic step had no
+    GPU and found them with COLMAP's CPU SIFT, and the timings hold the stage ``preselection``. The preselection keeps
+    the 20 strongest pairs of every photo, here of the 25 or so it overlaps, and another detector reorders that cut:
+    the classic step itself, with the GPU kernel against COLMAP's CPU SIFT, loses 7 of these 326 pairs (2.1 per
+    cent; with 45, 51, 75 and 77 inliers in full the strongest of them), the native step with the CPU twin the same
+    four and five weak ones (9, 2.8 per cent), against the classic step with the GPU kernel 3 (0.9 per cent)."""
     from pyarchinit_photogrammetry.engine import sfm
 
     monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "1")
@@ -788,7 +796,8 @@ def test_native_preselection_finds_the_classic_pairs(scene_dir, tmp_path, monkey
     classic_verified = _verified_pairs(classic.data_dir / "sfm" / "database.db")
     verified = _verified_pairs(ours.data_dir / "sfm" / "database.db")
     lost = set(classic_verified) - set(verified)
-    assert classic_verified and len(lost) <= 0.02 * len(classic_verified), (sorted(lost), len(classic_verified))
+    bound = 0.02 if classic.meta["sfm"]["features"] == "gpu" else 0.04  # one SIFT, or COLMAP's CPU SIFT beside it
+    assert classic_verified and len(lost) <= bound * len(classic_verified), (sorted(lost), len(classic_verified))
     assert not (ours.data_dir / "sfm" / "native" / "small").exists()
     assert ours.align_cameras(mapper="incremental") == PHOTOS
 
@@ -824,7 +833,7 @@ def test_a_learned_matcher_or_rigs_fall_back(scene_dir, tmp_path, monkeypatch, c
     _, rig = _project(scene_dir, tmp_path / "rig", photos=faces)
     assert len(rig.cameras) == 2
     for cam in rig.cameras:
-        cam.meta.update(panorama="P.jpg", face=cam.path.split("/")[-2])
+        cam.meta.update(panorama="P.jpg", face=Path(cam.path).parent.name)
     assert native_match.cannot_run(rig, "sift", True) == native_match.RIGS_REASON
     assert native_match.RIGS_REASON == "rigs of 360-degree photos: the native engine does not do them"
     rig.match_photos(quality="high", engine="native")
@@ -1689,3 +1698,26 @@ def test_the_commit_record_survives_a_copy_that_keeps_the_times(tmp_path):
     assert native_match._committed(copy / native_match.STORES, copy / "database.db") is True
     (copy / "database.db").write_bytes(b"another database of another size")
     assert native_match._committed(copy / native_match.STORES, copy / "database.db") is False
+
+
+def test_the_verified_pairs_of_two_databases_compare_whatever_their_image_ids(tmp_path):
+    """COLMAP's CPU extractor numbers the photos in the order its threads finish them, the native export in the order
+    of their names: a pair is keyed by its two names whatever ids, and so whatever order, its photos have."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    def database(path, ids):
+        con = sqlite3.connect(str(path))
+        con.executescript("CREATE TABLE images (image_id INTEGER, name TEXT);"
+                          "CREATE TABLE two_view_geometries (pair_id INTEGER, rows INTEGER, config INTEGER);")
+        con.executemany("INSERT INTO images VALUES (?, ?)", [(i, n) for n, i in ids.items()])
+        a, b = sorted((ids["IMG_0002.jpg"], ids["IMG_0003.jpg"]))
+        con.execute("INSERT INTO two_view_geometries VALUES (?, 40, 2)", (a * sfm.COLMAP_MAX_IMAGES + b,))
+        con.commit()
+        con.close()
+        return path
+
+    by_name = database(tmp_path / "native.db", {"IMG_0002.jpg": 1, "IMG_0003.jpg": 2})
+    by_thread = database(tmp_path / "classic.db", {"IMG_0003.jpg": 1, "IMG_0002.jpg": 2})
+    assert _verified_pairs(by_name) == _verified_pairs(by_thread) == {("IMG_0002.jpg", "IMG_0003.jpg"): (2, 40)}
