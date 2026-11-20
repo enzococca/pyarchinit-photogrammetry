@@ -78,5 +78,10 @@ decoders only `ublox.c` (T. Takasu, T. Suzuki) and `novatel.c` (T. Takasu) are i
 distribution (T. Takasu holds the copyright of its `license.txt`), see `vendor/rtklib/VERSION`. RTKLIB's optional routines
 of the IAU SOFA library (`sofa.c`, a licence of their own) are not included.
 
+The SIFT of the native matching (`gpu_sift.rs`, `sift_cpu.rs`) follows the structure of VLFeat's
+`sift.c` (BSD 2-clause), and the solvers and the LO-RANSAC of its verification follow COLMAP's
+estimators (BSD 3-clause); no file of either is compiled into the extension. Their notices are in
+`NOTICE`.
+
 The Rust crates built into the extension are under licences compatible with the GPL (MIT or
 Apache-2.0: PyO3, numpy, rayon, wgpu, spade and their dependencies).

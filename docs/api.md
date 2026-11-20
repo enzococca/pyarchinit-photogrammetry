@@ -22,7 +22,7 @@ longer explanations follow the table.
 | `add_photos(paths, recursive=False, raw=None, prefer="jpeg")` | files or folders; sensors grouped by body, lens and resolution; the EXIF GPS becomes the camera reference; camera raw files are developed into the project (*Camera raw files*, below) |
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | the raw files of the photos developed again: missing copies, raws that changed, other settings; returns `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
-| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below) |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below); the classic or the native engine (*The native matching*, below) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto")` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
@@ -138,6 +138,64 @@ the alignment there are and only matches the photos added since; `align_cameras(
 registers them into the block, one photo after the other (when nothing can be kept, everything is
 done again). `meta["sfm"]` records what ran: `pair_selection` (`exhaustive`, `generic`,
 `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`, `matcher`.
+
+### The native matching
+
+`match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
+`auto` stays the classic engine until the native matching has passed its gate) does the step with the
+native engine of the core (`engine.native_match`, `ppg_core` API 13): its own SIFT (following VLFeat's,
+as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
+a matching of the pairs in two stages - the points of the largest scales first, then along the
+epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
+preselection did not choose dropped when it has too little. The result is written to COLMAP's
+`database.db` as the classic step writes it, so `align_cameras` runs the classic mapper on it. The
+arguments are those of the classic step; `guided_matching` is ignored (the native matching always
+follows the epipolar lines).
+
+When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
+than API 13, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
+not know - or fails half way, the classic step runs with the same arguments, a line in the log says
+why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. A cancel
+and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it
+(the system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was.
+
+`meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
+`gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
+`dropped`) and `preselection_size`; `gpu`, `gpu_shares`, `gpu_pairs` and `cpu_pairs` name the
+adapters as the classic record does. `meta["timings"]["match_photos"]` has the stages `features`,
+`preselection`, `pairs` and `export`.
+
+Two environment variables: `PPG_NATIVE_DCT=0` decodes every JPEG whole (by default a JPEG is decoded
+at the DCT scale its reduction allows, chosen for the larger of its two reductions - the matching's
+and the preselection's - so that one decoding gives both); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
+and the pairs to the GPUs when there is one. A GPU lost in the middle of the step gives its work back
+to the others; when it was the last one, the CPU takes what is left, also with `PPG_NATIVE_CPU_SHARE=0`.
+A photo or a pair that fails on two devices is given up (the photo without points, the pair dropped)
+with a line in the log. A photo whose reduction - or whose preselection image - is under 8 x 8 pixels
+has no points, and the log says it is too small for the kernels.
+
+The stores live in `<sfm>/native/`: `features/` (the feature store: every photo, its key points in the
+pixels of the full photo with COLMAP's centre and its descriptors), `small/` (the store of the
+preselection, removed at the end of the step) and `matches/` (the match store). A matching works in
+`native.tmp/` and `database.native.tmp.db` and moves them into place only when it has finished: the
+stores first, the database last, the stores carrying a record of the database they go with
+(`commit.json`) until both are in place; whatever a crash leaves is swept at the start of the next
+step so that the stores always go with the database.
+
+`reset=False` continues from the stores when the record of the chunk says `native` with the same
+quality, point limit, masks and photo folder; from a classic database, which is imported into fresh
+stores first; otherwise everything is done again - also when the database is the export of a native
+matching with other settings, which holds key points but no descriptors. The classic step continuing
+a native chunk writes the descriptors of the stores into the database first. Both directions are
+functions of their own: `native_match.export_database(chunk, db_path, descriptors=False)` writes the
+stores to a COLMAP database (keeping the ids of the database it continues), and
+`native_match.import_database(db_path, features_dir, matches_dir)` reads a classic database into the
+stores (the pairs of photos without descriptors left out); both take `progress`, count the pairs and
+can be cancelled.
+
+`ppg bench run PHOTOS OUT --name NAME --engine native` measures the native matching against a run
+with `--engine classic`, and `ppg bench pairs A B` sets the pairs two kept runs verified side by side
+(`benchmark/README.md`, *Measuring the native matching*).
 
 ### Learned points
 

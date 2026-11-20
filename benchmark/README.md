@@ -193,7 +193,12 @@ version 1.10: that is how the 1.10 baseline is measured.
 The gate of the native matching reads it against the classic one on the same set: the seconds of
 the step, the pairs it verifies, the photos the mapper registers from its database, the tie points
 per photo and the reprojection error of the alignment, the metric gates of the synthetic trench. The
-bench measures every one of them with two runs of a set, one per engine, under two names:
+bench measures all of them but two of the metric gates, with two runs of a set, one per engine, under
+two names; of the metric gates it measures the control and check errors of the trench
+(`truth_control_rmse`, `truth_check_rmse`), while the median error of the DEM (under 3 mm) and the
+error of the targets on the orthophoto (under 5 mm) come from the metric test of pytest with the
+native matching (`test_the_metric_gates_hold_with_native_matching`; the bench's trench also builds
+its depth maps at `medium`, the test at `high`):
 
 ```bash
 ppg bench run PHOTOS OUT --name SET-classic --engine classic --seed 1 --repeat 3 --keep
@@ -211,7 +216,10 @@ ppg bench pairs OUT/SET-classic-1 OUT/SET-native-1
   learned matcher, rigs). The settings also keep what the record of a native matching says of
   itself - `engine`, `features` (`gpu`, `cpu` or `gpu+cpu`: where the key points were found) and
   `routes` (how many pairs went the guided way, the brute-force way, or were dropped) -; those are
-  facts of the run, not settings, and do not break a baseline.
+  facts of the run, not settings, and do not break a baseline. The record of a classic matching
+  names no engine, so `settings.engine` is `null` in a classic run: what ran is the `engine` of the
+  step (`steps[i].engine.used`), which also says a fallback. Both engines name a GPU as its adapter
+  calls itself (`gpu`, and the keys of `gpu_shares`).
 * `--steps match` runs the matching and stops (the default targets are not detected, the mapper
   does not run): the time of the native matching against the classic one on a large set, where the
   alignment would take longer than the step measured. Its record has the step `match_photos` with
