@@ -24,16 +24,31 @@
 //! a lock, the file written outside it). `open` reads the header of every file the index names
 //! and refuses the store at the first whose magic, version or length is wrong, naming the file
 //! and what was read.
+//!
+//! The match store ([`MatchStore`]) keeps the result of every pair the matching step did - its
+//! matches, its verification and the route it took - in a few files with an index, in the same
+//! folder style: `index.json` (`{"version": 1, "next": N, "segments": [F, ...]}`) names segment
+//! files `00000001.ppgm`, each a header of 16 bytes (the magic `PPGM`, the version 1, the number
+//! of pairs, the bytes of the table of contents), a table of contents (the two names of each
+//! pair, the offset and length of its record) and the records. `put` buffers the records; a
+//! buffer of [`SEGMENT_BYTES`] or more is sealed into a new segment file written to a temporary
+//! name and renamed into place, then the index is rewritten the same way; [`MatchStore::flush`]
+//! seals what is buffered and dropping the store does too. A pair put again replaces its result
+//! (the latest record wins, within a segment and across them). `open` reads the header and the
+//! table of every segment the index names and refuses the store at the first whose magic,
+//! version or length is wrong, naming the file and what was read.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use memmap2::Mmap;
+use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 use serde_json::{json, Map, Value};
 
+use crate::geometry::two_view::{Config, TwoView};
 use crate::gpu_sift::{Options, DESC};
 
 #[cfg(target_endian = "big")]
@@ -524,5 +539,492 @@ impl FeatureStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
             Err(e) => Err(e),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The match store
+
+/// The first four bytes of a segment file of the match store.
+pub const MATCH_MAGIC: [u8; 4] = *b"PPGM";
+/// The version of the segment files and of the index of the match store.
+pub const MATCH_VERSION: u32 = 1;
+/// The extension of a segment file.
+pub const MATCH_EXTENSION: &str = "ppgm";
+/// The buffered records at which `put` seals a segment: a few hundred pairs of a large project
+/// (a pair of two thousand matches and their inliers is about 30 KB), so that a step of ten
+/// thousand pairs is a few dozen files and a crash loses at most the pairs of one buffer.
+pub const SEGMENT_BYTES: usize = 8 << 20;
+
+const SEGMENT_HEADER: usize = 16;
+const S_MAGIC: usize = 0;
+const S_VERSION: usize = 4;
+const S_COUNT: usize = 8;
+const S_TOC_BYTES: usize = 12;
+
+// a record: the route, the configuration, the counts, the flags of the optional parts, a reserved
+// word, then the matches, the inliers (8 bytes each), the models (9 f64 each) and the pose (7 f64)
+const RECORD_HEADER: usize = 24;
+const R_ROUTE: usize = 0;
+const R_CONFIG: usize = 4;
+const R_MATCHES: usize = 8;
+const R_INLIERS: usize = 12;
+const R_FLAGS: usize = 16;
+const HAS_E: u32 = 1;
+const HAS_F: u32 = 2;
+const HAS_H: u32 = 4;
+const HAS_POSE: u32 = 8;
+const MATRIX_BYTES: usize = 9 * 8;
+const POSE_BYTES: usize = 7 * 8;
+
+/// How the matches of a pair were found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// The first stage (the largest scales) was trusted and the second matched along the
+    /// epipolar lines.
+    Guided,
+    /// The first stage was not trusted: every point matched against every point.
+    BruteForce,
+    /// The first stage found too little and the pair was not preselected: nothing matched.
+    Dropped,
+    /// Read from a COLMAP database (the matches of the classic step).
+    Imported,
+}
+
+impl Route {
+    fn code(self) -> u32 {
+        match self {
+            Route::Guided => 0,
+            Route::BruteForce => 1,
+            Route::Dropped => 2,
+            Route::Imported => 3,
+        }
+    }
+
+    fn from_code(code: u32) -> Option<Route> {
+        [Route::Guided, Route::BruteForce, Route::Dropped, Route::Imported].into_iter().find(|r| r.code() == code)
+    }
+
+    /// The word of the route, as a report names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Guided => "guided",
+            Route::BruteForce => "brute_force",
+            Route::Dropped => "dropped",
+            Route::Imported => "imported",
+        }
+    }
+}
+
+/// What the matching of a pair gave: the matches that went to the verification (pairs of key
+/// point indices into the first and the second photo, capped to the step's `max_num_matches`),
+/// the verification itself (`two_view::verify`: the configuration, the inliers among the
+/// matches, the models) and the route taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PairResult {
+    pub matches: Vec<[u32; 2]>,
+    pub two_view: TwoView,
+    pub route: Route,
+}
+
+fn put_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn put_f64(buf: &mut Vec<u8>, v: f64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn get_u64(buf: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(buf[at..at + 8].try_into().expect("eight bytes"))
+}
+
+fn get_f64(buf: &[u8], at: usize) -> f64 {
+    f64::from_le_bytes(buf[at..at + 8].try_into().expect("eight bytes"))
+}
+
+fn put_matrix(buf: &mut Vec<u8>, m: &Matrix3<f64>) {
+    for row in 0..3 {
+        for col in 0..3 {
+            put_f64(buf, m[(row, col)]);
+        }
+    }
+}
+
+fn get_matrix(buf: &[u8], at: usize) -> Matrix3<f64> {
+    Matrix3::from_fn(|row, col| get_f64(buf, at + (row * 3 + col) * 8))
+}
+
+/// The bytes of a pair result.
+fn encode_result(m: &PairResult) -> Vec<u8> {
+    let tv = &m.two_view;
+    let flags = if tv.e.is_some() { HAS_E } else { 0 }
+        | if tv.f.is_some() { HAS_F } else { 0 }
+        | if tv.h.is_some() { HAS_H } else { 0 }
+        | if tv.cam2_from_cam1.is_some() { HAS_POSE } else { 0 };
+    let most = RECORD_HEADER + (m.matches.len() + tv.inliers.len()) * 8 + 3 * MATRIX_BYTES + POSE_BYTES;
+    let mut buf = Vec::with_capacity(most);
+    buf.extend_from_slice(&m.route.code().to_le_bytes());
+    buf.extend_from_slice(&(tv.config as u32).to_le_bytes());
+    buf.extend_from_slice(&(m.matches.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&(tv.inliers.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&flags.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(bytemuck::cast_slice(&m.matches));
+    buf.extend_from_slice(bytemuck::cast_slice(&tv.inliers));
+    for model in [&tv.e, &tv.f, &tv.h].into_iter().flatten() {
+        put_matrix(&mut buf, model);
+    }
+    if let Some((q, t)) = &tv.cam2_from_cam1 {
+        for v in [q.w, q.i, q.j, q.k, t.x, t.y, t.z] {
+            put_f64(&mut buf, v);
+        }
+    }
+    buf
+}
+
+/// The pair result of the bytes `buf`; `what` names the record in an error.
+fn decode_result(buf: &[u8], what: &str) -> io::Result<PairResult> {
+    if buf.len() < RECORD_HEADER {
+        return Err(invalid(format!("{what}: {} bytes, no record header of {RECORD_HEADER}", buf.len())));
+    }
+    let route = get_u32(buf, R_ROUTE);
+    let route = Route::from_code(route).ok_or_else(|| invalid(format!("{what}: route {route} unknown")))?;
+    let config = get_u32(buf, R_CONFIG);
+    let config = Config::from_u32(config).ok_or_else(|| invalid(format!("{what}: configuration {config} unknown")))?;
+    let n_matches = get_u32(buf, R_MATCHES) as usize;
+    let n_inliers = get_u32(buf, R_INLIERS) as usize;
+    let flags = get_u32(buf, R_FLAGS);
+    let models = [HAS_E, HAS_F, HAS_H].iter().filter(|&&f| flags & f != 0).count();
+    let expected = RECORD_HEADER + (n_matches + n_inliers) * 8 + models * MATRIX_BYTES
+        + if flags & HAS_POSE != 0 { POSE_BYTES } else { 0 };
+    if buf.len() != expected {
+        return Err(invalid(format!("{what}: {} bytes, {expected} expected for its counts", buf.len())));
+    }
+    let mut at = RECORD_HEADER;
+    let pairs = |at: usize, n: usize| -> Vec<[u32; 2]> {
+        buf[at..at + n * 8].chunks_exact(8).map(|c| [get_u32(c, 0), get_u32(c, 4)]).collect()
+    };
+    let matches = pairs(at, n_matches);
+    at += n_matches * 8;
+    let inliers = pairs(at, n_inliers);
+    at += n_inliers * 8;
+    let mut model = |flag: u32| -> Option<Matrix3<f64>> {
+        if flags & flag == 0 {
+            return None;
+        }
+        let m = get_matrix(buf, at);
+        at += MATRIX_BYTES;
+        Some(m)
+    };
+    let (e, f, h) = (model(HAS_E), model(HAS_F), model(HAS_H));
+    let cam2_from_cam1 = (flags & HAS_POSE != 0).then(|| {
+        let v: Vec<f64> = (0..7).map(|k| get_f64(buf, at + k * 8)).collect();
+        // the quaternion as written (unit already): no renormalisation, so a result read back is
+        // the one written, bit for bit
+        (UnitQuaternion::new_unchecked(Quaternion::new(v[0], v[1], v[2], v[3])), Vector3::new(v[4], v[5], v[6]))
+    });
+    Ok(PairResult { matches, two_view: TwoView { config, inliers, e, f, h, cam2_from_cam1 }, route })
+}
+
+/// An entry of the table of contents of a segment: the pair and where its record is in the file.
+#[derive(Clone, Debug)]
+struct TocEntry {
+    a: String,
+    b: String,
+    offset: u64,
+    bytes: u32,
+}
+
+fn toc_entry_bytes(e: &TocEntry) -> usize {
+    4 + e.a.len() + 4 + e.b.len() + 8 + 4
+}
+
+fn encode_toc(entries: &[TocEntry]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(entries.iter().map(toc_entry_bytes).sum());
+    for e in entries {
+        buf.extend_from_slice(&(e.a.len() as u32).to_le_bytes());
+        buf.extend_from_slice(e.a.as_bytes());
+        buf.extend_from_slice(&(e.b.len() as u32).to_le_bytes());
+        buf.extend_from_slice(e.b.as_bytes());
+        put_u64(&mut buf, e.offset);
+        buf.extend_from_slice(&e.bytes.to_le_bytes());
+    }
+    buf
+}
+
+/// The table of contents of a segment out of its bytes: `count` entries, each record within
+/// `file_len`.
+fn decode_toc(buf: &[u8], count: usize, file_len: u64, path: &Path) -> io::Result<Vec<TocEntry>> {
+    let name = path.display();
+    let mut at = 0;
+    let mut entries = Vec::with_capacity(count);
+    let text = |at: usize, len: usize| -> io::Result<String> {
+        let short = || invalid(format!("{name}: the table of contents is cut short"));
+        let bytes = buf.get(at..at + len).ok_or_else(short)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| invalid(format!("{name}: a photo name is not UTF-8")))
+    };
+    let word = |at: usize| -> io::Result<u32> {
+        buf.get(at..at + 4)
+            .map(|b| get_u32(b, 0))
+            .ok_or_else(|| invalid(format!("{name}: the table of contents is cut short")))
+    };
+    for _ in 0..count {
+        let len_a = word(at)? as usize;
+        let a = text(at + 4, len_a)?;
+        at += 4 + len_a;
+        let len_b = word(at)? as usize;
+        let b = text(at + 4, len_b)?;
+        at += 4 + len_b;
+        let offset = buf
+            .get(at..at + 8)
+            .map(|b| get_u64(b, 0))
+            .ok_or_else(|| invalid(format!("{name}: the table of contents is cut short")))?;
+        let bytes = word(at + 8)?;
+        at += 12;
+        if offset.checked_add(u64::from(bytes)).is_none_or(|end| end > file_len) {
+            let what = format!("{name}: the record of ({a:?}, {b:?}) at {offset} of {bytes} bytes is beyond the \
+                                {file_len} bytes of the file");
+            return Err(invalid(what));
+        }
+        entries.push(TocEntry { a, b, offset, bytes });
+    }
+    if at != buf.len() {
+        return Err(invalid(format!("{name}: {} bytes after the table of contents", buf.len() - at)));
+    }
+    Ok(entries)
+}
+
+/// The header and the table of contents of the segment `path`, checked: the magic, the version,
+/// the length of the table and every record within the file.
+fn read_toc(path: &Path) -> io::Result<Vec<TocEntry>> {
+    let describe = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let name = path.display();
+    let mut file = File::open(path).map_err(describe)?;
+    let file_len = file.metadata().map_err(describe)?.len();
+    let mut header = [0u8; SEGMENT_HEADER];
+    let mut got = 0;
+    while got < SEGMENT_HEADER {
+        match file.read(&mut header[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(describe(e)),
+        }
+    }
+    if got < SEGMENT_HEADER {
+        return Err(invalid(format!("{name}: {got} bytes, no header of {SEGMENT_HEADER}")));
+    }
+    if header[S_MAGIC..S_MAGIC + 4] != MATCH_MAGIC {
+        let read = String::from_utf8_lossy(&header[S_MAGIC..S_MAGIC + 4]).into_owned();
+        return Err(invalid(format!("{name}: magic {read:?} read, PPGM expected: not a segment of a match store")));
+    }
+    let version = get_u32(&header, S_VERSION);
+    if version != MATCH_VERSION {
+        return Err(invalid(format!("{name}: segment version {version} read, {MATCH_VERSION} expected")));
+    }
+    let count = get_u32(&header, S_COUNT) as usize;
+    let toc_bytes = get_u32(&header, S_TOC_BYTES) as usize;
+    if (SEGMENT_HEADER + toc_bytes) as u64 > file_len {
+        let what = format!("{name}: a table of contents of {toc_bytes} bytes in a file of {file_len}");
+        return Err(invalid(what));
+    }
+    let mut toc = vec![0u8; toc_bytes];
+    file.read_exact(&mut toc).map_err(describe)?;
+    decode_toc(&toc, count, file_len, path)
+}
+
+/// Where the record of a pair is: in the segment `segment` of the index (an index into its
+/// list), or still buffered (`None`), at `offset` (from the start of the file, or of the
+/// buffer) for `bytes`.
+#[derive(Clone, Copy, Debug)]
+struct Located {
+    segment: Option<usize>,
+    offset: u64,
+    bytes: u32,
+}
+
+/// The index of a match store and the records not yet sealed into a segment.
+struct MatchIndex {
+    next: u64,
+    segments: Vec<String>,
+    pairs: BTreeMap<(String, String), Located>,
+    /// The entries of the segment being filled, their offsets into `data`.
+    pending: Vec<TocEntry>,
+    data: Vec<u8>,
+}
+
+impl MatchIndex {
+    fn to_json(&self) -> Value {
+        json!({"version": MATCH_VERSION, "next": self.next, "segments": self.segments})
+    }
+
+    fn from_json(value: &Value, path: &Path) -> io::Result<MatchIndex> {
+        let name = path.display();
+        let version = value["version"].as_u64().ok_or_else(|| invalid(format!("{name}: no version")))?;
+        if version != u64::from(MATCH_VERSION) {
+            return Err(invalid(format!("{name}: index version {version}, {MATCH_VERSION} expected")));
+        }
+        let next = value["next"].as_u64().ok_or_else(|| invalid(format!("{name}: no next file number")))?;
+        let listed = value["segments"].as_array().ok_or_else(|| invalid(format!("{name}: no segments")))?;
+        let segments = listed
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| invalid(format!("{name}: a segment without a name"))))
+            .collect::<io::Result<Vec<String>>>()?;
+        Ok(MatchIndex { next, segments, pairs: BTreeMap::new(), pending: Vec::new(), data: Vec::new() })
+    }
+
+    /// The index written to `dir`, whole: a temporary file renamed into place.
+    fn write(&self, dir: &Path) -> io::Result<()> {
+        let bytes = serde_json::to_vec_pretty(&self.to_json()).map_err(|e| invalid(e.to_string()))?;
+        write_whole(&dir.join(format!("{INDEX_FILE}.tmp")), &dir.join(INDEX_FILE), &bytes)
+    }
+
+    /// The buffered records sealed into a new segment file of `dir` (written whole to a
+    /// temporary name, renamed into place), the index rewritten; nothing when nothing is
+    /// buffered.
+    fn seal(&mut self, dir: &Path) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let file = format!("{:08}.{MATCH_EXTENSION}", self.next);
+        let toc_bytes: usize = self.pending.iter().map(toc_entry_bytes).sum();
+        let base = (SEGMENT_HEADER + toc_bytes) as u64;
+        let entries: Vec<TocEntry> =
+            self.pending.iter().map(|e| TocEntry { offset: e.offset + base, ..e.clone() }).collect();
+        let mut bytes = Vec::with_capacity(base as usize + self.data.len());
+        bytes.extend_from_slice(&MATCH_MAGIC);
+        bytes.extend_from_slice(&MATCH_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(toc_bytes as u32).to_le_bytes());
+        bytes.extend_from_slice(&encode_toc(&entries));
+        bytes.extend_from_slice(&self.data);
+        write_whole(&dir.join(format!("{file}.tmp")), &dir.join(&file), &bytes)?;
+        // the file is in place: the index knows it from now on, on disk once written below (a
+        // failure there leaves the file an orphan until the next successful write names it)
+        self.next += 1;
+        self.segments.push(file);
+        let segment = self.segments.len() - 1;
+        for e in &entries {
+            let located = Located { segment: Some(segment), offset: e.offset, bytes: e.bytes };
+            self.pairs.insert((e.a.clone(), e.b.clone()), located);
+        }
+        self.pending.clear();
+        self.data.clear();
+        self.write(dir)
+    }
+}
+
+/// A match store: the folder, and its index and buffered records under a lock.
+pub struct MatchStore {
+    dir: PathBuf,
+    index: Mutex<MatchIndex>,
+}
+
+impl MatchStore {
+    /// A new store in `dir` (created when missing). A folder that holds a store already is
+    /// refused (`AlreadyExists`): the caller removes it first when it means to start over.
+    pub fn create(dir: &Path) -> io::Result<MatchStore> {
+        fs::create_dir_all(dir)?;
+        if dir.join(INDEX_FILE).exists() {
+            let what = format!("{}: a match store is there already", dir.display());
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, what));
+        }
+        let index =
+            MatchIndex { next: 1, segments: Vec::new(), pairs: BTreeMap::new(), pending: Vec::new(), data: Vec::new() };
+        index.write(dir)?;
+        Ok(MatchStore { dir: dir.to_path_buf(), index: Mutex::new(index) })
+    }
+
+    /// The store in `dir`: its index read, the header and the table of contents of every segment
+    /// it names checked; an error names the first file that is wrong and what was read in it.
+    pub fn open(dir: &Path) -> io::Result<MatchStore> {
+        let path = dir.join(INDEX_FILE);
+        let bytes = fs::read(&path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
+        let mut index = MatchIndex::from_json(&value, &path)?;
+        for (segment, file) in index.segments.iter().enumerate() {
+            for e in read_toc(&dir.join(file))? {
+                // in the order of the files and of the entries: the latest record of a pair wins
+                index.pairs.insert((e.a, e.b), Located { segment: Some(segment), offset: e.offset, bytes: e.bytes });
+            }
+        }
+        Ok(MatchStore { dir: dir.to_path_buf(), index: Mutex::new(index) })
+    }
+
+    /// The folder of the store.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn index(&self) -> MutexGuard<'_, MatchIndex> {
+        self.index.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The result of the pair `(a, b)` - the two names in that order; the other order is another
+    /// pair - put into the store, replacing what it held for the pair. Thread-safe. The record is
+    /// buffered; a buffer of [`SEGMENT_BYTES`] or more is sealed into a segment file at once
+    /// (the error of that write is this call's).
+    pub fn put(&self, a: &str, b: &str, m: &PairResult) -> io::Result<()> {
+        let record = encode_result(m);
+        let mut index = self.index();
+        let offset = index.data.len() as u64;
+        let too_long = |_| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("({a}, {b}): a record of {} bytes", record.len()))
+        };
+        let bytes = u32::try_from(record.len()).map_err(too_long)?;
+        index.data.extend_from_slice(&record);
+        index.pending.push(TocEntry { a: a.to_owned(), b: b.to_owned(), offset, bytes });
+        index.pairs.insert((a.to_owned(), b.to_owned()), Located { segment: None, offset, bytes });
+        if index.data.len() >= SEGMENT_BYTES {
+            index.seal(&self.dir)?;
+        }
+        Ok(())
+    }
+
+    /// The buffered records sealed into a segment file and the index rewritten: everything put
+    /// so far is on disk. Dropping the store does the same, without a word on a failure.
+    pub fn flush(&self) -> io::Result<()> {
+        self.index().seal(&self.dir)
+    }
+
+    /// The result of the pair `(a, b)`, as put; `None` when the store has no such pair (or its
+    /// record cannot be read any more: `open` checked every table of contents against its file).
+    pub fn get(&self, a: &str, b: &str) -> Option<PairResult> {
+        let index = self.index();
+        let located = *index.pairs.get(&(a.to_owned(), b.to_owned()))?;
+        let what = format!("({a}, {b})");
+        let (offset, bytes) = (located.offset as usize, located.bytes as usize);
+        match located.segment {
+            None => decode_result(&index.data[offset..offset + bytes], &what).ok(),
+            Some(segment) => {
+                let path = self.dir.join(&index.segments[segment]);
+                let mut file = File::open(&path).ok()?;
+                file.seek(SeekFrom::Start(located.offset)).ok()?;
+                let mut buf = vec![0u8; bytes];
+                file.read_exact(&mut buf).ok()?;
+                decode_result(&buf, &format!("{}: {what}", path.display())).ok()
+            }
+        }
+    }
+
+    /// The pairs of the store, each as its two names in the order they were put, sorted.
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        self.index().pairs.keys().cloned().collect()
+    }
+
+    /// How many pairs the store holds.
+    pub fn len(&self) -> usize {
+        self.index().pairs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Drop for MatchStore {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
