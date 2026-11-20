@@ -15,7 +15,7 @@
 //! exception the callback raises sets the cancel flag of the step, which ends after the units
 //! being done (what they did is on disk), and comes out again as it was (a panic of the engine
 //! after it goes with it as a note, where Python has them). An error of the engine or a panic is
-//! a RuntimeError with its message; what the bindings check before any work - a camera model the
+//! a RuntimeError with its message - an OSError with `errno.ENOSPC` when the disk is full; what the bindings check before any work - a camera model the
 //! engine does not know, an option that is not one, arrays of the wrong shape - is a ValueError;
 //! a photo or a pair a store does not hold is a KeyError or None, as each reader says.
 //!
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -161,18 +161,31 @@ impl Relay<'_> {
     }
 }
 
-/// The seconds of `min_interval` as a duration; a negative or not finite number is a ValueError.
+/// The seconds of `min_interval` as a duration; a negative or not finite number, or one too large
+/// for a duration, is a ValueError.
 fn interval(min_interval: f64) -> PyResult<Duration> {
-    if !(min_interval.is_finite() && min_interval >= 0.0) {
-        return Err(PyValueError::new_err(format!("min_interval must be seconds, 0 or more, not {min_interval}")));
+    Duration::try_from_secs_f64(min_interval)
+        .map_err(|_| PyValueError::new_err(format!("min_interval must be seconds, 0 or more, not {min_interval}")))
+}
+
+/// Python's `errno.ENOSPC`, the same number on every system Python runs on.
+const ENOSPC: i32 = 28;
+
+/// The error of a step of the engine for Python: an `OSError` with `errno.ENOSPC` when its text says
+/// the disk is full (`store::storage_full`: a full disk is not a failure another engine can work
+/// around), a RuntimeError otherwise.
+fn engine_error(problem: String) -> PyErr {
+    if ppg_engine::store::storage_full(&problem) {
+        PyOSError::new_err((ENOSPC, problem))
+    } else {
+        PyRuntimeError::new_err(problem)
     }
-    Ok(Duration::from_secs_f64(min_interval))
 }
 
 /// A step of the engine run without the GIL: `f` gets the cancel flag of the step and its progress
 /// callback (`progress` relayed by a [`Relay`] at most every `interval`, with `message` as the
 /// third argument of every call). The error of the step, or a panic, is a RuntimeError with the
-/// message, unless the progress callback raised: then its exception comes out as it was, the step
+/// message (the error of a full disk an OSError, [`engine_error`]), unless the progress callback raised: then its exception comes out as it was, the step
 /// having been cancelled for it, a panic that followed attached to it as a note.
 fn run_native<T: Send>(py: Python<'_>, progress: Option<&Py<PyAny>>, message: &'static str, interval: Duration,
                        f: impl FnOnce(&AtomicBool, &(dyn Fn(usize, usize) + Sync)) -> Result<T, String> + Send)
@@ -188,7 +201,7 @@ fn run_native<T: Send>(py: Python<'_>, progress: Option<&Py<PyAny>>, message: &'
     let raised = lock(&relay.raised).take();
     match outcome {
         Ok(Ok(value)) => raised.map_or(Ok(value), Err),
-        Ok(Err(problem)) => Err(raised.unwrap_or_else(|| PyRuntimeError::new_err(problem))),
+        Ok(Err(problem)) => Err(raised.unwrap_or_else(|| engine_error(problem))),
         Err(payload) => {
             let text = format!("{message}: {}", panic_text(&*payload));
             match raised {

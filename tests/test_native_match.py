@@ -5,6 +5,8 @@ reduced as COLMAP reads them. Every binding releases the GIL and reports through
 total, message)``, whose exception stops the step. Skipped without a core that carries them."""
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -190,9 +192,11 @@ def test_progress_that_raises_stops_the_step(scene_dir, tmp_path):
 def test_the_progress_is_throttled(scene_dir, tmp_path):
     """With the default ``min_interval`` of half a second the callback is called at the start, then at most every
     half second (the GIL taken for those calls only, not once per photo), and with the last state when the step
-    ends: fewer calls than photos, the first ``(0, n)``, the last ``(n, n)``, half a second at least between two
-    calls but the last, ``done`` never falling. A callback that sleeps makes every call slow, so a step that
-    called it once per photo would show in the count and in the time."""
+    ends: the first ``(0, n)``, the last ``(n, n)``, no more calls than half seconds elapsed (plus the first and
+    the last), half a second at least between two calls but the last, ``done`` never falling - no bound on the
+    time the step takes, which a busy computer stretches. A callback that sleeps makes every call slow, so a step
+    that called it once per photo would show in the count and in the gaps. A ``min_interval`` that is not a
+    number of seconds a duration holds is a ValueError."""
     import time
 
     calls = []
@@ -206,14 +210,15 @@ def test_the_progress_is_throttled(scene_dir, tmp_path):
                              SMALL_POINTS, [], True, True, 2, slow_progress)
     elapsed = time.monotonic() - started
     assert calls[0][1:] == (0, PHOTOS) and calls[-1][1:] == (PHOTOS, PHOTOS)
-    assert 2 <= len(calls) <= elapsed / 0.5 + 2 < PHOTOS + 1, (len(calls), elapsed)
+    assert 2 <= len(calls) <= elapsed / 0.5 + 2, (len(calls), elapsed)
     gaps = [b[0] - a[0] for a, b in zip(calls, calls[1:-1])]  # between the calls, the last one excepted
     assert all(gap >= 0.45 for gap in gaps), gaps
     done = [d for _, d, _ in calls]
     assert done == sorted(done)
-    with pytest.raises(ValueError, match="min_interval"):
-        ppg_core.native_features(str(tmp_path / "g"), None, [], MAX_FEATURES, SMALL_POINTS, [], True, True, 2, None,
-                                 min_interval=-1.0)
+    for absurd in (-1.0, float("nan"), float("inf"), 1e300):
+        with pytest.raises(ValueError, match="min_interval"):
+            ppg_core.native_features(str(tmp_path / "g"), None, [], MAX_FEATURES, SMALL_POINTS, [], True, True, 2,
+                                     None, min_interval=absurd)
 
 
 def test_a_photo_given_as_pixels(scene_dir, tmp_path):
@@ -320,6 +325,26 @@ def test_the_store_is_written_and_read_from_python(tmp_path):
         ppg_core.native_store_write(store, "c.jpg", kp[:5], desc[:5, :64].copy(), 1200, 900, None)
     with pytest.raises(ValueError, match="5 key points"):
         ppg_core.native_store_write(store, "c.jpg", kp[:5], desc[:6], 1200, 900, None)
+
+
+@pytest.mark.skipif(not os.path.exists("/dev/full"), reason="a device that is always full (Linux's /dev/full)")
+def test_a_full_disk_under_the_store_is_an_oserror_of_enospc(tmp_path):
+    """A write of the store that the system refuses for a full disk comes out of the core as an ``OSError`` with
+    ``errno.ENOSPC`` - a full disk, which no engine can go on with - not as the RuntimeError of the other failures:
+    the next feature file of the store is a link to ``/dev/full``, whose every write fails with ENOSPC."""
+    import errno
+
+    rng = np.random.default_rng(2)
+    store = tmp_path / "store"
+    kp = np.column_stack([rng.uniform(0, 640, 50), rng.uniform(0, 480, 50), np.ones(50), np.zeros(50)])
+    kp = kp.astype(np.float32)
+    desc = rng.integers(0, 256, (50, 128), np.uint8)
+    ppg_core.native_store_write(str(store), "a.jpg", kp, desc, 640, 480, None)  # the first file: 00000001.ppgf
+    os.symlink("/dev/full", store / "00000002.ppgf")
+    with pytest.raises(OSError) as raised:
+        ppg_core.native_store_write(str(store), "b.jpg", kp, desc, 640, 480, None)
+    assert raised.value.errno == errno.ENOSPC, raised.value
+    assert ppg_core.native_store_names(str(store)) == ["a.jpg"]
 
 
 # ----------------------------------------------------------------------------------------- the preselection
