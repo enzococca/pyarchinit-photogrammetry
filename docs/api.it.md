@@ -164,8 +164,8 @@ com'era.
 
 `meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
-`dropped`) e `preselection_size`; `gpu`, `gpu_shares`, `gpu_pairs` e `cpu_pairs` nominano gli adattatori
-come il record classico. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
+`dropped`) e `preselection_size`; `gpu` e le chiavi di `gpu_shares` nominano gli adattatori come il
+record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie fatte da ciascuno. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
 `pairs` ed `export`.
 
 Due variabili d'ambiente: `PPG_NATIVE_DCT=0` decodifica ogni JPEG per intero (di norma un JPEG viene
@@ -173,7 +173,7 @@ decodificato alla scala DCT che la sua riduzione permette, scelta per la maggior
 riduzioni - quella del matching e quella della preselezione - così una sola decodifica dà entrambe);
 `PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una. Una GPU persa a metà
 del passo restituisce il suo lavoro alle altre; se era l'ultima, la CPU prende quello che resta, anche
-con `PPG_NATIVE_CPU_SHARE=0`. Una foto o una coppia che fallisce su due dispositivi viene lasciata
+con `PPG_NATIVE_CPU_SHARE=0`. Una foto o una coppia che fallisce su un dispositivo e poi anche sulla CPU viene lasciata
 (la foto senza punti, la coppia scartata) con una riga nel log. Una foto la cui riduzione - o la cui
 immagine di preselezione - è sotto 8 x 8 pixel non ha punti, e il log dice che è troppo piccola per i
 kernel.
@@ -183,8 +183,12 @@ chiave nei pixel della foto intera con il centro di COLMAP e i suoi descrittori)
 della preselezione, tolto alla fine del passo) e `matches/` (l'archivio delle corrispondenze). Un
 matching lavora in `native.tmp/` e `database.native.tmp.db` e li mette al loro posto solo quando ha
 finito: prima gli archivi, per ultimo il database, con negli archivi un record del database a cui
-appartengono (`commit.json`) finché non sono a posto entrambi; quello che un arresto improvviso lascia
-viene ripulito all'inizio del passo successivo, così gli archivi vanno sempre con il database.
+appartengono (`commit.json`: la dimensione e l'ora di modifica del database) finché non sono a posto
+entrambi; quello che un arresto improvviso lascia viene ripulito all'inizio del passo successivo. La
+pulizia tiene gli archivi che vanno con il database al suo posto, o li toglie quando non può dirlo (si
+rifà allora il matching di ogni foto); un database la cui dimensione o ora di modifica è cambiata tra
+l'arresto e la pulizia (una copia che non tiene le ore) può lasciare gli archivi vecchi accanto al
+database nuovo fino al matching successivo, che riscrive il database dagli archivi.
 
 `reset=False` continua dagli archivi quando il record del chunk dice `native` con la stessa qualità,
 lo stesso limite di punti, le stesse maschere e la stessa cartella delle foto; da un database classico,

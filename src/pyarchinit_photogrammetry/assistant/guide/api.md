@@ -161,8 +161,8 @@ and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whi
 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
-`dropped`) and `preselection_size`; `gpu`, `gpu_shares`, `gpu_pairs` and `cpu_pairs` name the
-adapters as the classic record does. `meta["timings"]["match_photos"]` has the stages `features`,
+`dropped`) and `preselection_size`; `gpu` and the keys of `gpu_shares` name the adapters as the
+classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs each did. `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
 Two environment variables: `PPG_NATIVE_DCT=0` decodes every JPEG whole (by default a JPEG is decoded
@@ -170,7 +170,7 @@ at the DCT scale its reduction allows, chosen for the larger of its two reductio
 and the preselection's - so that one decoding gives both); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
 and the pairs to the GPUs when there is one. A GPU lost in the middle of the step gives its work back
 to the others; when it was the last one, the CPU takes what is left, also with `PPG_NATIVE_CPU_SHARE=0`.
-A photo or a pair that fails on two devices is given up (the photo without points, the pair dropped)
+A photo or a pair that fails on a device and then on the CPU too is given up (the photo without points, the pair dropped)
 with a line in the log. A photo whose reduction - or whose preselection image - is under 8 x 8 pixels
 has no points, and the log says it is too small for the kernels.
 
@@ -179,8 +179,12 @@ pixels of the full photo with COLMAP's centre and its descriptors), `small/` (th
 preselection, removed at the end of the step) and `matches/` (the match store). A matching works in
 `native.tmp/` and `database.native.tmp.db` and moves them into place only when it has finished: the
 stores first, the database last, the stores carrying a record of the database they go with
-(`commit.json`) until both are in place; whatever a crash leaves is swept at the start of the next
-step so that the stores always go with the database.
+(`commit.json`: the size and time of change of the database) until both are in place; whatever a
+crash leaves is swept at the start of the next step. The sweep keeps the stores that go with the
+database in place, or removes them when it cannot tell (every photo is then matched again); a
+database whose size or time changed between the crash and the sweep (a copy that does not keep the
+times) can leave the old stores beside the new database until the next matching, which rewrites the
+database from the stores.
 
 `reset=False` continues from the stores when the record of the chunk says `native` with the same
 quality, point limit, masks and photo folder; from a classic database, which is imported into fresh
