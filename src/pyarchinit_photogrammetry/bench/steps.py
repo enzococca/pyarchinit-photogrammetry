@@ -2,11 +2,13 @@
 
     python -m pyarchinit_photogrammetry.bench.steps <job.json>
 
-The job names the local photos, the work folder, the chain (``align`` or ``all``), the mapper of the alignment (one of
-:data:`MAPPERS`) and, when the set has them, the targets to detect and the reference to import. The child makes a
-project in the work folder, adds the photos and runs public methods of :class:`..core.chunk.Chunk` only, in the order
-``ppg process`` runs them (:data:`ALL_STEPS`; a test keeps the two equal) with the defaults of today written out
-(:data:`ARGUMENTS`), so that a record says what ran. It rewrites ``result.json`` when a step starts and when it ends,
+The job names the local photos, the work folder, the chain (``align``, ``all`` or ``match``, :data:`CHAINS`), the
+mapper of the alignment (one of :data:`MAPPERS`), the engine of the matching (one of :data:`ENGINES`; the alignment
+and the depth maps run classic whatever the job asks: the bench measures the matching) and, when the set has them,
+the targets to detect and the reference to import. The child makes a project in the work folder, adds the photos and
+runs public methods of :class:`..core.chunk.Chunk` only, in the order ``ppg process`` runs them (:data:`ALL_STEPS`; a
+test keeps the two equal) with the defaults of today written out (:data:`ARGUMENTS`), so that a record says what
+ran. It rewrites ``result.json`` when a step starts and when it ends,
 so that a child that dies leaves the step it died in: the seconds of each step as the child measures them around it,
 the higher of its resident memory at the start and at the end (the parent's samples can only raise it), the stages and
 the engine the chunk recorded, the counts of the photo cache when the step has them; a step that fails is listed with
@@ -26,11 +28,19 @@ import numpy as np
 
 from .. import _native
 from ..core.document import Document
-from . import record
+from ..engine import switch
+from . import pairs, record
 
 # the steps of ``align`` and of ``all``: the methods of Chunk that ppg process calls, in its order; detect_markers,
 # import_reference and update_transform run when the job, or the chunk, gives them something to do
 ALIGN_STEPS = ("detect_markers", "match_photos", "align_cameras", "import_reference", "update_transform")
+# the steps of ``match``: the matching alone (the markers before it when the job names targets), for the time of the
+# native matching against the classic one on a large set without a run of the mapper
+MATCH_STEPS = ALIGN_STEPS[:2]
+# the engines of the matching ``ppg bench run`` chooses from (--engine), the first its default: those of the switch
+# (engine/switch.py), whose default is auto. The job carries the choice to match_photos alone; the record keeps it as
+# settings["engine_requested"], while the engine of the step says what ran
+ENGINES = switch.ENGINES
 # the targets ``all`` detects when the job names none: the default of ppg process, which is that of
 # Chunk.detect_markers (a test compares the three)
 DEFAULT_TARGETS = "aruco_4x4_50"
@@ -44,17 +54,20 @@ MAPPERS = ("auto", "incremental", "global")
 _REPLACE_TRIES = 5
 ALL_STEPS = ALIGN_STEPS + ("build_depth_maps", "build_point_cloud", "build_model", "build_texture", "build_dem",
                            "build_orthomosaic")
-CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS}
-# the arguments of the steps beside what the job gives (the targets, the reference, the mapper): the defaults of ppg
-# process and of the methods of Chunk today, written out so that a record says what ran even after a default changes
-# (a test compares them with the signatures)
+CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS, "match": MATCH_STEPS}
+# the arguments of the steps beside what the job gives (the targets, the reference, the mapper, the engine): the
+# defaults of ppg process and of the methods of Chunk today, written out so that a record says what ran even after a
+# default changes (a test compares them with the signatures)
 ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000,
                               "pair_selection": "auto"},
              "align_cameras": {}, "update_transform": {}, "build_depth_maps": {"quality": "medium"},
              "build_point_cloud": {}, "build_model": {"surface": "arbitrary"}, "build_texture": {}, "build_dem": {},
              "build_orthomosaic": {}}
-# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names
-SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback")
+# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. The last three are the native
+# matching's (its record names the engine, where the features were found and the routes the pairs took; the classic
+# record names no engine and no routes): facts of the run, not settings, for the table (table.RUN_FACTS)
+SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
+                "features", "routes")
 MATCH_SETTINGS = ("max_ratio", "max_distance", "cross_check")
 PROJECT = "project.ppg"
 RESULT = "result.json"
@@ -107,11 +120,32 @@ def _pycolmap_version() -> str | None:
     return str(version) if version else None
 
 
+def tie_points_per_photo(model) -> float:
+    """The tie points a registered photo of the reconstruction at ``model`` sees, on average: the 2D points of each
+    registered image that have a 3D point, averaged over the registered images (the measure the tests of the
+    native matching hold against the classic one); 0.0 when no image is registered."""
+    import pycolmap
+
+    rec = pycolmap.Reconstruction(str(model))
+    counts = [image.num_points3D for image in rec.images.values() if image.has_pose]
+    return sum(counts) / len(counts) if counts else 0.0
+
+
+def matching_results(chunk) -> dict:
+    """``verified_pairs`` after the matching: the pairs of photos whose two-view geometry the mapper takes
+    (:func:`.pairs.verified`), counted in the database of the chunk (``database.db`` in its sfm folder, read-only);
+    nothing when the database is not there."""
+    db = chunk.data_dir / "sfm" / pairs.DATABASE
+    return {"verified_pairs": len(pairs.verified(db))} if db.is_file() else {}
+
+
 def alignment_results(chunk) -> dict:
-    """``cameras``, ``aligned`` and ``reprojection_rms_px`` (when the reconstruction is there) after the alignment."""
+    """``cameras``, ``aligned`` and, when the reconstruction is there, ``tie_points_per_photo`` (to a tenth) and
+    ``reprojection_rms_px`` after the alignment."""
     results = {"cameras": len(chunk.cameras), "aligned": len(chunk.aligned_cameras)}
     model = chunk.product_path("reconstruction")
     if model is not None and model.exists():
+        results["tie_points_per_photo"] = round(tie_points_per_photo(model), 1)
         results["reprojection_rms_px"] = round(reprojection_rms(model), 3)
     return results
 
@@ -203,7 +237,9 @@ class Result:
     def note(self, step: str, chunk, value) -> None:
         """The settings and the results after ``step``, which returned ``value``."""
         self.data["settings"].update(settings_of(chunk))
-        if step == "align_cameras":
+        if step == "match_photos":
+            self.data["results"].update(matching_results(chunk))
+        elif step == "align_cameras":
             self.data["results"].update(alignment_results(chunk))
         elif step == "update_transform":
             self.data["results"].update(georeferencing_results(chunk, value))
@@ -225,15 +261,23 @@ def wanted(step: str, job: dict, chunk, imported: bool) -> bool:
 
 
 def call(chunk, step: str, job: dict):
-    """``step`` run on ``chunk``: the targets, the reference and the mapper (the first of :data:`MAPPERS` when the job
-    names none) from the job, the rest with :data:`ARGUMENTS`."""
+    """``step`` run on ``chunk``: the targets, the reference, the mapper (the first of :data:`MAPPERS` when the job
+    names none) and the engine of the matching (the first of :data:`ENGINES` when the job names none) from the job,
+    the rest with :data:`ARGUMENTS`. The two other steps that take an engine, the alignment and the depth maps, run
+    classic by the bench's own word: a run measures the matching, and what the computer asks for (``PPG_ENGINE``,
+    which the runner keeps out of the child anyway) never changes it."""
     if step == "detect_markers":
         return chunk.detect_markers(job["targets"])
     if step == "import_reference":
         return chunk.import_reference(job["reference"], crs=job.get("crs"))
+    kwargs = dict(ARGUMENTS[step])
+    if step == "match_photos":
+        kwargs["engine"] = job.get("engine", ENGINES[0])
+    elif step in switch.STEPS:
+        kwargs["engine"] = "classic"
     if step == "align_cameras":
-        return chunk.align_cameras(mapper=job.get("mapper", MAPPERS[0]), **ARGUMENTS[step])
-    return getattr(chunk, step)(**ARGUMENTS[step])
+        kwargs["mapper"] = job.get("mapper", MAPPERS[0])
+    return getattr(chunk, step)(**kwargs)
 
 
 def run_chain(chunk, job: dict, result: Result) -> bool:

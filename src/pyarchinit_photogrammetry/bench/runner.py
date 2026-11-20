@@ -47,6 +47,7 @@ class _Plan:
     name: str
     steps: str
     mapper: str
+    engine: str
     local: tuple[Path, ...]
     out: Path
     records: Path
@@ -76,22 +77,22 @@ def photo_cache_mb(env: dict) -> int | None:
 
 
 def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 1, keep: bool = False,
-        records: Path | None = None, *, mapper: str = "auto", extra_results: Callable | None = None,
-        targets: str | None = None, reference: Path | None = None, crs: str | None = None,
-        seed: int | None = None) -> list[Path]:
-    """``repeat`` runs of the chain ``steps`` (``align`` or ``all``, :data:`.steps.CHAINS`) on the photos of the folder
-    ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run failed: then it
-    stays with the child's log, said in the log by its name), the records written to ``records`` (default ``out``).
-    Returned: the path of each record.
+        records: Path | None = None, *, mapper: str = "auto", engine: str = "auto",
+        extra_results: Callable | None = None, targets: str | None = None, reference: Path | None = None,
+        crs: str | None = None, seed: int | None = None) -> list[Path]:
+    """``repeat`` runs of the chain ``steps`` (``align``, ``all`` or ``match``, :data:`.steps.CHAINS`) on the photos
+    of the folder ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run
+    failed: then it stays with the child's log, said in the log by its name), the records written to ``records``
+    (default ``out``). Returned: the path of each record.
 
     Refused, in this order and before anything runs: a name that is not one a file can take (ValueError), unknown
-    steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError), ``out`` or ``records``
-    inside ``photos`` (ValueError; by the identity of the folders, whatever the case of the letters), ``records``
-    inside a work folder (ValueError: it is removed after its run), a work folder of one of the repeats that exists
-    already (FileExistsError; nothing is deleted in silence), psutil missing (RuntimeError naming the extra), a
-    ``seed`` below 0 or a ``PPG_RANSAC_SEED`` in the environment that is not a whole number (ValueError, as the child
-    would refuse it), every photo online-only (RuntimeError; no child is started). Photos that are online-only are
-    left out of the run and make the record not valid.
+    steps, a mapper that is not one of :data:`.steps.MAPPERS`, an engine that is not one of :data:`.steps.ENGINES`
+    or a repeat below 1 (ValueError), ``out`` or ``records`` inside ``photos`` (ValueError; by the identity of the
+    folders, whatever the case of the letters), ``records`` inside a work folder (ValueError: it is removed after its
+    run), a work folder of one of the repeats that exists already (FileExistsError; nothing is deleted in silence),
+    psutil missing (RuntimeError naming the extra), a ``seed`` below 0 or a ``PPG_RANSAC_SEED`` in the environment
+    that is not a whole number (ValueError, as the child would refuse it), every photo online-only (RuntimeError; no
+    child is started). Photos that are online-only are left out of the run and make the record not valid.
 
     ``seed`` (0 or more) fixes the RANSAC of the geometric verification of the matches in the child, through
     ``PPG_RANSAC_SEED`` (:func:`..engine.sfm.verification_options`): runs with the same seed verify the same pairs, so
@@ -100,9 +101,13 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
 
     ``targets``, ``reference`` and ``crs`` go to the child, which detects the markers and imports the reference when
     they are given; ``all`` detects :data:`.steps.DEFAULT_TARGETS` when no targets are given, as ``ppg process`` does,
-    ``align`` detects none. ``mapper`` (``auto``, the default, ``incremental`` or ``global``) goes to the child, which
-    aligns with it; the record keeps it as ``settings["mapper_requested"]``, while ``settings["mapper"]`` stays the
-    mapper the run used (the one ``auto`` picked, or the one a global alignment fell back to). ``extra_results``,
+    ``align`` and ``match`` detect none. ``mapper`` (``auto``, the default, ``incremental`` or ``global``) goes to the
+    child, which aligns with it; the record keeps it as ``settings["mapper_requested"]``, while ``settings["mapper"]``
+    stays the mapper the run used (the one ``auto`` picked, or the one a global alignment fell back to). ``engine``
+    (``auto``, the default, ``classic`` or ``native``) goes to the child in the job, which matches with it and
+    nothing else (the alignment and the depth maps run classic: :func:`.steps.call`); the record keeps it as
+    ``settings["engine_requested"]``, while the engine of the step says what ran. ``PPG_ENGINE`` of this process's
+    environment is not passed on to the child: the engine of a run is the job's. ``extra_results``,
     called with the finished project (a :class:`..core.document.Document`) after the last step of a run that did not
     fail, returns a dict of numbers merged into the results; an exception in it, or a value that is not a number, is
     kept as ``results["error"]`` and makes the record not valid, the times stay. A KeyboardInterrupt while the child
@@ -111,10 +116,11 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     from ..engine import sfm
 
     photos = Path(photos).resolve()
-    out, records = check(out, name, steps, repeat, records, photos=photos, mapper=mapper)
+    out, records = check(out, name, steps, repeat, records, photos=photos, mapper=mapper, engine=engine)
     if seed is not None and int(seed) < 0:
         raise ValueError("seed must be 0 or more")
     env = dict(os.environ)
+    env.pop("PPG_ENGINE", None)  # the engine of a run is the job's, never the one the computer asks for
     env.update(LIVE_LOG_ENV)
     if seed is not None:
         env[sfm.RANSAC_SEED_ENV] = str(int(seed))
@@ -131,28 +137,32 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     reference = Path(reference).resolve() if reference else None
     settings = {**{key: None for key in child.SFM_SETTINGS}, **child.match_settings(), "pycolmap": None,
                 "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets,
-                "mapper_requested": mapper, "ransac_seed": verification_seed}
+                "mapper_requested": mapper, "engine_requested": engine, "ransac_seed": verification_seed}
     private = (photos, out, Path.home()) + ((reference,) if reference else ())
-    plan = _Plan(name=name, steps=steps, mapper=mapper, local=local, out=out, records=records, keep=keep, env=env,
-                 disk=disk, set=set_, settings=settings, private=private, names=tuple(p.name for p in files),
-                 extra_results=extra_results, targets=targets, reference=reference, crs=crs)
+    plan = _Plan(name=name, steps=steps, mapper=mapper, engine=engine, local=local, out=out, records=records,
+                 keep=keep, env=env, disk=disk, set=set_, settings=settings, private=private,
+                 names=tuple(p.name for p in files), extra_results=extra_results, targets=targets,
+                 reference=reference, crs=crs)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
 
 
 def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: Path | None = None, *,
-          photos: Path | None = None, mapper: str = "auto") -> tuple[Path, Path]:
+          photos: Path | None = None, mapper: str = "auto", engine: str = "auto") -> tuple[Path, Path]:
     """What :func:`run` refuses before anything runs, in its order, for a caller that must know before it makes its
     set (``ppg bench synthetic`` renders its photos after this): a name that is not one a file can take
-    (ValueError), unknown steps, a mapper that is not one of :data:`.steps.MAPPERS` or a repeat below 1 (ValueError),
-    ``photos`` - when given - that is not a folder or holds ``out`` or ``records`` (ValueError), ``records`` inside a
-    work folder (ValueError), a work folder of one of the repeats that exists already (FileExistsError), psutil
-    missing (RuntimeError), ``photos`` - when given - without a photo (ValueError). Returned: ``out`` and ``records``
-    resolved (``records`` is ``out`` when not given)."""
+    (ValueError), unknown steps, a mapper that is not one of :data:`.steps.MAPPERS`, an engine that is not one of
+    :data:`.steps.ENGINES` or a repeat below 1 (ValueError), ``photos`` - when given - that is not a folder or holds
+    ``out`` or ``records`` (ValueError), ``records`` inside a work folder (ValueError), a work folder of one of the
+    repeats that exists already (FileExistsError), psutil missing (RuntimeError), ``photos`` - when given - without a
+    photo (ValueError). Returned: ``out`` and ``records`` resolved (``records`` is ``out`` when not given)."""
     record.check_name(name)
     if steps not in child.CHAINS:
-        raise ValueError(f"steps must be {' or '.join(child.CHAINS)}, not {steps!r}")
+        raise ValueError(f"steps must be {', '.join(list(child.CHAINS)[:-1])} or {list(child.CHAINS)[-1]}, "
+                         f"not {steps!r}")
     if mapper not in child.MAPPERS:
         raise ValueError(f"mapper must be {', '.join(child.MAPPERS[:-1])} or {child.MAPPERS[-1]}, not {mapper!r}")
+    if engine not in child.ENGINES:
+        raise ValueError(f"engine must be {', '.join(child.ENGINES[:-1])} or {child.ENGINES[-1]}, not {engine!r}")
     if int(repeat) < 1:
         raise ValueError("repeat must be 1 or more")
     out = Path(out).resolve()
@@ -224,7 +234,8 @@ def _one_run(plan: _Plan, index: int, run_in: Callable | None = None) -> Path:
 
 def _run_in(plan: _Plan, index: int, work: Path) -> Path:
     job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "mapper": plan.mapper,
-           "targets": plan.targets, "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
+           "engine": plan.engine, "targets": plan.targets,
+           "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
     rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}

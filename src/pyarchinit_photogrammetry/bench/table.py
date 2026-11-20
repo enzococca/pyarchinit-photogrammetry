@@ -24,17 +24,22 @@ BASELINE_RUNS = 3
 # the entries of a record's settings that record what the run did, not what it was asked for: the version of pycolmap,
 # the count of pairs (above 40 photos the preselection's RANSAC has a random seed, so it moves between repeats) and
 # their split between the GPU and the CPU (the GPU threads take pairs as they go), the mapper and its fallback (a
-# global alignment that falls back in some runs; the mapper asked for, mapper_requested, is compared); runs that
-# differ in any other setting are not one measurement
-RUN_FACTS = ("pycolmap", "pairs", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback")
+# global alignment that falls back in some runs; the mapper asked for, mapper_requested, is compared), the engine the
+# record of the matching names, where it found the features (gpu, cpu, gpu+cpu: the GPU and the CPU share the photos
+# as they go) and the routes the pairs took (guided, brute force, dropped: counts that move between repeats; the
+# engine asked for, engine_requested, is compared); runs that differ in any other setting are not one measurement
+RUN_FACTS = ("pycolmap", "pairs", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine", "features", "routes")
 # the facts of the machine that two runs of one measurement share
 MACHINE_KEYS = ("system", "arch", "cpu", "memory_gb")
 # the facts of the set that two runs of one measurement share: the same photos (how many, their bytes)
 SET_KEYS = ("photos", "bytes")
 HEAD = ("name", "program", "step", "engine", "runs", "seconds (median)", "min", "max", "peak memory (MB)", "stages",
         "baseline")
-# the results of every alignment, first in the table of the results in this order; the others follow by name
-FIRST_RESULTS = ("cameras", "aligned", "reprojection_rms_px", "control_rmse", "check_rmse", "camera_rmse", "markers")
+# the results of every matching and alignment, first in the table of the results in this order (the pairs the matching
+# verified and the tie points per photo are what the gate of the native matching reads against the classic one); the
+# others follow by name
+FIRST_RESULTS = ("cameras", "aligned", "verified_pairs", "tie_points_per_photo", "reprojection_rms_px", "control_rmse",
+                 "check_rmse", "camera_rmse", "markers")
 
 
 def load(folder) -> list[dict]:

@@ -331,17 +331,35 @@ def scene():
     return make_scene()
 
 
+# the seed of COLMAP's RANSAC while the photos of ``processed`` are matched: its two-view geometries are then the
+# same in every run (test_native.py compares the native verification with them)
+PROCESSED_RANSAC_SEED = "1"
+
+
 @pytest.fixture(scope="session")
 def processed(scene_dir):
-    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic."""
+    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. COLMAP's RANSAC
+    is seeded with ``PROCESSED_RANSAC_SEED`` while the photos are matched, and the variable put back as it was
+    right after."""
+    import os
+
     import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.engine import sfm
 
     doc = ppg.Document()
     ch = doc.add_chunk("Saggio 1")
     doc.save(scene_dir / "project.ppg")
     ch.add_photos([scene_dir / "photos"])
     ch.detect_markers("aruco_4x4_50")
-    ch.match_photos(quality="high")
+    previous = os.environ.get(sfm.RANSAC_SEED_ENV)
+    os.environ[sfm.RANSAC_SEED_ENV] = PROCESSED_RANSAC_SEED
+    try:
+        ch.match_photos(quality="high")
+    finally:
+        if previous is None:
+            os.environ.pop(sfm.RANSAC_SEED_ENV, None)
+        else:
+            os.environ[sfm.RANSAC_SEED_ENV] = previous
     ch.align_cameras()
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     report = ch.update_transform()

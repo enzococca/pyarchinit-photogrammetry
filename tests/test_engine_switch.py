@@ -1,9 +1,11 @@
 """The engine of the matching, the alignment and the depth maps: ``auto``, ``classic`` or ``native``.
 
-The native engine does none of the three steps yet: ``auto`` is the classic engine, and ``native`` falls back to it
-and says so - a line in the log, what was asked and what was used in ``chunk.meta["engine"]``, a row in the report.
-The word comes from the ``engine`` argument of the three methods of the chunk, else from ``PPG_ENGINE``; the command
-line takes it with a hidden ``--engine`` and refuses an unknown one before it opens the project."""
+The native engine does the matching (``NATIVE_STEPS``) and none of the other two steps yet: ``auto`` is the classic
+engine until a step is put in ``AUTO_NATIVE_STEPS`` (empty: filled after the gate of the step), and ``native`` on a
+step the native engine does not do falls back to the classic one and says so - a line in the log, what was asked and
+what was used in ``chunk.meta["engine"]``, a row in the report. The word comes from the ``engine`` argument of the
+three methods of the chunk, else from ``PPG_ENGINE``; the command line takes it with a hidden ``--engine`` and refuses
+an unknown one before it opens the project."""
 from __future__ import annotations
 
 import inspect
@@ -60,15 +62,65 @@ def test_native_falls_back_to_classic_and_says_so(monkeypatch, caplog):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     monkeypatch.setenv("PPG_ENGINE", " Native ")
     with caplog.at_level("INFO"):
-        c = switch.resolve("match_photos")
-    assert (c.requested, c.used) == ("native", "classic") and "match_photos" in c.fallback
-    assert c.fallback == "the native engine does not do 'match_photos' yet"
+        c = switch.resolve("align_cameras")
+    assert (c.requested, c.used) == ("native", "classic") and "align_cameras" in c.fallback
+    assert c.fallback == "the native engine does not do 'align_cameras' yet"
     assert "classic" in caplog.text
     assert len(caplog.records) == 1  # one line for one fallback
     line = caplog.records[0]
     assert (line.name, line.levelname) == (switch.__name__, "WARNING")
-    assert line.getMessage() == ("engine 'native' asked for match_photos: classic used "
-                                 "(the native engine does not do 'match_photos' yet)")
+    assert line.getMessage() == ("engine 'native' asked for align_cameras: classic used "
+                                 "(the native engine does not do 'align_cameras' yet)")
+
+
+def test_the_matching_is_the_native_engines_when_asked_for(monkeypatch, caplog):
+    """``match_photos`` is a step the native engine does: ``native`` gives it to the native engine, with no fallback
+    and no line in the log; ``auto`` and ``classic`` keep the classic one."""
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    assert switch.NATIVE_STEPS == frozenset({"match_photos"})
+    with caplog.at_level("INFO"):
+        c = switch.resolve("match_photos", "native")
+        assert (c.requested, c.used, c.fallback) == ("native", "native", None)
+        for word in (None, "auto", "classic"):
+            c = switch.resolve("match_photos", word)
+            assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
+    assert not caplog.records
+
+
+def test_auto_takes_a_step_only_once_it_is_in_auto_native_steps(monkeypatch, caplog):
+    """``AUTO_NATIVE_STEPS`` names the steps ``auto`` gives to the native engine: none until a step has passed its
+    gate (the session owner adds it then, one line); with the matching in it ``auto`` is native for the matching,
+    with no line in the log, and ``classic`` is still the classic engine."""
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    assert switch.AUTO_NATIVE_STEPS == frozenset()
+    for word in (None, "auto"):
+        assert switch.resolve("match_photos", word) == switch.Choice("auto", "classic", None)
+    monkeypatch.setattr(switch, "AUTO_NATIVE_STEPS", frozenset({"match_photos"}))
+    with caplog.at_level("INFO"):
+        for word in (None, "auto"):
+            assert switch.resolve("match_photos", word) == switch.Choice("auto", "native", None)
+        assert switch.resolve("match_photos", "classic") == switch.Choice("classic", "classic", None)
+        assert switch.resolve("align_cameras", "auto") == switch.Choice("auto", "classic", None)
+    assert not caplog.records
+    # a step in AUTO_NATIVE_STEPS that the native engine does not do stays classic: the two sets are read together
+    monkeypatch.setattr(switch, "AUTO_NATIVE_STEPS", frozenset({"align_cameras"}))
+    assert switch.resolve("align_cameras", "auto") == switch.Choice("auto", "classic", None)
+
+
+def test_fall_back_keeps_the_request_and_logs(caplog):
+    """``fall_back`` is what a method does when the engine chosen cannot do the step after all (the native core
+    missing, a learned matcher, a failure half way): the same request, the classic engine used, the reason kept, and
+    one WARNING line that gives the reason."""
+    choice = switch.Choice("native", "native", None)
+    with caplog.at_level("INFO"):
+        back = switch.fall_back(choice, "learned matcher 'disk': the native engine matches SIFT points only")
+    assert back == switch.Choice("native", "classic", "learned matcher 'disk': the native engine matches SIFT points only")
+    assert choice == switch.Choice("native", "native", None)  # the choice given is not changed
+    assert len(caplog.records) == 1
+    line = caplog.records[0]
+    assert (line.name, line.levelname) == (switch.__name__, "WARNING")
+    assert "native" in line.getMessage() and "classic" in line.getMessage()
+    assert "learned matcher 'disk'" in line.getMessage()
 
 
 def test_the_argument_wins_over_the_environment(monkeypatch):
@@ -109,37 +161,41 @@ def test_the_word_is_checked_as_it_is_resolved(monkeypatch):
 
 
 def test_only_a_fallback_is_logged(monkeypatch, caplog):
-    """The classic engine doing what was asked, or what ``auto`` gives, is not news: no line in the log."""
+    """The classic engine doing what was asked, or what ``auto`` gives, is not news: no line in the log; nor is the
+    native engine doing a step it does."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert switch.NATIVE_STEPS == frozenset()  # the steps the native engine does: none in this milestone
+    assert switch.NATIVE_STEPS == frozenset({"match_photos"})  # the steps the native engine does: the matching
+    classic_only_steps = [step for step in switch.STEPS if step not in switch.NATIVE_STEPS]
+    assert classic_only_steps == ["align_cameras", "build_depth_maps"]
     with caplog.at_level("INFO"):
         for step in switch.STEPS:
             for word in (None, "auto", "classic"):
                 c = switch.resolve(step, word)
                 assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
+        assert switch.resolve("match_photos", "native") == switch.Choice("native", "native", None)
     assert not caplog.records
     with caplog.at_level("INFO"):
-        for step in switch.STEPS:
+        for step in classic_only_steps:
             assert switch.resolve(step, "native").fallback == f"the native engine does not do '{step}' yet"
     assert [record.getMessage().split(":")[0] for record in caplog.records] == [
-        f"engine 'native' asked for {step}" for step in switch.STEPS]  # one line per step that fell back
+        f"engine 'native' asked for {step}" for step in classic_only_steps]  # one line per step that fell back
 
 
 def test_a_step_the_native_engine_does_is_its_own_when_asked_for(monkeypatch, caplog):
-    """A step named in ``NATIVE_STEPS`` (none today: the next milestones add theirs) goes to the native engine when
-    ``native`` is asked for, with no fallback and no line in the log; ``auto`` stays on the classic engine, and the
-    steps not named fall back as before."""
+    """A step named in ``NATIVE_STEPS`` (the next milestones add theirs) goes to the native engine when ``native`` is
+    asked for, with no fallback and no line in the log; ``auto`` stays on the classic engine, and the steps not named
+    fall back as before."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    monkeypatch.setattr(switch, "NATIVE_STEPS", frozenset({"match_photos"}))
+    monkeypatch.setattr(switch, "NATIVE_STEPS", frozenset({"align_cameras"}))
     with caplog.at_level("INFO"):
-        c = switch.resolve("match_photos", "native")
+        c = switch.resolve("align_cameras", "native")
         assert (c.requested, c.used, c.fallback) == ("native", "native", None)
         for word in (None, "auto", "classic"):
-            c = switch.resolve("match_photos", word)
+            c = switch.resolve("align_cameras", word)
             assert (c.requested, c.used, c.fallback) == (word or "auto", "classic", None)
     assert not caplog.records
-    c = switch.resolve("align_cameras", "native")
-    assert (c.used, c.fallback) == ("classic", "the native engine does not do 'align_cameras' yet")
+    c = switch.resolve("match_photos", "native")
+    assert (c.used, c.fallback) == ("classic", "the native engine does not do 'match_photos' yet")
 
 
 # ------------------------------------------------------------------------------------------------------ the steps
@@ -169,7 +225,7 @@ def test_the_steps_are_written_once():
     for name in switch.STEPS:
         method = getattr(Chunk, name, None)
         assert inspect.isfunction(method) and "engine" in inspect.signature(method).parameters, name
-    assert switch.NATIVE_STEPS <= set(switch.STEPS)
+    assert switch.AUTO_NATIVE_STEPS <= switch.NATIVE_STEPS <= set(switch.STEPS)
 
 
 # ------------------------------------------------------------------------------------------- what the chunk keeps
@@ -259,12 +315,14 @@ def test_a_step_bears_whatever_is_under_the_key(name, held, monkeypatch, caplog,
 
 
 def test_a_method_records_no_engine_it_did_not_run(monkeypatch, idle_engine):
-    """The three methods call the classic engine and no other. With a step named in ``NATIVE_STEPS`` before its
-    method calls the native engine, ``native`` stops the method - the step and the engine named, nothing run,
-    nothing recorded - where the classic engine would have run under the name of the native one; ``auto`` and
-    ``classic`` run the classic engine as they do."""
+    """The alignment and the depth maps call the classic engine and no other. With a step named in ``NATIVE_STEPS``
+    before its method calls the native engine, ``native`` stops the method - the step and the engine named, nothing
+    run, nothing recorded - where the classic engine would have run under the name of the native one; ``auto`` and
+    ``classic`` run the classic engine as they do. (The matching calls the native engine: the next test.)"""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     for name in switch.STEPS:
+        if name == "match_photos":
+            continue
         monkeypatch.setattr(switch, "NATIVE_STEPS", frozenset({name}))
         chunk = Chunk(key=0, label="x")
         with pytest.raises(NotImplementedError) as stopped:
@@ -280,6 +338,75 @@ def test_a_method_records_no_engine_it_did_not_run(monkeypatch, idle_engine):
         assert idle_engine == [name] * 3  # stopped again, and the record is still of the last run that ended
         assert chunk.meta["engine"] == {name: {"requested": "classic", "used": "classic", "fallback": None}}
         idle_engine.clear()
+
+
+def test_the_matching_runs_the_native_step_or_falls_back(monkeypatch, idle_engine, caplog):
+    """``Chunk.match_photos`` with ``native``: the native step runs when nothing keeps it from running
+    (:func:`native_match.cannot_run`), and the record says native; a reason not to run it, or a failure of it other
+    than a cancel or a full disk, gives the classic step the same arguments and the record keeps the reason; a cancel
+    and a full disk come out as they are, nothing recorded."""
+    import errno
+
+    from pyarchinit_photogrammetry.core.progress import Cancelled
+    from pyarchinit_photogrammetry.engine import native_match
+
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    native_calls: list[dict] = []
+    reason = {"value": None}
+    outcome = {"raise": None}
+
+    def cannot_run(chunk, matcher, reset):
+        return reason["value"]
+
+    def native_step(chunk, **kwargs):
+        native_calls.append(kwargs)
+        if outcome["raise"] is not None:
+            raise outcome["raise"]
+
+    monkeypatch.setattr(native_match, "cannot_run", cannot_run)
+    monkeypatch.setattr(native_match, "match_photos", native_step)
+    chunk = Chunk(key=0, label="x")
+    chunk.match_photos(engine="native", quality="medium", reset=False)
+    assert chunk.meta["engine"]["match_photos"] == {"requested": "native", "used": "native", "fallback": None}
+    assert idle_engine == [] and len(native_calls) == 1
+    assert native_calls[0]["quality"] == "medium" and native_calls[0]["reset"] is False
+    assert "matcher" not in native_calls[0]  # the native step matches SIFT points: no matcher to choose
+    # a reason not to run it: the classic step, the reason kept
+    reason["value"] = "learned matcher 'disk': the native engine matches SIFT points only"
+    with caplog.at_level("INFO"):
+        chunk.match_photos(engine="native", matcher="disk")
+    assert chunk.meta["engine"]["match_photos"] == {"requested": "native", "used": "classic",
+                                                    "fallback": reason["value"]}
+    assert idle_engine == ["match_photos"] and len(native_calls) == 1
+    assert any("learned matcher 'disk'" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+    # a failure of the native step: the classic one, with the failure as the reason
+    reason["value"] = None
+    outcome["raise"] = RuntimeError("boom")
+    chunk.match_photos(engine="native")
+    assert chunk.meta["engine"]["match_photos"] == {"requested": "native", "used": "classic",
+                                                    "fallback": "native matching failed: boom"}
+    assert idle_engine == ["match_photos"] * 2 and len(native_calls) == 2
+    # a cancel and a full disk are not failures of the engine: they come out, nothing runs, nothing is recorded
+    kept = dict(chunk.meta["engine"]["match_photos"])
+    outcome["raise"] = Cancelled("stop")
+    with pytest.raises(Cancelled, match="stop"):
+        chunk.match_photos(engine="native")
+    outcome["raise"] = OSError(errno.ENOSPC, "No space left on device")
+    with pytest.raises(OSError) as full:
+        chunk.match_photos(engine="native")
+    assert full.value.errno == errno.ENOSPC
+    assert idle_engine == ["match_photos"] * 2 and len(native_calls) == 4
+    assert chunk.meta["engine"]["match_photos"] == kept
+    # any other OSError is a failure of the engine, like the rest
+    outcome["raise"] = OSError(errno.EACCES, "Permission denied")
+    chunk.match_photos(engine="native")
+    assert chunk.meta["engine"]["match_photos"]["fallback"].startswith("native matching failed: ")
+    assert idle_engine == ["match_photos"] * 3
+    # auto and classic never ask the native step
+    for word in (None, "auto", "classic"):
+        chunk.match_photos(engine=word)
+        assert chunk.meta["engine"]["match_photos"] == {"requested": word or "auto", "used": "classic", "fallback": None}
+    assert len(native_calls) == 5
 
 
 def test_the_engine_is_the_last_argument_and_by_keyword_only():
@@ -353,9 +480,12 @@ def test_the_commands_ask_the_steps_for_the_engine(tmp_path, monkeypatch, idle_e
 
 @pytest.mark.slow
 def test_process_with_the_native_engine_asked_for(scene_dir, tmp_path, monkeypatch):
-    """``ppg process --engine native`` on the trench of the session: the whole chain ends well, on the classic
-    engine; the project keeps what was asked and what was used for each of the three steps, and the report says it
-    once for each."""
+    """``ppg process --engine native`` on the trench of the session: the whole chain ends well - the matching on the
+    native engine where the native core carries it, on the classic one with the core named as the reason where it
+    does not; the alignment and the depth maps on the classic engine; the project keeps what was asked and what was
+    used for each of the three steps, and the report says it once for each."""
+    from pyarchinit_photogrammetry import _native
+
     monkeypatch.delenv("PPG_ENGINE", raising=False)
     project = tmp_path / "trench.ppg"
     result = CliRunner().invoke(app, ["process", str(project), str(scene_dir / "photos"),
@@ -364,9 +494,17 @@ def test_process_with_the_native_engine_asked_for(scene_dir, tmp_path, monkeypat
     chunk = ppg.Document.open(project).chunk
     assert len(chunk.aligned_cameras) == len(chunk.cameras) > 0
     assert sorted(chunk.meta["engine"]) == sorted(switch.STEPS)
-    for step, record in chunk.meta["engine"].items():
+    matching = chunk.meta["engine"]["match_photos"]
+    if _native.native_match_kernels() is not None:
+        assert matching == {"requested": "native", "used": "native", "fallback": None}
+        assert chunk.meta["sfm"]["engine"] == "native"
+    else:
+        assert (matching["requested"], matching["used"]) == ("native", "classic")
+        assert "native core" in matching["fallback"]
+    for step in ("align_cameras", "build_depth_maps"):
+        record = chunk.meta["engine"][step]
         assert (record["requested"], record["used"]) == ("native", "classic"), step
-        assert isinstance(record["fallback"], str) and step in record["fallback"], step
+        assert record["fallback"] == f"the native engine does not do '{step}' yet"
     report = project.with_suffix(".report.html").read_text(encoding="utf-8")
     assert report.count("Engine used") == 3
-    assert report.count("classic (the native engine does not do") == 3
+    assert report.count("classic (the native engine does not do") == 2

@@ -430,9 +430,10 @@ def test_gpu_patchmatch_agrees_with_the_cpu_kernel(gpu_test_device):
     assert np.median(np.abs(d2[ok] - truth[ok]) / truth[ok]) < 0.005
 
 
-def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
-    """The SIFT kernel of the GPU, on the photo as COLMAP sees it (its grey, its reduction),
-    finds the key points COLMAP's extractor finds, with the same descriptors, in a fixed order."""
+def _sift_finds_colmaps_points(scene_dir, tmp_path, extract):
+    """The SIFT kernel ``extract(image, max_features)`` - the GPU's or its CPU twin -, on the photo
+    as COLMAP sees it (its grey, its reduction), finds the key points COLMAP's extractor finds,
+    with the same descriptors, in a fixed order."""
     import sqlite3
 
     import cv2
@@ -440,9 +441,6 @@ def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
 
     from pyarchinit_photogrammetry.engine import sfm
 
-    device = gpu_test_device
-    if _native.kernel("gpu_sift") is None:
-        pytest.skip("no GPU SIFT in the native core")
     photo = scene_dir / "photos" / "IMG_0000.jpg"
     (tmp_path / "im").mkdir()
     shutil.copy(photo, tmp_path / "im" / photo.name)
@@ -460,7 +458,7 @@ def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
     con.close()
     g = cv2.transform(cv2.imread(str(photo), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION), sfm._REC709_BGR)
     small = sfm._rescale_as_colmap(g, 600, 450)
-    raw, desc = _native.gpu_sift(small.astype(np.float32) / 255.0, max_features=40000, device=device)
+    raw, desc = extract(small.astype(np.float32) / 255.0, 40000)
     raw, desc = np.asarray(raw, np.float32), np.asarray(desc, np.uint8)
     kp = raw.copy()
     kp[:, :2] = (kp[:, :2] + 0.5) * 2.0  # COLMAP's pixel centre, back to the full photo
@@ -475,9 +473,25 @@ def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
     b = their_desc[twins].astype(float)
     similarity = np.einsum("ij,ij->i", a, b) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1))
     assert np.median(similarity) > 0.99
-    again, desc_again = _native.gpu_sift(small.astype(np.float32) / 255.0, max_features=40000, device=device)
+    again, desc_again = extract(small.astype(np.float32) / 255.0, 40000)
     assert np.array_equal(np.asarray(again), raw) and np.array_equal(np.asarray(desc_again), desc)
     assert np.all(np.diff(raw[:, 1]) >= 0)  # by row, then column: the same order every time
+
+
+def test_gpu_sift_finds_colmaps_points(scene_dir, tmp_path, gpu_test_device):
+    """The SIFT kernel of the GPU finds COLMAP's points (``_sift_finds_colmaps_points``)."""
+    device = gpu_test_device
+    if _native.kernel("gpu_sift") is None:
+        pytest.skip("no GPU SIFT in the native core")
+    _sift_finds_colmaps_points(scene_dir, tmp_path, lambda image, n: _native.gpu_sift(image, max_features=n, device=device))
+
+
+def test_cpu_sift_finds_colmaps_points(scene_dir, tmp_path):
+    """The CPU twin of the SIFT kernel (``ppg_core.cpu_sift``, no GPU needed, so it runs on every
+    system) finds COLMAP's points (``_sift_finds_colmaps_points``)."""
+    if getattr(ppg_core, "cpu_sift", None) is None:
+        pytest.skip("no CPU SIFT in the native core")
+    _sift_finds_colmaps_points(scene_dir, tmp_path, lambda image, n: ppg_core.cpu_sift(image, max_features=n))
 
 
 def test_gpu_fusion_agrees_with_colmaps(processed, scene):
@@ -863,6 +877,185 @@ def test_the_bundle_bindings_refuse_what_is_not_a_problem():
     out = ppg_core.bundle_adjust(problem, {"max_iterations": 5}, None)
     assert out["linear_solver"] == "dense" and out["iterations"] <= 5 and out["cost"] <= out["cost_initial"]
     assert out["rolling_shutter"] is None and out["bias"] == {} and out["points"].shape == (1, 3)
+
+
+# ------------------------------------------------------------------- the geometric verification of a pair
+# The options the native verification reads (the names of ``two_view_defaults()``) and the attribute of
+# ``pycolmap.TwoViewGeometryOptions`` each one is the port of. The fields of pycolmap that are not read are
+# ``NOT_PORTED``: each is off by default, and the native engine behaves as COLMAP with them off.
+TWO_VIEW_FIELDS = {
+    "ransac_max_error": ("ransac", "max_error"),
+    "ransac_confidence": ("ransac", "confidence"),
+    "ransac_min_num_trials": ("ransac", "min_num_trials"),
+    "ransac_max_num_trials": ("ransac", "max_num_trials"),
+    "ransac_min_inlier_ratio": ("ransac", "min_inlier_ratio"),
+    "ransac_dyn_num_trials_multiplier": ("ransac", "dyn_num_trials_multiplier"),
+    "min_num_inliers": ("min_num_inliers",),
+    "min_e_f_inlier_ratio": ("min_E_F_inlier_ratio",),
+    "max_h_inlier_ratio": ("max_H_inlier_ratio",),
+    "watermark_min_inlier_ratio": ("watermark_min_inlier_ratio",),
+    "watermark_border_size": ("watermark_border_size",),
+    "watermark_detection_max_error": ("watermark_detection_max_error",),
+    "detect_watermark": ("detect_watermark",),
+    "use_sampson_refinement": ("use_sampson_refinement",),
+    "compute_relative_pose": ("compute_relative_pose",),
+}
+NOT_PORTED = {"min_inlier_ratio", "multiple_ignore_watermark", "filter_stationary_matches",
+              "stationary_matches_max_error", "force_H_use", "use_degensac", "multiple_models",
+              "ransac.random_seed", "ransac.num_threads"}
+
+
+def _two_view_core():
+    if not hasattr(ppg_core, "verify_pair"):
+        pytest.skip("the native core with the geometric verification of a pair is not installed")
+
+
+def test_the_two_view_options_are_colmaps():
+    """The defaults the binding reports are the fields of ``pycolmap.TwoViewGeometryOptions()`` of the
+    installed pycolmap, one by one and of the same type; every field of pycolmap is either read by the
+    native code or named as not ported."""
+    _two_view_core()
+    import pycolmap
+
+    defaults = ppg_core.two_view_defaults()
+    assert set(defaults) == set(TWO_VIEW_FIELDS)
+    options = pycolmap.TwoViewGeometryOptions()
+    for name, path in TWO_VIEW_FIELDS.items():
+        value = options
+        for attribute in path:
+            value = getattr(value, attribute)
+        assert defaults[name] == value and type(defaults[name]) is type(value), (name, defaults[name], value)
+    as_dict = options.todict()
+    every_field = {k for k in as_dict if k != "ransac"} | {"ransac." + k for k in as_dict["ransac"]}
+    ported = {".".join(path) for path in TWO_VIEW_FIELDS.values()}
+    assert not (ported & NOT_PORTED)
+    assert ported | NOT_PORTED == every_field, every_field - ported - NOT_PORTED
+
+
+def test_verify_pair_agrees_with_colmap(processed):
+    """On the three pairs of the trench with the most raw matches, read with COLMAP's own two-view geometry
+    from the classic database: the native verification gives the same configuration and an inlier count
+    within 5 % of COLMAP's (COLMAP's RANSAC is not seeded in the fixture, so its count moves by a few)."""
+    _two_view_core()
+    import pycolmap
+
+    _, ch, _ = processed
+    db = pycolmap.Database.open(str(ch.data_dir / "sfm" / "database.db"))
+    try:
+        pair_ids, all_matches = db.read_all_matches()
+        strongest = sorted(zip(pair_ids, all_matches), key=lambda p: -len(p[1]))[:3]
+        assert len(strongest) == 3
+        for pair_id, matches in strongest:
+            id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
+            colmap = db.read_two_view_geometry(id1, id2)
+            cameras, keypoints = [], []
+            for image_id in (id1, id2):
+                image = db.read_image(image_id)
+                cameras.append(db.read_camera(image.camera_id))
+                keypoints.append(db.read_keypoints(image_id))
+            calibrated = all(c.has_prior_focal_length for c in cameras)
+            c1, c2 = cameras
+            out = ppg_core.verify_pair(c1.model_name, np.asarray(c1.params), (c1.width, c1.height), keypoints[0],
+                                       c2.model_name, np.asarray(c2.params), (c2.width, c2.height), keypoints[1],
+                                       matches, np.ones(len(matches), np.float32), calibrated, pair_id)
+            n_colmap = len(colmap.inlier_matches)
+            assert n_colmap >= 15, "the strongest pairs of the trench are verified by COLMAP"
+            assert out["config"] == int(colmap.config), (id1, id2, out["config"], colmap.config)
+            n_native = len(out["inliers"])
+            assert abs(n_native - n_colmap) <= 0.05 * n_colmap, (id1, id2, n_native, n_colmap)
+            assert out["inliers"].dtype == np.uint32 and out["inliers"].shape == (n_native, 2)
+            assert set(map(tuple, out["inliers"].tolist())) <= set(map(tuple, matches.tolist()))
+            assert out["F"].shape == (3, 3) and out["H"].shape == (3, 3)
+            assert (out["E"] is None) == (not calibrated) or out["E"].shape == (3, 3)
+    finally:
+        db.close()
+
+
+def _synthetic_pair(seed=3, n=300, outliers=0.3, noise=0.5):
+    """A general scene seen by two pinhole cameras of 2000 x 1500 px with a focal length of 1000: the key points
+    of both photos (COLMAP pixels, ``[x, y, scale, orientation]`` float32), the matches (``i`` to ``i``) with
+    30 % outliers built at least 100 px (Sampson) from the true epipolar geometry, their quality, which are true,
+    and the pose cam2_from_cam1 ``(R, t)``."""
+    rng = np.random.default_rng(seed)
+    f, cx, cy, w, h = 1000.0, 1000.0, 750.0, 2000, 1500
+    axis = np.array([0.2, 1.0, 0.1]) / np.linalg.norm([0.2, 1.0, 0.1])
+    skew = lambda v: np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])  # noqa: E731
+    r = np.eye(3) + np.sin(0.2) * skew(axis) + (1 - np.cos(0.2)) * skew(axis) @ skew(axis)
+    t = np.array([0.8, 0.1, 0.05])
+    points = rng.uniform([-1.5, -1.1, 3.0], [1.5, 1.1, 6.0], (4 * n, 3))
+    moved = points @ r.T + t
+    x1 = np.c_[f * points[:, 0] / points[:, 2] + cx, f * points[:, 1] / points[:, 2] + cy]
+    x2 = np.c_[f * moved[:, 0] / moved[:, 2] + cx, f * moved[:, 1] / moved[:, 2] + cy]
+    seen = (x1 >= 0).all(1) & (x1 < [w, h]).all(1) & (x2 >= 0).all(1) & (x2 < [w, h]).all(1)
+    x1, x2 = x1[seen][:n].copy(), x2[seen][:n].copy()
+    assert len(x1) == n
+    k_inverse = np.linalg.inv(np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]]))
+    fundamental = k_inverse.T @ skew(t) @ r @ k_inverse
+    truth = np.ones(n, bool)
+    for i in range(n - int(outliers * n), n):
+        truth[i] = False
+        while True:
+            b = rng.uniform([0, 0], [w, h])
+            fa = fundamental @ [*x1[i], 1]
+            ftb = fundamental.T @ [*b, 1]
+            sampson = abs(np.dot([*b, 1], fa)) / np.hypot(np.hypot(fa[0], fa[1]), np.hypot(ftb[0], ftb[1]))
+            if sampson >= 100:
+                x2[i] = b
+                break
+    x1 += rng.normal(0, noise, x1.shape)
+    x2 += rng.normal(0, noise, x2.shape)
+    kp1 = np.c_[x1, np.ones(n), np.zeros(n)].astype(np.float32)
+    kp2 = np.c_[x2, np.ones(n), np.zeros(n)].astype(np.float32)
+    matches = np.c_[np.arange(n), np.arange(n)].astype(np.uint32)
+    quality = np.where(truth, rng.uniform(0.4, 0.75, n), rng.uniform(0.6, 0.8, n)).astype(np.float32)
+    return kp1, kp2, matches, quality, truth, r, t
+
+
+def _rotation_of(q):
+    """The rotation matrix of a unit quaternion ``(w, x, y, z)``."""
+    w, x, y, z = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def test_verify_pair_options_and_refusals():
+    """The binding on a synthetic pair: the configuration and the inliers, the pose under
+    ``compute_relative_pose`` (``qvec``, ``tvec``, None without it), an empty quality (the matches in their
+    order), and the ValueErrors that name what is wrong: a match outside the key points, a quality of another
+    length, matches that are not pairs, an option the engine does not know, a camera model it does not know."""
+    _two_view_core()
+    kp1, kp2, matches, quality, truth, r, t = _synthetic_pair()
+    params = np.array([1000.0, 1000.0, 750.0])
+    size = (2000, 1500)
+    args = ("SIMPLE_PINHOLE", params, size, kp1, "SIMPLE_PINHOLE", params, size, kp2, matches, quality, True, 11)
+    out = ppg_core.verify_pair(*args)
+    assert out["config"] == 2 and out["qvec"] is None and out["tvec"] is None
+    inliers = out["inliers"]
+    assert inliers.dtype == np.uint32 and truth[inliers[:, 0]].all() and len(inliers) >= 0.95 * truth.sum()
+    assert out["E"].shape == (3, 3) and out["F"].shape == (3, 3) and out["H"].shape == (3, 3)
+    with_pose = ppg_core.verify_pair(*args, options={"compute_relative_pose": True})
+    assert with_pose["config"] == 2 and with_pose["qvec"].shape == (4,) and with_pose["tvec"].shape == (3,)
+    assert np.allclose(np.linalg.norm(with_pose["tvec"]), 1.0)
+    direction = np.arccos(np.clip(with_pose["tvec"] @ t / np.linalg.norm(t), -1, 1))
+    assert direction < 1e-2, direction
+    turn = _rotation_of(with_pose["qvec"]) @ r.T
+    assert np.arccos(np.clip((np.trace(turn) - 1) / 2, -1, 1)) < 5e-3
+    plain = ppg_core.verify_pair(*args[:9], np.zeros(0, np.float32), True, 11)
+    assert plain["config"] == 2 and len(plain["inliers"]) >= 0.95 * truth.sum()
+    assert np.array_equal(ppg_core.verify_pair(*args)["inliers"], inliers), "the same seed, the same inliers"
+    outside = matches.copy()
+    outside[0, 1] = len(kp2)
+    with pytest.raises(ValueError, match="outside the key points"):
+        ppg_core.verify_pair(*args[:8], outside, quality, True, 11)
+    with pytest.raises(ValueError, match="qualities"):
+        ppg_core.verify_pair(*args[:9], quality[:-1], True, 11)
+    with pytest.raises(ValueError, match=r"matches must be \(n, 2\)"):
+        ppg_core.verify_pair(*args[:8], np.c_[matches, matches[:, :1]], quality, True, 11)
+    with pytest.raises(ValueError, match="unknown two-view option"):
+        ppg_core.verify_pair(*args, options={"ransac_threshold": 1.0})
+    with pytest.raises(ValueError, match="camera model"):
+        ppg_core.verify_pair("SPHERICAL", *args[1:])
 
 
 # ------------------------------------------------------------------------------------------- the TIN

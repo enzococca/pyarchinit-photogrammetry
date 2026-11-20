@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-use crate::gpu::{AdapterInfo, rank};
+use crate::gpu::{rank, read_back, AdapterInfo};
+use crate::sift_cpu::{cap_and_order, decimate, upsample2};
 
 pub const DESC: usize = 128;
 const MAX_CANDIDATES: usize = 1 << 17;
@@ -55,8 +56,8 @@ struct Params {
     max_oriented: u32,
     max_orient: u32,
     upright: u32,
-    pad0: u32,
-    pad1: u32,
+    level_stride: u32, // floats per Gaussian level: the keys kernels read the levels of an octave one after the other
+    src_w: u32,        // the width of the finer octave a level is halved from (decimate)
     pad2: u32,
     kernel: [[f32; 4]; 12], // 48 weights: radius up to 23
 }
@@ -66,7 +67,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 
@@ -105,12 +106,13 @@ fn blur_v(@builtin(global_invocation_id) id: vec3<u32>) {
     dst[y * p.w + x] = acc;
 }
 
-// src = the finer octave's level, dst = half size (every other pixel, as VLFeat)
+// src = the finer octave's level, p.src_w wide (an odd width halves to (w - 1) / 2: the stride is
+// the finer width, not twice the coarser one); dst = half size (every other pixel, as VLFeat)
 @compute @workgroup_size(16, 16)
 fn decimate(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = id.x; let y = id.y;
-    if (x >= p.w || y >= p.h) { return; }  // p.w, p.h = the size of dst; src is 2 x
-    dst[y * p.w + x] = src[(2u * y) * (2u * p.w) + 2u * x];
+    if (x >= p.w || y >= p.h) { return; }  // p.w, p.h = the size of dst
+    dst[y * p.w + x] = src[(2u * y) * p.src_w + 2u * x];
 }
 "#;
 
@@ -119,7 +121,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 @group(0) @binding(0) var<storage, read> a: array<f32>;
@@ -141,7 +143,7 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
 @group(0) @binding(0) var<storage, read> d0: array<f32>;
@@ -228,10 +230,10 @@ struct Params {
     w: u32, h: u32, radius: u32, level: u32,
     peak: f32, edge: f32, sigma0: f32, sigmak: f32,
     s_scale: f32, max_cand: u32, max_oriented: u32, max_orient: u32,
-    upright: u32, pad0: u32, pad1: u32, pad2: u32,
+    upright: u32, level_stride: u32, src_w: u32, pad2: u32,
     kernel: array<vec4<f32>, 12>,
 };
-// the Gaussian levels of the octave, one after the other (stride p.pad0 = floats per level)
+// the Gaussian levels of the octave, one after the other (p.level_stride floats per level)
 @group(0) @binding(0) var<storage, read> levels: array<f32>;
 @group(0) @binding(1) var<storage, read> cands: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> counts: array<atomic<u32>>;
@@ -250,7 +252,7 @@ fn level_of(s: f32) -> u32 {
 fn pix(level: u32, x: i32, y: i32) -> f32 {
     let xx = clamp(x, 0, i32(p.w) - 1);
     let yy = clamp(y, 0, i32(p.h) - 1);
-    return levels[level * p.pad0 + u32(yy) * p.w + u32(xx)];
+    return levels[level * p.level_stride + u32(yy) * p.w + u32(xx)];
 }
 
 fn gradient(level: u32, x: i32, y: i32) -> vec2<f32> {
@@ -524,14 +526,15 @@ impl Sift {
         let dsigma0 = sigma0 * (1.0 - 1.0 / (sigmak * sigmak)).sqrt();
         let n_levels = s_res + 3;
         let s_min: i32 = -1;
-        // the base of the first octave on the CPU: doubled (as VLFeat), copied, or halved
+        // the base of the first octave on the CPU: doubled (as VLFeat), copied, or halved - with
+        // the helpers of the CPU twin, so that both start from the same pixels
         let (mut bw, mut bh, mut base) = match o.first_octave {
             -1 => (2 * w, 2 * h, upsample2(image, w, h)),
             0 => (w, h, image.to_vec()),
             n if n > 0 => {
                 let mut cur = image.to_vec();
                 let (mut cw, mut ch) = (w, h);
-                for _ in 0..n { let (nw, nh) = (cw / 2, ch / 2); cur = decimate_cpu(&cur, cw, nw, nh); cw = nw; ch = nh; }
+                for _ in 0..n { let (nw, nh) = (cw / 2, ch / 2); cur = decimate(&cur, cw, nw, nh); cw = nw; ch = nh; }
                 (cw, ch, cur)
             }
             _ => return Err("first_octave: -1, 0 or positive".into()),
@@ -557,11 +560,12 @@ impl Sift {
             let counts = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("counts"), contents: bytemuck::cast_slice(&[0u32; 4]), usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC });
             // the parameters of every dispatch, in slots
             let mut slots: Vec<Params> = Vec::new();
-            let mut param = |w_: usize, h_: usize, radius: u32, level: u32, kernel: [[f32; 4]; 12]| -> u32 {
+            let mut param = |w_: usize, h_: usize, src_w: usize, radius: u32, level: u32, kernel: [[f32; 4]; 12]| -> u32 {
                 slots.push(Params { w: w_ as u32, h: h_ as u32, radius, level, peak: o.peak_threshold, edge: o.edge_threshold,
                                     sigma0, sigmak, s_scale: 1.0 / s_res as f32, max_cand: MAX_CANDIDATES as u32,
                                     max_oriented: MAX_ORIENTED as u32, max_orient: o.max_orientations.max(1),
-                                    upright: o.upright as u32, pad0: stride_f as u32, pad1: 0, pad2: 0, kernel });
+                                    upright: o.upright as u32, level_stride: stride_f as u32, src_w: src_w as u32, pad2: 0,
+                                    kernel });
                 (slots.len() - 1) as u32
             };
             let zero = [[0.0f32; 4]; 12];
@@ -577,35 +581,33 @@ impl Sift {
             if oct == 0 {
                 self.queue.write_buffer(&levels, 0, bytemuck::cast_slice(&base));
             } else if let Some((pl, pw, _ph, pstride)) = prev_levels.take() {
-                // decimate level s_min + S of the finer octave into level 0 of this one
-                let src_level = (s_res as i32) as usize; // index of s = s_min + S = S - 1 -> level S? (s - s_min) = S
+                // level s_min + S of the finer octave (pw wide: the stride of the kernel) halved
+                // into level 0 of this one
                 let s_best = (s_min + s_res as i32).min(s_min + n_levels as i32 - 1) - s_min; // level index
-                let _ = src_level;
-                let sp = param(bw, bh, 0, 0, zero);
+                let sp = param(bw, bh, pw, 0, 0, zero);
                 dispatches.push((2, sp, vec![(pl.clone(), s_best as u64 * pstride, pstride), lv(0)], img_groups));
-                let _ = pw;
             }
             if let Some((_s, (radius, kernel))) = first_blur {
-                let sp = param(bw, bh, radius, 0, kernel);
+                let sp = param(bw, bh, 0, radius, 0, kernel);
                 dispatches.push((0, sp, vec![lv(0), whole(&tmp)], img_groups));
                 dispatches.push((1, sp, vec![whole(&tmp), lv(0)], img_groups));
             }
             for s in 1..n_levels {
                 let sd = dsigma0 * sigmak.powi(s as i32 + s_min);
                 let (radius, kernel) = gaussian(sd);
-                let sp = param(bw, bh, radius, s as u32, kernel);
+                let sp = param(bw, bh, 0, radius, s as u32, kernel);
                 dispatches.push((0, sp, vec![lv(s - 1), whole(&tmp)], img_groups));
                 dispatches.push((1, sp, vec![whole(&tmp), lv(s)], img_groups));
             }
             for d in 0..n_levels - 1 {
-                let sp = param(bw, bh, 0, d as u32, zero);
+                let sp = param(bw, bh, 0, 0, d as u32, zero);
                 dispatches.push((3, sp, vec![lv(d), lv(d + 1), dg(d)], img_groups));
             }
             for d in 1..n_levels - 2 {
-                let sp = param(bw, bh, 0, d as u32, zero);
+                let sp = param(bw, bh, 0, 0, d as u32, zero);
                 dispatches.push((4, sp, vec![dg(d - 1), dg(d), dg(d + 1), whole(&cands), whole(&counts)], (((bw - 2) as u32 + 15) / 16, ((bh - 2) as u32 + 15) / 16)));
             }
-            let sp_keys = param(bw, bh, 0, 0, zero);
+            let sp_keys = param(bw, bh, 0, 0, 0, zero);
             let key_groups = ((MAX_CANDIDATES as u32 + 63) / 64, 1);
             dispatches.push((5, sp_keys, vec![whole(&levels), whole(&cands), whole(&counts), whole(&kps), whole(&descs)], key_groups));
             dispatches.push((6, sp_keys, vec![whole(&levels), whole(&cands), whole(&counts), whole(&kps), whole(&descs)], ((MAX_ORIENTED as u32 + 63) / 64, 1)));
@@ -644,22 +646,14 @@ impl Sift {
             enc.copy_buffer_to_buffer(&kps, 0, &st_kps, 0, (MAX_ORIENTED * 16) as u64);
             enc.copy_buffer_to_buffer(&descs, 0, &st_descs, 0, (MAX_ORIENTED * DESC) as u64);
             self.queue.submit(Some(enc.finish()));
-            let read = |b: &wgpu::Buffer| -> Result<Vec<u8>, String> {
-                let slice = b.slice(..);
-                let (tx, rx) = std::sync::mpsc::channel();
-                slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
-                self.device.poll(wgpu::Maintain::Wait);
-                rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                let v = slice.get_mapped_range().to_vec();
-                b.unmap();
-                Ok(v)
-            };
-            let c: Vec<u32> = bytemuck::cast_slice(&read(&st_counts)?).to_vec();
+            // waited for on the device's fence (gpu::read_back), never with Maintain::Wait, which
+            // wgpu 24 gives up after 60 s and treats as done; the counts first, then as many key
+            // points and descriptors as there are, typed by the read
+            let c: Vec<u32> = read_back(&self.device, &st_counts, 16)?;
             let n_or = (c[1] as usize).min(MAX_ORIENTED);
             if n_or > 0 {
-                let kp_raw = read(&st_kps)?;
-                let kp: &[[f32; 4]] = bytemuck::cast_slice(&kp_raw[..n_or * 16]);
-                let ds = read(&st_descs)?;
+                let kp: Vec<[f32; 4]> = read_back(&self.device, &st_kps, (n_or * 16) as u64)?;
+                let ds: Vec<u8> = read_back(&self.device, &st_descs, (n_or * DESC) as u64)?;
                 for (i, k) in kp.iter().enumerate() {
                     keypoints.push([k[0] * xper, k[1] * xper, k[2] * xper, k[3]]);
                     descriptors.extend_from_slice(&ds[i * DESC..(i + 1) * DESC]);
@@ -671,65 +665,11 @@ impl Sift {
             bh /= 2;
             octave += 1;
         }
-        // COLMAP keeps the key points of the largest scales when there are too many
-        if keypoints.len() > o.max_features {
-            let mut idx: Vec<usize> = (0..keypoints.len()).collect();
-            idx.sort_by(|&a, &b| keypoints[b][2].partial_cmp(&keypoints[a][2]).unwrap_or(std::cmp::Ordering::Equal));
-            idx.truncate(o.max_features);
-            idx.sort_unstable();
-            let kp2: Vec<[f32; 4]> = idx.iter().map(|&i| keypoints[i]).collect();
-            let mut d2 = Vec::with_capacity(idx.len() * DESC);
-            for &i in &idx { d2.extend_from_slice(&descriptors[i * DESC..(i + 1) * DESC]); }
-            keypoints = kp2;
-            descriptors = d2;
-        }
-        // the same order every time (the atomics of the kernels give any): by row, column, scale, orientation
-        let mut idx: Vec<usize> = (0..keypoints.len()).collect();
-        idx.sort_by(|&a, &b| {
-            let (ka, kb) = (&keypoints[a], &keypoints[b]);
-            [1usize, 0, 2, 3].iter().map(|&i| ka[i].partial_cmp(&kb[i]).unwrap_or(std::cmp::Ordering::Equal))
-                .find(|o| *o != std::cmp::Ordering::Equal).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let kp2: Vec<[f32; 4]> = idx.iter().map(|&i| keypoints[i]).collect();
-        let mut d2 = Vec::with_capacity(idx.len() * DESC);
-        for &i in &idx { d2.extend_from_slice(&descriptors[i * DESC..(i + 1) * DESC]); }
-        Ok((kp2, d2))
+        // COLMAP's cap (the largest scales kept), then the same order every time (the atomics of
+        // the kernels give any): by row, column, scale, orientation - the one implementation the
+        // CPU twin uses too
+        Ok(cap_and_order(keypoints, descriptors, o.max_features))
     }
-}
-
-/// VLFeat's doubling: a pixel copied, the one between two the mean (rows, then columns).
-fn upsample2(img: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let (w2, h2) = (2 * w, 2 * h);
-    let mut rows = vec![0.0f32; w2 * h];
-    for y in 0..h {
-        for x in 0..w {
-            let v = img[y * w + x];
-            let n = img[y * w + (x + 1).min(w - 1)];
-            rows[y * w2 + 2 * x] = v;
-            rows[y * w2 + 2 * x + 1] = 0.5 * (v + n);
-        }
-    }
-    let mut out = vec![0.0f32; w2 * h2];
-    for y in 0..h {
-        let yn = (y + 1).min(h - 1);
-        for x in 0..w2 {
-            let v = rows[y * w2 + x];
-            let n = rows[yn * w2 + x];
-            out[(2 * y) * w2 + x] = v;
-            out[(2 * y + 1) * w2 + x] = 0.5 * (v + n);
-        }
-    }
-    out
-}
-
-fn decimate_cpu(img: &[f32], w: usize, nw: usize, nh: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; nw * nh];
-    for y in 0..nh {
-        for x in 0..nw {
-            out[y * nw + x] = img[(2 * y) * w + 2 * x];
-        }
-    }
-    out
 }
 
 /// Sifts per adapter, created on first use.

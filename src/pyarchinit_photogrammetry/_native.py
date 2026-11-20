@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 _module = None
 _loaded = False
@@ -45,10 +46,18 @@ FEATURES = {
     "tin": "tin_triangulate",  # constrained Delaunay triangulation and the TIN kernels (API 10)
     "convbin": "raw_to_rinex",  # raw receiver logs converted to RINEX by RTKLIB's convbin (API 11)
     "bundle": "bundle_adjust",  # the bundle adjustment of the native engine (API 12)
+    "native_match": "native_match_pairs",  # the matching step of the native engine: features, pairs, stores (API 13)
 }
 TIN_API = 10  # tin_triangulate, tin_rasterize, tin_contours, tin_volume
 CONVBIN_API = 11  # raw_to_rinex, convert_cancel
 BUNDLE_API = 12  # bundle_adjust, bundle_evaluate
+NATIVE_MATCH_API = 13  # native_features, native_preselect, native_match_pairs, the stores, read_grey, rescale_as_colmap
+
+# the bindings of the native matching, by the name they have in native_match_kernels() (``native_`` in front of
+# each in ppg_core), and the two store handles (classes of ppg_core)
+_NATIVE_MATCH = ("features", "features_pixels", "preselect", "match_pairs", "store_read", "store_write", "store_names",
+                 "store_header", "match_read", "match_pairs_list")
+_NATIVE_MATCH_STORES = {"feature_store": "NativeFeatureStore", "match_store": "NativeMatchStore"}
 
 
 def supports(model: str) -> bool:
@@ -56,7 +65,7 @@ def supports(model: str) -> bool:
     extension has the feature ``model`` of :data:`FEATURES` (``"ppk"``: RTKLIB's post-processing,
     API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10;
     ``"convbin"``: raw receiver logs converted to RINEX, API 11; ``"bundle"``: the bundle adjustment
-    of the native engine, API 12)."""
+    of the native engine, API 12; ``"native_match"``: the matching step of the native engine, API 13)."""
     core = _core() if enabled() else None
     if core is None:
         return False
@@ -82,6 +91,26 @@ def tin_kernel(name: str):
     if fn is None or (api() or 0) < TIN_API:
         return None
     return fn
+
+
+def native_match_kernels() -> SimpleNamespace | None:
+    """The bindings of the matching step of the native engine (API 13) as a namespace: ``features`` and
+    ``features_pixels`` (the features step into a feature store), ``preselect`` (the pairs to match, on the
+    small store), ``match_pairs`` (the two-stage matching into a match store), ``store_read``, ``store_write``,
+    ``store_names``, ``store_header``, ``match_read``, ``match_pairs_list`` (the stores from Python) - each the
+    ``ppg_core`` function of that name with ``native_`` in front -, ``feature_store`` and ``match_store`` (the
+    classes ``NativeFeatureStore`` and ``NativeMatchStore``: a store held open for a step that goes through
+    every item of it) and ``read_grey``, ``rescale_as_colmap`` (the photos as COLMAP reads them). ``None``
+    without a core of API 13, with ``PPG_NATIVE=0``, or with a core that does not carry them: the matching then
+    stays classic."""
+    core = _core() if enabled() else None
+    if core is None or (api() or 0) < NATIVE_MATCH_API or not has("native_match"):
+        return None
+    if not all(hasattr(core, name) for name in _NATIVE_MATCH_STORES.values()):
+        return None
+    return SimpleNamespace(**{name: getattr(core, "native_" + name) for name in _NATIVE_MATCH},
+                           **{name: getattr(core, cls) for name, cls in _NATIVE_MATCH_STORES.items()},
+                           read_grey=core.read_grey, rescale_as_colmap=core.rescale_as_colmap)
 
 
 def version() -> str | None:

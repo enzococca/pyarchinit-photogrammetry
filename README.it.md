@@ -464,6 +464,8 @@ poligoni delle US, quote, tracce di sezione e computi metrici. Dettagli in
 
 ## Licenza
 
-GNU GPL v2 o successiva, come PyArchInit.
+GNU GPL v2 o successiva, come PyArchInit. Il nucleo nativo segue la struttura del SIFT di VLFeat
+(BSD a 2 clausole) e degli stimatori di COLMAP senza includerne i file; le loro note sono in
+`native/NOTICE`.
 
 Autore: Enzo Cocca

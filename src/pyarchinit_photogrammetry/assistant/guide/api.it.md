@@ -22,7 +22,7 @@ spiegazioni più lunghe seguono la tabella.
 | `add_photos(paths, recursive=False, raw=None, prefer="jpeg")` | file o cartelle; sensori raggruppati per corpo, obiettivo e risoluzione; il GPS dell'EXIF diventa il riferimento della camera; i file raw delle fotocamere sono sviluppati dentro il progetto (*File raw delle fotocamere*, sotto) |
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | i file raw delle foto sviluppati di nuovo: copie mancanti, raw cambiati, altre impostazioni; restituisce `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
-| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift")` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto) |
+| `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto); il motore classico o quello nativo (*Il matching nativo*, sotto) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto")` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
@@ -140,6 +140,70 @@ tiene le corrispondenze e l'allineamento che ci sono e abbina solo le foto aggiu
 tenere niente, si rifà tutto). `meta["sfm"]` registra cosa è stato fatto: `pair_selection`
 (`exhaustive`, `generic`, `generic+source`, ...), `pairs`, `apply_masks`, `masked_tie_points`, `added`,
 `matcher`.
+
+### Il matching nativo
+
+`match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
+`auto` resta il motore classico finché il matching nativo non ha superato il suo collaudo) fa il passo
+con il motore nativo del nucleo (`engine.native_match`, `ppg_core` API 13): il suo SIFT (che segue
+quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
+immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
+lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
+che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
+`database.db` di COLMAP come lo scrive il passo classico, così `align_cameras` vi fa girare il mapper
+classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
+nativo segue sempre le linee epipolari).
+
+Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
+dell'API 13, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
+che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
+dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Un
+annullamento e un disco pieno invece fermano il passo: un disco pieno è un `OSError` di ENOSPC
+qualunque strato lo dica (il sistema, sqlite, pycolmap; `native_match.disk_full`), e il progetto resta
+com'era.
+
+`meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
+`gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
+`dropped`) e `preselection_size`; `gpu` e le chiavi di `gpu_shares` nominano gli adattatori come il
+record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie fatte da ciascuno. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
+`pairs` ed `export`.
+
+Due variabili d'ambiente: `PPG_NATIVE_DCT=0` decodifica ogni JPEG per intero (di norma un JPEG viene
+decodificato alla scala DCT che la sua riduzione permette, scelta per la maggiore delle sue due
+riduzioni - quella del matching e quella della preselezione - così una sola decodifica dà entrambe);
+`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una. Una GPU persa a metà
+del passo restituisce il suo lavoro alle altre; se era l'ultima, la CPU prende quello che resta, anche
+con `PPG_NATIVE_CPU_SHARE=0`. Una foto o una coppia che fallisce su un dispositivo e poi anche sulla CPU viene lasciata
+(la foto senza punti, la coppia scartata) con una riga nel log. Una foto la cui riduzione - o la cui
+immagine di preselezione - è sotto 8 x 8 pixel non ha punti, e il log dice che è troppo piccola per i
+kernel.
+
+Gli archivi stanno in `<sfm>/native/`: `features/` (l'archivio dei punti: ogni foto, i suoi punti
+chiave nei pixel della foto intera con il centro di COLMAP e i suoi descrittori), `small/` (l'archivio
+della preselezione, tolto alla fine del passo) e `matches/` (l'archivio delle corrispondenze). Un
+matching lavora in `native.tmp/` e `database.native.tmp.db` e li mette al loro posto solo quando ha
+finito: prima gli archivi, per ultimo il database, con negli archivi un record del database a cui
+appartengono (`commit.json`: la dimensione e l'ora di modifica del database) finché non sono a posto
+entrambi; quello che un arresto improvviso lascia viene ripulito all'inizio del passo successivo. La
+pulizia tiene gli archivi che vanno con il database al suo posto, o li toglie quando non può dirlo (si
+rifà allora il matching di ogni foto); un database la cui dimensione o ora di modifica è cambiata tra
+l'arresto e la pulizia (una copia che non tiene le ore) può lasciare gli archivi vecchi accanto al
+database nuovo fino al matching successivo, che riscrive il database dagli archivi.
+
+`reset=False` continua dagli archivi quando il record del chunk dice `native` con la stessa qualità,
+lo stesso limite di punti, le stesse maschere e la stessa cartella delle foto; da un database classico,
+che prima viene importato in archivi nuovi; altrimenti si rifà tutto - anche quando il database è
+l'esportazione di un matching nativo con altre impostazioni, che ha i punti chiave ma non i
+descrittori. Il passo classico che continua un chunk nativo scrive prima nel database i descrittori
+degli archivi. Le due direzioni sono funzioni a sé: `native_match.export_database(chunk, db_path,
+descriptors=False)` scrive gli archivi in un database di COLMAP (tenendo gli id del database che
+continua) e `native_match.import_database(db_path, features_dir, matches_dir)` legge un database
+classico negli archivi (le coppie di foto senza descrittori restano fuori); entrambe accettano
+`progress`, contano le coppie e si possono annullare.
+
+`ppg bench run FOTO OUT --name NOME --engine native` misura il matching nativo contro un'esecuzione con
+`--engine classic`, e `ppg bench pairs A B` mette a confronto le coppie verificate da due esecuzioni
+tenute (`benchmark/README.md`, *Measuring the native matching*).
 
 ### Punti appresi
 

@@ -5,6 +5,7 @@
 
 mod convert;
 mod crinex;
+mod native_match;
 mod ppk;
 mod rtklib;
 
@@ -22,11 +23,13 @@ use rayon::prelude::*;
 
 // the kernels are in the crate ppg_engine (folder engine), which knows nothing of Python
 use ppg_engine::camera::{Camera, Pose};
-use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, tin};
+use ppg_engine::geometry::two_view;
+use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift, patchmatch, sift_cpu, tin};
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
-/// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate).
-const API: u32 = 12;
+/// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate,
+/// 13: the native matching - native_features, native_preselect, native_match_pairs, the stores).
+const API: u32 = 13;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -618,10 +621,40 @@ fn gpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, ma
         let s = gpu_sift::sift_for(device)?;
         s.extract(&data, w, h, &o)
     }).map_err(PyRuntimeError::new_err)?;
+    sift_arrays(py, kp, desc)
+}
+
+/// The key points ``(n, 4)`` and descriptors ``(n, 128)`` of a SIFT extraction as numpy arrays.
+pub(crate) fn sift_arrays(py: Python<'_>, kp: Vec<[f32; 4]>, desc: Vec<u8>)
+    -> PyResult<(Bound<'_, PyArray2<f32>>, Bound<'_, PyArray2<u8>>)> {
     let n = kp.len();
     let flat: Vec<f32> = kp.iter().flat_map(|k| k.iter().copied()).collect();
     Ok((Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray(py),
         Array2::from_shape_vec((n, gpu_sift::DESC), desc).unwrap().into_pyarray(py)))
+}
+
+/// SIFT key points and descriptors of a grey image (``h x w`` float32 in [0, 1]) on the CPU, the
+/// twin of :func:`gpu_sift` (`sift_cpu::extract`): the same points, descriptors, units (the centre
+/// of the first pixel at (0, 0)) and order, on the threads of rayon, the GIL released. An image
+/// smaller than 8 x 8 or a first octave below -1 is a RuntimeError, as on the GPU; so is a panic.
+#[pyfunction]
+#[pyo3(name = "cpu_sift")]
+#[pyo3(signature = (image, max_features=8192, first_octave=-1, num_octaves=4, octave_resolution=3,
+                    peak_threshold=0.02 / 3.0, edge_threshold=10.0, max_orientations=2, upright=false))]
+#[allow(clippy::too_many_arguments)]
+fn cpu_sift_features<'py>(py: Python<'py>, image: PyReadonlyArray2<'py, f32>, max_features: usize, first_octave: i32,
+                 num_octaves: u32, octave_resolution: u32, peak_threshold: f32, edge_threshold: f32,
+                 max_orientations: u32, upright: bool)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u8>>)> {
+    let a = image.as_array();
+    let (h, w) = (a.shape()[0], a.shape()[1]);
+    let data: Vec<f32> = a.iter().copied().collect();
+    let o = gpu_sift::Options { first_octave, num_octaves, octave_resolution, peak_threshold, edge_threshold,
+                                max_orientations, upright, max_features };
+    let (kp, desc) = py.detach(|| catch_unwind(AssertUnwindSafe(|| sift_cpu::extract(&data, w, h, &o))))
+        .map_err(|payload| PyRuntimeError::new_err(format!("cpu_sift: {}", panic_text(&*payload))))?
+        .map_err(PyRuntimeError::new_err)?;
+    sift_arrays(py, kp, desc)
 }
 
 type FuseMapArgs<'py> = (i64, Option<PyReadonlyArray2<'py, f32>>, (f64, f64, f64, f64), PyReadonlyArray2<'py, f64>,
@@ -1029,7 +1062,7 @@ fn solution_dict<'py>(py: Python<'py>, sol: &bundle::Solution) -> PyResult<Bound
 }
 
 /// The message of a panic of the engine.
-fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -1108,6 +1141,168 @@ fn supported_models() -> Vec<&'static str> {
     camera::MODELS.to_vec()
 }
 
+/// The options of the geometric verification as a flat dict: the RANSAC ones under ``ransac_*``.
+fn two_view_dict<'py>(py: Python<'py>, o: &two_view::Options) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("ransac_max_error", o.ransac.max_error)?;
+    d.set_item("ransac_confidence", o.ransac.confidence)?;
+    d.set_item("ransac_min_num_trials", o.ransac.min_num_trials)?;
+    d.set_item("ransac_max_num_trials", o.ransac.max_num_trials)?;
+    d.set_item("ransac_min_inlier_ratio", o.ransac.min_inlier_ratio)?;
+    d.set_item("ransac_dyn_num_trials_multiplier", o.ransac.dyn_num_trials_multiplier)?;
+    d.set_item("min_num_inliers", o.min_num_inliers)?;
+    d.set_item("min_e_f_inlier_ratio", o.min_e_f_inlier_ratio)?;
+    d.set_item("max_h_inlier_ratio", o.max_h_inlier_ratio)?;
+    d.set_item("watermark_min_inlier_ratio", o.watermark_min_inlier_ratio)?;
+    d.set_item("watermark_border_size", o.watermark_border_size)?;
+    d.set_item("watermark_detection_max_error", o.watermark_detection_max_error)?;
+    d.set_item("detect_watermark", o.detect_watermark)?;
+    d.set_item("use_sampson_refinement", o.use_sampson_refinement)?;
+    d.set_item("compute_relative_pose", o.compute_relative_pose)?;
+    Ok(d)
+}
+
+/// One option of the geometric verification set from `value` by its key of :func:`two_view_defaults`:
+/// whether `key` is one of them (a value of the wrong type is the error of its extraction).
+pub(crate) fn set_two_view_option(o: &mut two_view::Options, key: &str, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    match key {
+        "ransac_max_error" => o.ransac.max_error = value.extract()?,
+        "ransac_confidence" => o.ransac.confidence = value.extract()?,
+        "ransac_min_num_trials" => o.ransac.min_num_trials = value.extract()?,
+        "ransac_max_num_trials" => o.ransac.max_num_trials = value.extract()?,
+        "ransac_min_inlier_ratio" => o.ransac.min_inlier_ratio = value.extract()?,
+        "ransac_dyn_num_trials_multiplier" => o.ransac.dyn_num_trials_multiplier = value.extract()?,
+        "min_num_inliers" => o.min_num_inliers = value.extract()?,
+        "min_e_f_inlier_ratio" => o.min_e_f_inlier_ratio = value.extract()?,
+        "max_h_inlier_ratio" => o.max_h_inlier_ratio = value.extract()?,
+        "watermark_min_inlier_ratio" => o.watermark_min_inlier_ratio = value.extract()?,
+        "watermark_border_size" => o.watermark_border_size = value.extract()?,
+        "watermark_detection_max_error" => o.watermark_detection_max_error = value.extract()?,
+        "detect_watermark" => o.detect_watermark = value.extract()?,
+        "use_sampson_refinement" => o.use_sampson_refinement = value.extract()?,
+        "compute_relative_pose" => o.compute_relative_pose = value.extract()?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The options of the geometric verification from a flat dict (the keys of :func:`two_view_defaults`,
+/// any subset); a key that is not one of them is a ValueError.
+fn two_view_options(d: Option<&Bound<'_, PyDict>>) -> PyResult<two_view::Options> {
+    let mut o = two_view::Options::default();
+    let Some(d) = d else { return Ok(o) };
+    for (key, value) in d.iter() {
+        let key: String = key.extract()?;
+        if !set_two_view_option(&mut o, &key, &value)? {
+            return Err(PyValueError::new_err(format!("unknown two-view option {key:?}")));
+        }
+    }
+    Ok(o)
+}
+
+/// The verification of a pair (`two_view::TwoView`) into the dict `d`: ``config`` (COLMAP's number),
+/// ``inliers`` ``(m, 2)`` uint32 in the order of the matches, ``F``, ``E``, ``H`` as 3 x 3 float64 or None
+/// when not estimated, and ``qvec`` (w, x, y, z) with ``tvec`` of cam2_from_cam1, None without a pose.
+pub(crate) fn two_view_into_dict(py: Python<'_>, d: &Bound<'_, PyDict>, out: &two_view::TwoView) -> PyResult<()> {
+    d.set_item("config", out.config as u32)?;
+    let flat: Vec<u32> = out.inliers.iter().flat_map(|p| [p[0], p[1]]).collect();
+    d.set_item("inliers", Array2::from_shape_vec((out.inliers.len(), 2), flat).unwrap().into_pyarray(py))?;
+    for (name, matrix) in [("F", &out.f), ("E", &out.e), ("H", &out.h)] {
+        match matrix {
+            Some(mm) => {
+                let rows: Vec<f64> = (0..3).flat_map(|r| (0..3).map(move |c| mm[(r, c)])).collect();
+                d.set_item(name, Array2::from_shape_vec((3, 3), rows).unwrap().into_pyarray(py))?;
+            }
+            None => d.set_item(name, py.None())?,
+        }
+    }
+    match &out.cam2_from_cam1 {
+        Some((q, t)) => {
+            d.set_item("qvec", Array1::from_vec(vec![q.w, q.i, q.j, q.k]).into_pyarray(py))?;
+            d.set_item("tvec", Array1::from_vec(vec![t.x, t.y, t.z]).into_pyarray(py))?;
+        }
+        None => {
+            d.set_item("qvec", py.None())?;
+            d.set_item("tvec", py.None())?;
+        }
+    }
+    Ok(())
+}
+
+/// The defaults of the geometric verification of a pair (`two_view::Options`): the fields of COLMAP's
+/// ``TwoViewGeometryOptions`` the native engine reads, as a flat dict with the RANSAC ones under
+/// ``ransac_*`` (``tests/test_native.py`` maps each name to its pycolmap attribute and compares them).
+#[pyfunction]
+fn two_view_defaults(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    two_view_dict(py, &two_view::Options::default())
+}
+
+/// Key points as the engine takes them: an ``(n, k)`` float32 array with ``x`` and ``y`` in the first
+/// two columns, the only ones the verification reads (the four of the feature store, or the six of a
+/// COLMAP database, whose third and fourth columns are the affine shape, not a scale and an
+/// orientation: they are carried along and ignored).
+fn keypoint_rows(a: &PyReadonlyArray2<'_, f32>, what: &str) -> PyResult<Vec<[f32; 4]>> {
+    let s = a.shape();
+    if s[1] < 2 {
+        return Err(PyValueError::new_err(format!("{what} must be (n, >= 2), not {s:?}")));
+    }
+    let v = a.as_array();
+    Ok((0..s[0])
+        .map(|i| {
+            let at = |j: usize| if j < s[1] { v[[i, j]] } else { 0.0 };
+            [at(0), at(1), at(2), at(3)]
+        })
+        .collect())
+}
+
+/// The geometric verification of a pair by the native engine (`two_view::verify`): ``model1``,
+/// ``params1``, ``size1`` (``(width, height)``) the camera of the first photo and ``kp1`` its key
+/// points (:func:`keypoint_rows`, COLMAP pixels), the same for the second; ``matches`` ``(n, 2)`` uint32
+/// pairs of indices into them; ``quality`` one float32 per match (the ratio of the two best descriptor
+/// distances, lower is better, orders the PROSAC sampling; empty, the matches are taken in their
+/// order); ``calibrated`` whether both cameras have a prior focal length (then E is estimated too);
+/// ``seed`` the seed of the RANSAC (``two_view::pair_seed`` of the two names in the engine); ``options``
+/// any of the keys of :func:`two_view_defaults`. Returns ``config`` (COLMAP's number), ``inliers``
+/// ``(m, 2)`` uint32 in the order of ``matches``, ``F``, ``E``, ``H`` as 3 x 3 float64 or None when not
+/// estimated, and ``qvec`` (w, x, y, z) with ``tvec`` of cam2_from_cam1, None unless
+/// ``compute_relative_pose`` found one. An index outside the key points, lengths that disagree or a
+/// camera model the engine does not know are a ValueError; a panic of the engine, a RuntimeError.
+#[pyfunction]
+#[pyo3(signature = (model1, params1, size1, kp1, model2, params2, size2, kp2, matches, quality, calibrated, seed,
+                    options=None))]
+#[allow(clippy::too_many_arguments)]
+fn verify_pair<'py>(py: Python<'py>, model1: &str, params1: PyReadonlyArray1<'py, f64>, size1: (f64, f64),
+                    kp1: PyReadonlyArray2<'py, f32>, model2: &str, params2: PyReadonlyArray1<'py, f64>,
+                    size2: (f64, f64), kp2: PyReadonlyArray2<'py, f32>, matches: PyReadonlyArray2<'py, u32>,
+                    quality: PyReadonlyArray1<'py, f32>, calibrated: bool, seed: u64,
+                    options: Option<&Bound<'py, PyDict>>) -> PyResult<Bound<'py, PyDict>> {
+    let cam1 = camera(model1, &params1.as_array().to_vec(), size1.0, size1.1)?;
+    let cam2 = camera(model2, &params2.as_array().to_vec(), size2.0, size2.1)?;
+    let k1 = keypoint_rows(&kp1, "kp1")?;
+    let k2 = keypoint_rows(&kp2, "kp2")?;
+    if matches.shape()[1] != 2 {
+        return Err(PyValueError::new_err(format!("matches must be (n, 2), not {:?}", matches.shape())));
+    }
+    let m = matches.as_array();
+    let pairs: Vec<[u32; 2]> = (0..m.shape()[0]).map(|i| [m[[i, 0]], m[[i, 1]]]).collect();
+    if let Some(bad) = pairs.iter().find(|p| p[0] as usize >= k1.len() || p[1] as usize >= k2.len()) {
+        return Err(PyValueError::new_err(format!("match {bad:?} is outside the key points ({}, {})", k1.len(),
+                                                 k2.len())));
+    }
+    let q = quality.as_array().to_vec();
+    if !q.is_empty() && q.len() != pairs.len() {
+        return Err(PyValueError::new_err(format!("{} qualities for {} matches", q.len(), pairs.len())));
+    }
+    let o = two_view_options(options)?;
+    let out = py.detach(|| {
+        catch_unwind(AssertUnwindSafe(|| two_view::verify(&cam1, &k1, &cam2, &k2, &pairs, &q, calibrated, &o, seed)))
+    })
+    .map_err(|payload| PyRuntimeError::new_err(format!("verify_pair: {}", panic_text(&*payload))))?;
+    let d = PyDict::new(py);
+    two_view_into_dict(py, &d, &out)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -1123,6 +1318,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(supported_models, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_adapters, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_sift_features, m)?)?;
+    m.add_function(wrap_pyfunction!(cpu_sift_features, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_depth_maps, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_cached, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_fuse_forget, m)?)?;
@@ -1140,5 +1336,21 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tin_volume, m)?)?;
     m.add_function(wrap_pyfunction!(bundle_adjust, m)?)?;
     m.add_function(wrap_pyfunction!(bundle_evaluate, m)?)?;
+    m.add_function(wrap_pyfunction!(two_view_defaults, m)?)?;
+    m.add_function(wrap_pyfunction!(verify_pair, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_features, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_features_pixels, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_preselect, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_match_pairs, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_store_read, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_store_write, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_store_names, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_store_header, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_match_read, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::native_match_pairs_list, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::read_grey, m)?)?;
+    m.add_function(wrap_pyfunction!(native_match::rescale_as_colmap, m)?)?;
+    m.add_class::<native_match::NativeFeatureStore>()?;
+    m.add_class::<native_match::NativeMatchStore>()?;
     Ok(())
 }

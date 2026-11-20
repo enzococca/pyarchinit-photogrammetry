@@ -5,48 +5,121 @@
 //!
 //! - `ppg-bench adapters`: the GPU adapters wgpu finds, an array with the `index`, `name`,
 //!   `backend` and `device_type` of each.
-//! - `ppg-bench match [--n 4096] [--device N]`: the matching of descriptors, timed on two
-//!   generated sets of `n` descriptors of which the right matches are known; it prints `device`
-//!   (the name of the adapter), `n`, `dim`, `matches`, `correct` and `seconds` (the time of one
-//!   call, the first on a new matcher: not a repeated or a warmed timing). Without `--device`
-//!   the first adapter that is no software rasteriser is taken; when there is none the answer
-//!   is `{"skipped": "no adapter"}`, with exit code 0. `n` is 46336 at most (`MAX_N`): more is
-//!   a command line the binary refuses, before a device is opened.
+//! - `ppg-bench match [--n 4096] [--device N] [--workgroup-kb 16|32] [--cpu]`: the matching of
+//!   descriptors, timed on two generated sets of `n` descriptors of which the right matches are
+//!   known; it prints `device` (the name of the adapter), `n`, `dim`, `matches`, `correct`,
+//!   `seconds` (the time of one call, the first on a new matcher: not a repeated or a warmed
+//!   timing) and `workgroup_kb` (16 or 32: the workgroup memory of the kernels the matcher
+//!   chose from the adapter's limits, or the one `--workgroup-kb` forced - 16 on any adapter
+//!   exercises the small tiles). Without `--device` the first adapter that is no software
+//!   rasteriser is taken; when there is none the answer is `{"skipped": "no adapter"}`, with
+//!   exit code 0. `n` is 46336 at most with the tiles of 128 descriptors and 32768 with those of
+//!   64 (`most_descriptors`): more is a command line the binary refuses, before a device is
+//!   opened. With `--cpu` the CPU twin of the kernels (`matching::matches_cpu`) is timed instead,
+//!   on any computer, with `"device": "cpu"` and no `workgroup_kb`; it takes no `--device` and no
+//!   `--workgroup-kb`, and no bound on `n` (it binds no buffer).
 //! - `ppg-bench adjust [--photos 200] [--points 2000] [--solver auto|dense|sparse|pcg] [--seed 1]`:
 //!   the bundle adjustment of the synthetic grid block of `bundle::synthetic::grid_block`
 //!   (`photos` photos, `points` points - `points / photos` per photo, rounded up - perturbed from
 //!   exact observations), timed; it prints `photos`, `points`, `observations`, `solver` (the one
 //!   used: what `auto` chose), `iterations`, `cost_initial`, `cost` and `seconds` (the time of
 //!   `solve` alone, the block made before the clock starts).
+//! - `ppg-bench features DIR [--limit 2016] [--max-features 8192] [--device N | --cpu]`: the
+//!   features step of the native engine (`features::extract_all`) on the JPEG, PNG and TIFF files
+//!   of the folder `DIR` (not of its subfolders), each reduced to `limit` on its long side (0 for
+//!   none) with at most `max-features` points, into a store under the temporary folder of the
+//!   system, removed after; it prints `device` (the name of the adapter, or `cpu`), `photos` (the
+//!   files found), `done`, `unreadable` and `unsupported` (counts), `points_per_photo` (the mean
+//!   over the photos done), `seconds` (the wall time of the step), `photos_per_second`, the
+//!   thread-seconds by phase `decode_seconds`, `sift_seconds` and `write_seconds`, `limit` and
+//!   `max_features` - never the name of a photo. On a GPU the CPU takes no photo, so the record
+//!   is the device's; with `--cpu` the CPU twin does them all; without `--device` the first
+//!   adapter that is no software rasteriser, else `{"skipped": "no adapter"}`.
+//! - `ppg-bench preselect [--photos 200] [--points 1024] [--device N | --cpu] [--workgroup-kb 16|32]`:
+//!   the matching of the generic preselection (`preselect::match_blocks`, every pair of the
+//!   photos in blocks) on `photos` generated photos of `points` descriptors each, every photo
+//!   holding the twins of a quarter of the descriptors of the photo before it, timed as the
+//!   preselection runs it (the probe, the dispatches sized from their timing, the read-back and
+//!   the choice of the matches included); it prints `device`, `photos`, `points`, `pairs` (every
+//!   pair), `matches` (over all the pairs), `seconds`, `pairs_per_second`, `ms_per_pair` (the
+//!   design's estimate is about 0.13 ms per pair of 1024 descriptors at 2 TFLOP/s) and, on a GPU,
+//!   `workgroup_kb`. The adapter and `--cpu` are taken as `match` takes them.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{solve, LinearSolver, Options};
-use ppg_engine::gpu;
+use ppg_engine::features::{extract_all, FeatureOptions, PhotoJob};
+use ppg_engine::preselect::{match_blocks, MatchOptions};
+use ppg_engine::store::FeatureStore;
+use ppg_engine::{gpu, gpu_sift, matching};
 use serde_json::{json, Value};
 
 /// The descriptors of each set when `--n` is not given: a choice, not a measured figure.
 const DEFAULT_N: usize = 4096;
+
+/// The photos `preselect` matches when it is not told otherwise, and their descriptors: the
+/// cap of points of the program's preselection (`sfm.PRESELECTION_POINTS`), copied here as a
+/// choice, and a count of photos that gives twenty thousand pairs.
+const DEFAULT_PRESELECT_PHOTOS: usize = 200;
+const DEFAULT_PRESELECT_POINTS: usize = 1024;
+
+/// What `features` reduces the photos to and keeps of them when it is not told otherwise: the
+/// program's defaults for the alignment (quality "high" on a 24-megapixel photo, COLMAP's cap of
+/// points), copied here as choices.
+const DEFAULT_LIMIT: usize = 2016;
+const DEFAULT_MAX_FEATURES: usize = 8192;
+
+/// The reader threads of `features`: a choice, not a measured figure (the decoding of a JPEG at
+/// a DCT scale takes a fraction of the SIFT; a few readers keep a GPU fed).
+const READERS: usize = 4;
+
+/// The files `features` takes for photos, by extension (either case).
+const PHOTO_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "tif", "tiff"];
 
 /// The block `adjust` makes when it is not told otherwise: choices, not measured figures.
 const DEFAULT_PHOTOS: usize = 200;
 const DEFAULT_POINTS: usize = 2000;
 const DEFAULT_SEED: u64 = 1;
 
-/// The most descriptors `--n` takes: derived, not measured. The buffer of the matching kernel
-/// that grows fastest holds its partial results, 8 bytes for every tile of the first set (128
-/// descriptors, `TILE_A` in gpu.rs of the engine; the last tile counts whole) and every
-/// descriptor of the second, and the kernel binds it whole as a storage buffer: for two sets of
-/// `n` that is ceil(n / 128) * n * 8 bytes, within 128 MiB up to 46336 (362 tiles, 134 189 056
-/// bytes) and above it from 46337 (363 tiles, 134 562 648 bytes). 128 MiB is the storage binding
-/// wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size` of
-/// `Limits::default()`). The engine does not say what the device it opens holds, and with a
-/// buffer beyond that the kernel, which has no error scope, ends in a panic of wgpu: the figure
-/// is what can be said without the device. Many devices hold more, and an adapter below the
-/// defaults of wgpu (a downlevel one) holds less.
-const MAX_N: usize = 46336;
+/// The storage binding wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size`
+/// of `Limits::default()`): 128 MiB. The engine does not say what the device it opens holds, and
+/// with a buffer beyond that the kernel, which has no error scope, ends in a panic of wgpu. Many
+/// devices hold more, and an adapter below the defaults of wgpu (a downlevel one) holds less.
+const BINDING: usize = 128 << 20;
+
+/// The most descriptors `--n` takes with tiles of `rows` descriptors of the first set (the
+/// `rows` of `gpu::Tile`): derived, not measured. The buffer of the matching kernel that grows
+/// fastest holds its partial results, 8 bytes for every tile of the first set (the last tile
+/// counts whole) and every descriptor of the second, and the kernel binds it whole as a storage
+/// buffer: for two sets of `n` that is ceil(n / rows) * n * 8 bytes, to stay within `BINDING`.
+/// With the large tiles (128 rows) that is 46336 (362 tiles, 134 189 056 bytes; 46337 takes 363
+/// tiles, 134 562 648 bytes); with the small ones (64 rows) 32768 (512 tiles, 128 MiB exactly).
+/// The figure is what can be said without the device.
+fn most_descriptors(rows: usize) -> usize {
+    let fits = |n: usize| n.div_ceil(rows) * n * 8 <= BINDING;
+    // n * n * 8 / rows <= the partials, so the answer is at most sqrt(BINDING / 8 * rows): from
+    // there, or one above it against the rounding of the root, down to the first that fits
+    let mut n = ((BINDING / 8 * rows) as f64).sqrt() as usize + 1;
+    while !fits(n) {
+        n -= 1;
+    }
+    n
+}
+
+/// The tiles of the matching kernels `--workgroup-kb` names, or the large ones when it is not
+/// given: the bound on `--n` is theirs before a device is opened (an adapter with the small
+/// tiles only is held to its own bound once it is).
+fn tiles_asked(workgroup_kb: Option<u32>) -> gpu::Tile {
+    match workgroup_kb {
+        Some(16) => gpu::SMALL_TILE,
+        _ => gpu::LARGE_TILE,
+    }
+}
 
 // COLMAP's matching options as the program passes them: the defaults of `gpu_match` in
 // src/pyarchinit_photogrammetry/_native.py, copied here (to be changed with them)
@@ -156,9 +229,36 @@ fn adapters() -> Value {
         .collect()
 }
 
-/// The matching of two sets of `n` descriptors on the adapter `device`, timed: the record to
-/// print.
-fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
+/// Where `match` runs: a GPU adapter, named or the first that is no software rasteriser, with the
+/// tiles its workgroup memory takes or the ones `--workgroup-kb` forces; or the CPU twin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Where {
+    Gpu { device: Option<usize>, workgroup_kb: Option<u32> },
+    Cpu,
+}
+
+/// The record of a matching of two sets of `n` descriptors on `device` that took `seconds`:
+/// the matches, and how many of them join a descriptor to its twin.
+fn record(device: &str, n: usize, matches: &[[u32; 2]], twin_of: &[usize], seconds: f64) -> Value {
+    let correct = matches.iter().filter(|pair| twin_of[pair[1] as usize] == pair[0] as usize).count();
+    json!({"device": device, "n": n, "dim": gpu::DIM, "matches": matches.len(), "correct": correct,
+           "seconds": seconds})
+}
+
+/// The matching of two sets of `n` descriptors `on` a device, timed: the record to print.
+fn time_matching(n: usize, on: Where) -> Result<Value, String> {
+    let (device, workgroup_kb) = match on {
+        Where::Cpu => {
+            let (a, b, twin_of) = descriptor_sets(n);
+            // what is timed is the twin alone, the bests of both directions and the matches
+            // chosen among them, on every core rayon finds
+            let start = Instant::now();
+            let matches = matching::matches_cpu(&a, &b, MAX_RATIO, MAX_DISTANCE, CROSS_CHECK);
+            let seconds = start.elapsed().as_secs_f64();
+            return Ok(record("cpu", n, &matches, &twin_of, seconds));
+        }
+        Where::Gpu { device, workgroup_kb } => (device, workgroup_kb),
+    };
     let index = match device {
         Some(index) => index,
         // a software rasteriser (the type wgpu calls Cpu) is not timed as if it were a GPU: it is
@@ -168,7 +268,21 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
             None => return Ok(json!({"skipped": "no adapter"})),
         },
     };
-    let mut matcher = gpu::Matcher::new(Some(index))?;
+    let mut matcher = match workgroup_kb {
+        Some(kb) => gpu::Matcher::with_workgroup_bytes(Some(index), kb * 1024)?,
+        None => gpu::Matcher::new(Some(index))?,
+    };
+    // an adapter with the small tiles only, taken without --workgroup-kb: the bound of its tiles,
+    // below the one the command line was held to, holds before the kernel binds its buffer
+    let rows = matcher.tile().rows;
+    let most = most_descriptors(rows);
+    if n > most {
+        return Err(format!(
+            "{}: {n} descriptors are more than the {most} its tiles of {rows} take (the kernel's working \
+             buffer for more is above the {} MiB a device is sure to bind)",
+            matcher.info.name, BINDING >> 20
+        ));
+    }
     let (a, b, twin_of) = descriptor_sets(n);
     // the device is there: what is timed is the matching alone, from the descriptors sent to the
     // GPU (under the key 0: the matcher does not keep them on it) to the matches chosen among what
@@ -179,9 +293,80 @@ fn time_matching(n: usize, device: Option<usize>) -> Result<Value, String> {
     let start = Instant::now();
     let matches = matcher.matches(0, &a, 0, &b, MAX_RATIO, MAX_DISTANCE, CROSS_CHECK)?;
     let seconds = start.elapsed().as_secs_f64();
-    let correct = matches.iter().filter(|pair| twin_of[pair[1] as usize] == pair[0] as usize).count();
-    Ok(json!({"device": matcher.info.name, "n": n, "dim": gpu::DIM, "matches": matches.len(),
-              "correct": correct, "seconds": seconds}))
+    let mut answer = record(&matcher.info.name, n, &matches, &twin_of, seconds);
+    answer["workgroup_kb"] = json!(matcher.workgroup_bytes() / 1024);
+    Ok(answer)
+}
+
+/// The photos `preselect` matches: `photos` sets of `points` descriptors as the kernel takes
+/// them, every photo after the first holding, as its first quarter, the twins of the second
+/// quarter of the photo before it (descriptors of that photo's own): a photo shares a quarter
+/// of its descriptors with each of its neighbours and nothing with the others.
+fn preselect_photos(photos: usize, points: usize) -> Vec<Vec<u8>> {
+    let mut random = Lcg(SEED_A);
+    let shared = points / 4;
+    let mut previous: Vec<Vec<f64>> = Vec::new();
+    let mut out = Vec::with_capacity(photos);
+    for _ in 0..photos {
+        let mut current: Vec<Vec<f64>> = (0..points).map(|_| descriptor(&mut random)).collect();
+        if !previous.is_empty() {
+            for k in 0..shared {
+                current[k] = twin(&previous[shared + k], &mut random);
+            }
+        }
+        let mut bytes = Vec::with_capacity(points * gpu::DIM);
+        for descriptor in &current {
+            push_bytes(&mut bytes, descriptor);
+        }
+        out.push(bytes);
+        previous = current;
+    }
+    out
+}
+
+/// The matching of every pair of `photos` generated photos of `points` descriptors `on` a
+/// device, as the preselection runs it, timed: the record to print.
+fn time_preselect(photos: usize, points: usize, on: Where) -> Result<Value, String> {
+    let (devices, device, workgroup_kb) = match on {
+        Where::Cpu => (Vec::new(), "cpu".to_owned(), None),
+        Where::Gpu { device, workgroup_kb } => {
+            let adapters = gpu::adapters();
+            let index = match device {
+                Some(index) => index,
+                None => match adapters.iter().find(|adapter| adapter.device_type != "Cpu") {
+                    Some(adapter) => adapter.index,
+                    None => return Ok(json!({"skipped": "no adapter"})),
+                },
+            };
+            let name = adapters.into_iter().find(|adapter| adapter.index == index).map(|adapter| adapter.name);
+            (vec![index], name.ok_or_else(|| format!("GPU adapter {index} does not exist"))?, workgroup_kb)
+        }
+    };
+    let sets = preselect_photos(photos, points);
+    let refs: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+    let o = MatchOptions { max_ratio: MAX_RATIO, max_distance: MAX_DISTANCE, cross_check: CROSS_CHECK,
+                           workgroup_bytes: workgroup_kb.map(|kb| kb * 1024) };
+    // what is timed is the matching of every pair as the preselection does it, from the photos
+    // in memory to the matches of every pair: the blocks of the queue, the probe and the
+    // dispatches sized from it, the read-back and the choice of the matches - not a kernel alone
+    let matched = match_blocks(&refs, &o, &devices, &AtomicBool::new(false), &|_, _| {})?;
+    if on != Where::Cpu && matched.by_device.1 > 0 {
+        // a GPU that did not open leaves its units to the CPU: not a timing of the device
+        let why: Vec<&str> = matched.log.iter().filter(|line| line.starts_with("GPU")).map(String::as_str).collect();
+        let by_cpu = matched.by_device.1;
+        return Err(format!("{device}: {by_cpu} units done by the CPU, not by the GPU ({})", why.join("; ")));
+    }
+    let pairs = matched.pairs.len();
+    let matches: usize = matched.pairs.iter().map(|pair| pair.matches.len()).sum();
+    let seconds = matched.seconds;
+    let mut answer = json!({
+        "device": device, "photos": photos, "points": points, "pairs": pairs, "matches": matches, "seconds": seconds,
+        "pairs_per_second": pairs as f64 / seconds, "ms_per_pair": 1000.0 * seconds / pairs as f64,
+    });
+    if let Some((_, _, bytes)) = matched.gpus.first() {
+        answer["workgroup_kb"] = json!(bytes / 1024);
+    }
+    Ok(answer)
 }
 
 /// The name of a solver of the reduced system on the command line and in the record.
@@ -214,10 +399,112 @@ fn time_adjustment(photos: usize, points: usize, solver: LinearSolver, seed: u64
               "cost_initial": sol.cost_initial, "cost": sol.cost, "seconds": seconds}))
 }
 
+/// Where `features` runs: a GPU adapter, named or the first that is no software rasteriser, or
+/// the CPU twin of the kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Extractor {
+    Gpu(Option<usize>),
+    Cpu,
+}
+
+/// The photos of the folder `dir` as jobs of the features step: its files with an extension of
+/// `PHOTO_EXTENSIONS`, in the order of their names, each named by its file name.
+fn photo_jobs(dir: &Path, limit: usize) -> Result<Vec<PhotoJob>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut names: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let extension = Path::new(&name).extension().map(|e| e.to_string_lossy().to_lowercase());
+        let is_photo = extension.is_some_and(|e| PHOTO_EXTENSIONS.contains(&e.as_str()));
+        if is_photo && entry.file_type().map_err(|e| format!("{name}: {e}"))?.is_file() {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names
+        .into_iter()
+        .map(|name| PhotoJob { path: Some(dir.join(&name)), name, mask: None, limit, small_limit: None })
+        .collect())
+}
+
+/// The features step on the photos of `dir` with `on`, timed: the record to print.
+fn time_features(dir: &Path, limit: usize, max_features: usize, on: Extractor) -> Result<Value, String> {
+    let jobs = photo_jobs(dir, limit)?;
+    if jobs.is_empty() {
+        return Err(format!("{}: no JPEG, PNG or TIFF file", dir.display()));
+    }
+    let (devices, device, cpu_threads) = match on {
+        Extractor::Cpu => (Vec::new(), "cpu".to_owned(), 1),
+        Extractor::Gpu(index) => {
+            let adapters = gpu::adapters();
+            let index = match index {
+                Some(index) => index,
+                None => match adapters.iter().find(|adapter| adapter.device_type != "Cpu") {
+                    Some(adapter) => adapter.index,
+                    None => return Ok(json!({"skipped": "no adapter"})),
+                },
+            };
+            let name = adapters.into_iter().find(|adapter| adapter.index == index).map(|adapter| adapter.name);
+            (vec![index], name.ok_or_else(|| format!("GPU adapter {index} does not exist"))?, 0)
+        }
+    };
+    // the store lives for the run only, under the temporary folder of the system
+    let store_dir = std::env::temp_dir().join(format!("ppg-bench-features-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&store_dir);
+    let store = FeatureStore::create(&store_dir).map_err(|e| e.to_string())?;
+    let sift = gpu_sift::Options { max_features, ..gpu_sift::Options::default() };
+    let options = FeatureOptions { sift, dct: true, readers: READERS, cpu_threads };
+    // what is timed is the whole step - decoding, extraction and writing together, as a project
+    // pays it - from the jobs to the last file of the store
+    let start = Instant::now();
+    let report = extract_all(&jobs, &store, None, &options, &devices, &AtomicBool::new(false), &|_, _| {});
+    let seconds = start.elapsed().as_secs_f64();
+    drop(store);
+    let _ = fs::remove_dir_all(&store_dir);
+    let report = report?;
+    if on != Extractor::Cpu && report.by_impl.1 > 0 {
+        // a GPU that did not open leaves its photos to the CPU: not a timing of the device
+        let why: Vec<&str> = report.log.iter().filter(|line| line.starts_with("GPU")).map(String::as_str).collect();
+        let by_cpu = report.by_impl.1;
+        return Err(format!("{device}: {by_cpu} photos done by the CPU, not by the GPU ({})", why.join("; ")));
+    }
+    Ok(json!({
+        "device": device, "photos": jobs.len(), "done": report.done, "unreadable": report.unreadable.len(),
+        "unsupported": report.unsupported.len(), "points_per_photo": report.points as f64 / report.done.max(1) as f64,
+        "seconds": seconds, "photos_per_second": report.done as f64 / seconds, "decode_seconds": report.seconds.decode,
+        "sift_seconds": report.seconds.sift, "write_seconds": report.seconds.write, "limit": limit,
+        "max_features": max_features,
+    }))
+}
+
 enum Command {
     Adapters,
-    Match { n: usize, device: Option<usize> },
+    Match { n: usize, on: Where },
     Adjust { photos: usize, points: usize, solver: LinearSolver, seed: u64 },
+    Features { dir: PathBuf, limit: usize, max_features: usize, on: Extractor },
+    Preselect { photos: usize, points: usize, on: Where },
+}
+
+/// The value of `--workgroup-kb`: 16 or 32.
+fn workgroup_kb(word: Option<&str>) -> Result<u32, String> {
+    match word.ok_or("--workgroup-kb takes 16 or 32")? {
+        "16" => Ok(16),
+        "32" => Ok(32),
+        word => Err(format!("--workgroup-kb takes 16 or 32, not {word}")),
+    }
+}
+
+/// Where a command with `--device`, `--workgroup-kb` and `--cpu` runs, the three read: the CPU
+/// twin takes no adapter and no workgroup memory.
+fn where_asked(command: &str, device: Option<usize>, workgroup_kb: Option<u32>, cpu: bool) -> Result<Where, String> {
+    if !cpu {
+        return Ok(Where::Gpu { device, workgroup_kb });
+    }
+    if device.is_some() || workgroup_kb.is_some() {
+        return Err(format!("{command} --cpu takes no --device and no --workgroup-kb: the CPU twin has no adapter"));
+    }
+    Ok(Where::Cpu)
 }
 
 /// The command of a command line, or what is wrong with it.
@@ -230,7 +517,7 @@ fn command(words: &[String]) -> Result<Command, String> {
             Some(word) => Err(format!("adapters takes no argument: {word}")),
         },
         Some("match") => {
-            let (mut n, mut device) = (DEFAULT_N, None);
+            let (mut n, mut device, mut workgroup_kb, mut cpu) = (DEFAULT_N, None, None, false);
             while let Some(option) = words.next() {
                 match option {
                     "--n" => {
@@ -238,18 +525,52 @@ fn command(words: &[String]) -> Result<Command, String> {
                         if n == 0 {
                             return Err("--n takes 1 or more: two empty sets have nothing to match".into());
                         }
-                        if n > MAX_N {
-                            return Err(format!(
-                                "--n takes {MAX_N} at most: the kernel's working buffer for more is above the \
-                                 128 MiB a device is sure to bind"
-                            ));
-                        }
                     }
                     "--device" => device = Some(whole_number(option, words.next())?),
+                    "--workgroup-kb" => workgroup_kb = Some(self::workgroup_kb(words.next())?),
+                    "--cpu" => cpu = true,
                     _ => return Err(format!("match has no option {option}")),
                 }
             }
-            Ok(Command::Match { n, device })
+            let on = where_asked("match", device, workgroup_kb, cpu)?;
+            if on == Where::Cpu {
+                return Ok(Command::Match { n, on });
+            }
+            let rows = tiles_asked(workgroup_kb).rows;
+            let most = most_descriptors(rows);
+            if n > most {
+                return Err(format!(
+                    "--n takes {most} at most with tiles of {rows} descriptors: the kernel's working buffer for \
+                     more is above the {} MiB a device is sure to bind",
+                    BINDING >> 20
+                ));
+            }
+            Ok(Command::Match { n, on })
+        }
+        Some("preselect") => {
+            let (mut photos, mut points) = (DEFAULT_PRESELECT_PHOTOS, DEFAULT_PRESELECT_POINTS);
+            let (mut device, mut workgroup_kb, mut cpu) = (None, None, false);
+            while let Some(option) = words.next() {
+                match option {
+                    "--photos" => {
+                        photos = whole_number(option, words.next())?;
+                        if photos < 2 {
+                            return Err("--photos takes 2 or more: a pair needs two photos".into());
+                        }
+                    }
+                    "--points" => {
+                        points = whole_number(option, words.next())?;
+                        if points == 0 {
+                            return Err("--points takes 1 or more: a photo without descriptors matches nothing".into());
+                        }
+                    }
+                    "--device" => device = Some(whole_number(option, words.next())?),
+                    "--workgroup-kb" => workgroup_kb = Some(self::workgroup_kb(words.next())?),
+                    "--cpu" => cpu = true,
+                    _ => return Err(format!("preselect has no option {option}")),
+                }
+            }
+            Ok(Command::Preselect { photos, points, on: where_asked("preselect", device, workgroup_kb, cpu)? })
         }
         Some("adjust") => {
             let (mut photos, mut points) = (DEFAULT_PHOTOS, DEFAULT_POINTS);
@@ -279,6 +600,33 @@ fn command(words: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Adjust { photos, points, solver, seed })
         }
+        Some("features") => {
+            let dir = match words.next() {
+                Some(word) if !word.starts_with("--") => PathBuf::from(word),
+                Some(word) => return Err(format!("features takes the folder of the photos first, not {word}")),
+                None => return Err("features takes the folder of the photos".into()),
+            };
+            let (mut limit, mut max_features, mut device, mut cpu) = (DEFAULT_LIMIT, DEFAULT_MAX_FEATURES, None, false);
+            while let Some(option) = words.next() {
+                match option {
+                    "--limit" => limit = whole_number(option, words.next())?,
+                    "--max-features" => {
+                        max_features = whole_number(option, words.next())?;
+                        if max_features == 0 {
+                            return Err("--max-features takes 1 or more: a photo without points has no features".into());
+                        }
+                    }
+                    "--device" => device = Some(whole_number(option, words.next())?),
+                    "--cpu" => cpu = true,
+                    _ => return Err(format!("features has no option {option}")),
+                }
+            }
+            if cpu && device.is_some() {
+                return Err("features --cpu takes no --device: the CPU twin has no adapter".into());
+            }
+            let on = if cpu { Extractor::Cpu } else { Extractor::Gpu(device) };
+            Ok(Command::Features { dir, limit, max_features, on })
+        }
         Some(word) => Err(format!("no command {word}")),
     }
 }
@@ -293,15 +641,25 @@ fn main() -> ExitCode {
     let words: Vec<String> = std::env::args_os().skip(1).map(|word| word.to_string_lossy().into_owned()).collect();
     let answer = match command(&words) {
         Ok(Command::Adapters) => Ok(adapters()),
-        Ok(Command::Match { n, device }) => time_matching(n, device),
+        Ok(Command::Match { n, on }) => time_matching(n, on),
         Ok(Command::Adjust { photos, points, solver, seed }) => time_adjustment(photos, points, solver, seed),
+        Ok(Command::Features { dir, limit, max_features, on }) => time_features(&dir, limit, max_features, on),
+        Ok(Command::Preselect { photos, points, on }) => time_preselect(photos, points, on),
         Err(problem) => {
             eprintln!("ppg-bench: {problem}");
             eprintln!("usage: ppg-bench adapters");
-            eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N]");
+            eprintln!("       ppg-bench match [--n {DEFAULT_N}] [--device N] [--workgroup-kb 16|32] [--cpu]");
             eprintln!(
                 "       ppg-bench adjust [--photos {DEFAULT_PHOTOS}] [--points {DEFAULT_POINTS} (in all, rounded \
                  up to a multiple of the photos)] [--solver auto|dense|sparse|pcg] [--seed {DEFAULT_SEED}]"
+            );
+            eprintln!(
+                "       ppg-bench features DIR [--limit {DEFAULT_LIMIT}] [--max-features {DEFAULT_MAX_FEATURES}] \
+                 [--device N | --cpu]"
+            );
+            eprintln!(
+                "       ppg-bench preselect [--photos {DEFAULT_PRESELECT_PHOTOS}] \
+                 [--points {DEFAULT_PRESELECT_POINTS}] [--device N | --cpu] [--workgroup-kb 16|32]"
             );
             return ExitCode::from(2);
         }
@@ -337,22 +695,59 @@ mod tests {
     #[test]
     fn the_largest_size_is_the_last_whose_partial_results_fit_a_storage_binding() {
         // the bytes of the kernel's buffer of partial results for two sets of n descriptors (8 for
-        // every tile of 128 descriptors of the first and every descriptor of the second), against
-        // the 128 MiB of a storage binding: the two figures MAX_N is derived from
-        let partials = |n: usize| n.div_ceil(128) * n * 8;
-        let binding = 128 << 20;
-        assert!(partials(MAX_N) <= binding, "{} bytes for {MAX_N} descriptors", partials(MAX_N));
-        assert!(partials(MAX_N + 1) > binding, "{} bytes for one descriptor more", partials(MAX_N + 1));
+        // every tile of `rows` descriptors of the first and every descriptor of the second),
+        // against the 128 MiB of a storage binding: the figures the bound is derived from, for
+        // the tiles of both kernels
+        for (tile, most) in [(gpu::LARGE_TILE, 46336), (gpu::SMALL_TILE, 32768)] {
+            let partials = |n: usize| n.div_ceil(tile.rows) * n * 8;
+            assert_eq!(most_descriptors(tile.rows), most, "tiles of {} rows", tile.rows);
+            assert!(partials(most) <= BINDING, "{} bytes for {most} descriptors", partials(most));
+            assert!(partials(most + 1) > BINDING, "{} bytes for one descriptor more", partials(most + 1));
+        }
     }
 
     #[test]
     fn the_largest_size_is_taken_and_one_more_is_refused() {
-        let (most, more) = (MAX_N.to_string(), (MAX_N + 1).to_string());
-        let taken = command(&words(&["match", "--n", &most]));
-        assert!(matches!(taken, Ok(Command::Match { n: MAX_N, device: None })), "{most} descriptors are refused");
-        // the refusal says how many are taken, with or without an adapter named
-        let refused = command(&words(&["match", "--n", &more, "--device", "0"])).err();
-        assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{more} descriptors: {refused:?}");
+        let asked =
+            [(None, vec![]), (Some(32), vec!["--workgroup-kb", "32"]), (Some(16), vec!["--workgroup-kb", "16"])];
+        for (kb, option) in asked {
+            let bound = most_descriptors(tiles_asked(kb).rows);
+            let (most, more) = (bound.to_string(), (bound + 1).to_string());
+            let mut line = vec!["match", "--n", &most];
+            line.extend(&option);
+            let taken = command(&words(&line));
+            let on = Where::Gpu { device: None, workgroup_kb: kb };
+            assert!(matches!(taken, Ok(Command::Match { n, on: o }) if n == bound && o == on), "{line:?} is refused");
+            // the refusal says how many are taken, with or without an adapter named
+            let mut line = vec!["match", "--n", &more, "--device", "0"];
+            line.extend(&option);
+            let refused = command(&words(&line)).err();
+            assert!(refused.as_ref().is_some_and(|problem| problem.contains(&most)), "{line:?}: {refused:?}");
+        }
+        // the small tiles take fewer: a size the large ones take is refused with them
+        assert!(command(&words(&["match", "--n", "46336", "--workgroup-kb", "16"])).is_err());
+    }
+
+    #[test]
+    fn match_reads_where_it_runs() {
+        let on = |line: &[&str]| match command(&words(line)) {
+            Ok(Command::Match { n, on }) => Ok((n, on)),
+            Ok(_) => panic!("{line:?} is another command"),
+            Err(problem) => Err(problem),
+        };
+        assert_eq!(on(&["match"]), Ok((DEFAULT_N, Where::Gpu { device: None, workgroup_kb: None })));
+        assert_eq!(on(&["match", "--device", "2", "--workgroup-kb", "16"]),
+                   Ok((DEFAULT_N, Where::Gpu { device: Some(2), workgroup_kb: Some(16) })));
+        assert_eq!(on(&["match", "--workgroup-kb", "32", "--n", "9"]),
+                   Ok((9, Where::Gpu { device: None, workgroup_kb: Some(32) })));
+        assert_eq!(on(&["match", "--cpu", "--n", "9"]), Ok((9, Where::Cpu)));
+        // the CPU twin binds no buffer: no bound on n
+        assert_eq!(on(&["match", "--n", "46337", "--cpu"]), Ok((46337, Where::Cpu)));
+        let refused: [&[&str]; 4] = [&["match", "--workgroup-kb"], &["match", "--workgroup-kb", "24"],
+                                     &["match", "--cpu", "--device", "0"], &["match", "--cpu", "--workgroup-kb", "16"]];
+        for line in refused {
+            assert!(on(line).is_err(), "{line:?} is taken");
+        }
     }
 
     #[test]
@@ -372,6 +767,69 @@ mod tests {
         assert_eq!(solver_named("cholesky"), None);
         let refused = command(&words(&["adjust", "--solver", "cholesky"])).err();
         assert!(refused.as_ref().is_some_and(|problem| problem.contains("auto, dense, sparse or pcg")), "{refused:?}");
+    }
+
+    #[test]
+    fn features_reads_its_options_and_has_its_defaults() {
+        let on = |line: &[&str]| match command(&words(line)) {
+            Ok(Command::Features { dir, limit, max_features, on }) => Ok((dir, limit, max_features, on)),
+            Ok(_) => panic!("{line:?} is another command"),
+            Err(problem) => Err(problem),
+        };
+        let folder = PathBuf::from("photos");
+        assert_eq!(on(&["features", "photos"]), Ok((folder.clone(), 2016, 8192, Extractor::Gpu(None))));
+        assert_eq!(on(&["features", "photos", "--device", "1", "--limit", "0", "--max-features", "40000"]),
+                   Ok((folder.clone(), 0, 40000, Extractor::Gpu(Some(1)))));
+        assert_eq!(on(&["features", "photos", "--cpu", "--limit", "1024"]), Ok((folder, 1024, 8192, Extractor::Cpu)));
+        let refused: [&[&str]; 7] = [&["features"], &["features", "--cpu"], &["features", "photos", "--n", "8"],
+                                     &["features", "photos", "--limit"], &["features", "photos", "--limit", "many"],
+                                     &["features", "photos", "--max-features", "0"],
+                                     &["features", "photos", "--cpu", "--device", "0"]];
+        for line in refused {
+            assert!(on(line).is_err(), "{line:?} is taken");
+        }
+    }
+
+    #[test]
+    fn preselect_reads_its_options_and_has_its_defaults() {
+        let on = |line: &[&str]| match command(&words(line)) {
+            Ok(Command::Preselect { photos, points, on }) => Ok((photos, points, on)),
+            Ok(_) => panic!("{line:?} is another command"),
+            Err(problem) => Err(problem),
+        };
+        assert_eq!(on(&["preselect"]), Ok((200, 1024, Where::Gpu { device: None, workgroup_kb: None })));
+        assert_eq!(on(&["preselect", "--photos", "12", "--points", "300", "--device", "1", "--workgroup-kb", "16"]),
+                   Ok((12, 300, Where::Gpu { device: Some(1), workgroup_kb: Some(16) })));
+        assert_eq!(on(&["preselect", "--cpu", "--photos", "2"]), Ok((2, 1024, Where::Cpu)));
+        let refused: [&[&str]; 8] = [&["preselect", "--photos", "1"], &["preselect", "--points", "0"],
+                                     &["preselect", "--n", "8"], &["preselect", "--photos"],
+                                     &["preselect", "--workgroup-kb", "24"], &["preselect", "--cpu", "--device", "0"],
+                                     &["preselect", "--cpu", "--workgroup-kb", "32"], &["preselect", "--device", "-1"]];
+        for line in refused {
+            assert!(on(line).is_err(), "{line:?} is taken");
+        }
+    }
+
+    #[test]
+    fn the_photos_of_preselect_share_a_quarter_with_the_photo_before_only() {
+        let photos = preselect_photos(4, 64);
+        assert_eq!(photos.len(), 4);
+        assert!(photos.iter().all(|photo| photo.len() == 64 * gpu::DIM));
+        // the first 16 descriptors of a photo are the twins of descriptors 16..32 of the one before:
+        // at most the noise and two roundings apart; those of the photo before that are far
+        let apart = |x: &[u8], y: &[u8]| norm(x.iter().zip(y).map(|(&p, &q)| f64::from(p) - f64::from(q)));
+        let far = NOISE * NORM + (gpu::DIM as f64).sqrt();
+        for i in 1..4 {
+            for k in 0..16 {
+                let twin = &photos[i][k * gpu::DIM..][..gpu::DIM];
+                let source = &photos[i - 1][(16 + k) * gpu::DIM..][..gpu::DIM];
+                assert!(apart(twin, source) <= far, "photo {i}, descriptor {k}");
+                if i >= 2 {
+                    let older = &photos[i - 2][(16 + k) * gpu::DIM..][..gpu::DIM];
+                    assert!(apart(twin, older) > far, "photo {i}, descriptor {k}: close to the photo before the last");
+                }
+            }
+        }
     }
 
     #[test]

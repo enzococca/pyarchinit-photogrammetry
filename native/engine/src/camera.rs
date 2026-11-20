@@ -5,6 +5,8 @@
 
 use std::ops::{Add, Div, Mul, Sub};
 
+use crate::bundle::dual::Dual;
+
 /// The models the kernels know, in the order of `MODELS` (the others stay with the Python code).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Model {
@@ -183,6 +185,39 @@ impl Camera {
     pub fn pixel(&self, u: f64, v: f64) -> (f64, f64) {
         project(self.model, &self.p, u, v)
     }
+
+    /// The normalised point `(u, v)` whose pixel is `(x, y)`: the inverse of `pixel`, as COLMAP's
+    /// `CamFromImg`. The pinhole models invert in closed form; the others by Newton's method on
+    /// `project`, from the pinhole estimate, with the Jacobian of the dual numbers of
+    /// `bundle::dual`, until a step is shorter than 1e-10 or after 100 iterations (COLMAP's
+    /// `IterativeUndistortion` stops on the same figure measured on the squared step, one
+    /// iteration earlier). A pixel the model cannot reach gives the estimate of the last step.
+    pub fn normalised(&self, x: f64, y: f64) -> (f64, f64) {
+        let (mut u, mut v) = ((x - self.cx) / self.fx, (y - self.cy) / self.fy);
+        if matches!(self.model, Model::SimplePinhole | Model::Pinhole) {
+            return (u, v);
+        }
+        let p = self.p.map(Dual::<2>::constant);
+        for _ in 0..100 {
+            let (px, py) = project(self.model, &p, Dual::variable(u, 0), Dual::variable(v, 1));
+            let (rx, ry) = (px.v - x, py.v - y);
+            let determinant = px.d[0] * py.d[1] - px.d[1] * py.d[0];
+            if !(determinant != 0.0 && determinant.is_finite()) {
+                break;
+            }
+            let du = (py.d[1] * rx - px.d[1] * ry) / determinant;
+            let dv = (px.d[0] * ry - py.d[0] * rx) / determinant;
+            if !(du.is_finite() && dv.is_finite()) {
+                break;
+            }
+            u -= du;
+            v -= dv;
+            if du * du + dv * dv < 1e-20 {
+                break;
+            }
+        }
+        (u, v)
+    }
 }
 
 /// Rows of a `cam_from_world` matrix (3x4).
@@ -225,7 +260,6 @@ pub fn project_valid(cam: &Camera, m: &Pose, x: f64, y: f64, z: f64, margin: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::dual::Dual;
 
     /// The six models, each with a fixed parameter vector of awkward values, so that every
     /// rounding of its formula is exercised.

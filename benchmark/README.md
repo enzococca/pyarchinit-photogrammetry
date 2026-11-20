@@ -66,10 +66,11 @@ and writes one record, a JSON file. A folder of records gives the table of a ver
 by side.
 
 ```bash
-ppg bench run PHOTOS OUT --name NAME [--steps align|all] [--mapper auto|incremental|global] [--repeat N] [--keep] [--records DIR]
-ppg bench synthetic trench|ring OUT [--repeat 3] [--keep] [--records DIR]
+ppg bench run PHOTOS OUT --name NAME [--steps align|all|match] [--mapper auto|incremental|global] [--engine auto|classic|native] [--seed N] [--repeat N] [--keep] [--records DIR]
+ppg bench synthetic trench|ring OUT [--engine auto|classic|native] [--repeat 3] [--keep] [--records DIR]
 ppg bench adjust PROJECT --name NAME [--solvers native,colmap,scipy] [--repeat 3] [--records DIR]
 ppg bench table DIR
+ppg bench pairs A B
 ```
 
 * `run`: `--name` (required) names the run and its records (letters, digits, `.`, `_`, `-`): say the
@@ -77,7 +78,8 @@ ppg bench table DIR
   and, when the photos carry a GPS position, georeferences by those positions; `all` detects the
   default targets (`aruco_4x4_50`) first and goes on with the depth maps, the dense cloud, the model,
   the texture, the DEM and the orthophoto: the chain of `ppg process` with its defaults, which the
-  record writes out. A reference file or other targets are not options of `run` (the synthetic sets
+  record writes out; `match` matches and stops (see *Measuring the native matching*). A reference
+  file or other targets are not options of `run` (the synthetic sets
   pass them; a real set is measured as its photos come). Each of the `--repeat` runs works in
   `OUT/NAME-<i>`: `ppg bench` prints nothing while a run lasts; the step that is running and those
   done are in `result.json` there, rewritten as each step starts and ends, and what the child prints
@@ -94,6 +96,8 @@ ppg bench table DIR
   `ransac_seed`, `-1` without it (a seed from the clock). The seed fixes the verification only: on a
   computer that shares the pairs between the GPU and the CPU, and since COLMAP's threaded extractor
   numbers the photos in the order it finishes them, repeated runs can still differ in their pairs.
+  `--engine auto|classic|native` chooses the engine of the matching (`auto`, the default, is the
+  choice of the program); the record keeps it as `engine_requested`, and the table compares it.
 * `synthetic trench|ring`: writes the set in a folder of its own, `OUT/synthetic-trench-set/` or
   `OUT/synthetic-ring-set/` (its photos and `gcp.csv`), which must not exist yet, and runs it as
   `synthetic-trench` (28 photos, all the steps of `ppg process` with its defaults - the depth maps at
@@ -109,7 +113,7 @@ ppg bench table DIR
   true: heights that landed too high or too low keep their sign) and `truth_camera_height_rmse`,
   against the true targets and poses of the scene. The two sets are synthetic: their coordinates are
   made up and name no place. `--keep` keeps the work folder of each run with its project
-  (`OUT/synthetic-trench-<i>/project.ppg`): what `adjust` takes.
+  (`OUT/synthetic-trench-<i>/project.ppg`): what `adjust` and `pairs` take. `--engine` as in `run`.
 * `adjust PROJECT --name NAME`: the native bundle adjustment, COLMAP's and scipy's on the
   reconstruction of a kept project (one of `run` or `synthetic` with `--keep`, or any aligned
   project), on the same plain problem - the tie points, every calibration free but the principal
@@ -142,19 +146,27 @@ ppg bench table DIR
   differ): it is what the table of 2.0.0 compares. A row whose valid runs differ in their settings
   (other than what records what a run did rather than what it was asked: the version of pycolmap,
   the count of pairs - above 40 photos the preselection's RANSAC has a random seed - and their split
-  between the GPU and the CPU, the mapper and its fallback), in their machine (system, architecture,
-  processor, memory) or in their set (how many photos, their bytes) says `mixed settings`, `mixed
-  machines` or `mixed sets` and is no baseline.
+  between the GPU and the CPU, the mapper and its fallback, the engine the record of the matching
+  names, where it found the features and the routes its pairs took), in their machine (system,
+  architecture, processor, memory) or in their set (how many photos, their bytes) says `mixed
+  settings`, `mixed machines` or `mixed sets` and is no baseline. Native and classic runs under one
+  name are such a mix (`engine_requested` differs): give them two names to read them side by side.
+* `pairs A B`: the pairs of photos two kept runs verified, side by side (see *Measuring the native
+  matching*).
 
 **What a record holds**: the name of the run, its start, the version of the program; the machine
 (system, processor, cores, memory, GPU adapters, load, battery, whether Dropbox runs); the disk of the
 photos (bus, link speed, read rate, solid state); the set (how many photos, their bytes, how many
 online-only, how many with GPS); the settings of the engine (matching and its parameters, mapper, GPU,
-version of pycolmap, `photo_cache_mb`, georeferencing method, targets); the steps (seconds, peak
-memory in MB, stages, engine; for the orthophoto the counts of its photo cache: reads, hits, rereads);
-the results; the warnings; whether it is valid and why not; the error of a run that failed. **What a record never holds**: paths, coordinates, CRS codes, photo names, the
-name of the host or of the user. The text of an error is scrubbed of them before it is written, and
-a record that would still hold a path is refused. Records can be shared as they are.
+version of pycolmap, `photo_cache_mb`, georeferencing method, targets, the mapper and the engine asked
+for); the steps (seconds, peak memory in MB, stages, engine; for the orthophoto the counts of its photo
+cache: reads, hits, rereads); the results (after the matching `verified_pairs`; after the alignment
+`cameras`, `aligned`, `tie_points_per_photo`, `reprojection_rms_px`; after the georeferencing the
+errors on the references; the `truth_` errors of a synthetic set); the warnings; whether it is valid
+and why not; the error of a run that failed. **What a record never holds**: paths, coordinates, CRS
+codes, photo names, the name of the host or of the user. The text of an error is scrubbed of them
+before it is written, and a record that would still hold a path is refused. Records can be shared as
+they are.
 
 **When a run is not valid** (the record says so, with its reasons, and the table leaves it out): the
 disk of the photos is on a slow link (below 5000 Mb/s: USB 2), it reads slowly (below 100 MB/s),
@@ -175,3 +187,61 @@ settings, on the reference machine (Mac mini M4 Pro, 12 cores, 24 GB, memory bud
 a floor of photos, `max(12, 3 × workers)`, so that the workers never wait for a photo another one
 has just read. `PPG_PHOTO_CACHE_MB=0` leaves that floor alone and nothing more, which is the cache of
 version 1.10: that is how the 1.10 baseline is measured.
+
+### Measuring the native matching
+
+The gate of the native matching reads it against the classic one on the same set: the seconds of
+the step, the pairs it verifies, the photos the mapper registers from its database, the tie points
+per photo and the reprojection error of the alignment, the metric gates of the synthetic trench. The
+bench measures all of them but two of the metric gates, with two runs of a set, one per engine, under
+two names; of the metric gates it measures the control and check errors of the trench
+(`truth_control_rmse`, `truth_check_rmse`), while the median error of the DEM (under 3 mm) and the
+error of the targets on the orthophoto (under 5 mm) come from the metric test of pytest with the
+native matching (`test_the_metric_gates_hold_with_native_matching`; the bench's trench also builds
+its depth maps at `medium`, the test at `high`):
+
+```bash
+ppg bench run PHOTOS OUT --name SET-classic --engine classic --seed 1 --repeat 3 --keep
+ppg bench run PHOTOS OUT --name SET-native --engine native --repeat 3 --keep
+ppg bench table OUT
+ppg bench pairs OUT/SET-classic-1 OUT/SET-native-1
+```
+
+* `--engine auto|classic|native` is the engine of the matching alone: the alignment and the depth
+  maps run on the classic engine whatever is asked, so that the two runs differ in the matching and
+  nothing else, and `PPG_ENGINE` of the shell never reaches the child (the engine of a run is the
+  one asked). The record keeps the word as `settings.engine_requested`, which the table compares
+  (native and classic runs under one name are `mixed settings`), while the `engine` of the step
+  says what ran: `native`, or `classic` with the reason of a fallback (the native core missing, a
+  learned matcher, rigs). The settings also keep what the record of a native matching says of
+  itself - `engine`, `features` (`gpu`, `cpu` or `gpu+cpu`: where the key points were found) and
+  `routes` (how many pairs went the guided way, the brute-force way, or were dropped) -; those are
+  facts of the run, not settings, and do not break a baseline. The record of a classic matching
+  names no engine, so `settings.engine` is `null` in a classic run: what ran is the `engine` of the
+  step (`steps[i].engine.used`), which also says a fallback. Both engines name a GPU as its adapter
+  calls itself (`gpu`, and the keys of `gpu_shares`).
+* `--steps match` runs the matching and stops (the default targets are not detected, the mapper
+  does not run): the time of the native matching against the classic one on a large set, where the
+  alignment would take longer than the step measured. Its record has the step `match_photos` with
+  its seconds, its stages and its peak memory, and the one result `verified_pairs`.
+* `verified_pairs` (after the matching) counts the pairs of photos whose two-view geometry in the
+  database of the run - COLMAP's `database.db`, written by both engines - the mapper takes: at
+  least 15 inlier matches (COLMAP's `min_num_inliers`: below it the pair is DEGENERATE and its
+  matches are dropped) and a configuration other than UNDEFINED, DEGENERATE and WATERMARK. A pair
+  the matching never looked at, or one that failed its verification, is not a verified pair.
+* `tie_points_per_photo` (after the alignment, to a tenth) is the mean, over the photos the mapper
+  registered, of the tie points each one sees: the 2D points of the photo that have a 3D point. It
+  reads the density of the block the matching gave the mapper; `aligned` beside it says how many
+  photos the mapper registered, `reprojection_rms_px` how well.
+* `pairs A B` sets the verified pairs of two kept runs side by side (`A` and `B` are work folders
+  kept with `--keep`, `OUT/<name>-<i>`; each must hold exactly one `database.db` under it, else the
+  command refuses it saying the count). The pairs are compared by the names of the photos, since
+  each run numbers them as its extractor finished them. It prints one line of numbers and nothing
+  else: `verified A 6058, verified B 6040, lost 31 (0.51 %), gained 13`, where **lost** are the
+  pairs verified in A and not in B, in count and as a share of A's, and **gained** those verified in
+  B and not in A. The databases are read and never written.
+
+The figures above are a made-up example of the line, not a measurement. A classic run compared
+with the native one is seeded (`--seed`): COLMAP's RANSAC would otherwise verify a few pairs
+differently between repeats, and those pairs would read as lost or gained by the engine. The native
+matching seeds its own RANSAC from the pair and gives the same pairs on every run and every device.

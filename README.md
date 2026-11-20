@@ -546,6 +546,8 @@ chunk; photo paths inside the project folder are stored relative, so projects ca
 ## License
 
 GNU GPL v2 or later, like PyArchInit. Third-party engines keep their licences (COLMAP BSD,
-OpenMVS AGPL when used as an external program, SAM 2.1 Apache 2.0).
+OpenMVS AGPL when used as an external program, SAM 2.1 Apache 2.0). The native core follows the
+structure of VLFeat's SIFT (BSD 2-clause) and of COLMAP's estimators without including their files;
+their notices are in `native/NOTICE`.
 
 Author: Enzo Cocca
