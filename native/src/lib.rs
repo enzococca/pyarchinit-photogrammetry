@@ -1350,5 +1350,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_match::native_match_pairs_list, m)?)?;
     m.add_function(wrap_pyfunction!(native_match::read_grey, m)?)?;
     m.add_function(wrap_pyfunction!(native_match::rescale_as_colmap, m)?)?;
+    m.add_class::<native_match::NativeFeatureStore>()?;
+    m.add_class::<native_match::NativeMatchStore>()?;
     Ok(())
 }

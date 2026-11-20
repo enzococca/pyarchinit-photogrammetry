@@ -1132,6 +1132,16 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     _interrupted_names_back(db_path)  # the names a matching that died in COLMAP left aliased, before anything reads them
+    if not reset and (chunk.meta.get("sfm") or {}).get("engine") == "native" and db_path.exists():
+        # a chunk matched by the native engine keeps the descriptors in its stores, not in the database (the mapper
+        # needs none): the classic matcher continuing it needs them there, for the pairs of the new photos with the old
+        from . import native_match  # imports this module: not at the top
+
+        try:
+            native_match.export_database(chunk, db_path, descriptors=True)
+        except FileNotFoundError as exc:
+            log.warning("the descriptors of the native matching cannot be put into the database (%s): the pairs with "
+                        "the photos matched before may stay unmatched", exc)
     root, names = image_root_and_names(chunk)
     rigs = rig_configs(chunk, names)
     if matcher != "sift" and rigs:
@@ -1149,6 +1159,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         import shutil
 
         shutil.rmtree(work / "learned", ignore_errors=True)  # the descriptors of the database just removed
+        shutil.rmtree(work / "native", ignore_errors=True)  # the stores of the native matching, of other photos now
     existing = _db_image_names(db_path) if keep else set()
     downscale = QUALITY_DOWNSCALE.get(quality, 2)
 

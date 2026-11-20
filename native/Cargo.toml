@@ -21,6 +21,8 @@ ppg_engine = { path = "engine" }
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }
 numpy = "0.30"
 rayon = "1.10"
+# the matrices and the pose of a pair imported from a COLMAP database (the engine's own version)
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 
 [build-dependencies]
 # RTKLIB (vendor/rtklib, C) for the post-processing of GNSS observations; build.rs needs

@@ -22,7 +22,11 @@
 //! A feature store or a match store named by a step is opened when its folder holds one and made
 //! otherwise, so that a step interrupted keeps what it did and the next run adds to it; the
 //! caller removes the folder to start over. The readers open the store they are given and refuse
-//! one that is not there or is damaged, naming the file.
+//! one that is not there or is damaged, naming the file. The one-call readers and writers
+//! (`native_store_read`, `native_match_read`, ...) open the store on every call, which checks
+//! every file of it: a step that goes through every item - the export of a project to COLMAP's
+//! database, the import of one - holds the store open instead, through [`NativeFeatureStore`]
+//! and [`NativeMatchStore`], one handle for the whole step.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -31,6 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use nalgebra::{Matrix3, Quaternion, UnitQuaternion, Vector3};
 use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
@@ -39,13 +44,14 @@ use pyo3::types::PyDict;
 
 use ppg_engine::camera::Camera;
 use ppg_engine::features::{self, FeatureOptions, FeatureReport, PhotoJob};
-use ppg_engine::geometry::two_view;
+use ppg_engine::geometry::two_view::{self, Config, TwoView};
 use ppg_engine::gpu;
 use ppg_engine::gpu_sift::{self, DESC};
 use ppg_engine::image::{self, Grey};
 use ppg_engine::pairs;
 use ppg_engine::preselect::{self, MatchOptions, PreselectOptions};
-use ppg_engine::store::{ExtractParams, FeatureHeader, FeatureStore, Impl, MatchStore, PhotoFeatures, INDEX_FILE};
+use ppg_engine::store::{ExtractParams, FeatureHeader, FeatureStore, Impl, MatchStore, PairResult, PhotoFeatures,
+                        Route, INDEX_FILE};
 
 use crate::{panic_text, set_two_view_option, sift_arrays, two_view_into_dict};
 
@@ -346,25 +352,26 @@ fn check_pixels(name: &str, given: (usize, usize), full: (usize, usize), limit: 
 /// or a reduction of it at least as large as the reductions asked for: a smaller one is a ValueError),
 /// ``full_size`` ``(width, height)`` of the full photo - extracted into ``store`` (and ``small_store``) as
 /// :func:`native_features` extracts a photo it reads itself, on the first GPU of ``devices`` that opens,
-/// else on the CPU: for a file the step reported ``unsupported`` and Python decoded. Returns the dict of
-/// :func:`native_features` for this one photo, with ``points`` (the key points stored, 0 when it was
-/// not): a photo too small for the kernels is ``unsupported``, never an error. The GIL is released
-/// (`features::extract_pixels`).
+/// else on the CPU, with ``mask`` (a file, or None) applied as the step applies it: for a file the step
+/// reported ``unsupported`` and Python decoded. Returns the dict of :func:`native_features` for this one
+/// photo, with ``points`` (the key points stored, 0 when it was not): a photo too small for the kernels is
+/// ``unsupported``, never an error. The GIL is released (`features::extract_pixels`).
 #[pyfunction]
 #[pyo3(signature = (store, small_store, name, grey, full_size, limit, small_limit, max_features, small_max_features,
-                    devices))]
+                    devices, mask=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn native_features_pixels<'py>(py: Python<'py>, store: &str, small_store: Option<&str>, name: String,
                                           grey: PyReadonlyArray2<'py, u8>, full_size: (usize, usize), limit: usize,
                                           small_limit: Option<usize>, max_features: usize, small_max_features: usize,
-                                          devices: Vec<i64>) -> PyResult<Bound<'py, PyDict>> {
+                                          devices: Vec<i64>, mask: Option<PathBuf>) -> PyResult<Bound<'py, PyDict>> {
     let devices = self::devices(py, devices)?;
     let a = grey.as_array();
     let (height, width) = a.dim();
     let small_limit_wanted = small_limit.filter(|_| small_store.is_some());
     check_pixels(&name, (width, height), full_size, limit, small_limit_wanted)?;
     let pixels = Grey { width, height, pixels: a.iter().copied().collect() };
-    let job = PhotoJob { name: name.clone(), path: None, mask: None, limit, small_limit };
+    // the mask, when given, is the one of `native_features`: read by its path, applied when its size is the photo's
+    let job = PhotoJob { name: name.clone(), path: None, mask, limit, small_limit };
     // the GPU takes the photo when one opens, the CPU otherwise (the step makes a CPU worker then)
     let o = FeatureOptions { sift: sift_options(max_features), dct: true, readers: 1, cpu_threads: 0 };
     let refused = too_small(full_size, limit, small_limit_wanted);
@@ -535,6 +542,117 @@ pub(crate) fn native_match_pairs<'py>(py: Python<'py>, features: &str, matches: 
     Ok(d)
 }
 
+/// What a reader of the feature store gives of a photo: its key points, its descriptors (empty when
+/// not asked for) and the implementation that made them.
+type ReadFeatures = (Vec<[f32; 4]>, Vec<u8>, Impl);
+
+/// The key points and descriptors of a photo of a store as the readers return them: ``(keypoints (n, 4)
+/// float32, descriptors (n, 128) uint8 or None when they were not read, implementation)``.
+fn read_arrays<'py>(py: Python<'py>, found: Option<ReadFeatures>, name: &str, descriptors: bool)
+    -> PyResult<(Bound<'py, PyArray2<f32>>, Option<Bound<'py, PyArray2<u8>>>, &'static str)> {
+    let (kp, desc, implementation) = found.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?;
+    let n = kp.len();
+    let flat: Vec<f32> = kp.iter().flat_map(|k| k.iter().copied()).collect();
+    let kp = Array2::from_shape_vec((n, 4), flat).unwrap().into_pyarray(py);
+    let desc = descriptors.then(|| Array2::from_shape_vec((n, DESC), desc).unwrap().into_pyarray(py));
+    Ok((kp, desc, implementation.name()))
+}
+
+/// The features of a photo given from Python, checked: ``keypoints`` ``(n, 4)`` float32 in the pixels of
+/// the full photo with COLMAP's centre, ``descriptors`` ``(n, 128)`` uint8, ``width`` and ``height`` of the
+/// full photo, ``image_id`` COLMAP's id of the photo in the database they come from, or None. The
+/// implementation is ``imported`` (the features of the classic step), the extraction parameters zero.
+fn imported_features(keypoints: &PyReadonlyArray2<'_, f32>, descriptors: &PyReadonlyArray2<'_, u8>, width: u32,
+                     height: u32, image_id: Option<u32>) -> PyResult<PhotoFeatures> {
+    if keypoints.shape()[1] != 4 {
+        return Err(PyValueError::new_err(format!("keypoints must be (n, 4), not {:?}", keypoints.shape())));
+    }
+    if descriptors.shape()[1] != DESC {
+        let given = descriptors.shape()[1];
+        return Err(PyValueError::new_err(format!("descriptors of {DESC} bytes expected, {given} given")));
+    }
+    let (points, rows) = (keypoints.shape()[0], descriptors.shape()[0]);
+    if rows != points {
+        return Err(PyValueError::new_err(format!("{points} key points and {rows} descriptors")));
+    }
+    let k = keypoints.as_array();
+    let keypoints: Vec<[f32; 4]> = (0..points).map(|i| [k[[i, 0]], k[[i, 1]], k[[i, 2]], k[[i, 3]]]).collect();
+    let descriptors: Vec<u8> = descriptors.as_array().iter().copied().collect();
+    Ok(PhotoFeatures { width, height, implementation: Impl::Imported, image_id, params: ExtractParams::default(),
+                       keypoints, descriptors })
+}
+
+/// The header of a photo of a feature store as a dict: ``width`` and ``height`` of the full photo,
+/// ``points``, ``impl`` (``gpu``, ``cpu`` or ``imported``), ``image_id`` (COLMAP's, or None),
+/// ``max_image_size`` (the limit the photo was reduced under, 0 for none or imported) and ``masked``.
+fn header_dict<'py>(py: Python<'py>, h: &FeatureHeader) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("width", h.width)?;
+    d.set_item("height", h.height)?;
+    d.set_item("points", h.points)?;
+    d.set_item("impl", h.implementation.name())?;
+    d.set_item("image_id", h.image_id)?;
+    d.set_item("max_image_size", h.params.max_image_size)?;
+    d.set_item("masked", h.params.masked)?;
+    Ok(d)
+}
+
+/// The result of a pair of a match store as a dict: ``matches`` ``(n, 2)`` uint32 pairs of key point
+/// indices into the two photos, ``inliers`` ``(m, 2)`` among them, ``config`` (COLMAP's number), ``F``,
+/// ``E``, ``H`` (3 x 3 float64 or None), ``qvec`` and ``tvec`` (the relative pose or None) and ``route``
+/// (``guided``, ``brute_force``, ``dropped`` or ``imported``).
+fn pair_dict<'py>(py: Python<'py>, r: &PairResult) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    let flat: Vec<u32> = r.matches.iter().flat_map(|m| [m[0], m[1]]).collect();
+    d.set_item("matches", Array2::from_shape_vec((r.matches.len(), 2), flat).unwrap().into_pyarray(py))?;
+    two_view_into_dict(py, &d, &r.two_view)?;
+    d.set_item("route", r.route.name())?;
+    Ok(d)
+}
+
+/// ``(n, 2)`` uint32 pairs of key point indices from Python; another shape is a ValueError naming ``what``.
+fn index_pairs(a: &PyReadonlyArray2<'_, u32>, what: &str) -> PyResult<Vec<[u32; 2]>> {
+    if a.shape()[1] != 2 {
+        return Err(PyValueError::new_err(format!("{what} must be (n, 2), not {:?}", a.shape())));
+    }
+    let v = a.as_array();
+    Ok((0..a.shape()[0]).map(|i| [v[[i, 0]], v[[i, 1]]]).collect())
+}
+
+/// A 3 x 3 float64 matrix from Python, or None; another shape is a ValueError naming ``what``.
+fn matrix(m: Option<PyReadonlyArray2<'_, f64>>, what: &str) -> PyResult<Option<Matrix3<f64>>> {
+    let Some(m) = m else { return Ok(None) };
+    if m.shape() != [3, 3] {
+        return Err(PyValueError::new_err(format!("{what} must be 3 x 3, not {:?}", m.shape())));
+    }
+    let v = m.as_array();
+    Ok(Some(Matrix3::from_fn(|r, c| v[[r, c]])))
+}
+
+/// The result of a pair given from Python (`Route::Imported`, the matches of the classic step): ``matches``
+/// and ``inliers`` ``(n, 2)`` uint32, ``config`` COLMAP's number (0 to 7: the ones the verification gives),
+/// the models and the pose as :func:`pair_dict` gives them (``qvec`` and ``tvec`` together or neither).
+#[allow(clippy::too_many_arguments)]
+fn imported_result(a: &str, b: &str, matches: &PyReadonlyArray2<'_, u32>, inliers: &PyReadonlyArray2<'_, u32>,
+                   config: u32, f: Option<PyReadonlyArray2<'_, f64>>, e: Option<PyReadonlyArray2<'_, f64>>,
+                   h: Option<PyReadonlyArray2<'_, f64>>, qvec: Option<[f64; 4]>, tvec: Option<[f64; 3]>)
+    -> PyResult<PairResult> {
+    let config = Config::from_u32(config).ok_or_else(|| {
+        PyValueError::new_err(format!("({a}, {b}): configuration {config} is not one the verification gives (0 to 7)"))
+    })?;
+    let cam2_from_cam1 = match (qvec, tvec) {
+        (Some(q), Some(t)) => {
+            let rotation = UnitQuaternion::from_quaternion(Quaternion::new(q[0], q[1], q[2], q[3]));
+            Some((rotation, Vector3::new(t[0], t[1], t[2])))
+        }
+        (None, None) => None,
+        _ => return Err(PyValueError::new_err(format!("({a}, {b}): qvec and tvec go together"))),
+    };
+    let two_view = TwoView { config, inliers: index_pairs(inliers, "inliers")?, e: matrix(e, "E")?, f: matrix(f, "F")?,
+                             h: matrix(h, "H")?, cam2_from_cam1 };
+    Ok(PairResult { matches: index_pairs(matches, "matches")?, two_view, route: Route::Imported })
+}
+
 /// The features of the photo ``name`` of the feature store ``store``: ``(keypoints (n, 4) float32 - x, y,
 /// scale, orientation in the pixels of the full photo with COLMAP's centre -, descriptors (n, 128) uint8,
 /// implementation)``, the last ``gpu``, ``cpu`` or ``imported``. A photo the store does not hold is a
@@ -563,22 +681,7 @@ pub(crate) fn native_store_read<'py>(py: Python<'py>, store: &str, name: &str)
 pub(crate) fn native_store_write<'py>(py: Python<'py>, store: &str, name: &str, keypoints: PyReadonlyArray2<'py, f32>,
                                       descriptors: PyReadonlyArray2<'py, u8>, width: u32, height: u32,
                                       image_id: Option<u32>) -> PyResult<()> {
-    if keypoints.shape()[1] != 4 {
-        return Err(PyValueError::new_err(format!("keypoints must be (n, 4), not {:?}", keypoints.shape())));
-    }
-    if descriptors.shape()[1] != DESC {
-        let given = descriptors.shape()[1];
-        return Err(PyValueError::new_err(format!("descriptors of {DESC} bytes expected, {given} given")));
-    }
-    let (points, rows) = (keypoints.shape()[0], descriptors.shape()[0]);
-    if rows != points {
-        return Err(PyValueError::new_err(format!("{points} key points and {rows} descriptors")));
-    }
-    let k = keypoints.as_array();
-    let keypoints: Vec<[f32; 4]> = (0..points).map(|i| [k[[i, 0]], k[[i, 1]], k[[i, 2]], k[[i, 3]]]).collect();
-    let descriptors: Vec<u8> = descriptors.as_array().iter().copied().collect();
-    let f = PhotoFeatures { width, height, implementation: Impl::Imported, image_id, params: ExtractParams::default(),
-                            keypoints, descriptors };
+    let f = imported_features(&keypoints, &descriptors, width, height, image_id)?;
     run_native(py, None, "writing the feature store", NO_PROGRESS,|_, _| {
         let store = feature_store(store)?;
         store.put(name, &f).map_err(|e| e.to_string())
@@ -600,16 +703,7 @@ pub(crate) fn native_store_header<'py>(py: Python<'py>, store: &str, name: &str)
     let header: Option<FeatureHeader> = run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| {
         Ok(open_feature_store(store)?.get(name).map(|v| v.header().clone()))
     })?;
-    let h = header.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?;
-    let d = PyDict::new(py);
-    d.set_item("width", h.width)?;
-    d.set_item("height", h.height)?;
-    d.set_item("points", h.points)?;
-    d.set_item("impl", h.implementation.name())?;
-    d.set_item("image_id", h.image_id)?;
-    d.set_item("max_image_size", h.params.max_image_size)?;
-    d.set_item("masked", h.params.masked)?;
-    Ok(d)
+    header_dict(py, &header.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?)
 }
 
 /// The result of the pair ``(a, b)`` of the match store ``matches`` (the two names in the order they were
@@ -624,13 +718,7 @@ pub(crate) fn native_match_read<'py>(py: Python<'py>, matches: &str, a: &str, b:
         let store = MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?;
         Ok(store.get(a, b))
     })?;
-    let Some(r) = found else { return Ok(None) };
-    let d = PyDict::new(py);
-    let flat: Vec<u32> = r.matches.iter().flat_map(|m| [m[0], m[1]]).collect();
-    d.set_item("matches", Array2::from_shape_vec((r.matches.len(), 2), flat).unwrap().into_pyarray(py))?;
-    two_view_into_dict(py, &d, &r.two_view)?;
-    d.set_item("route", r.route.name())?;
-    Ok(Some(d))
+    found.map(|r| pair_dict(py, &r)).transpose()
 }
 
 /// The pairs of the match store ``matches``, each as its two names in the order they were matched,
@@ -640,6 +728,119 @@ pub(crate) fn native_match_pairs_list(py: Python<'_>, matches: &str) -> PyResult
     run_native(py, None, "reading the match store", NO_PROGRESS,|_, _| {
         Ok(MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?.pairs())
     })
+}
+
+/// A feature store held open from Python - ``NativeFeatureStore(dir)``, opened when the folder holds one
+/// and made otherwise - for a step that goes through every photo of it: the names, the header and the
+/// features of a photo read, and features written as :func:`native_store_write` writes them, through one
+/// handle, where the one-call readers open the store (and check every file of it) on every call. What one
+/// handle writes another on the same folder reads. A store that is not there or is damaged is a
+/// RuntimeError naming the file; a photo the store does not hold is a KeyError.
+#[pyclass(name = "NativeFeatureStore", module = "ppg_core", frozen)]
+pub(crate) struct NativeFeatureStore {
+    store: FeatureStore,
+}
+
+#[pymethods]
+impl NativeFeatureStore {
+    #[new]
+    fn new(py: Python<'_>, dir: &str) -> PyResult<Self> {
+        let store = run_native(py, None, "opening the feature store", NO_PROGRESS, |_, _| feature_store(dir))?;
+        Ok(NativeFeatureStore { store })
+    }
+
+    /// The names of the photos of the store, sorted.
+    fn names(&self) -> Vec<String> {
+        self.store.names()
+    }
+
+    /// The header of the photo ``name`` (the dict of :func:`native_store_header`).
+    fn header<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyDict>> {
+        let header = run_native(py, None, "reading the feature store", NO_PROGRESS, |_, _| {
+            Ok(self.store.get(name).map(|v| v.header().clone()))
+        })?;
+        header_dict(py, &header.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?)
+    }
+
+    /// The features of the photo ``name``: ``(keypoints (n, 4) float32, descriptors (n, 128) uint8 - or None
+    /// when ``descriptors`` is false: the export of the key points alone does not copy them -,
+    /// implementation)``, as :func:`native_store_read` gives them.
+    #[pyo3(signature = (name, descriptors=true))]
+    fn read<'py>(&self, py: Python<'py>, name: &str, descriptors: bool)
+        -> PyResult<(Bound<'py, PyArray2<f32>>, Option<Bound<'py, PyArray2<u8>>>, &'static str)> {
+        let found = run_native(py, None, "reading the feature store", NO_PROGRESS, |_, _| {
+            Ok(self.store.get(name).map(|v| {
+                let desc = if descriptors { v.descriptors().to_vec() } else { Vec::new() };
+                (v.keypoints().to_vec(), desc, v.header().implementation)
+            }))
+        })?;
+        read_arrays(py, found, name, descriptors)
+    }
+
+    /// The features of the photo ``name`` written, replacing what the store held for it, as
+    /// :func:`native_store_write` writes them (``imported``, with COLMAP's ``image_id`` or None).
+    #[pyo3(signature = (name, keypoints, descriptors, width, height, image_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn write<'py>(&self, py: Python<'py>, name: &str, keypoints: PyReadonlyArray2<'py, f32>,
+                  descriptors: PyReadonlyArray2<'py, u8>, width: u32, height: u32, image_id: Option<u32>)
+        -> PyResult<()> {
+        let f = imported_features(&keypoints, &descriptors, width, height, image_id)?;
+        run_native(py, None, "writing the feature store", NO_PROGRESS, |_, _| {
+            self.store.put(name, &f).map_err(|e| e.to_string())
+        })
+    }
+}
+
+/// A match store held open from Python - ``NativeMatchStore(dir)``, opened when the folder holds one and
+/// made otherwise - for a step that goes through every pair of it: the pairs listed and read, and pairs
+/// written (`Route::Imported`, the matches of a COLMAP database) through one handle. What is written is
+/// buffered and sealed into a segment file by :meth:`flush` (or when the buffer is full, or when the
+/// handle is dropped): a reader that opens the store on its own sees a pair once it is flushed, this
+/// handle at once. A store that is not there or is damaged is a RuntimeError naming the file.
+#[pyclass(name = "NativeMatchStore", module = "ppg_core", frozen)]
+pub(crate) struct NativeMatchStore {
+    store: MatchStore,
+}
+
+#[pymethods]
+impl NativeMatchStore {
+    #[new]
+    fn new(py: Python<'_>, dir: &str) -> PyResult<Self> {
+        let store = run_native(py, None, "opening the match store", NO_PROGRESS, |_, _| match_store(dir))?;
+        Ok(NativeMatchStore { store })
+    }
+
+    /// The pairs of the store, each as its two names in the order they were put, sorted.
+    fn pairs(&self) -> Vec<(String, String)> {
+        self.store.pairs()
+    }
+
+    /// The result of the pair ``(a, b)`` (the dict of :func:`native_match_read`), or None when the store has
+    /// no such pair.
+    fn read<'py>(&self, py: Python<'py>, a: &str, b: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let found = run_native(py, None, "reading the match store", NO_PROGRESS, |_, _| Ok(self.store.get(a, b)))?;
+        found.map(|r| pair_dict(py, &r)).transpose()
+    }
+
+    /// The result of the pair ``(a, b)`` written as ``imported``, replacing what the store held for it:
+    /// ``matches`` and ``inliers`` ``(n, 2)`` uint32, ``config`` COLMAP's number (0 to 7), ``F``, ``E``, ``H``
+    /// 3 x 3 float64 or None, ``qvec`` (w, x, y, z) with ``tvec`` or neither.
+    #[pyo3(signature = (a, b, matches, inliers, config, F=None, E=None, H=None, qvec=None, tvec=None))]
+    #[allow(clippy::too_many_arguments, non_snake_case)]
+    fn write<'py>(&self, py: Python<'py>, a: &str, b: &str, matches: PyReadonlyArray2<'py, u32>,
+                  inliers: PyReadonlyArray2<'py, u32>, config: u32, F: Option<PyReadonlyArray2<'py, f64>>,
+                  E: Option<PyReadonlyArray2<'py, f64>>, H: Option<PyReadonlyArray2<'py, f64>>,
+                  qvec: Option<[f64; 4]>, tvec: Option<[f64; 3]>) -> PyResult<()> {
+        let r = imported_result(a, b, &matches, &inliers, config, F, E, H, qvec, tvec)?;
+        run_native(py, None, "writing the match store", NO_PROGRESS, |_, _| {
+            self.store.put(a, b, &r).map_err(|e| e.to_string())
+        })
+    }
+
+    /// What was written sealed into a segment file and named by the index: on disk once this returns.
+    fn flush(&self, py: Python<'_>) -> PyResult<()> {
+        run_native(py, None, "writing the match store", NO_PROGRESS, |_, _| self.store.flush().map_err(|e| e.to_string()))
+    }
 }
 
 fn grey_array(py: Python<'_>, g: Grey) -> Bound<'_, PyArray2<u8>> {

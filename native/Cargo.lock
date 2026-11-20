@@ -1374,6 +1374,7 @@ name = "ppg_core"
 version = "0.8.0"
 dependencies = [
  "cc",
+ "nalgebra",
  "numpy",
  "ppg_engine",
  "pyo3",

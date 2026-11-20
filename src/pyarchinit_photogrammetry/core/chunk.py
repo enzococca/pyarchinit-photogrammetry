@@ -7,6 +7,7 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import uuid
@@ -22,7 +23,7 @@ from . import paths as paths_mod
 from .camera import FOCAL_GUESS, Camera, Reference, Sensor
 from .marker import Marker, Projection, ScaleBar
 from .pointcloud import PointCloud
-from .progress import ProgressCallback, as_progress
+from .progress import Cancelled, ProgressCallback, as_progress
 
 log = logging.getLogger(__name__)
 
@@ -430,18 +431,42 @@ class Chunk:
         or learned key points matched by LightGlue, ``disk`` or ``aliked`` (:mod:`engine.learned`:
         more matches on thermal frames and on surfaces with little texture). ``engine``:
         ``auto``, ``classic`` or ``native`` (None: the ``PPG_ENGINE`` environment variable,
-        ``auto`` by default; :mod:`engine.switch`): the native engine does not do this step yet,
-        so ``native`` runs it on the classic one and says so; what was asked and what was used
-        are kept in ``meta["engine"]``."""
+        ``auto`` by default; :mod:`engine.switch`). The native engine does this step
+        (:mod:`engine.native_match`: its own SIFT, preselection and matching, the result exported
+        to COLMAP's database for the alignment) when it is asked for and nothing keeps it from
+        running - the native core missing or switched off, a learned ``matcher``, rigs of
+        360-degree photos, processing nodes, a camera model it does not know -; otherwise, and
+        when it fails half way, the classic step runs with the same arguments and the reason is
+        kept; a cancel and a full disk stop the step as they are. ``auto`` is the classic engine
+        until the native matching has passed its gate. What was asked and what was used are kept
+        in ``meta["engine"]``."""
         from ..engine import sfm, switch
 
         choice = switch.resolve("match_photos", engine)
-        switch.classic_only("match_photos", choice)
-        sfm.match_photos(self, quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
-                         pair_selection=pair_selection, progress=as_progress(progress),
-                         exclude_stationary=exclude_stationary, generic=generic, reference=reference,
-                         neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
-                         reset=reset, gpu=gpu, matcher=matcher)
+        kwargs = dict(quality=quality, keypoint_limit=keypoint_limit, tiepoint_limit=tiepoint_limit,
+                      pair_selection=pair_selection, progress=as_progress(progress),
+                      exclude_stationary=exclude_stationary, generic=generic, reference=reference,
+                      neighbours=neighbours, apply_masks=apply_masks, guided_matching=guided_matching,
+                      reset=reset, gpu=gpu)
+        if choice.used == "native":
+            from ..engine import native_match
+
+            reason = native_match.cannot_run(self, matcher, reset)
+            if reason is not None:
+                choice = switch.fall_back(choice, reason)
+        if choice.used == "native":
+            try:
+                native_match.match_photos(self, **kwargs)
+            except Cancelled:
+                raise
+            except OSError as exc:
+                if exc.errno == errno.ENOSPC:  # a full disk: no engine can go on
+                    raise
+                choice = switch.fall_back(choice, f"native matching failed: {exc}")
+            except Exception as exc:  # noqa: BLE001 - whatever stopped the native step: the classic one does the step
+                choice = switch.fall_back(choice, f"native matching failed: {exc}")
+        if choice.used == "classic":
+            sfm.match_photos(self, matcher=matcher, **kwargs)
         switch.record(self, "match_photos", choice)
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,

@@ -2,9 +2,12 @@
 
 The matching, the alignment and the depth maps of a chunk (:data:`STEPS`) take an ``engine``. ``classic`` is the
 chain the program has always had (:mod:`.sfm`, :mod:`.dense`), ``native`` the engine of the native core, ``auto``
-the choice of the program. The native engine does none of these steps yet (:data:`NATIVE_STEPS` is empty): ``auto``
-is the classic engine, and ``native`` falls back to it, says so in the log and leaves the reason in the record of
-the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints.
+the choice of the program. The native engine does the matching (:data:`NATIVE_STEPS`, :mod:`.native_match`) and
+none of the other steps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
+reason in the record of the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints. ``auto`` is
+the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate. A
+method whose engine cannot do the step after all (the native core missing, a failure half way) falls back the same
+way (:func:`fall_back`).
 
 The word comes from the argument, else from the ``PPG_ENGINE`` environment variable, else it is ``auto``.
 """
@@ -19,8 +22,11 @@ log = logging.getLogger(__name__)
 ENGINES = ("auto", "classic", "native")
 # the steps that take an engine, by the name of their method of Chunk
 STEPS = ("match_photos", "align_cameras", "build_depth_maps")
-# those of them the native engine does: none yet
-NATIVE_STEPS: frozenset[str] = frozenset()
+# those of them the native engine does: the matching (engine/native_match.py)
+NATIVE_STEPS: frozenset[str] = frozenset({"match_photos"})
+# those of them ``auto`` gives to the native engine: a step goes in once it has passed its gate (the session owner
+# adds it, one line, one commit); none yet
+AUTO_NATIVE_STEPS: frozenset[str] = frozenset()
 _ACCEPTED = f"{', '.join(ENGINES[:-1])} or {ENGINES[-1]}"
 
 
@@ -50,14 +56,17 @@ def check(engine: str | None) -> str:
 def resolve(step: str, engine: str | None = None) -> Choice:
     """The engine that does ``step`` (one of :data:`STEPS`, the name of its method of
     :class:`..core.chunk.Chunk`) when ``engine`` is asked for (:func:`check`). ``classic`` is the classic engine.
-    ``auto`` takes the native engine for a step only once that step has passed its gate: none has, and ``auto`` is
-    the classic engine. ``native`` on a step the native engine does not do falls back to the classic one, with the
-    reason in ``fallback`` and one line in the log: never an error. A name that is not a step raises a ValueError
-    that names it, before anything is done under it."""
+    ``auto`` takes the native engine for a step only once that step has passed its gate and is in
+    :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): none is, and ``auto`` is the classic engine. ``native``
+    is the native engine for a step it does (:data:`NATIVE_STEPS`: the matching) and, on a step it does not do,
+    falls back to the classic one, with the reason in ``fallback`` and one line in the log: never an error. A name
+    that is not a step raises a ValueError that names it, before anything is done under it."""
     if step not in STEPS:
         raise ValueError(f"unknown step '{step}': the steps that take an engine are "
                          f"{', '.join(STEPS[:-1])} and {STEPS[-1]}")
     requested = check(engine)
+    if requested == "auto":
+        return Choice(requested, "native" if step in AUTO_NATIVE_STEPS and step in NATIVE_STEPS else "classic", None)
     if requested != "native":
         return Choice(requested, "classic", None)
     if step in NATIVE_STEPS:
@@ -65,6 +74,15 @@ def resolve(step: str, engine: str | None = None) -> Choice:
     fallback = f"the native engine does not do '{step}' yet"
     log.warning("engine 'native' asked for %s: classic used (%s)", step, fallback)
     return Choice(requested, "classic", fallback)
+
+
+def fall_back(choice: Choice, reason: str) -> Choice:
+    """The choice of a step that goes to the classic engine after all, for ``reason`` - the native core missing or
+    switched off, an argument the native engine does not take, a failure of the native step half way: the same
+    request, ``classic`` used, the reason kept for the record and the report, and one WARNING line in the log. The
+    choice given is not changed."""
+    log.warning("engine '%s' asked, classic used (%s)", choice.requested, reason)
+    return Choice(choice.requested, "classic", reason)
 
 
 def classic_only(step: str, choice: Choice) -> None:

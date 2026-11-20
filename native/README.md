@@ -48,7 +48,9 @@ matched in blocks, verified, weighted by its inliers), the two-stage matching of
 match store (`native_match_pairs`: the largest scales first, then along the epipolar lines of their
 model, brute force where the first stage is unsure), the stores read and written from Python
 (`native_store_read`, `native_store_write`, `native_store_names`, `native_store_header`,
-`native_match_read`, `native_match_pairs_list`) and, for the tests, the photos as COLMAP reads them
+`native_match_read`, `native_match_pairs_list`, each opening the store; `NativeFeatureStore` and
+`NativeMatchStore` hold one open for a step that goes through every item: the export of a project to
+COLMAP's database and the import of one) and, for the tests, the photos as COLMAP reads them
 (`read_grey`, `rescale_as_colmap`). Every step releases the GIL and reports through
 `progress(done, total, message)` at the start, then at most every `min_interval` seconds (0.5) and
 with the last state when it ends; an exception of the callback cancels it. The kernels are exact on every device

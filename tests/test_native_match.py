@@ -79,6 +79,7 @@ def test_the_kernels_are_declared_at_api_13(monkeypatch):
     assert k.preselect is ppg_core.native_preselect and k.features_pixels is ppg_core.native_features_pixels
     assert k.store_read is ppg_core.native_store_read and k.store_write is ppg_core.native_store_write
     assert k.match_read is ppg_core.native_match_read and k.match_pairs_list is ppg_core.native_match_pairs_list
+    assert k.feature_store is ppg_core.NativeFeatureStore and k.match_store is ppg_core.NativeMatchStore
     monkeypatch.setenv("PPG_NATIVE", "0")
     assert _native.native_match_kernels() is None
 
@@ -458,3 +459,681 @@ def test_a_progress_that_raises_stops_the_matching(trench_store, tmp_path):
         ppg_core.native_match_pairs(str(store), matches, pairs, _cameras(names), [], OPTIONS, progress, min_interval=0)
     done = ppg_core.native_match_pairs_list(matches)
     assert 1 <= len(done) < len(pairs) and [p for p in tmp_path.rglob("*.tmp")] == []
+
+
+# ------------------------------------------------------------------- the step behind engine="native" (native_match.py)
+def _verified_pairs(db_path) -> dict:
+    """The pairs of ``db_path`` with a verified geometry (15 inliers or more, a configuration that is not undefined,
+    degenerate or a watermark), by the names of their photos: ``(config, inliers)``."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
+    try:
+        names = dict(con.execute("SELECT image_id, name FROM images"))
+        out = {}
+        for pair_id, rows, config in con.execute("SELECT pair_id, rows, config FROM two_view_geometries"):
+            a, b = divmod(int(pair_id), sfm.COLMAP_MAX_IMAGES)
+            if rows >= 15 and config not in (0, 1, 7):
+                out[names[a], names[b]] = (int(config), int(rows))
+        return out
+    finally:
+        con.close()
+
+
+def _geometries(db_path) -> dict:
+    """Every two-view geometry of ``db_path`` by the names of its photos: ``(config, the bytes of its inliers)``."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
+    try:
+        names = dict(con.execute("SELECT image_id, name FROM images"))
+        out = {}
+        for pair_id, rows, config, data in con.execute("SELECT pair_id, rows, config, data FROM two_view_geometries"):
+            a, b = divmod(int(pair_id), sfm.COLMAP_MAX_IMAGES)
+            out[names[a], names[b]] = (int(config), int(rows), bytes(data or b""))
+        return out
+    finally:
+        con.close()
+
+
+def _image_ids(db_path) -> dict:
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
+    try:
+        return {str(n): int(i) for i, n in con.execute("SELECT image_id, name FROM images")}
+    finally:
+        con.close()
+
+
+def _table_count(db_path, table: str) -> int:
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
+    try:
+        return int(con.execute(f"SELECT count(*) FROM {table}").fetchone()[0])  # noqa: S608 - a table name of ours
+    finally:
+        con.close()
+
+
+def _project(scene_dir, folder, photos=None, markers=False):
+    """A project on the trench photos (all of them, or ``photos``), saved in ``folder``."""
+    import pyarchinit_photogrammetry as ppg
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("Saggio")
+    doc.save(folder / "project.ppg")
+    ch.add_photos(photos if photos is not None else [scene_dir / "photos"])
+    if markers:
+        ch.detect_markers("aruco_4x4_50")
+    return doc, ch
+
+
+def _tie_points_per_photo(ch) -> float:
+    from pyarchinit_photogrammetry.engine import sfm
+
+    rec = sfm.load_reconstruction(ch)
+    counts = [im.num_points3D for im in rec.images.values() if im.has_pose]
+    return sum(counts) / len(counts)
+
+
+@pytest.fixture(scope="module")
+def processed_native(scene_dir, tmp_path_factory):
+    """The chain of the session's ``processed`` fixture with the matching on the native engine: alignment,
+    georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. ``(doc, chunk, report of update_transform)``."""
+    doc, ch = _project(scene_dir, tmp_path_factory.mktemp("native_chain"), markers=True)
+    ch.match_photos(quality="high", engine="native")
+    ch.align_cameras()
+    ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    report = ch.update_transform()
+    ch.build_depth_maps(quality="high")
+    ch.build_point_cloud()
+    ch.build_model()
+    ch.build_texture(texture_size=2048)
+    ch.build_dem()
+    ch.build_orthomosaic()
+    doc.save()
+    return doc, ch, report
+
+
+@pytest.fixture(scope="module")
+def classic_trench(scene_dir, tmp_path_factory):
+    """The trench matched and aligned on the classic engine (COLMAP's RANSAC seeded), the yardstick of the native
+    matching: the chunk of a plain matching and the chunk of one with COLMAP's guided matching (the native matching
+    always matches along the epipolar lines: that is its like for like)."""
+    import os
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    chunks = []
+    previous = os.environ.get(sfm.RANSAC_SEED_ENV)
+    os.environ[sfm.RANSAC_SEED_ENV] = "1"
+    try:
+        for guided in (False, True):
+            _, ch = _project(scene_dir, tmp_path_factory.mktemp("classic_trench"), markers=True)
+            ch.match_photos(quality="high", engine="classic", guided_matching=guided)
+            chunks.append(ch)
+    finally:
+        if previous is None:
+            os.environ.pop(sfm.RANSAC_SEED_ENV, None)
+        else:
+            os.environ[sfm.RANSAC_SEED_ENV] = previous
+    for ch in chunks:
+        ch.align_cameras()
+    return tuple(chunks)
+
+
+def _median_point_error(ch) -> float:
+    from pyarchinit_photogrammetry.engine import sfm
+
+    rec = sfm.load_reconstruction(ch)
+    return float(np.median([p.error for p in rec.points3D.values()]))
+
+
+def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native, classic_trench):
+    """``match_photos(engine="native")`` then ``align_cameras()``: every photo aligned from the database the native
+    step exported, the record of the engine says native with no fallback, the record of the matching names the
+    engine, its features, its routes and its stages, and the block is as good as the classic one: the tie points per
+    photo at least 0.9 times the plain classic matching's, the median error of the points within 1.1 times its, and
+    the mean reprojection error within 1.05 times the classic matching with COLMAP's guided matching - the native
+    matching always matches along the epipolar lines, which (as COLMAP's guided matching) finds many more points
+    and, with them, more marginal ones: on this trench 1.5 times the tie points of the plain matching, a mean
+    reprojection error 1.2 times the plain matching's and 0.83 times the guided one's, the median error unchanged."""
+    from pyarchinit_photogrammetry.engine import native_match, sfm
+
+    _, ch, _ = processed_native
+    classic, classic_guided = classic_trench
+    assert len(ch.aligned_cameras) == len(ch.cameras) == PHOTOS
+    assert ch.meta["engine"]["match_photos"] == {"requested": "native", "used": "native", "fallback": None}
+    assert ch.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "classic", "fallback": None}
+    info = ch.meta["sfm"]
+    assert info["engine"] == "native" and info["features"] in ("gpu", "cpu", "gpu+cpu") and info["matcher"] == "sift"
+    assert set(info["routes"]) == {"guided", "brute_force", "dropped"} and info["routes"]["guided"] > 0
+    assert sum(info["routes"].values()) == info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
+    assert info["pairs_unmatched"] == 0 and info["rigs"] == 0 and info["nodes"] == [] and not info["continued"]
+    assert info["cpu_pairs"] + info["gpu_pairs"] == info["pairs"]
+    for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",
+                "apply_masks", "guided_matching", "stationary_removed", "keypoint_limit", "tiepoint_limit", "added",
+                "gpu", "gpu_shares"):
+        assert key in info, key
+    assert len(info["names"]) == PHOTOS and info["pair_selection"] == "exhaustive"
+    stages = ch.meta["timings"]["match_photos"]["stages"]
+    assert list(stages) == ["features", "pairs", "export"] and all(v >= 0 for v in stages.values())
+    assert sum(stages.values()) <= ch.meta["timings"]["match_photos"]["seconds"] + 0.01
+    work = ch.data_dir / "sfm"
+    assert (work / native_match.STORES / "features" / "index.json").is_file()
+    assert (work / native_match.STORES / "matches" / "index.json").is_file()
+    assert not (work / native_match.STORES / "small").exists()  # the preselection store goes at the end of the step
+    assert not (work / native_match.TMP).exists() and not (work / native_match.TMP_DB).exists()
+    # as good as the classic block: the points of a guided matching, the error of the plain one at the median
+    ours, plain, guided = (info["reprojection_error"], classic.meta["sfm"]["reprojection_error"],
+                           classic_guided.meta["sfm"]["reprojection_error"])
+    assert ours <= 1.05 * guided, (ours, plain, guided)
+    medians = _median_point_error(ch), _median_point_error(classic)
+    assert medians[0] <= 1.1 * medians[1], medians
+    mine, classic_points = _tie_points_per_photo(ch), _tie_points_per_photo(classic)
+    assert mine >= 0.9 * classic_points, (mine, classic_points)
+    assert classic_guided.meta["sfm"]["guided_matching"] and len(classic_guided.aligned_cameras) == PHOTOS
+    # the pairs the classic database verified are verified here too, nearly all of them
+    verified = _verified_pairs(work / "database.db")
+    classic_verified = _verified_pairs(classic.data_dir / "sfm" / "database.db")
+    lost = set(classic_verified) - set(verified)
+    assert len(lost) <= 0.02 * len(classic_verified), (len(lost), len(classic_verified))
+    assert len(sfm._db_image_names(work / "database.db")) == PHOTOS
+
+
+@pytest.mark.slow
+def test_the_metric_gates_hold_with_native_matching(processed_native, scene):
+    """The metric chain of the trench with the matching on the native engine: the control points within 2 mm, the
+    check points within 3 mm, the DEM median within 3 mm, the targets in the orthophoto within 5 mm (the assertions
+    of ``tests/test_pipeline.py`` on the classic chain)."""
+    import rasterio
+
+    from pyarchinit_photogrammetry.markers.targets import detect
+
+    _, ch, report = processed_native
+    assert len(ch.aligned_cameras) == len(ch.cameras) == 28 and len(ch.markers) == 8
+    assert report["method"] == "markers" and report["control_rmse"] < 0.002
+    before = np.array(ch.transform, float)
+    for label in ("target 4", "target 5"):
+        ch.marker(label).checkpoint = True
+    check = ch.update_transform()
+    assert check["check_rmse"] < 0.003
+    for m in ch.markers:
+        m.checkpoint = False
+    ch.update_transform()
+    ch.transform = before
+    with rasterio.open(ch.dem_path) as src:
+        dem = src.read(1)
+        rows, cols = np.nonzero(dem != src.nodata)
+        sel = np.random.default_rng(1).choice(len(rows), 4000, replace=False)
+        xs, ys = rasterio.transform.xy(src.transform, rows[sel], cols[sel])
+        assert src.crs.to_epsg() == 3004
+    err = dem[rows[sel], cols[sel]] - scene.world_height(np.array(xs), np.array(ys))
+    assert abs(np.median(err)) < 0.003
+    assert 1.4826 * np.median(np.abs(err - np.median(err))) < 0.005
+    assert np.percentile(np.abs(err), 90) < 0.02
+    with rasterio.open(ch.orthomosaic_path) as src:
+        img = np.moveaxis(src.read([3, 2, 1]), 0, -1).copy()
+        tr = src.transform
+        assert (src.read(4) > 0).mean() > 0.7
+    dets = detect(img)
+    assert len(dets) >= 6
+    for d in dets:
+        x, y = rasterio.transform.xy(tr, d["center"][1], d["center"][0])
+        tx, ty, _ = scene.targets[d["code"]]
+        assert np.hypot(x - tx, y - ty) < 0.005
+
+
+def test_the_exported_database_imports_back_as_the_stores(processed_native, tmp_path):
+    """The database the step exports holds no descriptors (the mapper needs none): exported again with them,
+    ``import_database`` gives back the stores it was exported from - the key points of every photo (with COLMAP's
+    image id in the header), the matches, inliers and configuration of every pair, imported; what the database
+    holds is what the stores hold. A database without descriptors imports no photo."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch, _ = processed_native
+    work = ch.data_dir / "sfm"
+    db_path = work / "database.db"
+    assert _table_count(db_path, "descriptors") == 0 and _table_count(db_path, "keypoints") == PHOTOS
+    assert native_match.import_database(db_path, tmp_path / "none_f", tmp_path / "none_m") == 0
+    full = tmp_path / "full.db"
+    native_match.export_database(ch, full, descriptors=True)
+    assert _table_count(full, "descriptors") == PHOTOS and _image_ids(full).keys() == _image_ids(db_path).keys()
+    assert native_match.import_database(full, tmp_path / "f", tmp_path / "m") == PHOTOS
+    k = _native.native_match_kernels()
+    ours, theirs = k.feature_store(str(work / native_match.STORES / "features")), k.feature_store(str(tmp_path / "f"))
+    ids = _image_ids(full)
+    assert theirs.names() == ours.names() and len(ids) == PHOTOS
+    for name in ours.names():
+        kp, desc, implementation = ours.read(name)
+        got_kp, got_desc, got_impl = theirs.read(name)
+        assert got_impl == "imported" and implementation in ("cpu", "gpu")
+        assert np.array_equal(kp, got_kp) and np.array_equal(desc, got_desc), name
+        header = theirs.header(name)
+        assert header["image_id"] == ids[name] and header["width"] == 1200 and header["height"] == 900
+    our_pairs = k.match_store(str(work / native_match.STORES / "matches"))
+    their_pairs = k.match_store(str(tmp_path / "m"))
+    pairs = our_pairs.pairs()
+    assert len(pairs) == PHOTOS * (PHOTOS - 1) // 2
+    assert {tuple(p) for p in their_pairs.pairs()} == {tuple(p) for p in pairs}
+    for a, b in pairs:
+        ours_r, theirs_r = our_pairs.read(a, b), their_pairs.read(a, b)
+        assert theirs_r["route"] == "imported" and ours_r["route"] in ("guided", "brute_force", "dropped")
+        assert np.array_equal(ours_r["matches"], theirs_r["matches"])
+        assert np.array_equal(ours_r["inliers"], theirs_r["inliers"])
+        assert ours_r["config"] == theirs_r["config"]
+        for key in ("F", "E", "H"):
+            if ours_r[key] is None:
+                assert theirs_r[key] is None, (a, b, key)
+            else:
+                assert np.allclose(ours_r[key], theirs_r[key]), (a, b, key)
+
+
+def test_native_preselection_finds_the_classic_pairs(scene_dir, tmp_path, monkeypatch):
+    """``generic=True`` on the trench, classic then native: of the pairs verified by the classic database at most
+    2 per cent are not verified in the native one, and the timings hold the stage ``preselection``."""
+    from pyarchinit_photogrammetry.engine import sfm
+
+    monkeypatch.setenv(sfm.RANSAC_SEED_ENV, "1")
+    (tmp_path / "classic").mkdir()
+    (tmp_path / "native").mkdir()
+    _, classic = _project(scene_dir, tmp_path / "classic")
+    classic.match_photos(quality="high", generic=True, engine="classic")
+    _, ours = _project(scene_dir, tmp_path / "native")
+    ours.match_photos(quality="high", generic=True, engine="native")
+    for ch in (classic, ours):
+        info = ch.meta["sfm"]
+        assert info["generic"] and info["pair_selection"] == "generic"
+        assert 2 * PHOTOS <= info["pairs"] < PHOTOS * (PHOTOS - 1) // 2
+    assert ours.meta["sfm"]["engine"] == "native"
+    assert list(ours.meta["timings"]["match_photos"]["stages"]) == ["features", "preselection", "pairs", "export"]
+    assert ours.meta["timings"]["match_photos"]["stages"]["preselection"] > 0
+    classic_verified = _verified_pairs(classic.data_dir / "sfm" / "database.db")
+    verified = _verified_pairs(ours.data_dir / "sfm" / "database.db")
+    lost = set(classic_verified) - set(verified)
+    assert classic_verified and len(lost) <= 0.02 * len(classic_verified), (sorted(lost), len(classic_verified))
+    assert not (ours.data_dir / "sfm" / "native" / "small").exists()
+    assert ours.align_cameras(mapper="incremental") == PHOTOS
+
+
+def test_a_learned_matcher_or_rigs_fall_back(scene_dir, tmp_path, monkeypatch, caplog):
+    """A learned matcher and the rigs of 360-degree photos are not the native engine's: ``match_photos`` with
+    ``native`` runs the classic step, and the reason kept names the cause."""
+    from pyarchinit_photogrammetry.engine import native_match, sfm
+
+    ran = []
+    monkeypatch.setattr(sfm, "match_photos", lambda chunk, **kwargs: ran.append(kwargs.get("matcher")))
+    native_ran = []
+    monkeypatch.setattr(native_match, "match_photos", lambda chunk, **kwargs: native_ran.append(kwargs))
+    _, ch = _project(scene_dir, tmp_path)
+    assert native_match.cannot_run(ch, "sift", True) is None
+    learned = "learned matcher 'disk': the native engine matches SIFT points only"
+    assert native_match.cannot_run(ch, "disk", True) == learned
+    with caplog.at_level("INFO"):
+        ch.match_photos(quality="high", matcher="disk", engine="native")
+    assert ran == ["disk"] and native_ran == []
+    assert ch.meta["engine"]["match_photos"] == {"requested": "native", "used": "classic",
+                                                 "fallback": learned}
+    assert any("learned matcher 'disk'" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    # a chunk with rigs: two faces of one panorama in the layout of split_panorama
+    photos = _photos(scene_dir)
+    faces = []
+    for face, photo in zip(("front", "right"), photos[:2]):
+        folder = tmp_path / "pano" / "facce_360" / face
+        folder.mkdir(parents=True)
+        (folder / "P.jpg").write_bytes(photo.read_bytes())
+        faces.append(folder / "P.jpg")
+    (tmp_path / "rig").mkdir()
+    _, rig = _project(scene_dir, tmp_path / "rig", photos=faces)
+    assert len(rig.cameras) == 2
+    for cam in rig.cameras:
+        cam.meta.update(panorama="P.jpg", face=cam.path.split("/")[-2])
+    assert native_match.cannot_run(rig, "sift", True) == native_match.RIGS_REASON
+    assert native_match.RIGS_REASON == "rigs of 360-degree photos: the native engine does not do them"
+    rig.match_photos(quality="high", engine="native")
+    assert ran == ["disk", "sift"] and native_ran == []
+    assert rig.meta["engine"]["match_photos"]["fallback"] == native_match.RIGS_REASON
+    # the core switched off, and a camera model the engine does not know
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    assert "PPG_NATIVE" in native_match.cannot_run(ch, "sift", True)
+    monkeypatch.delenv("PPG_NATIVE")
+    sensor = next(iter(ch.sensors.values()))
+    sensor.model, sensor.params = "FOV", [1000.0, 1000.0, 600.0, 450.0, 0.5]
+    reason = native_match.cannot_run(ch, "sift", True)
+    assert reason is not None and "FOV" in reason and sensor.label in reason
+
+
+def test_a_failure_falls_back_and_leaves_no_half_project(scene_dir, tmp_path, monkeypatch, caplog):
+    """``native_match_pairs`` raising after the features: the classic result, the fallback ``native matching
+    failed: boom`` in the record and in the log, and nothing of the native step left in the project: no
+    ``native.tmp``, no ``database.native.tmp.db``, no stores."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ppg_core, "native_match_pairs", boom)
+    _, ch = _project(scene_dir, tmp_path)
+    with caplog.at_level("INFO"):
+        ch.match_photos(quality="high", engine="native")
+    assert ch.meta["engine"]["match_photos"] == {"requested": "native", "used": "classic",
+                                                 "fallback": "native matching failed: boom"}
+    assert any("native matching failed: boom" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+    info = ch.meta["sfm"]
+    assert info.get("engine") is None and info["features"] in ("cpu", "gpu") and info["matcher"] == "sift"
+    work = ch.data_dir / "sfm"
+    assert (work / "database.db").is_file()
+    assert not (work / native_match.TMP).exists() and not (work / native_match.TMP_DB).exists()
+    assert not (work / native_match.STORES).exists()
+    assert [p for p in work.rglob("*.tmp")] == []
+    assert "failed" not in ch.meta["timings"]["match_photos"]  # the record of the step that ended: the classic one
+    assert ch.align_cameras(mapper="incremental") == PHOTOS
+
+
+def test_cancel_and_full_disk_leave_the_project_as_it_was(scene_dir, tmp_path, monkeypatch):
+    """After a native match, a second one cancelled at the pairs and a third with ``os.replace`` failing for a full
+    disk under the sfm folder: ``Cancelled`` and ``OSError`` come out as they are (no fallback), the bytes of
+    ``database.db`` and of the index files of the stores are unchanged, the records of the finished step stay, no
+    temporary folder or database is left, and the alignment still runs on what there is."""
+    import errno
+    import os
+
+    from pyarchinit_photogrammetry.core.progress import Progress
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path)
+    ch.match_photos(quality="high", engine="native")
+    work = ch.data_dir / "sfm"
+    stores = work / native_match.STORES
+    watched = [work / "database.db", stores / "features" / "index.json", stores / "matches" / "index.json"]
+    before = [p.read_bytes() for p in watched]
+    kept = ({k: (dict(v) if isinstance(v, dict) else v) for k, v in ch.meta["sfm"].items()},
+            dict(ch.meta["engine"]["match_photos"]))
+
+    def leftovers():
+        return sorted(str(p.relative_to(work)) for p in work.iterdir() if ".tmp" in p.name)
+
+    # cancelled at the pairs
+    progress = Progress()
+    seen = []
+
+    def watch(_fraction, message):
+        seen.append(message)
+        if message.startswith("Matching photos ("):
+            progress.cancel()
+
+    progress.callback = watch
+    with pytest.raises(Cancelled):
+        ch.match_photos(quality="high", engine="native", progress=progress)
+    assert any(m.startswith("Detecting points") for m in seen)
+    assert [p.read_bytes() for p in watched] == before and leftovers() == []
+    assert ch.meta["timings"]["match_photos"]["failed"] == "Cancelled"
+    # a full disk when the result is moved into place
+    real_replace = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        if str(src).startswith(str(work)) or str(dst).startswith(str(work)):
+            raise OSError(errno.ENOSPC, "No space left on device", str(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(native_match.os, "replace", replace)
+    with pytest.raises(OSError) as full:
+        ch.match_photos(quality="high", engine="native")
+    assert full.value.errno == errno.ENOSPC
+    monkeypatch.undo()
+    assert [p.read_bytes() for p in watched] == before and leftovers() == []
+    assert ch.meta["timings"]["match_photos"]["failed"] == "OSError"
+    assert ({k: (dict(v) if isinstance(v, dict) else v) for k, v in ch.meta["sfm"].items()},
+            dict(ch.meta["engine"]["match_photos"])) == kept
+    assert ch.align_cameras(mapper="incremental") == PHOTOS
+
+
+def test_a_lost_gpu_gives_the_same_matches(scene_dir, tmp_path, monkeypatch, gpu_test_device, caplog):
+    """A GPU that fails in the middle of the matching (``PPG_TEST_GPU_FAIL_AFTER``, the test hook of the scheduler:
+    every GPU worker retired at its N-th unit) gives its pairs back to the CPU, and the result is the one of
+    ``gpu="off"`` pair for pair - the same verified pairs with the same inliers, since the kernels are exact on every
+    device and the RANSAC is seeded by the pair - with a log line naming the GPU. The features are kept on the CPU
+    (the hook set to 1 while the points are detected: the GPU and CPU SIFT are twins, not the same bytes) and the
+    hook moved to 3 as the pairs start, so the GPU does the first stage of two pairs before it is lost."""
+    import os
+
+    gpu = "auto" if gpu_test_device == -1 else str(gpu_test_device)
+    monkeypatch.setenv("PPG_TEST_GPU_FAIL_AFTER", "1")
+
+    def progress(_fraction, message):
+        if message.startswith("Matching photos ("):
+            os.environ["PPG_TEST_GPU_FAIL_AFTER"] = "3"
+
+    (tmp_path / "gpu").mkdir()
+    (tmp_path / "cpu").mkdir()
+    _, with_gpu = _project(scene_dir, tmp_path / "gpu")
+    with caplog.at_level("INFO"):
+        with_gpu.match_photos(quality="high", engine="native", gpu=gpu, progress=progress)
+    monkeypatch.delenv("PPG_TEST_GPU_FAIL_AFTER")
+    _, cpu_only = _project(scene_dir, tmp_path / "cpu")
+    cpu_only.match_photos(quality="high", engine="native", gpu="off")
+    info, plain = with_gpu.meta["sfm"], cpu_only.meta["sfm"]
+    assert info["features"] == "cpu" and plain["features"] == "cpu"
+    assert info["gpu_pairs"] == 2 and info["gpu"] and info["gpu_shares"] and sum(info["gpu_shares"].values()) == 2
+    assert plain["gpu_pairs"] == 0 and plain["gpu"] is None and plain["cpu_pairs"] == plain["pairs"]
+    assert info["gpu_pairs"] + info["cpu_pairs"] == info["pairs"] == plain["pairs"]
+    assert info["routes"] == plain["routes"]
+    assert (_geometries(with_gpu.data_dir / "sfm" / "database.db")
+            == _geometries(cpu_only.data_dir / "sfm" / "database.db"))
+    retired = [r.getMessage() for r in caplog.records if "PPG_TEST_GPU_FAIL_AFTER" in r.getMessage()]
+    assert retired and all("GPU" in line for line in retired), retired
+
+
+def test_continuing_a_classic_project_imports_it(scene_dir, tmp_path, monkeypatch):
+    """A classic match and alignment of 24 trench photos, then 4 more and ``match_photos(engine="native",
+    reset=False)``: the database is imported into the stores (24 photos, their key points and image ids kept),
+    only the pairs with one of the 4 are matched, the exported database keeps the image ids of the 24 (the model
+    continues from them), and ``align_cameras(reset=False)`` aligns all 28."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    photos = _photos(scene_dir)
+    _, ch = _project(scene_dir, tmp_path, photos=photos[:24])
+    ch.match_photos(quality="high", engine="classic")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == 24
+    work = ch.data_dir / "sfm"
+    ids_before = _image_ids(work / "database.db")
+    assert len(ids_before) == 24
+    imported = []
+    real_import = native_match.import_database
+    monkeypatch.setattr(native_match, "import_database",
+                        lambda *a, **k: imported.append(real_import(*a, **k)) or imported[-1])
+    ch.add_photos(photos[24:])
+    ch.match_photos(quality="high", engine="native", reset=False)
+    assert imported == [24]
+    info = ch.meta["sfm"]
+    assert info["engine"] == "native" and info["continued"] and sorted(info["added"]) == [p.name for p in photos[24:]]
+    assert info["pairs"] == 4 * 24 + 4 * 3 // 2 and info["pairs_unmatched"] == 0
+    assert ch.meta["engine"]["match_photos"] == {"requested": "native", "used": "native", "fallback": None}
+    k = _native.native_match_kernels()
+    store = k.feature_store(str(work / native_match.STORES / "features"))
+    assert store.names() == [p.name for p in photos]
+    for name in ids_before:
+        header = store.header(name)
+        assert header["impl"] == "imported" and header["image_id"] == ids_before[name], name
+    for photo in photos[24:]:
+        assert store.header(photo.name)["impl"] in ("cpu", "gpu")
+    ids_after = _image_ids(work / "database.db")
+    assert len(ids_after) == 28 and {n: ids_after[n] for n in ids_before} == ids_before
+    assert _table_count(work / "database.db", "descriptors") == 0  # the mapper needs none: the stores keep them
+    # the imported key points are COLMAP's six columns reduced to four: the same x, y, a scale and an orientation
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    matches = k.match_store(str(work / native_match.STORES / "matches"))
+    pairs = matches.pairs()
+    assert len(pairs) == 24 * 23 // 2 + info["pairs"]
+    routes = {matches.read(a, b)["route"] for a, b in pairs}
+    assert "imported" in routes and routes & {"guided", "brute_force", "dropped"}
+    con = sqlite3.connect(sfm.read_only_uri(work / "database.db"), uri=True)
+    try:
+        rows = {int(i): int(c) for i, c in con.execute("SELECT image_id, cols FROM keypoints")}
+    finally:
+        con.close()
+    assert set(rows.values()) == {4}  # the export writes four columns for every photo
+    assert ch.align_cameras(reset=False, use_gps=False) == 28 and ch.meta["sfm"]["mapper"] == "incremental"
+
+
+def test_classic_continuation_of_a_native_project(scene_dir, tmp_path, monkeypatch):
+    """A native match and alignment of 24, then 4 added and ``match_photos(engine="classic", reset=False)``: the
+    descriptors of the 24 are exported first (the classic matcher needs them), the classic matcher matches only the
+    new pairs, and all 28 are aligned."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    photos = _photos(scene_dir)
+    _, ch = _project(scene_dir, tmp_path, photos=photos[:24])
+    ch.match_photos(quality="high", engine="native")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == 24
+    work = ch.data_dir / "sfm"
+    assert _table_count(work / "database.db", "descriptors") == 0
+    ids_before = _image_ids(work / "database.db")
+    exports = []
+    real_export = native_match.export_database
+    monkeypatch.setattr(native_match, "export_database",
+                        lambda chunk, db_path, descriptors=False, **k: exports.append(descriptors) or real_export(
+                            chunk, db_path, descriptors, **k))
+    ch.add_photos(photos[24:])
+    ch.match_photos(quality="high", engine="classic", reset=False)
+    assert exports == [True]
+    info = ch.meta["sfm"]
+    assert info.get("engine") is None and info["continued"] and len(info["added"]) == 4
+    assert info["pairs"] == 4 * 24 + 4 * 3 // 2
+    assert ch.meta["engine"]["match_photos"] == {"requested": "classic", "used": "classic", "fallback": None}
+    assert _table_count(work / "database.db", "descriptors") == 28
+    ids_after = _image_ids(work / "database.db")
+    assert {n: ids_after[n] for n in ids_before} == ids_before
+    assert ch.align_cameras(reset=False, use_gps=False) == 28
+    # the stores of the native step are no longer trusted by a native continuation: a classic record has no engine
+    assert not (work / native_match.STORES).exists() or info.get("engine") != "native"
+
+
+def test_masks_apply_to_the_native_key_points(scene_dir, tmp_path):
+    """A mask black on the left half of one photo: no key point of that photo in its left half in the exported
+    database, the other photos untouched."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+    from pyarchinit_photogrammetry.engine.masks import write_mask
+
+    _, ch = _project(scene_dir, tmp_path)
+    cam0 = ch.cameras[0]
+    keep = np.ones((900, 1200), bool)
+    keep[:, :600] = False
+    write_mask(ch, cam0, keep)
+    ch.match_photos(quality="high", engine="native")
+    info = ch.meta["sfm"]
+    assert info["masks"] and info["apply_masks"] == "keypoints" and info["engine"] == "native"
+    name = info["names"][str(cam0.key)]
+    con = sqlite3.connect(sfm.read_only_uri(ch.data_dir / "sfm" / "database.db"), uri=True)
+    try:
+        ids = {str(n): int(i) for i, n in con.execute("SELECT image_id, name FROM images")}
+        points = {}
+        for image_id, rows, cols, data in con.execute("SELECT image_id, rows, cols, data FROM keypoints"):
+            points[image_id] = np.frombuffer(data, np.float32).reshape(rows, cols)
+    finally:
+        con.close()
+    masked = points[ids[name]]
+    assert len(masked) > 100 and masked[:, 0].min() >= 600
+    other = points[ids[info["names"][str(ch.cameras[1].key)]]]
+    assert other[:, 0].min() < 600
+    k = _native.native_match_kernels()
+    header = k.feature_store(str(ch.data_dir / "sfm" / "native" / "features")).header(name)
+    assert header["masked"] and header["points"] == len(masked)
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == PHOTOS
+
+
+def test_the_store_handles_read_and_write_hundreds_of_items_with_one_open(tmp_path):
+    """``NativeFeatureStore`` and ``NativeMatchStore`` hold a store open: hundreds of photos and pairs written and
+    read through one handle (the export of a project reads every item: a store opened per item would check every
+    file of it each time), what one handle writes another sees, the pairs flushed to disk on request and read back
+    by the readers that open the store on their own; what the handles refuse is named."""
+    k = _native.native_match_kernels()
+    assert k.feature_store is ppg_core.NativeFeatureStore and k.match_store is ppg_core.NativeMatchStore
+    rng = np.random.default_rng(3)
+    store = k.feature_store(str(tmp_path / "features"))
+    photos = {}
+    for i in range(300):
+        n = 20 + i % 7
+        kp = np.column_stack([rng.uniform(0, 1200, n), rng.uniform(0, 900, n), rng.uniform(1, 9, n),
+                              rng.uniform(-3, 3, n)]).astype(np.float32)
+        desc = rng.integers(0, 256, (n, 128), np.uint8)
+        photos[f"folder {i % 3}/IMG_{i:04d}.jpg"] = (kp, desc)
+        store.write(f"folder {i % 3}/IMG_{i:04d}.jpg", kp, desc, 1200, 900, i + 1 if i % 2 else None)
+    assert store.names() == sorted(photos)
+    for i, (name, (kp, desc)) in enumerate(sorted(photos.items())):
+        got_kp, got_desc, implementation = store.read(name)
+        assert implementation == "imported" and np.array_equal(got_kp, kp) and np.array_equal(got_desc, desc)
+        only_kp, nothing, _ = store.read(name, descriptors=False)
+        assert nothing is None and np.array_equal(only_kp, kp)
+    header = store.header("folder 1/IMG_0001.jpg")
+    assert header == {"width": 1200, "height": 900, "points": 21, "impl": "imported", "image_id": 2,
+                      "max_image_size": 0, "masked": False}
+    assert store.header("folder 0/IMG_0000.jpg")["image_id"] is None
+    another = k.feature_store(str(tmp_path / "features"))  # the same store, opened again: everything there
+    assert another.names() == store.names()
+    assert ppg_core.native_store_names(str(tmp_path / "features")) == store.names()
+    with pytest.raises(KeyError, match="nothing.jpg"):
+        store.read("nothing.jpg")
+    with pytest.raises(KeyError, match="nothing.jpg"):
+        store.header("nothing.jpg")
+    with pytest.raises(ValueError, match="128"):
+        store.write("c.jpg", photos["folder 0/IMG_0000.jpg"][0], np.zeros((20, 64), np.uint8), 1200, 900)
+    with pytest.raises(RuntimeError, match="index.json"):
+        (tmp_path / "broken").mkdir()
+        (tmp_path / "broken" / "index.json").write_text("{}")
+        k.feature_store(str(tmp_path / "broken"))
+    # the match store
+    matches = k.match_store(str(tmp_path / "matches"))
+    names = sorted(photos)
+    pairs = {}
+    for i in range(400):
+        a, b = names[i % 300], names[(i * 7 + 1) % 300]
+        if a == b or (a, b) in pairs:
+            continue
+        m = rng.integers(0, 20, (10 + i % 5, 2)).astype(np.uint32)
+        inl = m[: 3 + i % 4]
+        f = rng.normal(size=(3, 3)) if i % 2 else None
+        h = rng.normal(size=(3, 3)) if i % 3 == 0 else None
+        q = np.array([1.0, 0.0, 0.0, 0.0]) if i % 5 == 0 else None
+        t = np.array([0.1, 0.2, 0.3]) if i % 5 == 0 else None
+        pairs[a, b] = (m, inl, 2 + i % 5, f, h, q, t)
+        matches.write(a, b, m, inl, 2 + i % 5, F=f, E=None, H=h, qvec=q, tvec=t)
+    assert len(pairs) >= 300
+    assert matches.pairs() == sorted(pairs)
+    for (a, b), (m, inl, config, f, h, q, t) in pairs.items():  # read back from the buffer, before any flush
+        r = matches.read(a, b)
+        assert r["route"] == "imported" and r["config"] == config
+        assert np.array_equal(r["matches"], m) and np.array_equal(r["inliers"], inl) and r["E"] is None
+        assert (r["F"] is None) == (f is None) and (f is None or np.allclose(r["F"], f))
+        assert (r["H"] is None) == (h is None) and (h is None or np.allclose(r["H"], h))
+        assert (r["qvec"] is None) == (q is None)
+        assert q is None or (np.allclose(r["qvec"], q) and np.allclose(r["tvec"], t))
+    assert matches.read(names[0], "nothing.jpg") is None
+    matches.flush()  # on disk: the readers that open the store on their own see every pair
+    assert ppg_core.native_match_pairs_list(str(tmp_path / "matches")) == sorted(pairs)
+    a, b = next(iter(sorted(pairs)))
+    assert np.array_equal(ppg_core.native_match_read(str(tmp_path / "matches"), a, b)["matches"], pairs[a, b][0])
+    assert k.match_store(str(tmp_path / "matches")).pairs() == sorted(pairs)
+    with pytest.raises(ValueError, match="9"):
+        matches.write(a, b, pairs[a, b][0], pairs[a, b][1], 9)
+    with pytest.raises(ValueError, match=r"\(n, 2\)"):
+        matches.write(a, b, np.zeros((3, 3), np.uint32), pairs[a, b][1], 2)
+    with pytest.raises(ValueError, match="3 x 3"):
+        matches.write(a, b, pairs[a, b][0], pairs[a, b][1], 2, F=np.zeros((2, 2)))
+    # a pair written again replaces its result
+    matches.write(a, b, pairs[a, b][0][:2], pairs[a, b][0][:1], 3)
+    assert len(matches.read(a, b)["matches"]) == 2 and matches.read(a, b)["config"] == 3
