@@ -647,6 +647,9 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     classic_verified = _verified_pairs(classic.data_dir / "sfm" / "database.db")
     lost = set(classic_verified) - set(verified)
     assert len(lost) <= 0.02 * len(classic_verified), (len(lost), len(classic_verified))
+    # an exhaustive matching tries every pair in full: the first stage drops none (the few classic-verified pairs
+    # lost, within the 2 per cent above, fail in the verification of their weak overlap, not to the first stage)
+    assert info["routes"]["dropped"] == 0
     assert len(sfm._db_image_names(work / "database.db")) == PHOTOS
 
 
@@ -868,13 +871,13 @@ def test_cancel_and_full_disk_leave_the_project_as_it_was(scene_dir, tmp_path, m
 
     def watch(_fraction, message):
         seen.append(message)
-        if message.startswith("Matching photos ("):
+        if message.startswith(native_match.PROGRESS_PAIRS + " ("):  # the step's own line before the pairs
             progress.cancel()
 
     progress.callback = watch
     with pytest.raises(Cancelled):
         ch.match_photos(quality="high", engine="native", progress=progress)
-    assert any(m.startswith("Detecting points") for m in seen)
+    assert any(m.startswith(native_match.PROGRESS_FEATURES) for m in seen)
     assert [p.read_bytes() for p in watched] == before and leftovers() == []
     assert ch.meta["timings"]["match_photos"]["failed"] == "Cancelled"
     # a full disk when the result is moved into place
@@ -906,11 +909,13 @@ def test_a_lost_gpu_gives_the_same_matches(scene_dir, tmp_path, monkeypatch, gpu
     hook moved to 3 as the pairs start, so the GPU does the first stage of two pairs before it is lost."""
     import os
 
+    from pyarchinit_photogrammetry.engine import native_match
+
     gpu = "auto" if gpu_test_device == -1 else str(gpu_test_device)
     monkeypatch.setenv("PPG_TEST_GPU_FAIL_AFTER", "1")
 
     def progress(_fraction, message):
-        if message.startswith("Matching photos ("):
+        if message.startswith(native_match.PROGRESS_PAIRS + " ("):  # the step's own line, before the core's pairs
             os.environ["PPG_TEST_GPU_FAIL_AFTER"] = "3"
 
     (tmp_path / "gpu").mkdir()
@@ -1137,3 +1142,178 @@ def test_the_store_handles_read_and_write_hundreds_of_items_with_one_open(tmp_pa
     # a pair written again replaces its result
     matches.write(a, b, pairs[a, b][0][:2], pairs[a, b][0][:1], 3)
     assert len(matches.read(a, b)["matches"]) == 2 and matches.read(a, b)["config"] == 3
+
+
+def _gps_references(ch, scene, noise: float = 0.05, seed: int = 3) -> None:
+    """The true positions of the synthetic cameras, a little noise added, as the GPS of the photos (as the classic
+    tests of the reference preselections set them)."""
+    from pyarchinit_photogrammetry.core.camera import Reference
+    from pyarchinit_photogrammetry.testing.synthetic import camera_poses
+
+    rng = np.random.default_rng(seed)
+    poses = camera_poses(scene)
+    for cam in ch.cameras:
+        i = int(cam.label.split("_")[-1])
+        xyz = poses[i][:3, 3] + np.asarray(scene.origin) + rng.normal(0.0, noise, 3)
+        cam.reference = Reference(location=[float(v) for v in xyz], accuracy=[0.1, 0.1, 0.2], enabled=True)
+        cam.meta["reference_crs"] = scene.crs
+
+
+def test_a_cancelled_or_failed_continuation_leaves_the_block_as_it_was(scene_dir, tmp_path, monkeypatch):
+    """A native match and alignment of 24, 4 added, then ``match_photos(engine="native", reset=False)`` cancelled at
+    the pairs and again failing for a full disk at the export: the stores in place and ``database.db`` keep their
+    bytes (the continuation works on a copy of the stores), nothing is left behind, and the next continuation takes
+    the 4 photos into the database (the ids of the 24 kept) and the alignment registers them."""
+    import errno
+    import os
+
+    from pyarchinit_photogrammetry.core.progress import Progress
+    from pyarchinit_photogrammetry.engine import native_match
+
+    photos = _photos(scene_dir)
+    _, ch = _project(scene_dir, tmp_path, photos=photos[:24])
+    ch.match_photos(quality="high", engine="native")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == 24
+    work = ch.data_dir / "sfm"
+    stores = work / native_match.STORES
+    watched = [work / "database.db", stores / "features" / "index.json", stores / "matches" / "index.json"]
+    before = [p.read_bytes() for p in watched]
+    ids_before = _image_ids(work / "database.db")
+    first = [p.name for p in photos[:24]]
+
+    def leftovers():
+        return sorted(str(p.relative_to(work)) for p in work.iterdir() if ".tmp" in p.name)
+
+    ch.add_photos(photos[24:])
+    progress = Progress()
+
+    def watch(_fraction, message):
+        if message.startswith(native_match.PROGRESS_PAIRS + " ("):
+            progress.cancel()
+
+    progress.callback = watch
+    with pytest.raises(Cancelled):
+        ch.match_photos(quality="high", engine="native", reset=False, progress=progress)
+    assert [p.read_bytes() for p in watched] == before and leftovers() == []
+    assert ppg_core.native_store_names(str(stores / "features")) == first  # no new photo in the stores in place
+    real_replace = os.replace
+
+    def replace(src, dst, *args, **kwargs):
+        if str(src).startswith(str(work)) or str(dst).startswith(str(work)):
+            raise OSError(errno.ENOSPC, "No space left on device", str(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(native_match.os, "replace", replace)
+    with pytest.raises(OSError) as full:
+        ch.match_photos(quality="high", engine="native", reset=False)
+    assert full.value.errno == errno.ENOSPC
+    monkeypatch.undo()
+    assert [p.read_bytes() for p in watched] == before and leftovers() == []
+    assert ppg_core.native_store_names(str(stores / "features")) == first
+    assert ch.meta["sfm"]["continued"] is False and ch.meta["sfm"]["added"] is None  # the record of the first step
+    # the next continuation finishes
+    ch.match_photos(quality="high", engine="native", reset=False)
+    info = ch.meta["sfm"]
+    assert info["continued"] and sorted(info["added"]) == [p.name for p in photos[24:]]
+    assert info["pairs"] == 4 * 24 + 4 * 3 // 2 and leftovers() == []
+    ids_after = _image_ids(work / "database.db")
+    assert len(ids_after) == 28 and {n: ids_after[n] for n in ids_before} == ids_before
+    assert ppg_core.native_store_names(str(stores / "features")) == [p.name for p in photos]
+    assert len(ppg_core.native_match_pairs_list(str(stores / "matches"))) == 24 * 23 // 2 + info["pairs"]
+    assert ch.align_cameras(reset=False, use_gps=False) == 28
+
+
+def test_a_classic_continuation_without_the_core_matches_everything_again(scene_dir, tmp_path, monkeypatch, caplog):
+    """A native match and alignment of 24, 4 added, the native core switched off (``PPG_NATIVE=0``) and
+    ``match_photos(engine="classic", reset=False)``: the descriptors of the 24 cannot be put into the database, so
+    the classic step says so and matches every photo again instead of continuing without them; the stores go, the
+    database holds the descriptors of all 28, and the alignment runs."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    photos = _photos(scene_dir)
+    _, ch = _project(scene_dir, tmp_path, photos=photos[:24])
+    ch.match_photos(quality="high", engine="native")
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == 24
+    work = ch.data_dir / "sfm"
+    ch.add_photos(photos[24:])
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    seen = []
+    with caplog.at_level("INFO"):
+        ch.match_photos(quality="high", engine="classic", reset=False, progress=lambda f, m: seen.append(m))
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("descriptors of the native matching cannot be put into the database" in m and "every photo again" in m
+               for m in said), said
+    assert any("every photo again" in m for m in seen)
+    info = ch.meta["sfm"]
+    assert info.get("engine") is None and info["continued"] is False and info["added"] is None
+    assert ch.meta["engine"]["match_photos"] == {"requested": "classic", "used": "classic", "fallback": None}
+    assert len(_image_ids(work / "database.db")) == 28 and _table_count(work / "database.db", "descriptors") == 28
+    assert not (work / native_match.STORES).exists()
+    assert ch.align_cameras(reset=False, use_gps=False) == 28
+
+
+def test_the_reference_preselections_pick_the_pairs_natively(scene_dir, scene, tmp_path):
+    """The reference preselections on the native path, as the classic test has them: ``source`` (the GPS of the
+    photos, every photo with its nearest), ``estimated`` (the positions of the alignment before), ``sequential`` (the
+    photos before and after in the capture order); each pair chosen by them is matched in full (none dropped), the
+    record names the preselection and the stage, and the block aligns on the source pairs."""
+    from pyarchinit_photogrammetry.engine import sfm
+
+    _, ch = _project(scene_dir, tmp_path)
+    _gps_references(ch, scene)
+    n = PHOTOS
+    every = n * (n - 1) // 2
+    ch.match_photos(quality="high", generic=False, reference="source", neighbours=4, engine="native")
+    info = ch.meta["sfm"]
+    names = {int(k): v for k, v in info["names"].items()}
+    assert info["engine"] == "native" and info["pair_selection"] == "source" and info["reference"] == "source"
+    assert not info["generic"] and info["neighbours"] == 4
+    assert info["pairs"] == len(sfm._reference_pairs(ch, names, neighbors=4)) and 2 * n <= info["pairs"] < every
+    assert info["routes"]["dropped"] == 0 and sum(info["routes"].values()) == info["pairs"]
+    assert list(ch.meta["timings"]["match_photos"]["stages"]) == ["features", "preselection", "pairs", "export"]
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == n
+    ch.match_photos(quality="high", generic=False, reference="estimated", neighbours=4, engine="native")
+    info = ch.meta["sfm"]
+    assert info["pair_selection"] == "estimated" and info["pairs"] == len(sfm._estimated_pairs(ch, names, 4))
+    assert 2 * n <= info["pairs"] < every and info["routes"]["dropped"] == 0
+    ch.match_photos(quality="high", generic=False, reference="sequential", neighbours=3, engine="native")
+    info = ch.meta["sfm"]
+    assert info["pair_selection"] == "sequential" and info["neighbours"] == 3
+    assert info["pairs"] == sum(min(3, n - 1 - i) for i in range(n)) and info["routes"]["dropped"] == 0
+    with pytest.raises(ValueError):
+        ch.match_photos(quality="high", reference="nowhere", engine="native")
+
+
+def test_photo_names_with_blanks_go_through_the_stores_and_the_database(scene_dir, tmp_path):
+    """Photos in a folder with a blank in its name, some in a subfolder with another, named with blanks: the native
+    step keys the stores by those names, exports them to the database as they are (no alias, no record of aliases
+    beside it), the export with descriptors imports back under the same names, and the alignment reads them."""
+    from pyarchinit_photogrammetry.engine import native_match, sfm
+
+    folder = tmp_path / "foto scavo"
+    sub = folder / "giorno 2"
+    sub.mkdir(parents=True)
+    copies = []
+    for i, photo in enumerate(_photos(scene_dir)[:8]):
+        copy = (folder if i < 4 else sub) / f"IMG {i:02d}.jpg"
+        copy.write_bytes(photo.read_bytes())
+        copies.append(copy)
+    (tmp_path / "p").mkdir()
+    _, ch = _project(scene_dir, tmp_path / "p", photos=copies)
+    ch.match_photos(quality="high", engine="native")
+    info = ch.meta["sfm"]
+    names = sorted(info["names"].values())
+    assert names == sorted([f"IMG {i:02d}.jpg" for i in range(4)] + [f"giorno 2/IMG {i:02d}.jpg" for i in range(4, 8)])
+    assert info["image_root"] == str(folder.resolve()) and info["pairs"] == 8 * 7 // 2
+    work = ch.data_dir / "sfm"
+    assert set(_image_ids(work / "database.db")) == set(names) and not (work / sfm.LIST_NAMES_FILE).exists()
+    k = _native.native_match_kernels()
+    assert k.feature_store(str(work / native_match.STORES / "features")).names() == names
+    pairs = k.match_store(str(work / native_match.STORES / "matches")).pairs()
+    assert len(pairs) == 28 and {n for pair in pairs for n in pair} == set(names)
+    full = tmp_path / "full.db"
+    native_match.export_database(ch, full, descriptors=True)
+    assert native_match.import_database(full, tmp_path / "f", tmp_path / "m") == 8
+    assert k.feature_store(str(tmp_path / "f")).names() == names
+    assert k.match_store(str(tmp_path / "m")).pairs() == pairs
+    assert ch.align_cameras(mapper="incremental", use_gps=False) >= 6

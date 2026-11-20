@@ -581,13 +581,10 @@ def _preselection(pair_selection: str, generic, reference) -> tuple[bool | None,
 
 
 def _db_image_names(db_path: Path) -> set[str]:
-    import pycolmap
-
-    db = pycolmap.Database.open(str(db_path))
-    try:
-        return {im.name for im in db.read_all_images()}
-    finally:
-        db.close()
+    """The names of the images of the database, read without touching it (:func:`_image_names_by_id`: a
+    read-only connection; pycolmap's ``Database.open`` rewrites the header of a file it only reads, which the native
+    step's promise of a project left as it was cannot have)."""
+    return set(_image_names_by_id(db_path).values())
 
 
 COLMAP_MAX_IMAGES = 2147483647  # COLMAP's kMaxNumImages: pair_id = id1 * COLMAP_MAX_IMAGES + id2, id1 < id2
@@ -1132,16 +1129,6 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
     _interrupted_names_back(db_path)  # the names a matching that died in COLMAP left aliased, before anything reads them
-    if not reset and (chunk.meta.get("sfm") or {}).get("engine") == "native" and db_path.exists():
-        # a chunk matched by the native engine keeps the descriptors in its stores, not in the database (the mapper
-        # needs none): the classic matcher continuing it needs them there, for the pairs of the new photos with the old
-        from . import native_match  # imports this module: not at the top
-
-        try:
-            native_match.export_database(chunk, db_path, descriptors=True)
-        except FileNotFoundError as exc:
-            log.warning("the descriptors of the native matching cannot be put into the database (%s): the pairs with "
-                        "the photos matched before may stay unmatched", exc)
     root, names = image_root_and_names(chunk)
     rigs = rig_configs(chunk, names)
     if matcher != "sift" and rigs:
@@ -1151,6 +1138,18 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         log.warning("the guided matching is COLMAP's (SIFT): left out with %s", learned.NAMES[matcher])
         guided_matching = False
     keep = (not reset) and not rigs and _continuable(chunk, db_path, root, names, matcher)
+    if keep and (chunk.meta.get("sfm") or {}).get("engine") == "native":
+        # a chunk matched by the native engine keeps the descriptors in its stores, not in the database (the mapper
+        # needs none): the classic matcher continuing it needs them there, for the pairs of the new photos with the
+        # old; without the native core, or without the stores, there is nothing to continue with: every photo again
+        from . import native_match  # imports this module: not at the top
+
+        try:
+            native_match.export_database(chunk, db_path, descriptors=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.warning("the descriptors of the native matching cannot be put into the database (%s): every photo "
+                        "again", exc)
+            keep = False
     if not reset and not keep:
         progress(0.0, "No alignment to continue: every photo again")
     if not keep and db_path.exists():

@@ -19,8 +19,12 @@ anything ``.tmp`` left by a crash is removed at the start of the next step. ``re
 an earlier native matching - trusted when the record of the chunk says ``native`` with the same quality, point limit,
 masks and photo folder, and the alignment can take more photos (:func:`.sfm._continuable`) - take the photos missing
 from them and the pairs with one of them, in place; without them, a classic database that can be continued is
-imported into fresh stores first (:func:`import_database`); else everything is done again. The export keeps the ids
-of the photos, cameras, rigs and frames of the database it continues: the model continues from them.
+imported into fresh stores first (:func:`import_database`); else everything is done again. A continuation too works
+in ``native.tmp`` - the stores copied there by hard links, nothing in place written - and a photo counts as done only
+when it is in the feature store and in the database, so a cancel or a failure at any point leaves the project as it
+was and the next run takes up what is missing. At the end the stores go into place first and the database last, each
+by one rename; a crash between them is swept at the next start. The export keeps the ids of the photos, cameras, rigs
+and frames of the database it continues: the model continues from them.
 
 The thresholds of the two-stage matching live here (:data:`STAGE1_POINTS`, :data:`TRUST_INLIERS`,
 :data:`DROP_INLIERS`) and go to the core with the options; ``PPG_NATIVE_DCT=0`` decodes every JPEG whole (no DCT
@@ -30,10 +34,12 @@ paths, blanks allowed): the stores key them by name and never make a file name o
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -92,10 +98,11 @@ def cannot_run(chunk: Chunk, matcher: str, reset: bool) -> str | None:
 
     if not _native.enabled():
         return "the native core is switched off (PPG_NATIVE=0)"
-    if _native._core() is None:
-        return "the native core (ppg_core) is not installed"
     if _native.native_match_kernels() is None:
-        return (f"the native core {_native.version()} (API {_native.api()}) has no native matching: API "
+        api = _native.api()  # None without the core
+        if api is None:
+            return "the native core (ppg_core) is not installed"
+        return (f"the native core {_native.version()} (API {api}) has no native matching: API "
                 f"{_native.NATIVE_MATCH_API} is needed")
     if matcher != "sift":
         return f"learned matcher '{matcher}': the native engine matches SIFT points only"
@@ -149,10 +156,23 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                      **({"failed": failed} if failed else {}))
 
 
+# the texts the step reports its parts with (the tests watch them to act at a given moment)
+PROGRESS_FEATURES = "Detecting points"
+PROGRESS_PRESELECTION = "Finding the pairs of photos that overlap"
+PROGRESS_PAIRS = "Matching photos"
+PROGRESS_EXPORT = "Writing the matches for the alignment"
+GUIDED_LINE = "the native matching always matches along the epipolar lines (guided)"
+
+
 def _remove_leftovers(work: Path) -> None:
-    """What a step that died left in the sfm folder: its work folder, the stores it was replacing, its database
-    being written, and the store of the preselection (made again by the step that needs it)."""
-    for folder in (work / TMP, work / OLD, work / STORES / SMALL):
+    """What a step that died left in the sfm folder: the stores it was replacing put back when it died between
+    their move and the move of the new ones (``native`` missing, ``native.old.tmp`` there), else removed; its work
+    folder, its database being written, and the store of the preselection (made again by the step that needs it)
+    removed."""
+    stores, old = work / STORES, work / OLD
+    if old.is_dir() and not stores.exists():
+        os.replace(old, stores)
+    for folder in (work / TMP, old, stores / SMALL):
         shutil.rmtree(folder, ignore_errors=True)
     for pattern in (f"{TMP_DB}*", "database.db.tmp*"):
         for path in work.glob(pattern):
@@ -172,6 +192,24 @@ def _stores_trusted(chunk: Chunk, stores: Path, root: Path, quality: str, keypoi
     return (_stores_present(stores) and info.get("engine") == "native" and info.get("quality") == quality
             and info.get("keypoint_limit") == int(keypoint_limit) and info.get("apply_masks") == apply_masks
             and info.get("image_root") == str(root))
+
+
+def _stage_stores(stores: Path, wd: Path) -> None:
+    """A copy of the feature and match stores of ``stores`` made in ``wd`` for a continuation to add to, so that the
+    stores in place are never written: every file of a store hard-linked (a store never writes over a file - a put
+    writes a new file and rewrites its index to a new name -, so what the copy does leaves the originals as they
+    are), copied where a link cannot be made, the index copied."""
+    for name in (FEATURES, MATCHES):
+        src, dst = stores / name, wd / name
+        dst.mkdir(parents=True, exist_ok=True)
+        for path in src.iterdir():
+            if path.name == INDEX or not path.is_file():
+                continue
+            try:
+                os.link(path, dst / path.name)
+            except OSError:
+                shutil.copy2(path, dst / path.name)
+        shutil.copyfile(src / INDEX, dst / INDEX)
 
 
 def _camera(sensor) -> tuple:
@@ -208,11 +246,320 @@ def _gpu_devices(gpu: str | None) -> tuple[list[int], str | None]:
     return devices, (", ".join(names) if devices else None)
 
 
+@dataclass
+class _Run:
+    """What the parts of one run of the step share: the kernels, the chunk, its photos and their folders, the
+    devices and the settings read once; and what the continuation decided - ``keep`` (a block continued), ``done``
+    (the photos the block has: in the feature store *and* in the database), ``to_extract`` (the photos the store
+    lacks), ``new`` (the photos not done: their pairs are matched and they go into the database) and
+    ``small_size`` (the size of the preselection images, None without a preselection). The step works in
+    :attr:`wd` (``native.tmp``) and moves it into :attr:`stores` when it has finished."""
+
+    k: object
+    chunk: Chunk
+    work: Path
+    root: Path
+    names: dict[int, str]
+    downscale: int
+    devices: list[int] = field(default_factory=list)
+    gpu_names: str | None = None
+    dct: bool = True
+    cpu_share: bool = True
+    masks: Path | None = None
+    keep: bool = False
+    done: set[str] = field(default_factory=set)
+    to_extract: list[str] = field(default_factory=list)
+    new: list[str] = field(default_factory=list)
+    small_size: int | None = None
+
+    def __post_init__(self) -> None:
+        self.sensor_of = {self.names[c.key]: c.sensor_key for c in self.chunk.cameras if c.enabled}
+        self.everyone = sorted(self.names.values())
+        # the photos in the order of the chunk, by sensor, as the classic step lists the new ones
+        by_sensor: dict[int, list[str]] = {}
+        for c in self.chunk.cameras:
+            if c.enabled:
+                by_sensor.setdefault(c.sensor_key, []).append(self.names[c.key])
+        self.ordered = [n for group in by_sensor.values() for n in group]
+
+    @property
+    def stores(self) -> Path:
+        return self.work / STORES
+
+    @property
+    def wd(self) -> Path:
+        return self.work / TMP
+
+    @property
+    def db_path(self) -> Path:
+        return self.work / "database.db"
+
+    @property
+    def tmp_db(self) -> Path:
+        return self.work / TMP_DB
+
+    @property
+    def features_dir(self) -> Path:
+        return self.wd / FEATURES
+
+    @property
+    def small_dir(self) -> Path:
+        return self.wd / SMALL
+
+    @property
+    def matches_dir(self) -> Path:
+        return self.wd / MATCHES
+
+    def long_side(self, name: str) -> int:
+        s = self.chunk.sensors[self.sensor_of[name]]
+        return max(int(s.width), int(s.height))
+
+    def limit_of(self, name: str) -> int:
+        """COLMAP's ``max_image_size`` of the photo for the quality: its long side over the downscale."""
+        return int(self.long_side(name) / self.downscale)
+
+    def small_limit_of(self, name: str) -> int | None:
+        return min(int(self.small_size), self.long_side(name)) if self.small_size else None
+
+    def camera(self, name: str) -> tuple:
+        return _camera(self.chunk.sensors[self.sensor_of[name]])
+
+    def mask_of(self, name: str) -> str | None:
+        return str(self.masks / f"{name}.png") if self.masks is not None else None
+
+    def job(self, name: str, limit: int, small_limit: int | None) -> tuple:
+        """A photo as ``native_features`` takes it: ``(name, path, mask, limit, small_limit)``."""
+        return name, str(self.root / name), self.mask_of(name), limit, small_limit
+
+    def names_in(self, store_dir: Path) -> set[str]:
+        """The photos of a store, opened for the question: a handle kept open would not see what the kernels wrote
+        since."""
+        return set(self.k.store_names(str(store_dir))) if (store_dir / INDEX).is_file() else set()
+
+
+def _continuation(run: _Run, *, reset: bool, quality: str, keypoint_limit: int, apply_masks: str) -> str | None:
+    """How the step continues what the chunk has, for ``reset=False``: ``"stores"`` - the stores of an earlier native
+    matching, trusted (:func:`_stores_trusted`) and holding no photo that left the chunk, copied to add to -,
+    ``"import"`` - a classic database that can be continued (:func:`.sfm._continuable`), imported into fresh stores
+    first - or None: everything again."""
+    if reset or not sfm._continuable(run.chunk, run.db_path, run.root, run.names, "sift"):
+        return None
+    if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks)
+            and set(run.k.store_names(str(run.stores / FEATURES))) <= set(run.everyone)):
+        return "stores"
+    return "import"
+
+
+def _begin(run: _Run, how: str | None, progress: Progress) -> None:
+    """The work folder of the step made from what is continued (``how`` of :func:`_continuation`), and the photos
+    sorted: ``done`` are those in the feature store *and* in the database - a photo a cancelled continuation left in
+    a store is not done -, ``to_extract`` those the store lacks, ``new`` those not done."""
+    if how == "stores":
+        progress(0.0, "Continuing the matching: the stores of the alignment copied to add to")
+        _stage_stores(run.stores, run.wd)
+    elif how == "import":
+        progress(0.0, "Importing the matches of the alignment to continue")
+        imported = import_database(run.db_path, run.features_dir, run.matches_dir)
+        log.info("%d photos of the database imported into the stores of the native matching", imported)
+    run.keep = how is not None
+    in_store = run.names_in(run.features_dir)
+    run.done = (in_store & sfm._db_image_names(run.db_path)) if run.keep else set()
+    run.to_extract = [n for n in run.ordered if n not in in_store]
+    run.new = [n for n in run.ordered if n not in run.done]
+
+
+def _detect_features(run: _Run, progress: Progress, keypoint_limit: int, generic: bool) -> str:
+    """The features stage: the photos the store lacks extracted into the feature store (and the small store when a
+    preselection runs), files the core does not decode given as pixels, unreadable ones logged; with a
+    preselection, the small store completed for the photos continued. Returns who detected the points: ``gpu``,
+    ``cpu`` or ``gpu+cpu``."""
+    k = run.k
+    sub = progress.sub(0.0, 0.45)
+    progress(0.0, f"{PROGRESS_FEATURES} in {len(run.to_extract)} photos" + (" (with masks)" if run.masks else ""))
+    jobs = [run.job(name, run.limit_of(name), run.small_limit_of(name)) for name in run.to_extract]
+    small_store = str(run.small_dir) if run.small_size else None
+    report = k.features(str(run.features_dir), small_store, jobs, int(keypoint_limit), sfm.PRESELECTION_POINTS,
+                        run.devices, run.dct, run.cpu_share, READERS, _relay(sub, PROGRESS_FEATURES, "photos"))
+    for line in report["log"]:
+        log.info("native features: %s", line)
+    counts = {"gpu": report["gpu"], "cpu": report["cpu"]}
+    for name in report["unsupported"]:  # files the core does not decode: OpenCV does, the kernels take pixels
+        given = _features_from_pixels(k, run.root, name, run.masks, run.features_dir,
+                                      run.small_dir if run.small_size else None, run.limit_of(name),
+                                      run.small_limit_of(name), int(keypoint_limit), run.devices)
+        if given is None:
+            log.warning("%s: unreadable, no key points", name)
+        else:
+            counts[given] += 1
+    for name in report["unreadable"]:
+        log.warning("%s: unreadable, no key points", name)
+    with_features = run.names_in(run.features_dir)
+    if generic:  # the photos continued have no preselection image: theirs, into the small store
+        present_small = run.names_in(run.small_dir)
+        small_jobs = [run.job(name, min(sfm.PRESELECTION_SIZE, run.long_side(name)), None)
+                      for name in run.everyone if name not in present_small and name in with_features]
+        if small_jobs:
+            more = k.features(str(run.small_dir), None, small_jobs, sfm.PRESELECTION_POINTS, sfm.PRESELECTION_POINTS,
+                              run.devices, run.dct, run.cpu_share, READERS,
+                              _relay(sub, "Reducing photos for the pairs", "photos"))
+            for line in more["log"]:
+                log.info("native features: %s", line)
+    features = _features_word(counts["gpu"], counts["cpu"])
+    sub(1.0, f"Points detected in {len(with_features)} photos"
+        + (f" on the {features.upper()}" if counts["gpu"] else ""))
+    return features
+
+
+def _preselect(run: _Run, progress: Progress, cams: dict) -> set[tuple[str, str]]:
+    """The generic preselection on the small store (:func:`.sfm._preselected_pairs` done by the core): the pairs with
+    enough inliers on the small images, the strongest of every photo kept (:func:`.sfm.strongest_pairs`) and the
+    nearest neighbours by the reference positions added; the small store removed after."""
+    k = run.k
+    small_names = [name for name in sorted(run.names_in(run.small_dir)) if name in cams]
+    sub = progress.sub(0.45, 0.1)
+    report = k.preselect(str(run.small_dir), {name: cams[name] for name in small_names}, run.devices,
+                         sfm.PRESELECTION_INLIERS, _relay(sub, PROGRESS_PRESELECTION, ""))
+    for line in report["log"]:
+        log.info("native preselection: %s", line)
+    weights = {(a, b): int(w) for a, b, w in report["weights"]}
+    per_photo = sfm.PRESELECTION_PAIRS_PER_PHOTO
+    found = sfm.strongest_pairs(weights, per_photo) if per_photo else set(weights)
+    found |= set(sfm._reference_pairs(run.chunk, run.names, neighbors=8) or [])
+    shutil.rmtree(run.small_dir, ignore_errors=True)  # its only use
+    sub(1.0, f"{len(found):,} pairs of photos overlap")
+    return found
+
+
+def _select_pairs(run: _Run, stages: timing.Stages, progress: Progress, generic: bool, reference: str | None,
+                  neighbours: int) -> tuple[list[tuple[str, str, bool]], str, dict]:
+    """The pairs to match, as the classic step chooses them: the generic preselection (stage ``preselection``), the
+    reference preselection (``source``, ``estimated``, ``sequential``), every pair when neither applies; on a
+    continuation only the pairs with a new photo; only photos with features. Each pair carries whether it was chosen
+    - by a preselection, or by an exhaustive matching, which tries every pair in full: the first stage never drops a
+    chosen pair. Returns the pairs, the mode (``generic``, ``source``, ``generic+source``, ..., ``exhaustive``) and
+    the cameras of the photos with features."""
+    present = sorted(run.names_in(run.features_dir) & set(run.everyone))
+    cams = {name: run.camera(name) for name in present}
+    pairs: set[tuple[str, str]] | None = None
+    chosen: set[tuple[str, str]] = set()
+    parts = []
+    if generic:
+        progress(0.45, PROGRESS_PRESELECTION)
+        with stages.stage("preselection"):
+            found = _preselect(run, progress, cams)
+        if found:  # nothing found on the small images: every pair
+            pairs, parts = set(found), ["generic"]
+            chosen |= set(found)
+    if reference:
+        finder = {"source": sfm._reference_pairs, "estimated": sfm._estimated_pairs,
+                  "sequential": sfm._sequential_pairs}[reference]
+        with stages.stage("preselection"):
+            found = finder(run.chunk, run.names, max(int(neighbours), 1))
+        if found:
+            pairs = (pairs or set()) | set(found)
+            chosen |= set(found)
+            parts.append(reference)
+        elif not pairs:
+            raise RuntimeError(f"the {reference} preselection needs "
+                               + ("camera reference positions" if reference == "source" else "an alignment"))
+    mode = "+".join(parts) if pairs else "exhaustive"
+    if pairs is None:  # exhaustive: every pair in full, as the classic step matches it
+        pairs = {(a, b) for i, a in enumerate(run.everyone) for b in run.everyone[i + 1:]}
+        chosen = set(pairs)
+    if run.keep:  # only the pairs with a photo new to the block
+        added = set(run.new)
+        pairs = {p for p in pairs if p[0] in added or p[1] in added}
+    pair_list = [(a, b, (a, b) in chosen) for a, b in sorted(pairs) if a in cams and b in cams]
+    return pair_list, mode, cams
+
+
+def _match_pairs(run: _Run, progress: Progress, pair_list: list, cams: dict, mode: str,
+                 tiepoint_limit: int) -> tuple[dict, dict]:
+    """The pairs stage: ``pair_list`` matched in two stages by the core into the match store, on the GPUs and the
+    CPU. Returns the pairs by device (``by_device``) and by route (``routes``)."""
+    progress(0.55, f"{PROGRESS_PAIRS} ({mode}, {len(pair_list):,} pairs)"
+             + (f" on {run.gpu_names} and the CPU" if run.devices and run.cpu_share
+                else f" on {run.gpu_names}" if run.devices else ""))
+    options = {"stage1_points": STAGE1_POINTS, "trust_inliers": TRUST_INLIERS, "drop_inliers": DROP_INLIERS,
+               "max_num_matches": max(int(tiepoint_limit) * 4, 8192)}
+    sub = progress.sub(0.55, 0.35)
+    matched = run.k.match_pairs(str(run.features_dir), str(run.matches_dir), pair_list, cams, run.devices, options,
+                                _relay(sub, PROGRESS_PAIRS, "pairs"), run.cpu_share)
+    for line in matched["log"]:
+        log.warning("native matching: %s", line)
+    by_device = {str(name): int(count) for name, count in matched["by_device"].items()}
+    routes = {"guided": int(matched["guided"]), "brute_force": int(matched["brute_force"]),
+              "dropped": int(matched["dropped"])}
+    sub(1.0, f"Matched {matched['done']:,} pairs: {routes['guided']:,} along the epipolar lines, "
+             f"{routes['brute_force']:,} by brute force, {routes['dropped']:,} dropped")
+    return by_device, routes
+
+
+def _commit(run: _Run, progress: Progress, exclude_stationary: bool, old_info: dict) -> int | None:
+    """The export stage: COLMAP's database written from the work folder (the ids of a continued database kept), the
+    stationary matches removed when asked, then everything into place - the stores first, the database last, each
+    by one rename, undone when a later one fails: a crash between them leaves ``native.old.tmp`` beside the new
+    stores and the old database, which :func:`_remove_leftovers` sweeps and the rule of :func:`_begin` (done = in
+    the store and in the database) absorbs. Returns the stationary matches removed (the count of the step
+    continued when it did not run again)."""
+    progress(0.9, PROGRESS_EXPORT)
+    export_database(run.chunk, run.tmp_db, descriptors=False, stores=run.wd,
+                    previous=run.db_path if run.keep else None, stationary_rule=not exclude_stationary)
+    if exclude_stationary:
+        removed = sfm.remove_stationary_matches(run.tmp_db)
+    else:  # a continuation keeps the count of the step it continues (the export applied its removal again)
+        removed = old_info.get("stationary_removed") if run.keep else None
+    old = run.work / OLD
+    moved_old = moved_new = False
+    try:
+        if run.stores.exists():
+            os.replace(run.stores, old)
+            moved_old = True
+        os.replace(run.wd, run.stores)
+        moved_new = True
+        os.replace(run.tmp_db, run.db_path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            if moved_new:
+                os.replace(run.stores, run.wd)
+            if moved_old:
+                os.replace(old, run.stores)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.rmtree(run.stores / SMALL, ignore_errors=True)
+    return removed
+
+
+def _record(run: _Run, *, features: str, mode: str, pairs: int, by_device: dict, routes: dict, removed: int | None,
+            old_info: dict, quality: str, keypoint_limit: int, tiepoint_limit: int, generic: bool,
+            reference: str | None, neighbours: int, apply_masks: str, guided_matching: bool) -> None:
+    """``chunk.meta["sfm"]``: the keys of the classic record, plus ``engine``, ``features``, ``routes`` and
+    ``preselection_size``."""
+    gpu_shares = {name: count for name, count in by_device.items() if name != "CPU"}
+    run.chunk.meta["sfm"] = {"engine": "native", "image_root": str(run.root),
+                             "names": {str(k): v for k, v in run.names.items()}, "features": features,
+                             "matcher": "sift", "quality": quality, "pair_selection": mode, "pairs": pairs,
+                             "pairs_unmatched": 0, "generic": bool(generic), "reference": reference,
+                             "neighbours": int(neighbours), "masks": run.masks is not None, "apply_masks": apply_masks,
+                             "guided_matching": bool(guided_matching), "stationary_removed": removed, "rigs": 0,
+                             "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit),
+                             "continued": run.keep, "added": run.new if run.keep else None, "nodes": [],
+                             "gpu": ", ".join(gpu_shares) if gpu_shares else None,
+                             "gpu_pairs": sum(gpu_shares.values()), "gpu_shares": gpu_shares or None,
+                             "cpu_pairs": by_device.get("CPU", 0), "routes": routes,
+                             "preselection_size": run.small_size}
+    if run.keep and old_info.get("gps_priors"):
+        run.chunk.meta["sfm"]["gps_priors"] = old_info["gps_priors"]  # the priors already in the database: same axes
+
+
 def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint_limit: int, tiepoint_limit: int,
                   pair_selection: str, progress: Progress | None, exclude_stationary: bool, generic: bool | None,
                   reference: str | None, neighbours: int, apply_masks: str, guided_matching: bool, reset: bool,
                   gpu: str | None) -> None:
-    """The matching of :func:`match_photos`, each of its parts timed as a stage of ``stages``."""
+    """The matching of :func:`match_photos`: the arguments checked, the chunk read, the continuation decided
+    (:func:`_continuation`, :func:`_begin`), then the stages ``features`` (:func:`_detect_features`),
+    ``preselection`` (:func:`_select_pairs`), ``pairs`` (:func:`_match_pairs`) and ``export`` (:func:`_commit`),
+    and the record (:func:`_record`). Whatever stops the step, the work folder goes and the project is as it was."""
     from ..markers import gcp
     from . import panorama
     from .masks import colmap_mask_folder
@@ -223,209 +570,48 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         raise ValueError(f"apply_masks: one of {', '.join(sfm.MASK_MODES)}")
     generic, reference = sfm._preselection(pair_selection, generic, reference)
     if guided_matching:
-        log.info("the native matching always matches along the epipolar lines (guided)")
+        log.info(GUIDED_LINE)
     try:  # the matching needs no system: what the alignment would refuse is only said here
         gcp.preflight(chunk)
     except Exception as exc:  # noqa: BLE001 - whatever it is: the references may still be switched off before it
         log.warning("the alignment will not place the chunk by the positions of the photos while they are switched on: "
                     "%s", exc)
     work = sfm._sfm_dir(chunk)
-    db_path = work / "database.db"
     _remove_leftovers(work)
-    sfm._interrupted_names_back(db_path)  # the names a classic matching that died in COLMAP left aliased
+    sfm._interrupted_names_back(work / "database.db")  # the names a classic matching that died in COLMAP left aliased
     root, names = sfm.image_root_and_names(chunk)
     if panorama.rig_configs(chunk, names):
         raise RuntimeError(RIGS_REASON)
-    downscale = QUALITY_DOWNSCALE.get(quality, 2)
-    stores = work / STORES
-    everyone = sorted(names.values())
-
-    # what to continue: the stores of an earlier native matching, a classic database, or nothing
-    continuable = (not reset) and sfm._continuable(chunk, db_path, root, names, "sift")
-    keep_stores = continuable and _stores_trusted(chunk, stores, root, quality, keypoint_limit, apply_masks)
-    if keep_stores:  # photos taken out of the chunk since: their features would go into the database
-        keep_stores = set(k.store_names(str(stores / FEATURES))) <= set(everyone)
-    keep_import = continuable and not keep_stores
-    keep = keep_stores or keep_import
-    if not reset and not keep:
-        progress(0.0, "No alignment to continue: every photo again")
-    wd = stores if keep_stores else work / TMP  # the folder the stores are made in
-    tmp_db = work / TMP_DB
+    run = _Run(k, chunk, work, root, names, QUALITY_DOWNSCALE.get(quality, 2))
+    run.devices, run.gpu_names = _gpu_devices(gpu)
+    run.dct, run.cpu_share = dct_enabled(), cpu_share_enabled()
+    if generic is None:
+        generic = len(names) > sfm.EXHAUSTIVE_UP_TO  # every pair is cheap enough up to there
     old_info = chunk.meta.get("sfm") or {}
+    how = _continuation(run, reset=reset, quality=quality, keypoint_limit=keypoint_limit, apply_masks=apply_masks)
+    if not reset and how is None:
+        progress(0.0, "No alignment to continue: every photo again")
+    # the size of the preselection images: the one the stores were made with when continuing them (the raster of a
+    # JPEG decoded at a DCT scale depends on it), else the preselection's when it runs
+    run.small_size = (old_info.get("preselection_size") if how == "stores"
+                      else sfm.PRESELECTION_SIZE if generic else None)
     try:
-        if keep_import:
-            progress(0.0, "Importing the matches of the alignment to continue")
-            imported = import_database(db_path, wd / FEATURES, wd / MATCHES)
-            log.info("%d photos of the database imported into the stores of the native matching", imported)
-        features_dir, small_dir, matches_dir = wd / FEATURES, wd / SMALL, wd / MATCHES
-
-        def names_in(store_dir: Path) -> set[str]:
-            # the store opened for the question: a handle kept open would not see what the kernels wrote since
-            return set(k.store_names(str(store_dir))) if (store_dir / INDEX).is_file() else set()
-
-        existing = names_in(features_dir) if keep else set()
-        by_sensor: dict[int, list[str]] = {}
-        for c in chunk.cameras:
-            if c.enabled:
-                by_sensor.setdefault(c.sensor_key, []).append(names[c.key])
-        new = [n for group in by_sensor.values() for n in group if n not in existing]
-        n = len(names)
-        if generic is None:
-            generic = n > sfm.EXHAUSTIVE_UP_TO  # every pair is cheap enough up to there
-        # the size of the preselection images: the one the stores were made with when continuing them (the raster
-        # of a JPEG decoded at a DCT scale depends on it), else the preselection's when it runs
-        small_size = old_info.get("preselection_size") if keep_stores else (sfm.PRESELECTION_SIZE if generic else None)
-        devices, gpu_names = _gpu_devices(gpu)
-        dct, cpu_share = dct_enabled(), cpu_share_enabled()
-        sensor_of = {names[c.key]: c.sensor_key for c in chunk.cameras if c.enabled}
-
-        def long_side(name: str) -> int:
-            s = chunk.sensors[sensor_of[name]]
-            return max(int(s.width), int(s.height))
-
-        def limit_of(name: str) -> int:
-            return int(long_side(name) / downscale)
-
-        def small_limit_of(name: str) -> int | None:
-            return min(int(small_size), long_side(name)) if small_size else None
-
-        with stages.stage("features"):  # the points of the photos
-            masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
-            progress(0.0, f"Detecting points in {len(new)} photos" + (" (with masks)" if masks else ""))
-            jobs = [(name, str(root / name), str(masks / f"{name}.png") if masks is not None else None, limit_of(name),
-                     small_limit_of(name)) for name in new]
-            sub = progress.sub(0.0, 0.45)
-            report = k.features(str(features_dir), str(small_dir) if small_size else None, jobs, int(keypoint_limit),
-                                sfm.PRESELECTION_POINTS, devices, dct, cpu_share, READERS,
-                                _relay(sub, "Detecting points", "photos"))
-            for line in report["log"]:
-                log.info("native features: %s", line)
-            counts = {"gpu": report["gpu"], "cpu": report["cpu"]}
-            for name in report["unsupported"]:  # files the core does not decode: OpenCV does, the kernels take pixels
-                given = _features_from_pixels(k, root, name, masks, features_dir, small_dir if small_size else None,
-                                              limit_of(name), small_limit_of(name), int(keypoint_limit), devices)
-                if given is None:
-                    log.warning("%s: unreadable, no key points", name)
-                else:
-                    counts[given] += 1
-            for name in report["unreadable"]:
-                log.warning("%s: unreadable, no key points", name)
-            with_features = names_in(features_dir)
-            if generic:  # the photos continued have no preselection image: theirs, into the small store
-                present_small = names_in(small_dir)
-                small_jobs = [(name, str(root / name), str(masks / f"{name}.png") if masks is not None else None,
-                               min(sfm.PRESELECTION_SIZE, long_side(name)), None)
-                              for name in everyone if name not in present_small and name in with_features]
-                if small_jobs:
-                    more = k.features(str(small_dir), None, small_jobs, sfm.PRESELECTION_POINTS,
-                                      sfm.PRESELECTION_POINTS, devices, dct, cpu_share, READERS,
-                                      _relay(sub, "Reducing photos for the pairs", "photos"))
-                    for line in more["log"]:
-                        log.info("native features: %s", line)
-            features = _features_word(counts["gpu"], counts["cpu"])
-            sub(1.0, f"Points detected in {len(with_features)} photos"
-                + (f" on the {features.upper()}" if counts["gpu"] else ""))
-
-        present = sorted(with_features & set(everyone))
-        cams = {name: _camera(chunk.sensors[sensor_of[name]]) for name in present}
-        pairs: set[tuple[str, str]] | None = None
-        chosen: set[tuple[str, str]] = set()  # the pairs a preselection chose: never dropped by the first stage
-        parts = []
-        if generic:
-            progress(0.45, "Finding the pairs of photos that overlap")
-            with stages.stage("preselection"):
-                small_names = [name for name in sorted(names_in(small_dir)) if name in cams]
-                sub = progress.sub(0.45, 0.1)
-                found_pairs = k.preselect(str(small_dir), {name: cams[name] for name in small_names}, devices,
-                                          sfm.PRESELECTION_INLIERS,
-                                          _relay(sub, "Finding the pairs of photos that overlap", ""))
-                for line in found_pairs["log"]:
-                    log.info("native preselection: %s", line)
-                weights = {(a, b): int(w) for a, b, w in found_pairs["weights"]}
-                found = (sfm.strongest_pairs(weights, sfm.PRESELECTION_PAIRS_PER_PHOTO)
-                         if sfm.PRESELECTION_PAIRS_PER_PHOTO else set(weights))
-                found |= set(sfm._reference_pairs(chunk, names, neighbors=8) or [])
-                shutil.rmtree(small_dir, ignore_errors=True)  # its only use
-                sub(1.0, f"{len(found):,} pairs of photos overlap")
-            if found:  # nothing found on the small images: every pair
-                pairs, parts = set(found), ["generic"]
-                chosen |= set(found)
-        if reference:
-            finder = {"source": sfm._reference_pairs, "estimated": sfm._estimated_pairs,
-                      "sequential": sfm._sequential_pairs}[reference]
-            with stages.stage("preselection"):
-                found = finder(chunk, names, max(int(neighbours), 1))
-            if found:
-                pairs = (pairs or set()) | set(found)
-                chosen |= set(found)
-                parts.append(reference)
-            elif not pairs:
-                raise RuntimeError(f"the {reference} preselection needs "
-                                   + ("camera reference positions" if reference == "source" else "an alignment"))
-        mode = "+".join(parts) if pairs else "exhaustive"
-        if pairs is None:
-            pairs = {(a, b) for i, a in enumerate(everyone) for b in everyone[i + 1:]}
-        if keep:  # only the pairs with a photo added since
-            added = set(new)
-            pairs = {p for p in pairs if p[0] in added or p[1] in added}
-        pair_list = [(a, b, (a, b) in chosen) for a, b in sorted(pairs) if a in cams and b in cams]
-
+        _begin(run, how, progress)
+        with stages.stage("features"):
+            run.masks = colmap_mask_folder(chunk, names, work / "masks") if apply_masks == "keypoints" else None
+            features = _detect_features(run, progress, keypoint_limit, generic)
+        pair_list, mode, cams = _select_pairs(run, stages, progress, generic, reference, neighbours)
         with stages.stage("pairs"):
-            progress(0.55, f"Matching photos ({mode}, {len(pair_list):,} pairs)"
-                     + (f" on {gpu_names} and the CPU" if devices and cpu_share else f" on {gpu_names}" if devices
-                        else ""))
-            options = {"stage1_points": STAGE1_POINTS, "trust_inliers": TRUST_INLIERS, "drop_inliers": DROP_INLIERS,
-                       "max_num_matches": max(int(tiepoint_limit) * 4, 8192)}
-            sub = progress.sub(0.55, 0.35)
-            matched = k.match_pairs(str(features_dir), str(matches_dir), pair_list, cams, devices, options,
-                                    _relay(sub, "Matching photos", "pairs"), cpu_share)
-            for line in matched["log"]:
-                log.warning("native matching: %s", line)
-            by_device = {str(name): int(count) for name, count in matched["by_device"].items()}
-            gpu_shares = {name: count for name, count in by_device.items() if name != "CPU"}
-            routes = {"guided": int(matched["guided"]), "brute_force": int(matched["brute_force"]),
-                      "dropped": int(matched["dropped"])}
-            sub(1.0, f"Matched {matched['done']:,} pairs: {routes['guided']:,} along the epipolar lines, "
-                     f"{routes['brute_force']:,} by brute force, {routes['dropped']:,} dropped")
-
-        with stages.stage("export"):  # COLMAP's database for the mapper, then everything into place
-            progress(0.9, "Writing the matches for the alignment")
-            export_database(chunk, tmp_db, descriptors=False, stores=wd, previous=db_path if keep else None,
-                            added=new if keep else ())
-            if exclude_stationary:
-                removed = sfm.remove_stationary_matches(tmp_db)
-            else:  # a continuation keeps the count of the step it continues (the export applied its removal again)
-                removed = old_info.get("stationary_removed") if keep else None
-            os.replace(tmp_db, db_path)
-            if wd != stores:
-                if stores.exists():
-                    os.replace(stores, work / OLD)
-                os.replace(wd, stores)
-                shutil.rmtree(work / OLD, ignore_errors=True)
-            shutil.rmtree(stores / SMALL, ignore_errors=True)
+            by_device, routes = _match_pairs(run, progress, pair_list, cams, mode, tiepoint_limit)
+        with stages.stage("export"):
+            removed = _commit(run, progress, exclude_stationary, old_info)
     except BaseException:
-        if wd != stores:
-            shutil.rmtree(wd, ignore_errors=True)
-        else:
-            shutil.rmtree(stores / SMALL, ignore_errors=True)
-        for path in work.glob(f"{TMP_DB}*"):
-            path.unlink(missing_ok=True)
+        _remove_leftovers(work)  # the work folder and the database being written; the stores moved aside put back
         raise
-
-    gpu_pairs = sum(gpu_shares.values())
-    chunk.meta["sfm"] = {"engine": "native", "image_root": str(root), "names": {str(k_): v for k_, v in names.items()},
-                         "features": features, "matcher": "sift", "quality": quality, "pair_selection": mode,
-                         "pairs": len(pair_list), "pairs_unmatched": 0, "generic": bool(generic),
-                         "reference": reference,
-                         "neighbours": int(neighbours), "masks": masks is not None, "apply_masks": apply_masks,
-                         "guided_matching": bool(guided_matching), "stationary_removed": removed, "rigs": 0,
-                         "keypoint_limit": int(keypoint_limit), "tiepoint_limit": int(tiepoint_limit),
-                         "continued": keep, "added": new if keep else None, "nodes": [],
-                         "gpu": ", ".join(gpu_shares) if gpu_shares else None, "gpu_pairs": gpu_pairs,
-                         "gpu_shares": gpu_shares or None, "cpu_pairs": by_device.get("CPU", 0), "routes": routes,
-                         "preselection_size": small_size}
-    if keep and old_info.get("gps_priors"):
-        chunk.meta["sfm"]["gps_priors"] = old_info["gps_priors"]  # the priors already in the database: same axes
+    _record(run, features=features, mode=mode, pairs=len(pair_list), by_device=by_device, routes=routes,
+            removed=removed, old_info=old_info, quality=quality, keypoint_limit=keypoint_limit,
+            tiepoint_limit=tiepoint_limit, generic=generic, reference=reference, neighbours=neighbours,
+            apply_masks=apply_masks, guided_matching=guided_matching)
     progress(1.0, "Matching finished" + (f" ({removed:,} stationary matches left out)" if removed else ""))
 
 
@@ -495,10 +681,11 @@ def _new_image(db, name: str, camera_id: int, rig_id: int) -> int:
     return image_id
 
 
-def _image_ids(db, chunk: Chunk, sensor_of: dict[str, int], held: set[str], continued: bool, added) -> dict[str, int]:
-    """The image id of every photo to export, in ``db``: of a continued database (``continued``), the ids its images
-    have, and a new image - with the camera and the rig of its sensor, or new ones - for each of ``added``; of a
-    fresh database, a camera and a rig per sensor and an image per photo, as the classic step writes them."""
+def _image_ids(db, chunk: Chunk, sensor_of: dict[str, int], held: set[str], continued: bool) -> dict[str, int]:
+    """The image id of every photo to export (``held``), in ``db``: of a continued database (``continued``), the ids
+    its images have, and a new image - with the camera and the rig of its sensor, or new ones - for each photo of
+    ``held`` it lacks; of a fresh database, a camera and a rig per sensor and an image per photo, as the classic
+    step writes them."""
     import pycolmap
 
     ids: dict[str, int] = {}
@@ -507,9 +694,7 @@ def _image_ids(db, chunk: Chunk, sensor_of: dict[str, int], held: set[str], cont
         camera_of_sensor = {sensor_of[n]: int(im.camera_id) for n, im in images.items() if n in sensor_of}
         rig_of_camera = {int(r.ref_sensor_id.id): int(r.rig_id) for r in db.read_all_rigs()}
         ids = {n: int(im.image_id) for n, im in images.items() if n in held}
-        for name in added:
-            if name not in held or name in images:
-                continue
+        for name in sorted(held - set(images)):
             skey = sensor_of[name]
             if skey not in camera_of_sensor:  # a sensor new to the database: its camera and rig
                 camera_of_sensor[skey], rig_id = _new_camera(db, chunk.sensors[skey])
@@ -550,7 +735,7 @@ def _two_view_geometry(r: dict):
 
 
 def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, stores: Path | None = None,
-                    previous: Path | None = None, added=()) -> None:
+                    previous: Path | None = None, stationary_rule: bool = True) -> None:
     """COLMAP's database of the stores of the native matching (``stores``: ``<sfm>/native`` of the chunk when not
     given), written whole to ``db_path`` - a temporary file beside it, moved into place when complete -: the cameras
     by sensor as the classic step writes them (the model of :func:`.sfm.mapping_camera`, a prior focal length), a
@@ -559,9 +744,10 @@ def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, s
     photos are those of the chunk that the feature store holds. ``previous`` (a database to continue; ``db_path``
     itself when it is there and none is given): copied first, its features and matches cleared and written again,
     so that its images, cameras, rigs, frames and pose priors keep their ids (the model of the alignment names them)
-    and the photos of ``added`` come after them, with the camera and the rig of their sensor; the stationary matches
-    the step it continues left out are left out again (:func:`.sfm.remove_stationary_matches`, when the record of
-    the chunk has a count). A chunk without the feature store is a FileNotFoundError."""
+    and the photos of the store it lacks come after them, with the camera and the rig of their sensor; the stationary
+    matches the step it continues left out are left out again (:func:`.sfm.remove_stationary_matches`, when the
+    record of the chunk has a count and ``stationary_rule`` is not switched off by a caller that runs the removal
+    itself). A chunk without the feature store is a FileNotFoundError."""
     import pycolmap
 
     k = _kernels()
@@ -586,7 +772,7 @@ def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, s
     db = pycolmap.Database.open(str(tmp))
     try:
         with pycolmap.DatabaseTransaction(db):
-            ids = _image_ids(db, chunk, sensor_of, held, continued, added)
+            ids = _image_ids(db, chunk, sensor_of, held, continued)
             for name, image_id in ids.items():
                 kp, desc, _implementation = features.read(name, descriptors)
                 db.write_keypoints(image_id, np.ascontiguousarray(kp, np.float32))
@@ -604,7 +790,7 @@ def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, s
                     db.write_two_view_geometry(ids[a], ids[b], _two_view_geometry(r))
     finally:
         db.close()
-    if continued and (chunk.meta.get("sfm") or {}).get("stationary_removed") is not None:
+    if continued and stationary_rule and (chunk.meta.get("sfm") or {}).get("stationary_removed") is not None:
         sfm.remove_stationary_matches(tmp)
     os.replace(tmp, db_path)
 
