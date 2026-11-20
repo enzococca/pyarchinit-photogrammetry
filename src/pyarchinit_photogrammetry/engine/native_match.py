@@ -237,10 +237,10 @@ def _remove_leftovers(work: Path) -> None:
     """What a step that died left in the sfm folder, swept so that the stores in place go with the database in place
     as far as the record of the commit can tell (:func:`_identity`). The stores being replaced (``native.old.tmp``)
     are put back when the new ones never came into place, or came but the database was not replaced (their commit
-    record names another database: they are removed); they are removed when it was replaced; with new stores and no record there is no telling, and both go (the
-    next step does every photo again). New stores of a first matching beside a database that is not theirs go
-    too. Then the work folder, the database being written, and the store of the preselection (made again by the
-    step that needs it) are removed."""
+    record names another database: they are removed); they are removed when it was replaced; with new stores and
+    no record there is no telling, and both go (the next step does every photo again). New stores of a first
+    matching beside a database that is not theirs go too. Then the work folder, the database being written, and
+    the store of the preselection (made again by the step that needs it) are removed."""
     stores, old, db_path = work / STORES, work / OLD, work / "database.db"
     if old.is_dir():
         if not stores.exists():
