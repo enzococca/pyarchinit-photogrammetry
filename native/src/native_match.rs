@@ -660,7 +660,7 @@ fn imported_result(a: &str, b: &str, matches: &PyReadonlyArray2<'_, u32>, inlier
 #[pyfunction]
 pub(crate) fn native_store_read<'py>(py: Python<'py>, store: &str, name: &str)
     -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<u8>>, &'static str)> {
-    let found = run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| {
+    let found = run_native(py, None, "reading the feature store", NO_PROGRESS, |_, _| {
         let store = open_feature_store(store)?;
         let view = store.get(name);
         Ok(view.map(|v| (v.keypoints().to_vec(), v.descriptors().to_vec(), v.header().implementation)))
@@ -682,7 +682,7 @@ pub(crate) fn native_store_write<'py>(py: Python<'py>, store: &str, name: &str, 
                                       descriptors: PyReadonlyArray2<'py, u8>, width: u32, height: u32,
                                       image_id: Option<u32>) -> PyResult<()> {
     let f = imported_features(&keypoints, &descriptors, width, height, image_id)?;
-    run_native(py, None, "writing the feature store", NO_PROGRESS,|_, _| {
+    run_native(py, None, "writing the feature store", NO_PROGRESS, |_, _| {
         let store = feature_store(store)?;
         store.put(name, &f).map_err(|e| e.to_string())
     })
@@ -691,7 +691,7 @@ pub(crate) fn native_store_write<'py>(py: Python<'py>, store: &str, name: &str, 
 /// The names of the photos of the feature store ``store``, sorted.
 #[pyfunction]
 pub(crate) fn native_store_names(py: Python<'_>, store: &str) -> PyResult<Vec<String>> {
-    run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| Ok(open_feature_store(store)?.names()))
+    run_native(py, None, "reading the feature store", NO_PROGRESS, |_, _| Ok(open_feature_store(store)?.names()))
 }
 
 /// The header of the photo ``name`` of the feature store ``store``: ``width`` and ``height`` of the full
@@ -700,7 +700,7 @@ pub(crate) fn native_store_names(py: Python<'_>, store: &str) -> PyResult<Vec<St
 /// photo the store does not hold is a KeyError.
 #[pyfunction]
 pub(crate) fn native_store_header<'py>(py: Python<'py>, store: &str, name: &str) -> PyResult<Bound<'py, PyDict>> {
-    let header: Option<FeatureHeader> = run_native(py, None, "reading the feature store", NO_PROGRESS,|_, _| {
+    let header: Option<FeatureHeader> = run_native(py, None, "reading the feature store", NO_PROGRESS, |_, _| {
         Ok(open_feature_store(store)?.get(name).map(|v| v.header().clone()))
     })?;
     header_dict(py, &header.ok_or_else(|| PyKeyError::new_err(name.to_owned()))?)
@@ -714,7 +714,7 @@ pub(crate) fn native_store_header<'py>(py: Python<'py>, store: &str, name: &str)
 #[pyfunction]
 pub(crate) fn native_match_read<'py>(py: Python<'py>, matches: &str, a: &str, b: &str)
     -> PyResult<Option<Bound<'py, PyDict>>> {
-    let found = run_native(py, None, "reading the match store", NO_PROGRESS,|_, _| {
+    let found = run_native(py, None, "reading the match store", NO_PROGRESS, |_, _| {
         let store = MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?;
         Ok(store.get(a, b))
     })?;
@@ -725,7 +725,7 @@ pub(crate) fn native_match_read<'py>(py: Python<'py>, matches: &str, a: &str, b:
 /// sorted.
 #[pyfunction]
 pub(crate) fn native_match_pairs_list(py: Python<'_>, matches: &str) -> PyResult<Vec<(String, String)>> {
-    run_native(py, None, "reading the match store", NO_PROGRESS,|_, _| {
+    run_native(py, None, "reading the match store", NO_PROGRESS, |_, _| {
         Ok(MatchStore::open(Path::new(matches)).map_err(|e| e.to_string())?.pairs())
     })
 }
@@ -857,7 +857,7 @@ fn grey_array(py: Python<'_>, g: Grey) -> Bound<'_, PyArray2<u8>> {
 #[pyfunction]
 pub(crate) fn read_grey<'py>(py: Python<'py>, path: &str, min_long_side: usize, dct: bool)
     -> PyResult<(Bound<'py, PyArray2<u8>>, (usize, usize))> {
-    let (grey, full) = run_native(py, None, "reading a photo", NO_PROGRESS,|_, _| {
+    let (grey, full) = run_native(py, None, "reading a photo", NO_PROGRESS, |_, _| {
         image::read_grey(Path::new(path), min_long_side, dct).map_err(|e| format!("{path}: {e}"))
     })?;
     Ok((grey_array(py, grey), full))
@@ -872,6 +872,6 @@ pub(crate) fn rescale_as_colmap<'py>(py: Python<'py>, grey: PyReadonlyArray2<'py
     let a = grey.as_array();
     let (height, width) = a.dim();
     let img = Grey { width, height, pixels: a.iter().copied().collect() };
-    let out = run_native(py, None, "reducing a photo", NO_PROGRESS,|_, _| Ok(image::rescale_as_colmap(&img, w, h)))?;
+    let out = run_native(py, None, "reducing a photo", NO_PROGRESS, |_, _| Ok(image::rescale_as_colmap(&img, w, h)))?;
     Ok(grey_array(py, out))
 }

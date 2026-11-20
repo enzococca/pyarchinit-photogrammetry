@@ -59,8 +59,9 @@ fn duplicate(set: &mut [u8], from: usize, to: usize) {
 /// The two sets: A of `N_A`, B of `N_B` whose first `COPIES` are the first of A moved by noise in
 /// [-6, 6] on every byte. Then the ties: in B, descriptors 64, 135 and 1699 are descriptor 5
 /// again (three duplicated columns: in other tiles than their original for either tile size, and
-/// 64 in a lower thread column of the workgroup - 5 falls in the second thread column with
-/// either width, 64 in the first); in A, descriptors 70, 1500 and 1999 are descriptor 3 again
+/// 64 in a lower thread column of the workgroup - 64 falls in the first thread column with
+/// either width, 5 in a later one: the second with the large tiles, the third with the small);
+/// in A, descriptors 70, 1500 and 1999 are descriptor 3 again
 /// (three duplicated rows, in other tiles).
 fn pair() -> (Vec<u8>, Vec<u8>) {
     let mut random = Lcg(2026);

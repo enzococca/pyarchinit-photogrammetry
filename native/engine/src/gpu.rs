@@ -59,7 +59,7 @@ impl Tile {
     }
 
     /// The workgroup memory the kernel declares: the two tiles as u32 words (32 per descriptor)
-    /// and `scratch` as vec2<u32>.
+    /// and `scratch` as `vec2<u32>`.
     pub const fn workgroup_bytes(&self) -> u32 {
         ((self.rows * 32 + 32 * self.cols) * 4 + self.scratch() * 8) as u32
     }
@@ -994,8 +994,9 @@ impl Matcher {
 /// timed out while waiting on the last successful submission to complete!" and an access violation
 /// on WARP, where 4096 x 4096 descriptors take minutes). The fence is read in a tight loop for the
 /// first millisecond (a small pair answers within it), then with pauses that grow to a
-/// millisecond, so a long kernel costs no core. Every kernel of the engine waits through this
-/// function (the matcher, the SIFT).
+/// millisecond, so a long kernel costs no core. The kernels of the matching wait through this
+/// function (the matcher, the preselection, the SIFT); those of the dense step
+/// (`gpu_patchmatch`, `gpu_fuse`) still use ``Maintain::Wait`` and carry the same 60 s limit.
 pub(crate) fn wait_idle(device: &wgpu::Device) {
     let started = Instant::now();
     let mut pause = Duration::from_micros(50);

@@ -169,7 +169,7 @@ fn cpu_sift_is_repeatable_and_ordered() {
     assert!(again_odd == (kp_odd.clone(), desc_odd), "two runs differ at {ow} x {oh}");
     assert_ordered(&kp_odd);
     // images whose coarsest octaves are narrower than the blur radius (40 x 40 reaches 10 x 10, a
-    // radius of 13; one level per octave reaches 20 x 20 with a radius of 45) and the smallest
+    // radius of 13; one level per octave reaches 40 x 40 with a radius of 45) and the smallest
     // image the kernel accepts: extracted, repeatable, ordered, inside the image
     let one_level = Options { octave_resolution: 1, ..o };
     for (sw, sh, options) in [(40usize, 40usize, o), (48, 48, o), (44, 60, o), (8, 8, o), (160, 160, one_level)] {

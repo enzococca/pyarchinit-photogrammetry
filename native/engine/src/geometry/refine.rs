@@ -13,7 +13,6 @@ use super::ransac::{Model, Report, Support};
 use super::solvers::pose_from_essential;
 use super::two_view::{Essential, Fundamental, Homography};
 
-
 /// A model with a local parametrisation about itself, for the least squares on its inliers.
 trait Refinable: Clone {
     const PARAMS: usize;
