@@ -65,6 +65,20 @@ pub const INDEX_FILE: &str = "index.json";
 /// The extension of a feature file.
 pub const EXTENSION: &str = "ppgf";
 
+/// The codes of the system's error for a full disk: ENOSPC (28 on Linux and macOS), and
+/// ERROR_HANDLE_DISK_FULL (39) and ERROR_DISK_FULL (112) on Windows.
+#[cfg(not(windows))]
+const DISK_FULL_CODES: &[i32] = &[28];
+#[cfg(windows)]
+const DISK_FULL_CODES: &[i32] = &[39, 112];
+
+/// Whether the text of an error of the engine says that the disk is full: it carries the code of
+/// a full disk as an `io::Error` of the system words it (`... (os error 28)`), which the errors of
+/// the stores keep through the words the steps add (the steps carry their errors as text).
+pub fn storage_full(text: &str) -> bool {
+    DISK_FULL_CODES.iter().any(|code| text.contains(&format!("(os error {code})")))
+}
+
 const HEADER_BYTES: usize = 128;
 const KEYPOINT_BYTES: usize = 16;
 

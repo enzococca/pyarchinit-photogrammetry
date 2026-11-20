@@ -1030,3 +1030,83 @@ fn match_all_is_the_same_on_every_device() {
     drop((on_cpu, on_fake, fallen_back, refused, store));
     fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_lost_gpu_alone_a_pair_no_device_can_do_and_twin_names() {
+    const PHOTOS: usize = 5;
+    let dir = folder("lost");
+    let store = scene(&dir.join("features"), PHOTOS, 120, 200);
+    let names = store.names();
+    let cams: HashMap<String, Camera> = names.iter().map(|n| (n.clone(), camera())).collect();
+    let calibrated: HashSet<String> = names.iter().cloned().collect();
+    let list: Vec<(String, String, bool)> =
+        (0..PHOTOS - 1).map(|i| (photo_name(i), photo_name(i + 1), true)).collect();
+    let total = list.len();
+    let o = options(400);
+    let never = AtomicBool::new(false);
+    let reference = MatchStore::create(&dir.join("cpu")).unwrap();
+    let want = pairs::match_all(&list, &store, &cams, &calibrated, &reference, &[], Some(1), &o, &never, &|_, _| {})
+        .unwrap();
+    let fake = |name: &'static str, fail_at: Option<usize>| -> Box<dyn Device> {
+        // `started` raised already: the broken device does not wait for a patient one
+        Box::new(Fake { name, calls: 0, fail_at, started: Arc::new(AtomicBool::new(true)),
+                        broken: Arc::new(AtomicBool::new(true)) })
+    };
+
+    // the only GPU lost at its first pair, no CPU thread beside it: the CPU standing by does
+    // every pair, with the same results
+    let alone = MatchStore::create(&dir.join("alone")).unwrap();
+    let on = pairs::match_on(&list, &store, &cams, &calibrated, &alone, vec![fake("lost GPU", Some(1))], 0, &o,
+                             &never, &|_, _| {})
+        .unwrap_or_else(|p| panic!("{p}"));
+    assert_eq!((on.done, on.by_route), (total, want.by_route));
+    for (a, b, _) in &list {
+        assert_eq!(alone.get(a, b), reference.get(a, b), "({a}, {b})");
+    }
+    assert!(on.log.iter().any(|l| l.starts_with("lost GPU") && l.contains("retired")), "{:?}", on.log);
+    assert!(on.log.iter().any(|l| l.contains("the CPU takes them")), "{:?}", on.log);
+    assert_eq!(on.stage1_by_device, vec![("lost GPU".to_owned(), 0), ("CPU".to_owned(), total)]);
+
+    // two devices of one name: each keeps its count
+    let twins = MatchStore::create(&dir.join("twins")).unwrap();
+    let on = pairs::match_on(&list, &store, &cams, &calibrated, &twins, vec![fake("GPU", None), fake("GPU", None)], 0,
+                             &o, &never, &|_, _| {})
+        .unwrap();
+    assert_eq!(on.stage1_by_device.len(), 2, "{:?}", on.stage1_by_device);
+    assert_ne!(on.stage1_by_device[0].0, on.stage1_by_device[1].0, "{:?}", on.stage1_by_device);
+    assert_eq!(on.stage1_by_device.iter().map(|(_, n)| n).sum::<usize>(), total);
+
+    // the file of photo 02 gone after the store was opened: its two pairs fail on every worker,
+    // and are dropped instead of retiring them all; the other pairs are done
+    let mut files: Vec<PathBuf> = fs::read_dir(dir.join("features")).unwrap().map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().is_some_and(|n| n != "index.json")).collect();
+    files.sort();
+    fs::remove_file(&files[2]).unwrap();
+    let damaged = MatchStore::create(&dir.join("damaged")).unwrap();
+    let on = pairs::match_all(&list, &store, &cams, &calibrated, &damaged, &[], Some(3), &o, &never, &|_, _| {})
+        .unwrap_or_else(|p| panic!("{p}"));
+    assert_eq!(on.done, total);
+    assert_eq!(on.by_route.2, want.by_route.2 + 2, "{:?} against {:?}", on.by_route, want.by_route);
+    assert!(on.log.iter().any(|l| l.contains("given up") && l.contains(&photo_name(2))), "{:?}", on.log);
+    for (a, b, _) in &list {
+        if a != &photo_name(2) && b != &photo_name(2) {
+            assert_eq!(damaged.get(a, b), reference.get(a, b), "({a}, {b})");
+        }
+    }
+    // a match store that cannot be written (its folder read-only): the step's error, never pairs
+    // dropped one by one
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked_dir = dir.join("locked");
+        let locked = MatchStore::create(&locked_dir).unwrap();
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let r = pairs::match_all(&list, &store, &cams, &calibrated, &locked, &[], Some(3), &o, &never, &|_, _| {});
+        fs::set_permissions(&locked_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let problem = r.err().expect("a store that cannot be written is an error");
+        assert!(problem.contains("the match store"), "{problem}");
+        assert!(!problem.contains("given up"), "{problem}");
+    }
+    drop((reference, alone, twins, damaged, store));
+    fs::remove_dir_all(&dir).unwrap();
+}

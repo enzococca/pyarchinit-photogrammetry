@@ -3,9 +3,13 @@
 //! its own pace and the split between them is decided by their speeds, not in advance (the
 //! calibration pass of the design is left out on purpose: the queue needs none). A worker whose
 //! unit fails is retired and its unit goes back to the queue for the others - a lost GPU gives
-//! its units back - with a line in the log; a worker that finds the queue empty while another is
-//! still on a unit waits for it, since that unit comes back if its worker fails; with units left
-//! and no worker alive the run is an error; `cancel` set stops every worker after its unit. The
+//! its units back - with a line in the log; a unit that fails again, on a second worker, is the
+//! unit's fault, not the device's: the worker gives it up ([`Worker::give_up`]) and goes on, so
+//! that one unit no device can do does not retire every worker. A worker that finds the queue
+//! empty while another is still on a unit waits for it, since that unit comes back if its worker
+//! fails; when every worker is retired with units left, CPU workers standing by take them
+//! ([`run_with_standby`]), and without them the run is an error; `cancel` set stops every worker
+//! after its unit. The
 //! results come back in the order of the units given, whatever the threads did, so a run is
 //! reproducible whichever device did which unit.
 //!
@@ -25,6 +29,14 @@ use std::thread;
 pub trait Worker<U, R>: Send {
     fn name(&self) -> String;
     fn run(&mut self, unit: &U) -> Result<R, String>;
+
+    /// The result of a unit that failed on another worker before and has just failed on this one
+    /// with `why`: the unit is given up with it and the worker goes on; `None` (the default) when
+    /// the unit cannot be given up - the worker is retired and the unit goes back, as on a first
+    /// failure.
+    fn give_up(&mut self, _unit: &U, _why: &str) -> Option<R> {
+        None
+    }
 }
 
 /// What makes a CPU worker, called once per CPU thread.
@@ -57,6 +69,8 @@ struct Done<U, R> {
     results: Vec<Option<(U, R)>>,
     count: usize,
     log: Vec<String>,
+    /// The failures of every unit so far.
+    failures: Vec<u32>,
 }
 
 /// The units left, and how many are being done: a worker that finds the queue empty while one
@@ -142,6 +156,27 @@ fn serve<U, R>(worker: &mut dyn Worker<U, R>, side: Side, shared: &Shared<U, R>,
                 Err(payload) => Err(format!("panicked: {}", panic_text(&*payload))),
             }
         };
+        let outcome = match outcome {
+            Ok(result) => Ok(result),
+            Err(problem) => {
+                let failed_before = {
+                    let mut done = lock(&shared.done);
+                    done.failures[i] += 1;
+                    done.failures[i] > 1
+                };
+                // a unit that failed on another worker before: the unit's fault, given up when it can be
+                let given_up = if failed_before { worker.give_up(&unit, &problem) } else { None };
+                match given_up {
+                    Some(result) => {
+                        let line = format!("{}: unit {} of {total} failed again ({problem}); it is given up, the \
+                                            worker goes on", worker.name(), i + 1);
+                        lock(&shared.done).log.push(line);
+                        Ok(result)
+                    }
+                    None => Err(problem),
+                }
+            }
+        };
         match outcome {
             Ok(result) => {
                 // the progress callback is called under the lock: one call at a time
@@ -171,12 +206,24 @@ fn serve<U, R>(worker: &mut dyn Worker<U, R>, side: Side, shared: &Shared<U, R>,
 /// each, taking from the front of the queue) and `cpu_threads` CPU workers made by `cpu` (one
 /// per thread, taking from the back). `progress(done, total)` is called at the start with
 /// `(0, total)` and after every unit, one call at a time. The results come back in the order of
-/// `units`. Errors, with the log of the run so far: `"cancelled"` when `cancel` was set and
-/// units are left; "no worker left" when every worker was retired with units left; "no worker"
-/// when there is none to start with.
+/// `units` (a unit given up with what [`Worker::give_up`] made of it). Errors, with the log of the
+/// run so far: `"cancelled"` when `cancel` was set and units are left; "no worker left" when
+/// every worker was retired with units left; "no worker" when there is none to start with.
 pub fn run<'a, U: Send + 'a, R: Send + 'a>(
     units: Vec<U>, gpus: Vec<Box<dyn Worker<U, R> + 'a>>, cpu: Option<Factory<'a, U, R>>, cpu_threads: usize,
     cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Run<U, R>, (String, Vec<String>)> {
+    run_with_standby(units, gpus, cpu, cpu_threads, 0, cancel, progress)
+}
+
+/// [`run`] with `standby` CPU workers made by `cpu` standing by when no CPU worker works beside
+/// the GPUs (`cpu_threads` 0): when every GPU worker has been retired with units left, they are
+/// started and take those units, with a line in the log - a GPU lost in the middle of a step
+/// that was to leave the CPU alone does not end the step.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_standby<'a, U: Send + 'a, R: Send + 'a>(
+    units: Vec<U>, gpus: Vec<Box<dyn Worker<U, R> + 'a>>, cpu: Option<Factory<'a, U, R>>, cpu_threads: usize,
+    standby: usize, cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<Run<U, R>, (String, Vec<String>)> {
     let total = units.len();
     if total == 0 {
@@ -194,25 +241,34 @@ pub fn run<'a, U: Send + 'a, R: Send + 'a>(
     let shared = Shared {
         queue: Mutex::new(Queue { units: units.into_iter().enumerate().collect(), in_flight: 0 }),
         idle: Condvar::new(),
-        done: Mutex::new(Done { results: (0..total).map(|_| None).collect(), count: 0, log: Vec::new() }),
+        done: Mutex::new(Done { results: (0..total).map(|_| None).collect(), count: 0, log: Vec::new(),
+                                failures: vec![0; total] }),
     };
+    let standing_by = if cpu_threads == 0 && cpu.is_some() { standby } else { 0 };
+    let shared = &shared;
+    // the CPU workers of a scope: `threads` of them made by `cpu`
+    let cpu_workers = |threads: usize| (0..threads).filter_map(|_| cpu.as_ref()).collect::<Vec<_>>();
     thread::scope(|s| {
         for mut worker in gpus {
-            let shared = &shared;
             s.spawn(move || serve(&mut *worker, Side::Front, shared, total, cancel, progress, fail_after));
         }
-        if let Some(factory) = &cpu {
-            for _ in 0..cpu_threads {
-                let shared = &shared;
-                s.spawn(move || {
-                    let mut worker = factory();
-                    serve(&mut *worker, Side::Back, shared, total, cancel, progress, None);
-                });
-            }
+        for factory in cpu_workers(cpu_threads) {
+            s.spawn(move || serve(&mut *factory(), Side::Back, shared, total, cancel, progress, None));
         }
     });
-    let left = shared.queue.into_inner().unwrap_or_else(PoisonError::into_inner).units;
-    let done = shared.done.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let left = lock(&shared.queue).units.len();
+    if left > 0 && standing_by > 0 && !cancel.load(Ordering::SeqCst) {
+        let line = format!("every GPU worker retired with {left} of {total} units left: the CPU takes them");
+        lock(&shared.done).log.push(line);
+        thread::scope(|s| {
+            for factory in cpu_workers(standing_by) {
+                s.spawn(move || serve(&mut *factory(), Side::Back, shared, total, cancel, progress, None));
+            }
+        });
+    }
+    let left = std::mem::take(&mut lock(&shared.queue).units);
+    let done = std::mem::replace(&mut *lock(&shared.done),
+                                 Done { results: Vec::new(), count: 0, log: Vec::new(), failures: Vec::new() });
     if !left.is_empty() {
         let reason = if cancel.load(Ordering::SeqCst) {
             "cancelled".to_owned()

@@ -548,6 +548,93 @@ fn a_worker_that_fails_gives_its_units_back() {
     assert_eq!(CALLS.load(Ordering::SeqCst), 20);
 }
 
+/// A worker of the tests that fails every time on the unit `bad` (a unit no device can do) and
+/// at its `fail_at`-th unit (a device lost), and gives a unit up as `0` when `gives_up`; it
+/// counts nothing the other tests count, so it runs beside them.
+struct Picky {
+    name: String,
+    bad: Option<u32>,
+    fail_at: Option<usize>,
+    served: usize,
+    gives_up: bool,
+}
+
+fn picky(name: &str, bad: Option<u32>, fail_at: Option<usize>, gives_up: bool) -> Box<dyn Worker<u32, u32>> {
+    Box::new(Picky { name: name.to_owned(), bad, fail_at, served: 0, gives_up })
+}
+
+impl Worker<u32, u32> for Picky {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn run(&mut self, unit: &u32) -> Result<u32, String> {
+        self.served += 1;
+        if self.bad == Some(*unit) {
+            return Err(format!("unit {unit} cannot be done"));
+        }
+        if self.fail_at == Some(self.served) {
+            return Err("lost on purpose".to_owned());
+        }
+        Ok(unit * 10)
+    }
+
+    fn give_up(&mut self, _unit: &u32, _why: &str) -> Option<u32> {
+        self.gives_up.then_some(0)
+    }
+}
+
+#[test]
+fn a_unit_that_fails_on_two_workers_is_given_up_not_every_worker() {
+    let units: Vec<u32> = (1..=20).collect();
+    let never = AtomicBool::new(false);
+    let quiet = |_: usize, _: usize| {};
+    let cpus = |gives_up: bool| -> Option<sched::Factory<'static, u32, u32>> {
+        let made = AtomicUsize::new(0);
+        Some(Box::new(move || picky(&format!("CPU {}", made.fetch_add(1, Ordering::SeqCst)), Some(7), None, gives_up)))
+    };
+    // unit 7 fails everywhere: the first worker is retired, the second gives the unit up, the
+    // others go on, and every other unit is done
+    let run = sched::run(units.clone(), vec![], cpus(true), 3, &never, &quiet).unwrap();
+    let want: Vec<(u32, u32)> = units.iter().map(|&u| (u, if u == 7 { 0 } else { u * 10 })).collect();
+    assert_eq!(run.results, want);
+    assert_eq!(run.log.len(), 2, "{:?}", run.log);
+    assert!(run.log[0].contains("retired"), "{:?}", run.log);
+    assert!(run.log[1].contains("unit 7 of 20") && run.log[1].contains("given up"), "{:?}", run.log);
+    // a worker that cannot give a unit up: every worker retires on it, as before
+    let (reason, log) = sched::run(units.clone(), vec![], cpus(false), 3, &never, &quiet).err().unwrap();
+    assert!(reason.contains("no worker left"), "{reason}");
+    assert_eq!(log.len(), 3, "{log:?}");
+}
+
+#[test]
+fn the_cpu_standing_by_takes_the_units_of_the_last_gpu_lost() {
+    let units: Vec<u32> = (1..=20).collect();
+    let want: Vec<(u32, u32)> = units.iter().map(|&u| (u, u * 10)).collect();
+    let never = AtomicBool::new(false);
+    let calls = Mutex::new(Vec::new());
+    let progress = |done: usize, total: usize| calls.lock().unwrap().push((done, total));
+    let cpu = || -> Option<sched::Factory<'static, u32, u32>> { Some(Box::new(|| picky("CPU", None, None, false))) };
+    let gpu = |fail_at| vec![picky("GPU 0 (fake)", None, fail_at, false)];
+    // no CPU thread beside the GPU, two standing by: the GPU lost at its third unit, the CPU
+    // does the eighteen left
+    let run = sched::run_with_standby(units.clone(), gpu(Some(3)), cpu(), 0, 2, &never, &progress).unwrap();
+    assert_eq!(run.results, want);
+    assert_eq!(run.log.len(), 2, "{:?}", run.log);
+    assert!(run.log[0].contains("GPU 0 (fake)") && run.log[0].contains("retired"), "{:?}", run.log);
+    assert!(run.log[1].contains("the CPU") && run.log[1].contains("18"), "{:?}", run.log);
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(calls.last(), Some(&(20, 20)), "{calls:?}");
+    assert!(calls.windows(2).all(|w| w[0].0 <= w[1].0), "{calls:?}");
+    // a GPU that does every unit: the CPU standing by is never started
+    let run = sched::run_with_standby(units.clone(), gpu(None), cpu(), 0, 2, &never, &|_, _| {}).unwrap();
+    assert_eq!(run.results, want);
+    assert!(run.log.is_empty(), "{:?}", run.log);
+    // nothing standing by: no worker left, as before
+    let r = sched::run_with_standby(units.clone(), gpu(Some(3)), cpu(), 0, 0, &never, &|_, _| {});
+    assert!(r.as_ref().is_err_and(|(reason, _)| reason.contains("no worker left")), "{:?}", r.err());
+}
+
 #[test]
 fn extract_all_on_a_gpu_shares_the_photos_with_the_cpu() {
     // taken before the adapters are listed: the drivers read the environment, which the hook
@@ -689,4 +776,16 @@ fn a_store_that_cannot_be_written_ends_the_step_and_a_tiny_photo_is_skipped() {
         }
     }
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_full_disk_is_told_by_the_text_of_its_error() {
+    use ppg_engine::store::storage_full;
+    let full = std::io::Error::from_raw_os_error(if cfg!(windows) { 112 } else { 28 });
+    // as the store words it, through the step's words
+    let text = format!("photo 01.jpg: not written to the store: /some/where/00000002.ppgf: {full}");
+    assert!(storage_full(&text), "{text}");
+    assert!(!storage_full("photo 01.jpg: not written to the store: /x: Permission denied (os error 13)"));
+    assert!(!storage_full("os error 280 is not one"));
+    assert!(!storage_full("(os error 2)"));
 }

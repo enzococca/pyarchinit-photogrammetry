@@ -563,6 +563,13 @@ impl Worker<usize, Outcome> for FeatureWorker<'_> {
             }
         }
     }
+
+    /// A photo whose kernels failed on two devices: skipped as unreadable with the reason, its
+    /// pixels dropped.
+    fn give_up(&mut self, unit: &usize, why: &str) -> Option<Outcome> {
+        self.ctx.pantry.done(*unit);
+        Some(Outcome::Skipped(Problem::Unreadable(format!("the kernels failed on two devices: {why}"))))
+    }
 }
 
 /// The GPU workers of the adapters `devices`; an adapter that opens no SIFT is logged and left
@@ -598,18 +605,16 @@ fn failed(reason: String, lines: Vec<String>) -> String {
 }
 
 /// The units run through the queue with the GPU workers `gpus` and the CPU's: the outcomes in
-/// the order of the units, with the log (`log` first, then the scheduler's lines).
+/// the order of the units, with the log (`log` first, then the scheduler's lines). Without a CPU
+/// worker beside the GPUs (`cpu_threads` 0) one stands by, for the photos left when every GPU is
+/// lost.
 fn run_units<'a>(ctx: &'a Context<'a>, units: Vec<usize>, gpus: Vec<Box<dyn Worker<usize, Outcome> + 'a>>,
                  mut log: Vec<String>, cancel: &AtomicBool, progress: &(dyn Fn(usize, usize) + Sync))
     -> Result<(Vec<Outcome>, Vec<String>), String> {
     let cpu_threads = if gpus.is_empty() { ctx.o.cpu_threads.max(1) } else { ctx.o.cpu_threads };
-    let cpu: Option<sched::Factory<'a, usize, Outcome>> = if cpu_threads > 0 {
-        let make = move || Box::new(FeatureWorker { engine: Engine::Cpu, ctx }) as Box<dyn Worker<usize, Outcome> + 'a>;
-        Some(Box::new(make))
-    } else {
-        None
-    };
-    match sched::run(units, gpus, cpu, cpu_threads, cancel, progress) {
+    let make = move || Box::new(FeatureWorker { engine: Engine::Cpu, ctx }) as Box<dyn Worker<usize, Outcome> + 'a>;
+    let cpu: Option<sched::Factory<'a, usize, Outcome>> = Some(Box::new(make));
+    match sched::run_with_standby(units, gpus, cpu, cpu_threads, 1, cancel, progress) {
         Ok(run) => {
             log.extend(run.log);
             Ok((run.results.into_iter().map(|(_, outcome)| outcome).collect(), log))

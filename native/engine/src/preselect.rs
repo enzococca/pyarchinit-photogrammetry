@@ -290,7 +290,7 @@ fn failed(reason: String, lines: Vec<String>) -> String {
 /// Every pair of `photos` (their descriptors, n x 128 bytes each) matched with COLMAP's tests on
 /// the GPUs `devices` (adapter indices; one that opens no matcher, or whose backend refuses the
 /// kernels of a block, is logged and left to the others) or, when none is given or none opens,
-/// on the CPU. `progress(done, total)` counts the units of the queue (the blocks of `blocks`).
+/// on the CPU, which also takes the blocks left when every GPU is lost. `progress(done, total)` counts the units of the queue (the blocks of `blocks`).
 /// An error, with the log of the run, on a cancel (`"cancelled"` when nothing else happened) or
 /// when the queue is left with units and no worker.
 pub fn match_blocks(photos: &[&[u8]], o: &MatchOptions, devices: &[usize], cancel: &AtomicBool,
@@ -321,14 +321,13 @@ pub fn match_blocks(photos: &[&[u8]], o: &MatchOptions, devices: &[usize], cance
         opened.push((index, matcher.info.name.clone(), matcher.workgroup_bytes()));
         gpus.push(Box::new(GpuWorker { matcher, index, ctx: &ctx, pairs_per_dispatch: PROBE_PAIRS }));
     }
+    // the CPU alone without a GPU; with GPUs, standing by for the blocks left when every one is lost
     let cpu_threads = usize::from(gpus.is_empty());
-    let cpu: Option<sched::Factory<'_, Block, Vec<PairMatches>>> = if cpu_threads > 0 {
+    let cpu: Option<sched::Factory<'_, Block, Vec<PairMatches>>> = {
         let ctx = &ctx;
         Some(Box::new(move || Box::new(CpuWorker { ctx }) as Box<dyn Worker<Block, Vec<PairMatches>> + '_>))
-    } else {
-        None
     };
-    let run = match sched::run(blocks(photos.len()), gpus, cpu, cpu_threads, cancel, progress) {
+    let run = match sched::run_with_standby(blocks(photos.len()), gpus, cpu, cpu_threads, 1, cancel, progress) {
         Ok(run) => run,
         Err((reason, lines)) => {
             log.extend(lines);

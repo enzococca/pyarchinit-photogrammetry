@@ -523,6 +523,9 @@ struct Context<'a> {
     out: &'a MatchStore,
     o: &'a Options,
     cell: f64,
+    /// Set when a result could not be put into the match store: a pair failing then is the
+    /// store's fault (a full disk), never given up as dropped.
+    store_failed: AtomicBool,
 }
 
 /// A worker doing whole pairs: the first stage on its device (or the CPU twin without one), the
@@ -582,8 +585,18 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
             };
             match_prepared(va, pa, vb, pb, name_a, name_b, cam_a, cam_b, calibrated, *preselected, ctx.o, &mut bests)?
         };
-        ctx.out.put(name_a, name_b, &result).map_err(|e| format!("the match store: {e}"))?;
+        if let Err(e) = ctx.out.put(name_a, name_b, &result) {
+            ctx.store_failed.store(true, Ordering::SeqCst);
+            return Err(format!("the match store: {e}"));
+        }
         Ok((result.route, self.slot))
+    }
+
+    /// A pair that failed on two workers (a photo whose features cannot be mapped any more, or a
+    /// defect on that pair): dropped, unless the match store failed - the step's error, not the
+    /// pair's.
+    fn give_up(&mut self, _unit: &usize, _why: &str) -> Option<(Route, usize)> {
+        (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot))
     }
 }
 
@@ -598,7 +611,10 @@ fn failed(reason: String, lines: Vec<String>) -> String {
 
 /// Every pair of `pairs` (two photo names and whether the preselection chose the pair) matched
 /// and put into `out`, through the queue of `sched`: one worker per device of `devices` and
-/// `cpu_threads` CPU workers (none with no device is an error). `features` holds the photos,
+/// `cpu_threads` CPU workers (none with no device is an error); with no CPU worker beside the
+/// devices, one per core stands by for the pairs left when every device is lost. A pair that
+/// fails on two workers is dropped, with a line in the log; a device keeps its own count in
+/// `stage1_by_device`, two devices of one name told apart by their place (`#2`). `features` holds the photos,
 /// `cams` their cameras (one per name; a pair of a photo without one, or not in the store, is an
 /// error before any work), `calibrated` names the photos with a prior focal length (a pair is
 /// calibrated when both are in it). `progress(done, total)` counts the pairs. The store is
@@ -625,8 +641,13 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
     let mut sorted = pairs.to_vec();
     sorted.sort();
     let cell = cell_side(o.two_view.ransac.max_error);
-    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell };
-    let names: Vec<String> = devices.iter().map(|d| d.name()).collect();
+    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell, store_failed: AtomicBool::new(false) };
+    let mut names: Vec<String> = Vec::with_capacity(devices.len());
+    for device in &devices {
+        let name = device.name();
+        let twins = names.iter().filter(|n| **n == name || n.starts_with(&format!("{name} #"))).count();
+        names.push(if twins == 0 { name } else { format!("{name} #{}", twins + 1) });
+    }
     let cpu_slot = names.len();
     let gpus: Vec<Box<dyn Worker<usize, (Route, usize)> + '_>> = devices
         .into_iter()
@@ -636,15 +657,16 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
         })
         .collect();
-    let cpu: Option<sched::Factory<'_, usize, (Route, usize)>> = (cpu_threads > 0).then(|| {
+    let cpu: Option<sched::Factory<'_, usize, (Route, usize)>> = {
         let ctx = &ctx;
-        Box::new(move || {
+        Some(Box::new(move || {
             Box::new(PairWorker { ctx, device: None, slot: cpu_slot, cache: Vec::new() })
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
-        }) as sched::Factory<'_, usize, (Route, usize)>
-    });
+        }))
+    };
     let units: Vec<usize> = (0..ctx.pairs.len()).collect();
-    let run = sched::run(units, gpus, cpu, cpu_threads, cancel, progress);
+    let standby = thread::available_parallelism().map_or(1, |n| n.get());
+    let run = sched::run_with_standby(units, gpus, cpu, cpu_threads, standby, cancel, progress);
     let flushed = out.flush().map_err(|e| format!("the match store: {e}"));
     let run = match run {
         Ok(run) => run,
@@ -666,7 +688,7 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
         counts[*slot] += 1;
     }
     let mut stage1_by_device: Vec<(String, usize)> = names.into_iter().zip(counts.iter().copied()).collect();
-    if cpu_threads > 0 {
+    if cpu_threads > 0 || counts[cpu_slot] > 0 {
         stage1_by_device.push(("CPU".to_owned(), counts[cpu_slot]));
     }
     Ok(PairsReport { done: run.results.len(), by_route, stage1_by_device, log: run.log })
