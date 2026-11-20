@@ -226,13 +226,13 @@ impl Kernel {
         let (per_row, per_col) = (rows / 16, cols / 16); // dot products of a thread: per_row x per_col
         let half = rows / 2; // rows merged at a time: scratch holds 16 threads x half
         let scratch = tile.scratch();
-        let (a_words, b_words) = (rows * 32, cols * 32);
+        let a_words = rows * 32;
         let a_loads = a_words / 256; // words of the A tile each thread loads
         let b_threads = 256 / cols; // threads that load one column of the B tile ...
         let b_loads = 32 / b_threads; // ... and the words each of them loads
         debug_assert!(rows % 16 == 0 && cols % 16 == 0 && a_words % 256 == 0 && 256 % cols == 0);
         debug_assert!(32 % b_threads == 0 && half == 8 * per_row && rows <= 256);
-        debug_assert!(scratch >= 16 * cols && scratch >= 16 * half && b_words == cols * 32);
+        debug_assert!(scratch >= 16 * cols && scratch >= 16 * half);
         Kernel { tile, per_row, per_col, half, b_threads, b_loads, a_loads }
     }
 
@@ -561,6 +561,73 @@ pub(crate) fn rank(t: wgpu::DeviceType) -> u8 {
     }
 }
 
+/// The environment variable of a test hook: set, the kernels of a block are refused as a backend
+/// compiler would refuse them, so that a test sees the preselection leave the device to the others
+/// on a computer whose GPU takes them.
+pub const BLOCK_REFUSED_VAR: &str = "PPG_TEST_BLOCK_KERNEL_REFUSED";
+
+/// A storage buffer of the bind group layout of the kernels.
+fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false,
+                                        min_binding_size: None },
+    }
+}
+
+/// The uniform buffer of the parameters of the kernels.
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false,
+                                        min_binding_size: None },
+    }
+}
+
+fn uniform_buffer(device: &wgpu::Device, size: u64, label: &str) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label), size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false })
+}
+
+/// The kernels of a block (`Kernel::block`): the two pipelines, their bind group layout (the
+/// bindings of the pair kernels and the table of segments) and their parameters.
+struct BlockKernels {
+    gemm: wgpu::ComputePipeline,
+    merge: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+}
+
+impl BlockKernels {
+    /// The kernels built on `device` for `tile`, under error scopes: what the shader compiler of
+    /// the backend or the pipeline refuses comes back as the error, instead of the panic of an
+    /// uncaptured error of wgpu.
+    fn build(device: &wgpu::Device, tile: Tile) -> Result<BlockKernels, String> {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("match_block"), source: wgpu::ShaderSource::Wgsl(block_shader(tile).into()) });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
+            storage_entry(0, true), storage_entry(1, true), storage_entry(2, false), storage_entry(3, false),
+            uniform_entry(4), storage_entry(5, true),
+        ] });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+        let make = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry), layout: Some(&pipeline_layout), module: &module, entry_point: Some(entry),
+            compilation_options: Default::default(), cache: None });
+        let gemm = make("gemm_block");
+        let merge = make("merge_block");
+        let internal = pollster::block_on(device.pop_error_scope());
+        let validation = pollster::block_on(device.pop_error_scope());
+        if let Some(problem) = validation.or(internal) {
+            return Err(format!("the block kernels are refused: {problem}"));
+        }
+        Ok(BlockKernels { gemm, merge, layout, params: uniform_buffer(device, 32, "block_params") })
+    }
+}
+
 /// A matcher on one GPU: the kernels compiled once for the tiles the adapter's workgroup memory
 /// takes, the descriptors of the recent photos kept on the device, the working buffers grown as
 /// needed.
@@ -573,10 +640,9 @@ pub struct Matcher {
     merge: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
-    block_gemm: wgpu::ComputePipeline,
-    block_merge: wgpu::ComputePipeline,
-    block_layout: wgpu::BindGroupLayout,
-    block_params: wgpu::Buffer,
+    /// The kernels of a block, built at the first `bests_block` (or `prepare_block`): `None` until
+    /// then, the error kept when the backend refused them.
+    block: Option<Result<BlockKernels, String>>,
     out: Option<(wgpu::Buffer, wgpu::Buffer, u64)>,
     partials: Option<(wgpu::Buffer, u64)>,
     cache: HashMap<u64, (wgpu::Buffer, usize)>,
@@ -644,14 +710,9 @@ impl Matcher {
             .map_err(|e| format!("{}: {e}", info.name))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("match"), source: wgpu::ShaderSource::Wgsl(shader(tile).into()) });
-        let buffer = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
-            binding, visibility: wgpu::ShaderStages::COMPUTE, count: None,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
-        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
-            buffer(0, true), buffer(1, true), buffer(2, false), buffer(3, false),
-            wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, count: None,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None } },
+            storage_entry(0, true), storage_entry(1, true), storage_entry(2, false), storage_entry(3, false),
+            uniform_entry(4),
         ] });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&layout], push_constant_ranges: &[] });
         let make = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -659,30 +720,32 @@ impl Matcher {
             compilation_options: Default::default(), cache: None });
         let gemm = make("gemm");
         let merge = make("merge");
-        let uniform = |size: u64, label: &str| device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label), size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false });
-        let params = uniform(16, "params");
-        // the kernels of a block: the same bindings and one more, the table of segments
-        let block_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("match_block"), source: wgpu::ShaderSource::Wgsl(block_shader(tile).into()) });
-        let block_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[
-            buffer(0, true), buffer(1, true), buffer(2, false), buffer(3, false),
-            wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, count: None,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None } },
-            buffer(5, true),
-        ] });
-        let block_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &[&block_layout], push_constant_ranges: &[] });
-        let make_block = |entry: &str| device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry), layout: Some(&block_pipeline_layout), module: &block_module, entry_point: Some(entry),
-            compilation_options: Default::default(), cache: None });
-        let block_gemm = make_block("gemm_block");
-        let block_merge = make_block("merge_block");
-        let block_params = uniform(32, "block_params");
-        Ok(Matcher { info, tile, device, queue, gemm, merge, layout, params, block_gemm, block_merge, block_layout,
-                     block_params, out: None, partials: None, cache: HashMap::new(), order: VecDeque::new(),
-                     cached_bytes: 0, limit: cache_limit() })
+        let params = uniform_buffer(&device, 16, "params");
+        Ok(Matcher { info, tile, device, queue, gemm, merge, layout, params, block: None, out: None, partials: None,
+                     cache: HashMap::new(), order: VecDeque::new(), cached_bytes: 0, limit: cache_limit() })
+    }
+
+    /// The kernels of a block built now, if they are not yet: an error when the backend refuses
+    /// them (the pair kernels are untouched by it, and `bests_block` gives the same error). The
+    /// preselection asks before it makes a device a worker, so that a device without them is
+    /// left to the others.
+    pub fn prepare_block(&mut self) -> Result<(), String> {
+        self.block_kernels().map(|_| ())
+    }
+
+    /// The kernels of a block, built at the first call under error scopes (a shader a backend
+    /// compiler refuses, a pipeline it cannot build) and kept, the error too. The test hook
+    /// `BLOCK_REFUSED_VAR` refuses them as a backend would.
+    fn block_kernels(&mut self) -> Result<&BlockKernels, String> {
+        if self.block.is_none() {
+            let built = if std::env::var_os(BLOCK_REFUSED_VAR).is_some() {
+                Err(format!("the block kernels are refused for the test ({BLOCK_REFUSED_VAR} is set)"))
+            } else {
+                BlockKernels::build(&self.device, self.tile)
+            };
+            self.block = Some(built.map_err(|e| format!("{}: {e}", self.info.name)));
+        }
+        self.block.as_ref().expect("set above").as_ref().map_err(Clone::clone)
     }
 
     fn upload(&self, data: &[u8]) -> wgpu::Buffer {
@@ -827,12 +890,14 @@ impl Matcher {
     /// `b[j]` (n x 128 bytes each) the entry `i * b.len() + j` of the answer is what
     /// [`bests`](Self::bests) gives for that pair, bit for bit (nothing for a pair with an empty
     /// photo). The descriptors are not kept on the device. An error when a set is not whole
-    /// descriptors or when the working buffers of the block are above
-    /// [`block_limit`](Self::block_limit), naming the bytes.
+    /// descriptors, when the working buffers of the block are above
+    /// [`block_limit`](Self::block_limit), naming the bytes, or when the backend refuses the
+    /// kernels of a block (built at the first call: [`prepare_block`](Self::prepare_block)).
     pub fn bests_block(&mut self, a: &[&[u8]], b: &[&[u8]]) -> Result<Vec<Vec<[u32; 3]>>, String> {
         if a.iter().chain(b).any(|d| d.len() % DIM != 0) {
             return Err("descriptors are 128 bytes each".into());
         }
+        self.block_kernels()?;
         let counts = |set: &[&[u8]]| -> Vec<usize> { set.iter().map(|d| d.len() / DIM).collect() };
         let (count_a, count_b) = (counts(a), counts(b));
         let layout = BlockLayout::new(self.tile, &count_a, &count_b);
@@ -859,28 +924,32 @@ impl Matcher {
         let b_buf = self.upload(&padded(b, &layout.b, layout.n_b));
         let seg_buf = self.upload(bytemuck::cast_slice(&layout.seg));
         let (out, staging, part) = self.working(out_size, part_size);
+        let kernels = match &self.block {
+            Some(Ok(kernels)) => kernels,
+            _ => unreachable!("the kernels of a block were built above"),
+        };
         let params = BlockParams { n_a: layout.n_a as u32, n_b: layout.n_b as u32, tiles_a: layout.tiles_a as u32,
                                    photos_b: layout.photos_b as u32, tiles_b: layout.tiles_b as u32,
                                    photos_a: layout.photos_a as u32, _pad: [0; 2] };
-        self.queue.write_buffer(&self.block_params, 0, bytemuck::bytes_of(&params));
+        self.queue.write_buffer(&kernels.params, 0, bytemuck::bytes_of(&params));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &self.block_layout,
+            label: None, layout: &kernels.layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: a_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: b_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: out.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: part.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.block_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: kernels.params.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: seg_buf.as_entire_binding() },
             ],
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.block_gemm);
+            pass.set_pipeline(&kernels.gemm);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(layout.tiles_a as u32, 1, 1);
-            pass.set_pipeline(&self.block_merge);
+            pass.set_pipeline(&kernels.merge);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(layout.n_b.div_ceil(256) as u32, layout.photos_a as u32, 1);
         }

@@ -15,7 +15,7 @@ use ppg_engine::camera::Camera;
 use ppg_engine::geometry::two_view;
 use ppg_engine::gpu::{self, Matcher, DIM};
 use ppg_engine::matching;
-use ppg_engine::preselect::{self, MatchOptions, PreselectOptions};
+use ppg_engine::preselect::{self, MatchOptions, PreselectOptions, GROUP_PHOTOS};
 use ppg_engine::store::{ExtractParams, FeatureStore, Impl, PhotoFeatures};
 
 /// The norm of a descriptor before it is rounded to bytes: COLMAP's.
@@ -154,6 +154,32 @@ fn same_block(got: &[Vec<[u32; 3]>], want: &[Vec<[u32; 3]>], a: &[Vec<u8>], b: &
     }
 }
 
+/// Whether an adapter that opens no matcher fails the test: the one `ppg-bench` takes when none
+/// is named (the first that is no software rasteriser) and, on a CI runner, every software
+/// adapter the job names in `SOFTWARE_ADAPTERS` (`rust.yml`); any other (a GL adapter of a
+/// runner that opens no device) is reported and left out. With no adapter at all the GPU tests
+/// have nothing to compare and say so.
+fn must_open(adapter: &gpu::AdapterInfo, adapters: &[gpu::AdapterInfo]) -> bool {
+    let chosen = adapters.iter().find(|a| a.device_type != "Cpu").map(|a| a.index);
+    let index = adapter.index.to_string();
+    let named = std::env::var("SOFTWARE_ADAPTERS").is_ok_and(|v| v.split_whitespace().any(|w| w == index));
+    chosen == Some(adapter.index) || named
+}
+
+/// The matcher of `adapter`, or `None` when it opens none and may be left out (`must_open`).
+fn matcher_of(adapter: &gpu::AdapterInfo, adapters: &[gpu::AdapterInfo]) -> Option<Matcher> {
+    match Matcher::new(Some(adapter.index)) {
+        Ok(matcher) => Some(matcher),
+        Err(problem) if must_open(adapter, adapters) => {
+            panic!("adapter {} ({}) opens no matcher: {problem}", adapter.index, adapter.name)
+        }
+        Err(problem) => {
+            eprintln!("adapter {} ({}) skipped: {problem}", adapter.index, adapter.name);
+            None
+        }
+    }
+}
+
 /// The blocks of the edge cases: an empty photo and a photo of one descriptor on either side,
 /// sizes around the tile widths of both kernels.
 fn edge_blocks() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -196,13 +222,11 @@ fn bests_block_on_the_gpu_is_bests_pair_by_pair_on_every_adapter_and_tile() {
     let (ea, eb) = edge_blocks();
     let want_edges = pair_by_pair(&ea, &eb);
     for adapter in &adapters {
-        let most = match Matcher::new(Some(adapter.index)) {
-            Ok(matcher) => matcher.workgroup_bytes(),
-            Err(problem) => {
-                eprintln!("adapter {} ({}) skipped: {problem}", adapter.index, adapter.name);
-                continue;
-            }
-        };
+        let Some(mut matcher) = matcher_of(adapter, &adapters) else { continue };
+        let most = matcher.workgroup_bytes();
+        // the kernels of a block are built on demand, and this backend takes them
+        matcher.prepare_block().unwrap_or_else(|p| panic!("adapter {} ({}): {p}", adapter.index, adapter.name));
+        drop(matcher);
         for bytes in [16384u32, 32768].into_iter().filter(|&bytes| bytes <= most) {
             let mut matcher = Matcher::with_workgroup_bytes(Some(adapter.index), bytes)
                 .unwrap_or_else(|p| panic!("adapter {} with {bytes} bytes: {p}", adapter.index));
@@ -256,28 +280,28 @@ fn photo_name(i: usize) -> String {
     format!("photo {i:02}.jpg")
 }
 
-/// The small store of the scene: `PHOTOS` photos in a row, 0.6 units apart along x with a small
-/// rotation each, looking at `PHOTOS + 2` groups of `GROUP` points 4 to 6 units away; photo `i`
+/// The small store of the scene: `photos` photos in a row, 0.6 units apart along x with a small
+/// rotation each, looking at `photos + 2` groups of `group` points 4 to 6 units away; photo `i`
 /// sees the groups `i`, `i + 1` and `i + 2` (their points projected with 0.3 px of noise, their
-/// descriptors noisy copies of the group's), plus `ALONE` points of its own anywhere in the photo
+/// descriptors noisy copies of the group's), plus `alone` points of its own anywhere in the photo
 /// with descriptors of their own. So photo `i` shares descriptors with photos `i + 1` (two
 /// groups) and `i + 2` (one group) and with no other photo.
-fn scene(dir: &Path) -> FeatureStore {
+fn scene(dir: &Path, photos: usize, group: usize, alone: usize) -> FeatureStore {
     let mut random = Lcg(31);
-    let groups: Vec<(Vec<Vector3<f64>>, Vec<u8>)> = (0..PHOTOS + 2)
+    let groups: Vec<(Vec<Vector3<f64>>, Vec<u8>)> = (0..photos + 2)
         .map(|k| {
             let centre = 0.6 * k as f64 + 0.6;
-            let points = (0..GROUP)
+            let points = (0..group)
                 .map(|_| {
                     Vector3::new(centre + random.uniform_in(-1.5, 1.5), random.uniform_in(-1.5, 1.5),
                                  random.uniform_in(4.0, 6.0))
                 })
                 .collect();
-            (points, descriptors(GROUP, &mut random))
+            (points, descriptors(group, &mut random))
         })
         .collect();
     let store = FeatureStore::create(dir).unwrap();
-    for i in 0..PHOTOS {
+    for i in 0..photos {
         let axis = Vector3::new(random.uniform_in(-1.0, 1.0), random.uniform_in(-1.0, 1.0),
                                 random.uniform_in(-1.0, 1.0)).normalize();
         let r = rotation(&axis, random.uniform_in(-0.05, 0.05));
@@ -295,10 +319,10 @@ fn scene(dir: &Path) -> FeatureStore {
                 desc.extend(noisy(&base[m * DIM..(m + 1) * DIM], &mut random));
             }
         }
-        for _ in 0..ALONE {
+        for _ in 0..alone {
             keypoints.push([random.uniform_in(0.0, WIDTH) as f32, random.uniform_in(0.0, HEIGHT) as f32, 2.0, 0.0]);
         }
-        desc.extend(descriptors(ALONE, &mut random));
+        desc.extend(descriptors(alone, &mut random));
         let features = PhotoFeatures { width: WIDTH as u32, height: HEIGHT as u32, implementation: Impl::Cpu,
                                        image_id: None, params: ExtractParams::default(), keypoints, descriptors: desc };
         store.put(&photo_name(i), &features).unwrap();
@@ -311,12 +335,12 @@ fn options() -> PreselectOptions {
     PreselectOptions { min_inliers: MIN_INLIERS, matching, two_view: two_view::Options::default() }
 }
 
-/// The pairs of the scene: `(i, i + 1)` and `(i, i + 2)`, by name, `a < b`.
-fn expected_pairs() -> Vec<(String, String)> {
+/// The pairs of a scene of `photos` photos: `(i, i + 1)` and `(i, i + 2)`, by name, sorted.
+fn expected_pairs(photos: usize) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
-    for i in 0..PHOTOS {
+    for i in 0..photos {
         for j in [i + 1, i + 2] {
-            if j < PHOTOS {
+            if j < photos {
                 pairs.push((photo_name(i), photo_name(j)));
             }
         }
@@ -325,10 +349,15 @@ fn expected_pairs() -> Vec<(String, String)> {
     pairs
 }
 
+/// The pairs of the weights of a report, by name.
+fn pairs_of(weights: &[(String, String, u32)]) -> Vec<(String, String)> {
+    weights.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect()
+}
+
 #[test]
 fn run_finds_the_pairs_that_share_descriptors_on_the_cpu_and_on_the_gpus_alike() {
     let dir = folder("run");
-    let store = scene(&dir);
+    let store = scene(&dir, PHOTOS, GROUP, ALONE);
     let names = store.names();
     let cams: HashMap<String, Camera> = names.iter().map(|n| (n.clone(), camera())).collect();
     let calibrated: HashSet<String> = names.iter().cloned().collect();
@@ -338,8 +367,7 @@ fn run_finds_the_pairs_that_share_descriptors_on_the_cpu_and_on_the_gpus_alike()
     let progress = |done: usize, total: usize| calls.lock().unwrap().push((done, total));
     let report = preselect::run(&store, &cams, &calibrated, &[], &o, &never, &progress).unwrap();
     assert_eq!(report.pairs_tried, PHOTOS * (PHOTOS - 1) / 2);
-    let pairs: Vec<(String, String)> = report.weights.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
-    assert_eq!(pairs, expected_pairs(), "the pairs with {MIN_INLIERS} inliers or more");
+    assert_eq!(pairs_of(&report.weights), expected_pairs(PHOTOS), "the pairs with {MIN_INLIERS} inliers or more");
     for (a, b, w) in &report.weights {
         assert!(a < b, "({a}, {b}) is not in byte order");
         assert!(*w as usize >= MIN_INLIERS, "({a}, {b}): {w} inliers");
@@ -358,12 +386,12 @@ fn run_finds_the_pairs_that_share_descriptors_on_the_cpu_and_on_the_gpus_alike()
 
     // without a prior focal length the same pairs come out (the fundamental matrix's inliers)
     let uncalibrated = preselect::run(&store, &cams, &HashSet::new(), &[], &o, &never, &|_, _| {}).unwrap();
-    let pairs: Vec<(String, String)> = uncalibrated.weights.iter().map(|(a, b, _)| (a.clone(), b.clone())).collect();
-    assert_eq!(pairs, expected_pairs());
+    assert_eq!(pairs_of(&uncalibrated.weights), expected_pairs(PHOTOS));
 
     // the GPUs give the same weights, exactly (exact kernels, the RANSAC seeded by the pair)
-    for adapter in gpu::adapters() {
-        if Matcher::new(Some(adapter.index)).is_err() {
+    let adapters = gpu::adapters();
+    for adapter in &adapters {
+        if matcher_of(adapter, &adapters).is_none() {
             continue;
         }
         let on_gpu = preselect::run(&store, &cams, &calibrated, &[adapter.index], &o, &never, &|_, _| {}).unwrap();
@@ -386,9 +414,117 @@ fn run_finds_the_pairs_that_share_descriptors_on_the_cpu_and_on_the_gpus_alike()
 }
 
 #[test]
+fn match_blocks_crosses_the_groups_and_gives_every_pair_once() {
+    // 70 photos of 64 descriptors: three groups, six units (three of them diagonal); every photo
+    // after the first holds, as its first 16 descriptors, noisy copies of descriptors 16..32 of the
+    // one before (its own), so neighbours share 16 and other pairs nothing
+    const N: usize = 2 * GROUP_PHOTOS + 6;
+    let mut random = Lcg(7);
+    let mut photos: Vec<Vec<u8>> = (0..N).map(|_| descriptors(64, &mut random)).collect();
+    for i in 1..N {
+        let copies = noisy(&photos[i - 1][16 * DIM..32 * DIM], &mut random);
+        photos[i][..16 * DIM].copy_from_slice(&copies);
+    }
+    let refs = refs(&photos);
+    let o = MatchOptions { max_ratio: 0.8, max_distance: 0.7, cross_check: true, workgroup_bytes: None };
+    let never = AtomicBool::new(false);
+    let calls = Mutex::new(Vec::new());
+    let progress = |done: usize, total: usize| calls.lock().unwrap().push((done, total));
+    let on_cpu = preselect::match_blocks(&refs, &o, &[], &never, &progress).unwrap();
+    let units = preselect::blocks(N);
+    assert_eq!(units.len(), 6);
+    assert_eq!(on_cpu.pairs.len(), N * (N - 1) / 2);
+    assert_eq!(on_cpu.by_device, (0, 6));
+    assert!(on_cpu.gpus.is_empty() && on_cpu.log.is_empty(), "{:?}", on_cpu.log);
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!((calls.first(), calls.last()), (Some(&(0, 6)), Some(&(6, 6))), "{calls:?}");
+    // unit by unit, in order within a unit: every pair once
+    let mut expected = Vec::new();
+    for unit in &units {
+        for i in unit.a.clone() {
+            expected.extend(unit.b.clone().filter(|&j| i < j).map(|j| (i, j)));
+        }
+    }
+    let got: Vec<(usize, usize)> = on_cpu.pairs.iter().map(|p| (p.a, p.b)).collect();
+    assert_eq!(got, expected);
+    assert_eq!(got.iter().collect::<HashSet<_>>().len(), got.len(), "a pair twice");
+    // the matches and the quality of every pair are those of the pair matched alone
+    let mut neighbours = 0;
+    for pair in &on_cpu.pairs {
+        let bests = matching::bests_cpu(refs[pair.a], refs[pair.b]);
+        let matches = gpu::select_matches(&bests, 64, 64, 0.8, 0.7, true);
+        assert_eq!(pair.matches, matches, "pair ({}, {})", pair.a, pair.b);
+        assert_eq!(pair.quality, gpu::match_quality(&bests, &matches), "pair ({}, {})", pair.a, pair.b);
+        let (a, b, found) = (pair.a, pair.b, pair.matches.len());
+        if b == a + 1 {
+            assert!(found >= 12, "pair ({a}, {b}): {found} of 16 copies matched");
+            neighbours += 1;
+        } else {
+            assert!(found <= 3, "pair ({a}, {b}): {found} matches of nothing shared");
+        }
+    }
+    assert_eq!(neighbours, N - 1);
+    // the GPUs: the same pairs, matches and qualities, with both tile sizes
+    let adapters = gpu::adapters();
+    for adapter in &adapters {
+        if matcher_of(adapter, &adapters).is_none() {
+            continue;
+        }
+        for workgroup_bytes in [None, Some(16384)] {
+            let o = MatchOptions { workgroup_bytes, ..o };
+            let on_gpu = preselect::match_blocks(&refs, &o, &[adapter.index], &never, &|_, _| {}).unwrap();
+            let what = format!("adapter {} ({}) with {workgroup_bytes:?}", adapter.index, adapter.name);
+            assert_eq!(on_gpu.pairs.len(), on_cpu.pairs.len(), "{what}");
+            for (k, (g, c)) in on_gpu.pairs.iter().zip(&on_cpu.pairs).enumerate() {
+                assert_eq!((g.a, g.b), (c.a, c.b), "{what}: pair {k} is ({}, {}) on the GPU", g.a, g.b);
+                assert_eq!(g.matches, c.matches, "{what}: the matches of ({}, {})", g.a, g.b);
+                assert_eq!(g.quality, c.quality, "{what}: the quality of ({}, {})", g.a, g.b);
+            }
+            assert_eq!(on_gpu.by_device, (6, 0), "{what}");
+            assert_eq!(on_gpu.gpus.len(), 1, "{what}");
+            assert_eq!(on_gpu.gpus[0].0, adapter.index);
+            assert_eq!(on_gpu.gpus[0].2, workgroup_bytes.unwrap_or(on_gpu.gpus[0].2), "{what}");
+            assert!(on_gpu.log.is_empty(), "{what}: {:?}", on_gpu.log);
+        }
+    }
+}
+
+#[test]
+fn run_crosses_the_group_boundary_with_the_weights_sorted_by_name() {
+    // two groups (three units) of a smaller scene: 60 points a group, 100 of a photo's own
+    const N: usize = GROUP_PHOTOS + 8;
+    let dir = folder("groups");
+    let store = scene(&dir, N, 60, 100);
+    let names = store.names();
+    let cams: HashMap<String, Camera> = names.iter().map(|n| (n.clone(), camera())).collect();
+    let calibrated: HashSet<String> = names.iter().cloned().collect();
+    let o = options();
+    let never = AtomicBool::new(false);
+    let report = preselect::run(&store, &cams, &calibrated, &[], &o, &never, &|_, _| {}).unwrap();
+    assert_eq!(report.pairs_tried, N * (N - 1) / 2);
+    assert_eq!(pairs_of(&report.weights), expected_pairs(N));
+    assert!(report.weights.windows(2).all(|w| (&w[0].0, &w[0].1) < (&w[1].0, &w[1].1)), "not sorted by name");
+    for (a, b, w) in &report.weights {
+        let (i, j) = (a[6..8].parse::<usize>().unwrap(), b[6..8].parse::<usize>().unwrap());
+        let shared = if j == i + 1 { 120 } else { 60 };
+        assert!(*w as usize >= shared * 8 / 10, "({a}, {b}): {w} inliers of {shared} shared points");
+    }
+    let adapters = gpu::adapters();
+    for adapter in &adapters {
+        if matcher_of(adapter, &adapters).is_none() {
+            continue;
+        }
+        let on_gpu = preselect::run(&store, &cams, &calibrated, &[adapter.index], &o, &never, &|_, _| {}).unwrap();
+        assert_eq!(on_gpu.weights, report.weights, "adapter {} ({})", adapter.index, adapter.name);
+    }
+    drop(store);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn a_cancel_set_before_the_run_is_an_error_and_a_missing_camera_too() {
     let dir = folder("cancel");
-    let store = scene(&dir);
+    let store = scene(&dir, PHOTOS, GROUP, ALONE);
     let names = store.names();
     let cams: HashMap<String, Camera> = names.iter().map(|n| (n.clone(), camera())).collect();
     let calibrated: HashSet<String> = names.iter().cloned().collect();

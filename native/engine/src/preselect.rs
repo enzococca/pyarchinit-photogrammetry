@@ -52,7 +52,8 @@ const DISPATCH_SECONDS: f64 = 0.5;
 
 /// The options of the matching: COLMAP's three tests as the program passes them, and the
 /// workgroup memory the kernels of every GPU are built for (`Matcher::with_workgroup_bytes`;
-/// `None` for the adapter's own - the tests and `ppg-bench` force the small tiles with it).
+/// `None` for the adapter's own, which is what the Python binding passes - the tests and
+/// `ppg-bench` force the small tiles with it).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MatchOptions {
     pub max_ratio: f32,
@@ -80,9 +81,10 @@ pub struct PairMatches {
     pub quality: Vec<f32>,
 }
 
-/// What the matching of every pair gave: the pairs in order (`a < b`, every pair of the photos),
-/// the GPUs that opened (adapter index, name, the workgroup memory of their kernels), how many
-/// units the GPUs and the CPU did, the wall seconds and the log.
+/// What the matching of every pair gave: every pair of the photos (`a < b`), unit by unit in the
+/// order of `blocks` and in order within a unit; the GPUs that did the matching (adapter index,
+/// name, the workgroup memory of their kernels); how many units the GPUs and the CPU did; the
+/// wall seconds and the log.
 #[derive(Clone, Debug, Default)]
 pub struct Matched {
     pub pairs: Vec<PairMatches>,
@@ -94,8 +96,9 @@ pub struct Matched {
 
 /// What the preselection gave: the pairs with at least `min_inliers` inlier matches, each as
 /// the two names in byte order (`a < b`, as `sfm._preselected_pairs` keys them) with the count,
-/// in the order of the names; how many pairs were tried (every pair of the photos); the wall
-/// seconds of the two phases; the log (GPUs not opened, workers retired).
+/// sorted by the two names (whatever the units of the queue were); how many pairs were tried
+/// (every pair of the photos); the wall seconds of the two phases; the log (GPUs not opened or
+/// without the block kernels, workers retired).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PreselectReport {
     pub weights: Vec<(String, String, u32)>,
@@ -138,11 +141,13 @@ pub fn blocks(n: usize) -> Vec<Block> {
     blocks
 }
 
-/// What the workers of the matching share: the descriptors of the photos and the options; the
-/// units done by kind of worker.
+/// What the workers of the matching share: the descriptors of the photos, the options, the
+/// cancel flag of the run (a GPU looks at it before every dispatch); the units done by kind of
+/// worker.
 struct Matching<'a> {
     photos: &'a [&'a [u8]],
     o: &'a MatchOptions,
+    cancel: &'a AtomicBool,
     by_gpu: AtomicUsize,
     by_cpu: AtomicUsize,
 }
@@ -210,7 +215,8 @@ impl Worker<Block, Vec<PairMatches>> for GpuWorker<'_> {
 
     /// The unit in sub-blocks: rows of A chosen from the pairs the last dispatch earned, the
     /// columns of B of each dispatch too; a sub-block below the diagonal of the block (no `i <
-    /// j` in it) is not dispatched.
+    /// j` in it) is not dispatched. A cancel seen before a dispatch ends the unit with
+    /// `"cancelled"`: the scheduler gives the unit back and ends the run as cancelled.
     fn run(&mut self, unit: &Block) -> Result<Vec<PairMatches>, String> {
         let photos = self.ctx.photos;
         let points = unit.a.clone().chain(unit.b.clone()).map(|i| photos[i].len() / DIM).max().unwrap_or(0);
@@ -225,6 +231,9 @@ impl Worker<Block, Vec<PairMatches>> for GpuWorker<'_> {
             a_from += rows;
             let mut b_from = unit.b.start;
             while b_from < unit.b.end {
+                if self.ctx.cancel.load(Ordering::SeqCst) {
+                    return Err("cancelled".to_owned());
+                }
                 let cols = (self.pairs_per_dispatch / rows).clamp(1, unit.b.end - b_from);
                 let (_, cols) = self.fit(rows, cols, points, true)?;
                 let sub = Block { a: a_chunk.clone(), b: b_from..b_from + cols };
@@ -242,6 +251,9 @@ impl Worker<Block, Vec<PairMatches>> for GpuWorker<'_> {
                 }
             }
         }
+        // sub-block by sub-block until here, and the sub-blocks follow the timing: in the order
+        // of the unit's pairs, as the CPU gives them, whatever the dispatches were
+        out.sort_by_key(|pair| (pair.a, pair.b));
         self.ctx.by_gpu.fetch_add(1, Ordering::Relaxed);
         Ok(out)
     }
@@ -276,15 +288,15 @@ fn failed(reason: String, lines: Vec<String>) -> String {
 }
 
 /// Every pair of `photos` (their descriptors, n x 128 bytes each) matched with COLMAP's tests on
-/// the GPUs `devices` (adapter indices; one that opens no matcher is logged and left to the
-/// others) or, when none is given or none opens, on the CPU. `progress(done, total)` counts the
-/// units of the queue (the blocks of `blocks`). An error, with the log of the run, on a cancel
-/// (`"cancelled"` when nothing else happened) or when the queue is left with units and no
-/// worker.
+/// the GPUs `devices` (adapter indices; one that opens no matcher, or whose backend refuses the
+/// kernels of a block, is logged and left to the others) or, when none is given or none opens,
+/// on the CPU. `progress(done, total)` counts the units of the queue (the blocks of `blocks`).
+/// An error, with the log of the run, on a cancel (`"cancelled"` when nothing else happened) or
+/// when the queue is left with units and no worker.
 pub fn match_blocks(photos: &[&[u8]], o: &MatchOptions, devices: &[usize], cancel: &AtomicBool,
                     progress: &(dyn Fn(usize, usize) + Sync)) -> Result<Matched, String> {
     let started = Instant::now();
-    let ctx = Matching { photos, o, by_gpu: AtomicUsize::new(0), by_cpu: AtomicUsize::new(0) };
+    let ctx = Matching { photos, o, cancel, by_gpu: AtomicUsize::new(0), by_cpu: AtomicUsize::new(0) };
     let mut log = Vec::new();
     let mut opened = Vec::new();
     let mut gpus: Vec<Box<dyn Worker<Block, Vec<PairMatches>> + '_>> = Vec::new();
@@ -293,13 +305,21 @@ pub fn match_blocks(photos: &[&[u8]], o: &MatchOptions, devices: &[usize], cance
             Some(bytes) => Matcher::with_workgroup_bytes(Some(index), bytes),
             None => Matcher::new(Some(index)),
         };
-        match matcher {
-            Ok(matcher) => {
-                opened.push((index, matcher.info.name.clone(), matcher.workgroup_bytes()));
-                gpus.push(Box::new(GpuWorker { matcher, index, ctx: &ctx, pairs_per_dispatch: PROBE_PAIRS }));
+        let mut matcher = match matcher {
+            Ok(matcher) => matcher,
+            Err(problem) => {
+                log.push(format!("GPU {index} not opened ({problem}): the other workers do its share"));
+                continue;
             }
-            Err(problem) => log.push(format!("GPU {index} not opened ({problem}): the other workers do its share")),
+        };
+        // the kernels of a block built now: a backend that refuses them leaves the device out
+        // of the preselection (its pair kernels are not affected)
+        if let Err(problem) = matcher.prepare_block() {
+            log.push(format!("GPU {index}: {problem}; the other workers do its share"));
+            continue;
         }
+        opened.push((index, matcher.info.name.clone(), matcher.workgroup_bytes()));
+        gpus.push(Box::new(GpuWorker { matcher, index, ctx: &ctx, pairs_per_dispatch: PROBE_PAIRS }));
     }
     let cpu_threads = usize::from(gpus.is_empty());
     let cpu: Option<sched::Factory<'_, Block, Vec<PairMatches>>> = if cpu_threads > 0 {
@@ -409,7 +429,7 @@ pub fn run(store: &FeatureStore, cams: &HashMap<String, Camera>, calibrated: &Ha
         }
     };
     log.extend(run.log);
-    let weights = run
+    let mut weights: Vec<(String, String, u32)> = run
         .results
         .into_iter()
         .filter(|(_, inliers)| *inliers as usize >= o.min_inliers)
@@ -418,6 +438,8 @@ pub fn run(store: &FeatureStore, cams: &HashMap<String, Camera>, calibrated: &Ha
             (names[pair.a].clone(), names[pair.b].clone(), inliers)
         })
         .collect();
+    // unit by unit until here: by name, whatever the groups were
+    weights.sort();
     if total > 0 {
         progress(total, total);
     }

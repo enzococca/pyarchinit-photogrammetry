@@ -72,7 +72,9 @@ pub fn matches_cpu(a: &[u8], b: &[u8], max_ratio: f32, max_distance: f32, cross_
 ///
 /// # Panics
 ///
-/// When the length of a photo is not a multiple of 128.
+/// When the length of a photo is not a multiple of 128, as [`bests_cpu`] panics where
+/// [`crate::gpu::Matcher::bests`] gives an error: the twins of the CPU take whole descriptors
+/// for granted, the GPU ones check before they bind a buffer.
 pub fn bests_block_cpu(a: &[&[u8]], b: &[&[u8]]) -> Vec<Vec<[u32; 3]>> {
     let pairs: Vec<(usize, usize)> = (0..a.len()).flat_map(|i| (0..b.len()).map(move |j| (i, j))).collect();
     pairs.par_iter().map(|&(i, j)| bests_cpu(a[i], b[j])).collect()
