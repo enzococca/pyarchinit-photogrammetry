@@ -40,6 +40,19 @@ none, Huber and Cauchy on the tie points; control points, scale bars, GNSS posit
 per flight and the rolling shutter as in the Python problem) and the same problem evaluated at its
 parameters (`bundle_evaluate`: residuals, gradient, Jacobian, cost). scipy stays the reference of
 the tests and what the program uses where the core is missing or a camera model is not among the six.
+API 13 (the matching step of the native engine, same version): the features step
+(`native_features`, `native_features_pixels`: the photos decoded and reduced as COLMAP reduces them,
+SIFT on the GPUs and the CPU together through one queue, into a feature store of one file per
+photo), the generic preselection of the pairs on the small store (`native_preselect`: every pair
+matched in blocks, verified, weighted by its inliers), the two-stage matching of the pairs into a
+match store (`native_match_pairs`: the largest scales first, then along the epipolar lines of their
+model, brute force where the first stage is unsure), the stores read and written from Python
+(`native_store_read`, `native_store_write`, `native_store_names`, `native_store_header`,
+`native_match_read`, `native_match_pairs_list`) and, for the tests, the photos as COLMAP reads them
+(`read_grey`, `rescale_as_colmap`). Every step releases the GIL and reports through
+`progress(done, total, message)`, whose exception cancels it. The kernels are exact on every device
+and the RANSAC is seeded by the pair, so the matches are the same whichever device did them; COLMAP
+stays the classic engine and the reference of the tests.
 
 Build and install in the environment of pyarchinit-photogrammetry (a Rust toolchain is needed):
 
