@@ -8,7 +8,8 @@ for the classic mapper (:func:`.sfm.align_cameras`) to run on it. The arguments 
 :func:`.sfm.match_photos`: ``database.db`` in the sfm folder of the chunk, ``chunk.meta["sfm"]`` with the same keys
 plus ``engine`` (``native``), ``features`` (``gpu``, ``cpu`` or ``gpu+cpu``: who detected the points) and ``routes``
 (the pairs by the route of the matching: ``guided``, ``brute_force``, ``dropped``);
-``chunk.meta["timings"]["match_photos"]`` with the stages ``features``, ``preselection``, ``pairs`` and ``export``.
+``chunk.meta["timings"]["match_photos"]`` with the stages ``features``, ``preselection``, ``pairs`` and ``export``. A
+full disk, whichever layer says it (:func:`disk_full`), stops the step as an ``OSError`` of ENOSPC.
 ``guided_matching`` is ignored: the native matching always matches along the epipolar lines.
 
 Layout, under ``<sfm>/native/``: ``features/`` (the feature store: every photo, in the pixels of the full photo with
@@ -19,12 +20,15 @@ anything ``.tmp`` left by a crash is removed at the start of the next step. ``re
 an earlier native matching - trusted when the record of the chunk says ``native`` with the same quality, point limit,
 masks and photo folder, and the alignment can take more photos (:func:`.sfm._continuable`) - take the photos missing
 from them and the pairs with one of them, in place; without them, a classic database that can be continued is
-imported into fresh stores first (:func:`import_database`); else everything is done again. A continuation too works
-in ``native.tmp`` - the stores copied there by hard links, nothing in place written - and a photo counts as done only
-when it is in the feature store and in the database, so a cancel or a failure at any point leaves the project as it
-was and the next run takes up what is missing. At the end the stores go into place first and the database last, each
-by one rename; a crash between them is swept at the next start. The export keeps the ids of the photos, cameras, rigs
-and frames of the database it continues: the model continues from them.
+imported into fresh stores first (:func:`import_database`); else everything is done again (also when the database
+is the export of a native matching, without descriptors: its matches index key points the stores no longer hold). A
+continuation too works in ``native.tmp`` - the stores copied there by hard links, nothing in place written - and a
+photo counts as done only when it is in the feature store and in the database, so a cancel or a failure at any point
+leaves the project as it was and the next run takes up what is missing. At the end the stores go into place first
+and the database last, each by one rename, the stores carrying the identity of the database they go with until both
+are in place (``commit.json``); a crash between them is swept at the next start so that the stores go with the
+database. The export keeps the ids of the photos, cameras, rigs and frames of the database it continues: the model
+continues from them.
 
 The thresholds of the two-stage matching live here (:data:`STAGE1_POINTS`, :data:`TRUST_INLIERS`,
 :data:`DROP_INLIERS`) and go to the core with the options; ``PPG_NATIVE_DCT=0`` decodes every JPEG whole (no DCT
@@ -34,10 +38,14 @@ paths, blanks allowed): the stores key them by name and never make a file name o
 """
 from __future__ import annotations
 
-import contextlib
+import errno
+import itertools
+import json
 import logging
 import os
+import re
 import shutil
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,11 +70,35 @@ STORES = "native"  # <sfm>/native/{features,small,matches}
 TMP = "native.tmp"  # where a fresh matching works, moved into place when it has finished
 OLD = "native.old.tmp"  # the stores being replaced, for the moment of the move
 TMP_DB = "database.native.tmp.db"  # the database being written, moved into place when it has finished
+COMMIT = "commit.json"  # in the stores while they are moved into place: the database they go with
 FEATURES, SMALL, MATCHES = "features", "small", "matches"
 INDEX = "index.json"
 READERS = 4  # the threads that decode and reduce the photos while the kernels work (as the classic GPU path)
 
 RIGS_REASON = "rigs of 360-degree photos: the native engine does not do them"
+
+# what a full disk says through each layer: the system (``(os error N)`` of the core's errors: ENOSPC, and Windows'
+# ERROR_HANDLE_DISK_FULL and ERROR_DISK_FULL), sqlite (SQLITE_FULL, also through pycolmap's RuntimeError)
+DISK_FULL_TEXTS = ("(os error 28)", "(os error 39)", "(os error 112)", "database or disk is full")
+EXPORT_EVERY = 500  # the pairs between two reports of the export and of the import (and their cancel points)
+
+
+def disk_full(exc: BaseException) -> bool:
+    """Whether ``exc`` says that the disk is full: an ``OSError`` of ENOSPC, or the error of the core, of pycolmap
+    or of sqlite whose text says so (:data:`DISK_FULL_TEXTS`). No engine can go on on a full disk: it is never a
+    reason to fall back."""
+    if isinstance(exc, OSError):
+        return exc.errno == errno.ENOSPC
+    if isinstance(exc, (RuntimeError, sqlite3.Error)):
+        return any(text in str(exc) for text in DISK_FULL_TEXTS)
+    return False
+
+
+def as_disk_full(exc: BaseException) -> OSError:
+    """``exc`` (a full disk, :func:`disk_full`) as the ``OSError`` of ENOSPC the callers stop on."""
+    if isinstance(exc, OSError):
+        return exc
+    return OSError(errno.ENOSPC, f"the disk is full: {exc}")
 
 
 def dct_enabled() -> bool:
@@ -139,8 +171,8 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
     ``features`` and ``routes`` beside, the seconds of the step and of its stages (``features``, ``preselection``,
     ``pairs``, ``export``) in ``chunk.meta["timings"]["match_photos"]``, also when the step fails or is cancelled
     (then with the name of the type of the error under ``failed``). ``guided_matching`` is ignored, with a line in the
-    log. What stops the step comes out as it is: :class:`Cancelled`, an ``OSError`` of a full disk, the errors of the
-    core; the project is left as it was."""
+    log. What stops the step comes out as it is: :class:`Cancelled`, the errors of the core; a full disk, whichever
+    layer says so (:func:`disk_full`), as an ``OSError`` of ENOSPC; the project is left as it was."""
     stages, started = timing.Stages(), time.perf_counter()
     failed = None
     try:
@@ -148,6 +180,12 @@ def match_photos(chunk: Chunk, quality: str = "high", keypoint_limit: int = 4000
                       pair_selection=pair_selection, progress=progress, exclude_stationary=exclude_stationary,
                       generic=generic, reference=reference, neighbours=neighbours, apply_masks=apply_masks,
                       guided_matching=guided_matching, reset=reset, gpu=gpu)
+    except Exception as exc:
+        if disk_full(exc) and not isinstance(exc, OSError):  # pycolmap's, sqlite's: an OSError as the system's
+            failed = "OSError"
+            raise as_disk_full(exc) from exc
+        failed = type(exc).__name__
+        raise
     except BaseException as exc:
         failed = type(exc).__name__
         raise
@@ -164,15 +202,67 @@ PROGRESS_EXPORT = "Writing the matches for the alignment"
 GUIDED_LINE = "the native matching always matches along the epipolar lines (guided)"
 
 
+def _identity(path: Path) -> list[int] | None:
+    """What tells a file from another one of the same name: its inode, size and time of change (a rename keeps
+    them); None when it is not there."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return [int(st.st_ino), int(st.st_size), int(st.st_mtime_ns)]
+
+
+def _write_commit(stores: Path, db_path: Path) -> None:
+    """The record of a commit in ``stores`` (:data:`COMMIT`): the identity of the database they go with, written
+    before the stores and the database are moved into place, removed when both are."""
+    (stores / COMMIT).write_text(json.dumps({"database": _identity(db_path)}))
+
+
+def _committed(stores: Path, db_path: Path) -> bool | None:
+    """Whether the database in place is the one the record of ``stores`` names (the commit replaced it), or None
+    without a record that can be read."""
+    try:
+        recorded = json.loads((stores / COMMIT).read_text())["database"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return recorded is not None and recorded == _identity(db_path)
+
+
 def _remove_leftovers(work: Path) -> None:
-    """What a step that died left in the sfm folder: the stores it was replacing put back when it died between
-    their move and the move of the new ones (``native`` missing, ``native.old.tmp`` there), else removed; its work
-    folder, its database being written, and the store of the preselection (made again by the step that needs it)
-    removed."""
-    stores, old = work / STORES, work / OLD
-    if old.is_dir() and not stores.exists():
-        os.replace(old, stores)
+    """What a step that died left in the sfm folder, swept so that the stores in place always go with the database
+    in place. The stores being replaced (``native.old.tmp``) are put back when the new ones never came into place,
+    or came but the database was not replaced (their commit record names another database: they are removed);
+    they are removed when it was replaced; with new stores and no record there is no telling, and both go (the
+    next step does every photo again). New stores of a first matching beside a database that is not theirs go
+    too. Then the work folder, the database being written, and the store of the preselection (made again by the
+    step that needs it) are removed."""
+    stores, old, db_path = work / STORES, work / OLD, work / "database.db"
+    if old.is_dir():
+        if not stores.exists():
+            os.replace(old, stores)
+        else:
+            replaced = _committed(stores, db_path)
+            if replaced is None:
+                log.warning("%s: the stores of the native matching beside the ones they replaced, without a record "
+                            "of the commit: both removed, every photo is matched again", work)
+                shutil.rmtree(stores, ignore_errors=True)
+            elif not replaced:
+                shutil.rmtree(stores, ignore_errors=True)
+                os.replace(old, stores)
+    elif (stores / COMMIT).exists() and not _committed(stores, db_path):
+        shutil.rmtree(stores, ignore_errors=True)  # a first matching that died before its database was in place
+    (stores / COMMIT).unlink(missing_ok=True)
     for folder in (work / TMP, old, stores / SMALL):
+        shutil.rmtree(folder, ignore_errors=True)
+    for pattern in (f"{TMP_DB}*", "database.db.tmp*"):
+        for path in work.glob(pattern):
+            path.unlink(missing_ok=True)
+
+
+def remove_work(work: Path) -> None:
+    """Everything of the native matching in the sfm folder ``work`` removed, nothing put back: the stores, the work
+    folder, the stores being replaced, the databases being written - for a step that matches every photo again."""
+    for folder in (work / STORES, work / TMP, work / OLD):
         shutil.rmtree(folder, ignore_errors=True)
     for pattern in (f"{TMP_DB}*", "database.db.tmp*"):
         for path in work.glob(pattern):
@@ -341,13 +431,28 @@ def _continuation(run: _Run, *, reset: bool, quality: str, keypoint_limit: int, 
     """How the step continues what the chunk has, for ``reset=False``: ``"stores"`` - the stores of an earlier native
     matching, trusted (:func:`_stores_trusted`) and holding no photo that left the chunk, copied to add to -,
     ``"import"`` - a classic database that can be continued (:func:`.sfm._continuable`), imported into fresh stores
-    first - or None: everything again."""
+    first - or None: everything again (also when the database has photos without descriptors: the export of a
+    native matching whose stores are not trusted)."""
     if reset or not sfm._continuable(run.chunk, run.db_path, run.root, run.names, "sift"):
         return None
     if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks)
             and set(run.k.store_names(str(run.stores / FEATURES))) <= set(run.everyone)):
         return "stores"
+    if _photos_without_descriptors(run.db_path):
+        # the export of a native matching (the mapper needs no descriptors): its matches index key points the new
+        # settings would not keep, and nothing could be matched with its photos
+        return None
     return "import"
+
+
+def _photos_without_descriptors(db_path: Path) -> int:
+    """How many images of COLMAP's database ``db_path`` have no descriptors."""
+    con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
+    try:
+        return int(con.execute("SELECT COUNT(*) FROM images WHERE image_id NOT IN "
+                               "(SELECT image_id FROM descriptors WHERE rows > 0)").fetchone()[0])
+    finally:
+        con.close()
 
 
 def _begin(run: _Run, how: str | None, progress: Progress) -> None:
@@ -359,7 +464,7 @@ def _begin(run: _Run, how: str | None, progress: Progress) -> None:
         _stage_stores(run.stores, run.wd)
     elif how == "import":
         progress(0.0, "Importing the matches of the alignment to continue")
-        imported = import_database(run.db_path, run.features_dir, run.matches_dir)
+        imported = import_database(run.db_path, run.features_dir, run.matches_dir, progress=progress)
         log.info("%d photos of the database imported into the stores of the native matching", imported)
     run.keep = how is not None
     in_store = run.names_in(run.features_dir)
@@ -374,7 +479,7 @@ def _detect_features(run: _Run, progress: Progress, keypoint_limit: int, generic
     preselection, the small store completed for the photos continued. Returns who detected the points: ``gpu``,
     ``cpu`` or ``gpu+cpu``."""
     k = run.k
-    sub = progress.sub(0.0, 0.45)
+    sub = progress.sub(0.0, 0.4 if generic else 0.45)  # with a preselection, the small images of the rest after it
     progress(0.0, f"{PROGRESS_FEATURES} in {len(run.to_extract)} photos" + (" (with masks)" if run.masks else ""))
     jobs = [run.job(name, run.limit_of(name), run.small_limit_of(name)) for name in run.to_extract]
     small_store = str(run.small_dir) if run.small_size else None
@@ -384,13 +489,15 @@ def _detect_features(run: _Run, progress: Progress, keypoint_limit: int, generic
         log.info("native features: %s", line)
     counts = {"gpu": report["gpu"], "cpu": report["cpu"]}
     for name in report["unsupported"]:  # files the core does not decode: OpenCV does, the kernels take pixels
-        given = _features_from_pixels(k, run.root, name, run.masks, run.features_dir,
-                                      run.small_dir if run.small_size else None, run.limit_of(name),
-                                      run.small_limit_of(name), int(keypoint_limit), run.devices)
-        if given is None:
-            log.warning("%s: unreadable, no key points", name)
-        else:
+        given, refused = _features_from_pixels(k, run.root, name, run.masks, run.features_dir,
+                                               run.small_dir if run.small_size else None, run.limit_of(name),
+                                               run.small_limit_of(name), int(keypoint_limit), run.devices)
+        if given is not None:
             counts[given] += 1
+        elif refused is not None:
+            log.warning("%s: too small for the kernels, no key points (%s)", name, refused)
+        else:
+            log.warning("%s: unreadable, no key points", name)
     for name in report["unreadable"]:
         log.warning("%s: unreadable, no key points", name)
     with_features = run.names_in(run.features_dir)
@@ -401,11 +508,11 @@ def _detect_features(run: _Run, progress: Progress, keypoint_limit: int, generic
         if small_jobs:
             more = k.features(str(run.small_dir), None, small_jobs, sfm.PRESELECTION_POINTS, sfm.PRESELECTION_POINTS,
                               run.devices, run.dct, run.cpu_share, READERS,
-                              _relay(sub, "Reducing photos for the pairs", "photos"))
+                              _relay(progress.sub(0.4, 0.05), "Reducing photos for the pairs", "photos"))
             for line in more["log"]:
                 log.info("native features: %s", line)
     features = _features_word(counts["gpu"], counts["cpu"])
-    sub(1.0, f"Points detected in {len(with_features)} photos"
+    progress(0.45, f"Points detected in {len(with_features)} photos"
         + (f" on the {features.upper()}" if counts["gpu"] else ""))
     return features
 
@@ -498,18 +605,21 @@ def _match_pairs(run: _Run, progress: Progress, pair_list: list, cams: dict, mod
 def _commit(run: _Run, progress: Progress, exclude_stationary: bool, old_info: dict) -> int | None:
     """The export stage: COLMAP's database written from the work folder (the ids of a continued database kept), the
     stationary matches removed when asked, then everything into place - the stores first, the database last, each
-    by one rename, undone when a later one fails: a crash between them leaves ``native.old.tmp`` beside the new
-    stores and the old database, which :func:`_remove_leftovers` sweeps and the rule of :func:`_begin` (done = in
-    the store and in the database) absorbs. Returns the stationary matches removed (the count of the step
-    continued when it did not run again)."""
+    by one rename, each undone on its own when a later one fails. The new stores carry the identity of the database
+    they go with (:data:`COMMIT`) until both are in place, so a crash or an undo that fails between the renames is
+    swept by :func:`_remove_leftovers` into a state where the stores go with the database: the old stores back
+    when the database was not replaced, removed when it was. Returns the stationary matches removed (the count of
+    the step continued when it did not run again)."""
     progress(0.9, PROGRESS_EXPORT)
     export_database(run.chunk, run.tmp_db, descriptors=False, stores=run.wd,
-                    previous=run.db_path if run.keep else None, stationary_rule=not exclude_stationary)
+                    previous=run.db_path if run.keep else None, stationary_rule=not exclude_stationary,
+                    progress=progress.sub(0.9, 0.1))
     if exclude_stationary:
         removed = sfm.remove_stationary_matches(run.tmp_db)
     else:  # a continuation keeps the count of the step it continues (the export applied its removal again)
         removed = old_info.get("stationary_removed") if run.keep else None
     old = run.work / OLD
+    _write_commit(run.wd, run.tmp_db)  # goes with the stores: the sweep tells by it whether the database followed
     moved_old = moved_new = False
     try:
         if run.stores.exists():
@@ -519,23 +629,44 @@ def _commit(run: _Run, progress: Progress, exclude_stationary: bool, old_info: d
         moved_new = True
         os.replace(run.tmp_db, run.db_path)
     except BaseException:
-        with contextlib.suppress(OSError):
-            if moved_new:
+        # each undone on its own: one that fails leaves a state the sweep of the caller puts right (the record)
+        if moved_new:
+            try:
                 os.replace(run.stores, run.wd)
-            if moved_old:
+            except OSError as exc:
+                log.warning("the new stores of the native matching could not be moved back (%s)", exc)
+        if moved_old:
+            try:
                 os.replace(old, run.stores)
+            except OSError as exc:
+                log.warning("the stores of the native matching could not be put back yet (%s)", exc)
         raise
     shutil.rmtree(old, ignore_errors=True)
+    (run.stores / COMMIT).unlink(missing_ok=True)
     shutil.rmtree(run.stores / SMALL, ignore_errors=True)
     return removed
+
+
+def _adapter_name(key: str) -> str:
+    """The name of a GPU as the classic record gives it (``gpu_device_name``: the adapter's name) from the name the
+    core gives the device in the counts of the pairs (``GPU <index> (<adapter's name>)``, ``#<n>`` after a twin)."""
+    match = re.fullmatch(r"GPU \d+ \((.*)\)( #\d+)?", key)
+    return match.group(1) + (match.group(2) or "") if match else key
 
 
 def _record(run: _Run, *, features: str, mode: str, pairs: int, by_device: dict, routes: dict, removed: int | None,
             old_info: dict, quality: str, keypoint_limit: int, tiepoint_limit: int, generic: bool,
             reference: str | None, neighbours: int, apply_masks: str, guided_matching: bool) -> None:
     """``chunk.meta["sfm"]``: the keys of the classic record, plus ``engine``, ``features``, ``routes`` and
-    ``preselection_size``."""
-    gpu_shares = {name: count for name, count in by_device.items() if name != "CPU"}
+    ``preselection_size``; the GPUs named as the classic record names them (:func:`_adapter_name`)."""
+    gpu_shares: dict[str, int] = {}
+    for key, count in by_device.items():
+        if key == "CPU":
+            continue
+        name = _adapter_name(key)
+        if name in gpu_shares:  # two adapters of one name: each keeps its count
+            name = f"{name} #{sum(1 for n in gpu_shares if n == name or n.startswith(name + ' #')) + 1}"
+        gpu_shares[name] = count
     run.chunk.meta["sfm"] = {"engine": "native", "image_root": str(run.root),
                              "names": {str(k): v for k, v in run.names.items()}, "features": features,
                              "matcher": "sift", "quality": quality, "pair_selection": mode, "pairs": pairs,
@@ -616,16 +747,18 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
 
 
 def _features_from_pixels(k, root: Path, name: str, masks: Path | None, features_dir: Path, small_dir: Path | None,
-                          limit: int, small_limit: int | None, keypoint_limit: int, devices: list[int]) -> str | None:
-    """The features of a photo the core does not decode (a format outside JPEG, PNG and TIFF), from the pixels OpenCV
-    reads - COLMAP's grey of the raster with the EXIF orientation ignored, as the classic GPU path reads them -:
-    ``gpu`` or ``cpu`` for who extracted them, None when OpenCV does not read the file either (or the photo is too
-    small for the kernels)."""
+                          limit: int, small_limit: int | None, keypoint_limit: int,
+                          devices: list[int]) -> tuple[str | None, str | None]:
+    """The features of a photo the core does not decode (a format outside JPEG, PNG and TIFF, or a photo too small
+    for the kernels), from the pixels OpenCV reads - COLMAP's grey of the raster with the EXIF orientation ignored,
+    as the classic GPU path reads them -: ``(who, None)`` with ``gpu`` or ``cpu`` for who extracted them, ``(None,
+    why)`` when the kernels refuse the photo for its size, ``(None, None)`` when OpenCV does not read the file
+    either."""
     import cv2
 
     img = cv2.imread(str(root / name), cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if img is None:
-        return None
+        return None, None
     if img.ndim == 3:
         img = cv2.transform(img, sfm._REC709_BGR)
     h, w = img.shape
@@ -636,16 +769,14 @@ def _features_from_pixels(k, root: Path, name: str, masks: Path | None, features
     for line in given["log"]:
         log.info("native features: %s", line)
     if given["done"] != 1:
-        return None
-    return "gpu" if given["gpu"] else "cpu"
+        return None, ("; ".join(given["log"]) or "refused by the kernels") if given["unsupported"] else None
+    return ("gpu" if given["gpu"] else "cpu"), None
 
 
 # ----------------------------------------------------------------------------------- COLMAP's database
 def _clear_features_and_matches(db_path: Path) -> None:
     """The key points, descriptors, matches and two-view geometries of a copied database gone: they are written
     again from the stores (COLMAP's documented sqlite layout, as :func:`.sfm.remove_stationary_matches` edits it)."""
-    import sqlite3
-
     con = sqlite3.connect(str(db_path))
     try:
         for table in ("keypoints", "descriptors", "matches", "two_view_geometries"):
@@ -735,7 +866,8 @@ def _two_view_geometry(r: dict):
 
 
 def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, stores: Path | None = None,
-                    previous: Path | None = None, stationary_rule: bool = True) -> None:
+                    previous: Path | None = None, stationary_rule: bool = True,
+                    progress: Progress | None = None) -> None:
     """COLMAP's database of the stores of the native matching (``stores``: ``<sfm>/native`` of the chunk when not
     given), written whole to ``db_path`` - a temporary file beside it, moved into place when complete -: the cameras
     by sensor as the classic step writes them (the model of :func:`.sfm.mapping_camera`, a prior focal length), a
@@ -747,9 +879,11 @@ def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, s
     and the photos of the store it lacks come after them, with the camera and the rig of their sensor; the stationary
     matches the step it continues left out are left out again (:func:`.sfm.remove_stationary_matches`, when the
     record of the chunk has a count and ``stationary_rule`` is not switched off by a caller that runs the removal
-    itself). A chunk without the feature store is a FileNotFoundError."""
+    itself). ``progress`` counts the pairs written (and stops the export by raising, :class:`Cancelled`); the
+    temporary file goes whatever stops it. A chunk without the feature store is a FileNotFoundError."""
     import pycolmap
 
+    progress = as_progress(progress)
     k = _kernels()
     db_path = Path(db_path)
     stores = Path(stores) if stores is not None else sfm._sfm_dir(chunk) / STORES
@@ -761,38 +895,47 @@ def export_database(chunk: Chunk, db_path: Path, descriptors: bool = False, *, s
     sensor_of = {names[c.key]: c.sensor_key for c in chunk.cameras if c.key in names}
     held = set(features.names()) & set(names.values())
     tmp = db_path.with_name(db_path.name + ".tmp")
-    for suffix in ("", "-wal", "-shm", "-journal"):
-        Path(str(tmp) + suffix).unlink(missing_ok=True)
+
+    def remove_tmp():
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(str(tmp) + suffix).unlink(missing_ok=True)
+
+    remove_tmp()
     if previous is None and db_path.exists():
         previous = db_path
     continued = previous is not None and Path(previous).exists()
-    if continued:
-        shutil.copyfile(previous, tmp)
-        _clear_features_and_matches(tmp)
-    db = pycolmap.Database.open(str(tmp))
     try:
-        with pycolmap.DatabaseTransaction(db):
-            ids = _image_ids(db, chunk, sensor_of, held, continued)
-            for name, image_id in ids.items():
-                kp, desc, _implementation = features.read(name, descriptors)
-                db.write_keypoints(image_id, np.ascontiguousarray(kp, np.float32))
-                if descriptors:
-                    db.write_descriptors(image_id, pycolmap.FeatureDescriptors(pycolmap.FeatureExtractorType.SIFT,
-                                                                               np.ascontiguousarray(desc, np.uint8)))
-            if matches is not None:
-                for a, b in matches.pairs():
-                    if a not in ids or b not in ids:
-                        continue
+        if continued:
+            shutil.copyfile(previous, tmp)
+            _clear_features_and_matches(tmp)
+        db = pycolmap.Database.open(str(tmp))
+        try:
+            with pycolmap.DatabaseTransaction(db):
+                ids = _image_ids(db, chunk, sensor_of, held, continued)
+                for name, image_id in ids.items():
+                    kp, desc, _implementation = features.read(name, descriptors)
+                    db.write_keypoints(image_id, np.ascontiguousarray(kp, np.float32))
+                    if descriptors:
+                        db.write_descriptors(image_id, pycolmap.FeatureDescriptors(
+                            pycolmap.FeatureExtractorType.SIFT, np.ascontiguousarray(desc, np.uint8)))
+                pairs = [(a, b) for a, b in matches.pairs() if a in ids and b in ids] if matches is not None else []
+                for i, (a, b) in enumerate(pairs):
+                    if i % EXPORT_EVERY == 0:
+                        progress(i / len(pairs), f"{PROGRESS_EXPORT}: {i:,} of {len(pairs):,} pairs")
                     r = matches.read(a, b)
                     if r is None:
                         continue
                     db.write_matches(ids[a], ids[b], np.ascontiguousarray(r["matches"], np.uint32))
                     db.write_two_view_geometry(ids[a], ids[b], _two_view_geometry(r))
-    finally:
-        db.close()
-    if continued and stationary_rule and (chunk.meta.get("sfm") or {}).get("stationary_removed") is not None:
-        sfm.remove_stationary_matches(tmp)
-    os.replace(tmp, db_path)
+                progress(1.0, f"{PROGRESS_EXPORT}: {len(pairs):,} of {len(pairs):,} pairs")
+        finally:
+            db.close()
+        if continued and stationary_rule and (chunk.meta.get("sfm") or {}).get("stationary_removed") is not None:
+            sfm.remove_stationary_matches(tmp)
+        os.replace(tmp, db_path)
+    except BaseException:
+        remove_tmp()
+        raise
 
 
 def _four_columns(kp: np.ndarray) -> np.ndarray:
@@ -815,26 +958,33 @@ def _blob(data, count: int) -> np.ndarray | None:
     return np.frombuffer(bytes(data), np.float64, count).copy()
 
 
-def import_database(db_path: Path, features_dir: Path, matches_dir: Path) -> int:
+def import_database(db_path: Path, features_dir: Path, matches_dir: Path, progress: Progress | None = None) -> int:
     """The features and the matches of COLMAP's database ``db_path`` (a classic matching) into the feature store
     ``features_dir`` and the match store ``matches_dir`` (made when missing): every photo with key points and
     descriptors, its key points as four columns (:func:`_four_columns`) and COLMAP's image id in its header, as
-    ``imported``; every pair of the two-view geometries (and of the matches) with its matches, inliers,
-    configuration, models and pose, as ``imported``. The names a classic matching that died left aliased are put
-    back first (:func:`.sfm._interrupted_names_back`); the database is read read-only. Returns the photos
-    imported."""
-    import sqlite3
-
+    ``imported``; every pair of the two-view geometries (and of the matches) of two photos imported, with its
+    matches, inliers, configuration, models and pose, as ``imported`` - a pair of a photo left out (no descriptors)
+    is left out too, since its matches index key points the stores do not hold. The pairs are read one at a time
+    (the database of a large block does not fit in memory); ``progress`` counts them (and stops the import by
+    raising, :class:`Cancelled`). The names a classic matching that died left aliased are put back first
+    (:func:`.sfm._interrupted_names_back`); the database is read read-only. Returns the photos imported."""
+    progress = as_progress(progress)
     k = _kernels()
     db_path = Path(db_path)
     sfm._interrupted_names_back(db_path)
     features = k.feature_store(str(features_dir))
     matches = k.match_store(str(matches_dir))
+    empty = np.zeros((0, 2), np.uint32)
+
+    def array(rows, cols, data) -> np.ndarray:
+        return np.frombuffer(bytes(data), np.uint32).reshape(int(rows), int(cols)) if rows and data else empty
+
     con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
     try:
         images = {int(i): (str(n), int(c)) for i, n, c in con.execute("SELECT image_id, name, camera_id FROM images")}
         sizes = {int(c): (int(w), int(h)) for c, w, h in con.execute("SELECT camera_id, width, height FROM cameras")}
-        imported = without_descriptors = 0
+        without_descriptors = 0
+        imported: dict[int, str] = {}
         for image_id, rows, cols, data in con.execute("SELECT image_id, rows, cols, data FROM keypoints"):
             if image_id not in images or not rows or not data:
                 continue
@@ -851,42 +1001,47 @@ def import_database(db_path: Path, features_dir: Path, matches_dir: Path) -> int
             name, camera_id = images[image_id]
             width, height = sizes.get(camera_id, (0, 0))
             features.write(name, kp, np.ascontiguousarray(desc), width, height, int(image_id))
-            imported += 1
-        raw = {}
-        for pair_id, rows, cols, data in con.execute("SELECT pair_id, rows, cols, data FROM matches"):
-            raw[int(pair_id)] = (np.frombuffer(bytes(data), np.uint32).reshape(int(rows), int(cols)) if rows and data
-                                 else np.zeros((0, 2), np.uint32))
-        geometries = {}
-        for pair_id, rows, cols, data, config, f, e, h, qvec, tvec in con.execute(
-                "SELECT pair_id, rows, cols, data, config, F, E, H, qvec, tvec FROM two_view_geometries"):
-            inliers = (np.frombuffer(bytes(data), np.uint32).reshape(int(rows), int(cols)) if rows and data
-                       else np.zeros((0, 2), np.uint32))
-            geometries[int(pair_id)] = (inliers, int(config), _blob(f, 9), _blob(e, 9), _blob(h, 9), _blob(qvec, 4),
-                                        _blob(tvec, 3))
+            imported[int(image_id)] = name
+        total = int(con.execute("SELECT (SELECT COUNT(*) FROM two_view_geometries) + (SELECT COUNT(*) FROM matches "
+                                "WHERE pair_id NOT IN (SELECT pair_id FROM two_view_geometries))").fetchone()[0])
+        # the pairs with a two-view geometry and their matches, then the pairs with matches alone
+        with_geometry = con.execute(
+            "SELECT g.pair_id, m.rows, m.cols, m.data, g.rows, g.cols, g.data, g.config, g.F, g.E, g.H, g.qvec, "
+            "g.tvec FROM two_view_geometries g LEFT JOIN matches m ON m.pair_id = g.pair_id ORDER BY g.pair_id")
+        rows = ((pair_id, array(mr, mc, md), array(gr, gc, gd), int(config), _blob(f, 9), _blob(e, 9), _blob(h, 9),
+                 _blob(qvec, 4), _blob(tvec, 3))
+                for pair_id, mr, mc, md, gr, gc, gd, config, f, e, h, qvec, tvec in with_geometry)
+        alone = con.cursor().execute("SELECT pair_id, rows, cols, data FROM matches WHERE pair_id NOT IN "
+                                     "(SELECT pair_id FROM two_view_geometries) ORDER BY pair_id")
+        rows_alone = ((pair_id, array(mr, mc, md), empty, 0, None, None, None, None, None)
+                      for pair_id, mr, mc, md in alone)
+        unknown_configs = skipped = 0
+        for i, (pair_id, raw, inliers, config, f, e, h, qvec, tvec) in enumerate(itertools.chain(rows, rows_alone)):
+            if i % EXPORT_EVERY == 0:
+                progress(0.0, f"Importing the matches of the alignment: {i:,} of {total:,} pairs")
+            id1, id2 = divmod(int(pair_id), sfm.COLMAP_MAX_IMAGES)
+            if id1 not in imported or id2 not in imported:
+                skipped += 1
+                continue
+            if config > 7:  # MULTIPLE, CALIBRATED_RIG: not configurations the verification gives; the inliers count
+                unknown_configs += 1
+                config = 0
+            pose = (qvec is not None and tvec is not None
+                    and not (np.allclose(qvec, [1, 0, 0, 0]) and np.allclose(tvec, 0)))
+            matches.write(imported[id1], imported[id2], np.ascontiguousarray(raw), np.ascontiguousarray(inliers),
+                          config, F=None if f is None or not f.any() else f.reshape(3, 3),
+                          E=None if e is None or not e.any() else e.reshape(3, 3),
+                          H=None if h is None or not h.any() else h.reshape(3, 3),
+                          qvec=qvec if pose else None, tvec=tvec if pose else None)
     finally:
         con.close()
-    empty = np.zeros((0, 2), np.uint32)
-    unknown_configs = 0
-    for pair_id in sorted(set(raw) | set(geometries)):
-        id1, id2 = divmod(pair_id, sfm.COLMAP_MAX_IMAGES)
-        if id1 not in images or id2 not in images:
-            continue
-        a, b = images[id1][0], images[id2][0]
-        inliers, config, f, e, h, qvec, tvec = geometries.get(pair_id, (empty, 0, None, None, None, None, None))
-        if config > 7:  # MULTIPLE, CALIBRATED_RIG: not configurations the verification gives; the inliers count
-            unknown_configs += 1
-            config = 0
-        pose = qvec is not None and tvec is not None and not (np.allclose(qvec, [1, 0, 0, 0]) and np.allclose(tvec, 0))
-        matches.write(a, b, np.ascontiguousarray(raw.get(pair_id, empty)), np.ascontiguousarray(inliers), config,
-                      F=None if f is None or not f.any() else f.reshape(3, 3),
-                      E=None if e is None or not e.any() else e.reshape(3, 3),
-                      H=None if h is None or not h.any() else h.reshape(3, 3),
-                      qvec=qvec if pose else None, tvec=tvec if pose else None)
     matches.flush()
     if without_descriptors:
         log.warning("%d photos of the database have key points but no descriptors: not imported, their points are "
                     "detected again", without_descriptors)
+    if skipped:
+        log.warning("%d pairs of the database with a photo that was not imported: left out", skipped)
     if unknown_configs:
         log.warning("%d pairs of the database had a configuration the native engine does not give: kept as undefined, "
                     "with their inliers", unknown_configs)
-    return imported
+    return len(imported)

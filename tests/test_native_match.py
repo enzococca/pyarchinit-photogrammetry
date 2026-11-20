@@ -1342,3 +1342,293 @@ def test_photo_names_with_blanks_go_through_the_stores_and_the_database(scene_di
     assert k.feature_store(str(tmp_path / "f")).names() == names
     assert k.match_store(str(tmp_path / "m")).pairs() == pairs
     assert ch.align_cameras(mapper="incremental", use_gps=False) >= 6
+
+
+# ------------------------------------------------------------------------------------- the final fix wave of M2
+def _native_block(scene_dir, tmp_path, count=24, **kwargs):
+    """A native match and alignment of the first ``count`` trench photos, then the others added: ``(chunk, sfm
+    folder, the photos)``."""
+    photos = _photos(scene_dir)
+    _, ch = _project(scene_dir, tmp_path, photos=photos[:count])
+    ch.match_photos(quality="high", engine="native", **kwargs)
+    assert ch.align_cameras(mapper="incremental", use_gps=False) == count
+    ch.add_photos(photos[count:])
+    return ch, ch.data_dir / "sfm", photos
+
+
+def _leftovers(work):
+    return sorted(str(p.relative_to(work)) for p in work.iterdir() if ".tmp" in p.name)
+
+
+def test_continuing_with_other_settings_matches_everything_again(scene_dir, tmp_path, monkeypatch):
+    """A native match and alignment of 24, 4 added, then ``reset=False`` with another point limit: the stores are
+    not trusted, and the database is the native export - key points without descriptors - so nothing of it is
+    imported (its matches index the old key points): every photo again, all 28 with points of the new limit, and
+    the import of such a database writes no pair either."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    ch, work, photos = _native_block(scene_dir, tmp_path)
+    # the import of the native export: no photo has descriptors, so no pair goes into the stores
+    imported = native_match.import_database(work / "database.db", tmp_path / "f", tmp_path / "m")
+    assert imported == 0
+    assert ppg_core.native_match_pairs_list(str(tmp_path / "m")) == []
+    calls = []
+    real_import = native_match.import_database
+    monkeypatch.setattr(native_match, "import_database", lambda *a, **k: calls.append(a) or real_import(*a, **k))
+    seen = []
+    ch.match_photos(quality="high", engine="native", reset=False, keypoint_limit=20000,
+                    progress=lambda _f, m: seen.append(m))
+    assert calls == [] and any("every photo again" in m for m in seen)
+    info = ch.meta["sfm"]
+    assert info["engine"] == "native" and info["continued"] is False and info["added"] is None
+    assert info["keypoint_limit"] == 20000 and info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
+    store = ppg_core.native_store_names(str(work / native_match.STORES / "features"))
+    assert store == [p.name for p in photos]
+    assert {ppg_core.native_store_header(str(work / "native" / "features"), n)["impl"] for n in store} <= {"cpu", "gpu"}
+    assert len(_image_ids(work / "database.db")) == PHOTOS
+
+
+def test_a_full_disk_in_the_database_stops_both_engines_and_keeps_the_block(scene_dir, tmp_path, monkeypatch):
+    """A native match and alignment of 24, 4 added; the export to COLMAP's database failing as a full disk fails
+    there - pycolmap's RuntimeError and sqlite's OperationalError, with the words sqlite gives a full disk -: the
+    native continuation raises ``OSError(ENOSPC)`` without falling back to the classic step, and the classic
+    continuation, whose descriptors cannot be put into the database, raises it too instead of throwing the
+    database and the stores away. Both leave the block as it was, and the classic continuation goes on once there
+    is room."""
+    import errno
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import native_match, sfm
+
+    ch, work, photos = _native_block(scene_dir, tmp_path)
+    stores = work / native_match.STORES
+    watched = [work / "database.db", stores / "features" / "index.json", stores / "matches" / "index.json"]
+    before = [p.read_bytes() for p in watched]
+    kept = dict(ch.meta["engine"]["match_photos"])
+    classic_runs = []
+    real_classic = sfm.match_photos
+    monkeypatch.setattr(sfm, "match_photos", lambda *a, **k: classic_runs.append(k) or real_classic(*a, **k))
+    pycolmap_full = RuntimeError("[database_sqlite.cc:1350] SQLite error: database or disk is full")
+
+    def export_full(*_args, **_kwargs):
+        raise pycolmap_full
+
+    monkeypatch.setattr(native_match, "export_database", export_full)
+    with pytest.raises(OSError) as full:
+        ch.match_photos(quality="high", engine="native", reset=False)
+    assert full.value.errno == errno.ENOSPC and full.value.__cause__ is pycolmap_full
+    assert classic_runs == [] and dict(ch.meta["engine"]["match_photos"]) == kept
+    assert [p.read_bytes() for p in watched] == before and _leftovers(work) == []
+
+    def export_sqlite_full(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(native_match, "export_database", export_sqlite_full)
+    with pytest.raises(OSError) as full:
+        ch.match_photos(quality="high", engine="classic", reset=False)
+    assert full.value.errno == errno.ENOSPC
+    assert [p.read_bytes() for p in watched] == before and _leftovers(work) == []
+    monkeypatch.undo()
+    ch.match_photos(quality="high", engine="classic", reset=False)
+    info = ch.meta["sfm"]
+    assert info["continued"] and sorted(info["added"]) == [p.name for p in photos[24:]]
+
+
+def test_disk_full_is_told_from_the_errors_of_every_layer():
+    """What a full disk raises, through each layer, is a full disk; other errors are not."""
+    import errno
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import native_match
+
+    assert native_match.disk_full(OSError(errno.ENOSPC, "No space left on device"))
+    assert native_match.disk_full(sqlite3.OperationalError("database or disk is full"))
+    assert native_match.disk_full(RuntimeError("[database_sqlite.cc:1350] SQLite error: database or disk is full"))
+    assert native_match.disk_full(RuntimeError("x.ppgf: No space left on device (os error 28)"))
+    assert not native_match.disk_full(OSError(errno.EACCES, "Permission denied"))
+    assert not native_match.disk_full(sqlite3.OperationalError("no such table: images"))
+    assert not native_match.disk_full(RuntimeError("boom"))
+    assert not native_match.disk_full(ValueError("database or disk is full"))
+
+
+def test_the_moves_into_place_are_undone_or_swept_whichever_fails(scene_dir, tmp_path, monkeypatch):
+    """A native match of 8 photos, then a fresh one whose third move (the database into place) fails: the stores
+    are moved back and the project is as it was. Again with the undo of the stores failing as well: the sweep of
+    the step (:func:`_remove_leftovers`) puts the old stores back, since the database was not replaced."""
+    import os
+    from pathlib import Path
+
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:8])
+    ch.match_photos(quality="high", engine="native")
+    work = ch.data_dir / "sfm"
+    stores = work / native_match.STORES
+    watched = [work / "database.db", stores / "features" / "index.json", stores / "matches" / "index.json"]
+    before = [p.read_bytes() for p in watched]
+    real_replace = os.replace
+
+    def failing(also_undo: bool):
+        def replace(src, dst, *args, **kwargs):
+            if Path(src).name == native_match.TMP_DB:
+                raise PermissionError("the database cannot be replaced")
+            if also_undo and Path(src) == stores and Path(dst).name == native_match.TMP:
+                raise PermissionError("the stores cannot be moved back")
+            return real_replace(src, dst, *args, **kwargs)
+        return replace
+
+    for also_undo in (False, True):
+        monkeypatch.setattr(native_match.os, "replace", failing(also_undo))
+        with pytest.raises(PermissionError):
+            native_match.match_photos(ch, quality="high")
+        monkeypatch.undo()
+        assert [p.read_bytes() for p in watched] == before, also_undo
+        assert _leftovers(work) == [] and not (stores / native_match.COMMIT).exists(), also_undo
+
+
+def _stores_like(folder, tag: str):
+    (folder / "features").mkdir(parents=True)
+    (folder / "matches").mkdir()
+    (folder / "features" / "index.json").write_text(tag)
+    (folder / "matches" / "index.json").write_text(tag)
+
+
+def test_the_sweep_tells_a_replaced_database_from_one_that_was_not(tmp_path):
+    """The states a crash can leave between the moves of the stores and of the database: the stores being
+    replaced beside no stores (put back); beside new stores whose commit record names the database in place (the
+    database was replaced: the old ones go) or another (it was not: the new ones go, the old come back); beside
+    new stores without a record (no telling: both go, and the next step does every photo again)."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    def state(name):
+        work = tmp_path / name
+        work.mkdir()
+        (work / "database.db").write_bytes(b"the database in place")
+        _stores_like(work / native_match.OLD, "old")
+        return work, work / native_match.STORES
+
+    def tag(stores):
+        return (stores / "features" / "index.json").read_text()
+
+    work, stores = state("no new stores")
+    native_match._remove_leftovers(work)
+    assert tag(stores) == "old" and _leftovers(work) == []
+
+    work, stores = state("database replaced")
+    _stores_like(stores, "new")
+    native_match._write_commit(stores, work / "database.db")
+    native_match._remove_leftovers(work)
+    assert tag(stores) == "new" and _leftovers(work) == [] and not (stores / native_match.COMMIT).exists()
+
+    work, stores = state("database not replaced")
+    _stores_like(stores, "new")
+    (work / "other.db").write_bytes(b"the database that was to come")
+    native_match._write_commit(stores, work / "other.db")
+    native_match._remove_leftovers(work)
+    assert tag(stores) == "old" and _leftovers(work) == [] and not (stores / native_match.COMMIT).exists()
+
+    work, stores = state("no record")
+    _stores_like(stores, "new")
+    native_match._remove_leftovers(work)
+    assert not stores.exists() and _leftovers(work) == []
+
+
+def test_a_continuation_reports_forward_and_its_export_can_be_cancelled(scene_dir, tmp_path):
+    """A native match with the generic preselection, an alignment, 4 added and ``reset=False``: the progress never
+    goes back (the points of the 4 and the small images of the 24 on two spans), the export counts its pairs, and a
+    cancel during the export leaves the block as it was."""
+    from pyarchinit_photogrammetry.core.progress import Progress
+    from pyarchinit_photogrammetry.engine import native_match
+
+    ch, work, photos = _native_block(scene_dir, tmp_path, generic=True)
+    stores = work / native_match.STORES
+    watched = [work / "database.db", stores / "features" / "index.json", stores / "matches" / "index.json"]
+    before = [p.read_bytes() for p in watched]
+    progress = Progress()
+
+    def watch(_fraction, message):
+        if message.startswith(native_match.PROGRESS_EXPORT + ":"):
+            progress.cancel()
+
+    progress.callback = watch
+    with pytest.raises(Cancelled):
+        ch.match_photos(quality="high", engine="native", reset=False, generic=True, progress=progress)
+    assert [p.read_bytes() for p in watched] == before and _leftovers(work) == []
+    seen = []
+    ch.match_photos(quality="high", engine="native", reset=False, generic=True,
+                    progress=lambda f, m: seen.append((f, m)))
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions), [(f, m) for f, m in seen]
+    assert any(m.startswith("Reducing photos for the pairs") for _, m in seen)
+    assert any(m.startswith(native_match.PROGRESS_EXPORT + ":") and "pairs" in m for _, m in seen)
+    assert ch.meta["sfm"]["continued"]
+
+
+def test_a_tiny_photo_is_logged_as_too_small_not_unreadable(scene_dir, tmp_path, caplog):
+    """A photo the kernels refuse for its size (7 x 5 pixels, not reduced at the quality ``highest``) is said to be
+    too small, not unreadable: OpenCV reads it, the kernels refuse it."""
+    import cv2
+
+    tiny = tmp_path / "tiny.png"
+    cv2.imwrite(str(tiny), np.full((5, 7), 128, np.uint8))
+    (tmp_path / "project").mkdir()
+    _, ch = _project(scene_dir, tmp_path / "project", photos=_photos(scene_dir)[:6] + [tiny])
+    with caplog.at_level("INFO"):
+        ch.match_photos(quality="highest", engine="native")
+    said = [r.getMessage() for r in caplog.records if "tiny.png" in r.getMessage() and r.levelname == "WARNING"]
+    assert said and all("too small" in m and "unreadable" not in m for m in said), said
+    assert ch.meta["engine"]["match_photos"]["used"] == "native"
+
+
+def test_the_classic_step_sweeps_what_a_native_step_left(scene_dir, tmp_path):
+    """The temporary folders and databases a native step that died left in the sfm folder go when the classic step
+    matches every photo again."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:6])
+    work = ch.data_dir / "sfm"
+    work.mkdir(parents=True, exist_ok=True)
+    for folder in (native_match.TMP, native_match.OLD):
+        _stores_like(work / folder, "left")
+    for name in (native_match.TMP_DB, native_match.TMP_DB + "-wal", "database.db.tmp"):
+        (work / name).write_bytes(b"left")
+    ch.match_photos(quality="high", engine="classic")
+    assert _leftovers(work) == [] and not (work / native_match.STORES).exists()
+
+
+def test_a_lost_gpu_without_the_cpu_share_leaves_its_pairs_to_the_cpu(scene_dir, tmp_path, monkeypatch,
+                                                                     gpu_test_device, caplog):
+    """``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPU; when it is lost in the middle of the matching the CPU
+    standing by takes the pairs left, so the step ends natively with the matches of ``gpu="off"``."""
+    import os
+
+    from pyarchinit_photogrammetry.engine import native_match
+
+    gpu = "auto" if gpu_test_device == -1 else str(gpu_test_device)
+    monkeypatch.setenv("PPG_NATIVE_CPU_SHARE", "0")
+    monkeypatch.setenv("PPG_TEST_GPU_FAIL_AFTER", "1")
+
+    def progress(_fraction, message):
+        if message.startswith(native_match.PROGRESS_PAIRS + " ("):
+            os.environ["PPG_TEST_GPU_FAIL_AFTER"] = "3"
+
+    photos = _photos(scene_dir)[:8]
+    (tmp_path / "gpu").mkdir()
+    (tmp_path / "cpu").mkdir()
+    _, with_gpu = _project(scene_dir, tmp_path / "gpu", photos=photos)
+    with caplog.at_level("INFO"):
+        with_gpu.match_photos(quality="high", engine="native", gpu=gpu, progress=progress)
+    monkeypatch.delenv("PPG_TEST_GPU_FAIL_AFTER")
+    monkeypatch.delenv("PPG_NATIVE_CPU_SHARE")
+    assert with_gpu.meta["engine"]["match_photos"]["used"] == "native"
+    _, cpu_only = _project(scene_dir, tmp_path / "cpu", photos=photos)
+    cpu_only.match_photos(quality="high", engine="native", gpu="off")
+    info = with_gpu.meta["sfm"]
+    assert info["gpu_pairs"] == 2 and info["cpu_pairs"] == info["pairs"] - 2
+    # the GPU named as the classic record names it: the adapter's name
+    named = _native.kernel("gpu_device_name")(_native.gpu_devices(gpu)[0])
+    assert info["gpu"] == named and info["gpu_shares"] == {named: 2}
+    assert (_geometries(with_gpu.data_dir / "sfm" / "database.db")
+            == _geometries(cpu_only.data_dir / "sfm" / "database.db"))
+    said = [r.getMessage() for r in caplog.records]
+    assert any("the CPU takes them" in m for m in said), said

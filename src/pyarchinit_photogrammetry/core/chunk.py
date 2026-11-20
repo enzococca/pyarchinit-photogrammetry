@@ -7,7 +7,6 @@ Rasters (DEM, orthomosaic) are written directly in the chunk CRS.
 """
 from __future__ import annotations
 
-import errno
 import logging
 import os
 import uuid
@@ -459,11 +458,9 @@ class Chunk:
                 native_match.match_photos(self, **kwargs)
             except Cancelled:
                 raise
-            except OSError as exc:
-                if exc.errno == errno.ENOSPC:  # a full disk: no engine can go on
-                    raise
-                choice = switch.fall_back(choice, f"native matching failed: {exc}")
             except Exception as exc:  # noqa: BLE001 - whatever stopped the native step: the classic one does the step
+                if native_match.disk_full(exc):  # a full disk, whichever layer says so: no engine can go on
+                    raise
                 choice = switch.fall_back(choice, f"native matching failed: {exc}")
         if choice.used == "classic":
             sfm.match_photos(self, matcher=matcher, **kwargs)

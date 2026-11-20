@@ -1138,15 +1138,22 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         log.warning("the guided matching is COLMAP's (SIFT): left out with %s", learned.NAMES[matcher])
         guided_matching = False
     keep = (not reset) and not rigs and _continuable(chunk, db_path, root, names, matcher)
+    from . import native_match  # imports this module: not at the top
+
     if keep and (chunk.meta.get("sfm") or {}).get("engine") == "native":
         # a chunk matched by the native engine keeps the descriptors in its stores, not in the database (the mapper
         # needs none): the classic matcher continuing it needs them there, for the pairs of the new photos with the
-        # old; without the native core, or without the stores, there is nothing to continue with: every photo again
-        from . import native_match  # imports this module: not at the top
-
+        # old; without the native core, or without the stores, there is nothing to continue with: every photo again.
+        # A native step that died is swept first, so that the stores go with the database; a full disk stops the
+        # step with the database and the stores as they are
+        native_match._remove_leftovers(work)
         try:
             native_match.export_database(chunk, db_path, descriptors=True)
-        except (OSError, RuntimeError, ValueError) as exc:
+        except Exception as exc:
+            if native_match.disk_full(exc):
+                raise native_match.as_disk_full(exc) from exc
+            if not isinstance(exc, (OSError, RuntimeError, ValueError)):
+                raise
             log.warning("the descriptors of the native matching cannot be put into the database (%s): every photo "
                         "again", exc)
             keep = False
@@ -1158,7 +1165,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         import shutil
 
         shutil.rmtree(work / "learned", ignore_errors=True)  # the descriptors of the database just removed
-        shutil.rmtree(work / "native", ignore_errors=True)  # the stores of the native matching, of other photos now
+        native_match.remove_work(work)  # the stores of the native matching (of other photos now) and its leftovers
     existing = _db_image_names(db_path) if keep else set()
     downscale = QUALITY_DOWNSCALE.get(quality, 2)
 
