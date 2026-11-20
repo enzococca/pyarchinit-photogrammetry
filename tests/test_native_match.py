@@ -1632,3 +1632,60 @@ def test_a_lost_gpu_without_the_cpu_share_leaves_its_pairs_to_the_cpu(scene_dir,
             == _geometries(cpu_only.data_dir / "sfm" / "database.db"))
     said = [r.getMessage() for r in caplog.records]
     assert any("the CPU takes them" in m for m in said), said
+
+
+def test_the_windows_codes_of_a_full_disk_count_only_on_windows(monkeypatch):
+    """``(os error 39)`` and ``(os error 112)`` are a full disk on Windows only: elsewhere 39 and 112 are other errors
+    (ENOTEMPTY, EHOSTDOWN on Linux), which fall back instead of stopping both engines."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    for code in (39, 112):
+        error = RuntimeError(f"x: Directory not empty (os error {code})")
+        monkeypatch.setattr(native_match.sys, "platform", "linux")
+        assert not native_match.disk_full(error), code
+        monkeypatch.setattr(native_match.sys, "platform", "win32")
+        assert native_match.disk_full(error), code
+    monkeypatch.setattr(native_match.sys, "platform", "linux")
+    assert native_match.disk_full(RuntimeError("x: No space left on device (os error 28)"))
+
+
+def test_a_classic_photo_without_features_does_not_stop_the_import(tmp_path):
+    """A classic database where SIFT found nothing on one photo (0-row key points and descriptors) is still one to
+    import; one with key points but no descriptors (a native export) is not."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import native_match
+
+    db = tmp_path / "database.db"
+    con = sqlite3.connect(str(db))
+    con.executescript("CREATE TABLE images (image_id INTEGER, name TEXT, camera_id INTEGER);"
+                      "CREATE TABLE keypoints (image_id INTEGER, rows INTEGER, cols INTEGER, data BLOB);"
+                      "CREATE TABLE descriptors (image_id INTEGER, rows INTEGER, cols INTEGER, data BLOB);")
+    con.executemany("INSERT INTO images VALUES (?, ?, 1)", [(1, "a.jpg"), (2, "sky.jpg")])
+    con.executemany("INSERT INTO keypoints VALUES (?, ?, 4, ?)", [(1, 2, b"x" * 32), (2, 0, b"")])
+    con.executemany("INSERT INTO descriptors VALUES (?, ?, 128, ?)", [(1, 2, b"d" * 256), (2, 0, b"")])
+    con.commit()
+    assert native_match._photos_without_descriptors(db) == 0
+    con.execute("DELETE FROM descriptors WHERE image_id = 1")
+    con.commit()
+    con.close()
+    assert native_match._photos_without_descriptors(db) == 1
+
+
+def test_the_commit_record_survives_a_copy_that_keeps_the_times(tmp_path):
+    """The record of a commit names the database by its size and time of change, not by its inode: a copy of the
+    project that keeps the times (a new inode) is still judged replaced."""
+    import shutil
+
+    from pyarchinit_photogrammetry.engine import native_match
+
+    work = tmp_path / "work"
+    stores = work / native_match.STORES
+    stores.mkdir(parents=True)
+    (work / "database.db").write_bytes(b"the database in place")
+    native_match._write_commit(stores, work / "database.db")
+    copy = tmp_path / "copy"
+    shutil.copytree(work, copy, copy_function=shutil.copy2)
+    assert native_match._committed(copy / native_match.STORES, copy / "database.db") is True
+    (copy / "database.db").write_bytes(b"another database of another size")
+    assert native_match._committed(copy / native_match.STORES, copy / "database.db") is False

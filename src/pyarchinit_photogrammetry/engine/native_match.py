@@ -46,6 +46,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,20 +78,23 @@ READERS = 4  # the threads that decode and reduce the photos while the kernels w
 
 RIGS_REASON = "rigs of 360-degree photos: the native engine does not do them"
 
-# what a full disk says through each layer: the system (``(os error N)`` of the core's errors: ENOSPC, and Windows'
-# ERROR_HANDLE_DISK_FULL and ERROR_DISK_FULL), sqlite (SQLITE_FULL, also through pycolmap's RuntimeError)
-DISK_FULL_TEXTS = ("(os error 28)", "(os error 39)", "(os error 112)", "database or disk is full")
+# what a full disk says through each layer: the system (``(os error N)`` of the core's errors: ENOSPC; on Windows
+# also ERROR_HANDLE_DISK_FULL and ERROR_DISK_FULL, which are other errors elsewhere), sqlite (SQLITE_FULL, also
+# through pycolmap's RuntimeError)
+DISK_FULL_TEXTS = ("(os error 28)", "database or disk is full")
+WINDOWS_DISK_FULL_TEXTS = ("(os error 39)", "(os error 112)")
 EXPORT_EVERY = 500  # the pairs between two reports of the export and of the import (and their cancel points)
 
 
 def disk_full(exc: BaseException) -> bool:
     """Whether ``exc`` says that the disk is full: an ``OSError`` of ENOSPC, or the error of the core, of pycolmap
-    or of sqlite whose text says so (:data:`DISK_FULL_TEXTS`). No engine can go on on a full disk: it is never a
-    reason to fall back."""
+    or of sqlite whose text says so (:data:`DISK_FULL_TEXTS`, and :data:`WINDOWS_DISK_FULL_TEXTS` on Windows). No
+    engine can go on on a full disk: it is never a reason to fall back."""
     if isinstance(exc, OSError):
         return exc.errno == errno.ENOSPC
     if isinstance(exc, (RuntimeError, sqlite3.Error)):
-        return any(text in str(exc) for text in DISK_FULL_TEXTS)
+        texts = DISK_FULL_TEXTS + (WINDOWS_DISK_FULL_TEXTS if sys.platform == "win32" else ())
+        return any(text in str(exc) for text in texts)
     return False
 
 
@@ -203,13 +207,14 @@ GUIDED_LINE = "the native matching always matches along the epipolar lines (guid
 
 
 def _identity(path: Path) -> list[int] | None:
-    """What tells a file from another one of the same name: its inode, size and time of change (a rename keeps
-    them); None when it is not there."""
+    """What tells a file from another one of the same name: its size and time of change, which a rename keeps and so
+    does a copy that keeps the times (not the inode: a copy, a remount of FAT or exFAT, a sync client re-creating
+    the file change it); None when it is not there."""
     try:
         st = path.stat()
     except OSError:
         return None
-    return [int(st.st_ino), int(st.st_size), int(st.st_mtime_ns)]
+    return [int(st.st_size), int(st.st_mtime_ns)]
 
 
 def _write_commit(stores: Path, db_path: Path) -> None:
@@ -229,10 +234,10 @@ def _committed(stores: Path, db_path: Path) -> bool | None:
 
 
 def _remove_leftovers(work: Path) -> None:
-    """What a step that died left in the sfm folder, swept so that the stores in place always go with the database
-    in place. The stores being replaced (``native.old.tmp``) are put back when the new ones never came into place,
-    or came but the database was not replaced (their commit record names another database: they are removed);
-    they are removed when it was replaced; with new stores and no record there is no telling, and both go (the
+    """What a step that died left in the sfm folder, swept so that the stores in place go with the database in place
+    as far as the record of the commit can tell (:func:`_identity`). The stores being replaced (``native.old.tmp``)
+    are put back when the new ones never came into place, or came but the database was not replaced (their commit
+    record names another database: they are removed); they are removed when it was replaced; with new stores and no record there is no telling, and both go (the
     next step does every photo again). New stores of a first matching beside a database that is not theirs go
     too. Then the work folder, the database being written, and the store of the preselection (made again by the
     step that needs it) are removed."""
@@ -446,10 +451,11 @@ def _continuation(run: _Run, *, reset: bool, quality: str, keypoint_limit: int, 
 
 
 def _photos_without_descriptors(db_path: Path) -> int:
-    """How many images of COLMAP's database ``db_path`` have no descriptors."""
+    """How many images of COLMAP's database ``db_path`` have key points and no descriptors - the mark of the export
+    of a native matching; a photo on which the classic SIFT found nothing (no key points either) is not one."""
     con = sqlite3.connect(sfm.read_only_uri(db_path), uri=True)
     try:
-        return int(con.execute("SELECT COUNT(*) FROM images WHERE image_id NOT IN "
+        return int(con.execute("SELECT COUNT(*) FROM keypoints WHERE rows > 0 AND image_id NOT IN "
                                "(SELECT image_id FROM descriptors WHERE rows > 0)").fetchone()[0])
     finally:
         con.close()
