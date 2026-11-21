@@ -1506,6 +1506,47 @@ def _copy_inputs(chunk: "Chunk", dup: "Chunk") -> None:
         cam.path = str(target)
 
 
+def _copy_sparse_model(chunk: "Chunk", dup: "Chunk", keys: set) -> bool:
+    """The COLMAP model of ``chunk`` into ``dup`` whole - the tie points with the observations of the photos, as the
+    alignment and the optimisations left them - so that an optimisation of the copy adjusts what the original would
+    (a model written again from the poses has its observations projected exactly: nothing to adjust, Khutm
+    2026-11-19). With some of the photos (``keys``) the others leave the model: their observations go, a point seen
+    by fewer than two of the photos kept goes with them, their poses are deregistered. False when ``chunk`` has no
+    model to copy, or its photos are not named in it."""
+    import pycolmap
+
+    from .sfm import _sfm_dir
+
+    src = chunk.product_path("reconstruction")
+    names = (chunk.meta.get("sfm") or {}).get("names") or {}
+    if src is None or not src.is_dir() or not names:
+        return False
+    rec = pycolmap.Reconstruction()
+    rec.read(str(src))
+    key_of = {v: int(k) for k, v in names.items()}
+    if not any(key_of.get(im.name) in keys for im in rec.images.values()):
+        return False
+    dropped = {iid for iid, im in rec.images.items() if key_of.get(im.name) not in keys}
+    for iid in dropped:
+        image = rec.images[iid]
+        for idx in list(image.get_observation_point2D_idxs()):
+            if image.points2D[idx].has_point3D():
+                rec.delete_observation(iid, idx)
+    for fid, frame in list(rec.frames.items()):
+        if frame.has_pose and all(int(d.id) in dropped for d in frame.data_ids
+                                  if d.sensor_id.type == pycolmap.SensorType.CAMERA):
+            rec.deregister_frame(fid)
+    out = _sfm_dir(dup) / "model"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    rec.write(str(out))
+    dup._set_product("reconstruction", out)
+    sfm_meta = dup.meta.setdefault("sfm", {})
+    sfm_meta["names"] = {k: v for k, v in names.items() if int(k) in keys}  # the photos of the copy, as written
+    sfm_meta.setdefault("image_root", (chunk.meta.get("sfm") or {}).get("image_root"))
+    return True
+
+
 def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | None = None,
                     keep_products: bool = False) -> "Chunk":
     """See :meth:`Document.duplicate_chunk`."""
@@ -1557,8 +1598,9 @@ def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | 
             out = dup.data_dir / src.name
             shutil.copy2(src, out)
             dup._set_product("tie_points", out)
-        if any(c.aligned for c in dup.cameras):
-            # the poses as a COLMAP model observing the tie points of the source: depth maps run on it
+        if any(c.aligned for c in dup.cameras) and not _copy_sparse_model(chunk, dup, keys):
+            # no model to copy (poses imported from elsewhere): the poses as a COLMAP model observing the tie
+            # points of the source - depth maps run on it
             write_reconstruction_from_chunk(dup, points=tie)
     except BaseException:
         doc.remove_chunk(dup)

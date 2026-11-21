@@ -812,3 +812,31 @@ def test_colmaps_free_adjustment_keeps_the_cameras_in_the_crs(tmp_path):
     ch.optimize_cameras()
     assert "internal_frame" not in ch.meta["sfm"]["optimize"] and np.array_equal(ch.transform, transform)
 
+
+def _observations(ch) -> int:
+    rec = sfm.load_reconstruction(ch)
+    return sum(p.track.length() for p in rec.points3D.values())
+
+
+def test_a_duplicate_carries_the_tie_points_and_their_observations(tmp_path):
+    """A duplicate of a chunk carries its sparse model whole - the tie points with the observations of the photos -
+    so that an optimisation of the copy adjusts what the original would (Khutm, 2026-11-19: the copy was written from
+    the poses, the observations projected exactly, and its optimisation stopped at 1 iteration with 0.000 px). With
+    some of the photos the copy keeps their observations, the points still seen by two of them."""
+    doc, ch = _rtk_block(tmp_path)
+    dup = doc.duplicate_chunk(ch)
+    assert _observations(dup) == _observations(ch)
+    assert _mean_reprojection_error(dup) == pytest.approx(_mean_reprojection_error(ch), rel=1e-9)
+    assert _mean_reprojection_error(dup) > 0.3  # half a pixel of noise: not projections written exactly
+    assert dup.optimize_cameras(gnss="off") == pytest.approx(ch.optimize_cameras(gnss="off"), rel=1e-6)
+
+    doc, ch = _rtk_block(tmp_path / "subset")
+    some = ch.cameras[:16]  # the first two strips
+    part = doc.duplicate_chunk(ch, some)
+    rec = sfm.load_reconstruction(part)
+    names = {ch.meta["sfm"]["names"][str(c.key)] for c in some}
+    assert {im.name for im in rec.images.values() if im.has_pose} == names
+    assert all(p.track.length() >= 2 for p in rec.points3D.values())
+    assert all(rec.images[el.image_id].name in names for p in rec.points3D.values() for el in p.track.elements)
+    assert _mean_reprojection_error(part) > 0.3
+    assert part.optimize_cameras(gnss="off") > 0.3
