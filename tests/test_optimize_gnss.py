@@ -347,7 +347,7 @@ def test_cli_optimize_gnss_option(tmp_path, monkeypatch):
         return 0.5
 
     monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
-    for args, engine, gnss in ((["--gnss", "off"], "colmap", "off"), ([], "colmap", "auto"),
+    for args, engine, gnss in ((["--gnss", "off"], "auto", "off"), ([], "auto", "auto"),
                                (["--engine", "ppg"], "ppg", "auto"),
                                (["--engine", "ppg", "--gnss", "bias"], "ppg", "bias"),
                                (["--engine", "ppg", "--gnss", "plain"], "ppg", "plain")):
@@ -840,3 +840,43 @@ def test_a_duplicate_carries_the_tie_points_and_their_observations(tmp_path):
     assert all(rec.images[el.image_id].name in names for p in rec.points3D.values() for el in p.track.elements)
     assert _mean_reprojection_error(part) > 0.3
     assert part.optimize_cameras(gnss="off") > 0.3
+
+
+def test_the_engine_of_the_optimisation_is_auto_by_default(tmp_path, monkeypatch):
+    """``engine="auto"`` is the default of the optimisation, as of the other steps of the program: the formulation
+    the program chooses (:data:`sfm.OPTIMIZE_AUTO_ENGINE`; the native solver is the default of ``"ppg"`` since its
+    gate), recorded in the report with the one asked for; the options of our own adjustment are refused under
+    ``auto`` while it is COLMAP's, as under ``colmap``; a word that is not an engine is refused."""
+    import inspect
+
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    assert inspect.signature(Chunk.optimize_cameras).parameters["engine"].default == "auto"
+    assert inspect.signature(sfm.optimize_cameras).parameters["engine"].default == "auto"
+    assert sfm.resolve_optimize_engine("auto") == sfm.OPTIMIZE_AUTO_ENGINE
+    assert sfm.resolve_optimize_engine("ppg") == "ppg" and sfm.resolve_optimize_engine("colmap") == "colmap"
+    with pytest.raises(ValueError, match="auto, colmap or ppg"):
+        sfm.resolve_optimize_engine("native")
+    doc, ch = _rtk_block(tmp_path)
+    ch.optimize_cameras()
+    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": "auto", "used": sfm.OPTIMIZE_AUTO_ENGINE}
+    ch.optimize_cameras(engine="ppg")
+    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": "ppg", "used": "ppg"}
+    if sfm.OPTIMIZE_AUTO_ENGINE == "colmap":
+        with pytest.raises(ValueError, match="engine='ppg'"):
+            ch.optimize_cameras(gnss="plain")
+
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    seen = []
+    def optimise(self, **kwargs):
+        seen.append(kwargs)
+        self.meta.setdefault("sfm", {})["optimize"] = {"reprojection_error": 0.5}
+        return 0.5
+
+    monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
+    result = CliRunner().invoke(app, ["optimize", str(doc.path)])
+    assert result.exit_code == 0, result.output
+    assert seen[-1]["engine"] == "auto"

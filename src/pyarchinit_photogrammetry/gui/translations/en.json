@@ -290,6 +290,7 @@
   "Automatica (la GPU migliore insieme alla CPU)": "Automatic (the best GPU together with the CPU)",
   "Automatica: quando la vista si è spostata (il più nitido)": "Automatic: when the view has moved (the sharpest)",
   "Automatica: tutte le coppie fino a 40 foto, oltre solo quelle che si sovrappongono, trovate prima su foto rimpicciolite (preselezione generica)": "Automatic: every pair up to 40 photos, above that only those that overlap, found first on reduced photos (generic preselection)",
+  "Automatico (la scelta del programma: COLMAP per ora)": "Automatic (the program's choice: COLMAP for now)",
   "Automatico": "Automatic",
   "Automatico: PatchMatch per i rilievi aerei (foto con il GPS sparse sul sito), lo stereo a coppie (CPU) per oggetti e scavi. PatchMatch: un piano per pixel confrontato con più foto insieme; da drone niente gradini a forma di curve di livello e bordi più coperti, circa 8 volte più lento": "Automatic: PatchMatch for surveys from the air (photos whose GPS spreads over the site), two-view stereo (CPU) for objects and trenches. PatchMatch: a plane per pixel checked against several photos at once; from a drone no contour-like terraces and more of the edges covered, about 8 times slower",
   "Automatico: dopo i numeri già usati": "Automatic: after occupied identifiers",

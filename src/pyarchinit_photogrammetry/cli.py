@@ -1275,8 +1275,9 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                                                                    "in the adjustment; check points and bars are reported"),
              marker_weight: int = typer.Option(4, help="a marker measurement counts as this many tie point observations"),
              principal_point: bool = False,
-             engine: str = typer.Option("colmap", help="colmap, or ppg: our own adjustment (control points by their "
-                                                       "accuracy, bars as distances, GNSS, rolling shutter)"),
+             engine: str = typer.Option("auto", help="auto (the program's choice: colmap for now), colmap, or ppg: "
+                                                     "our own adjustment (control points by their accuracy, bars as "
+                                                     "distances, GNSS, rolling shutter)"),
              gnss: str = typer.Option("auto", help="the GNSS positions of the photos: auto (the accurate ones - fix, float, "
                                                    "PPK, 0.5 m or better - hold the block when no fixed points do: "
                                                    "fewer than 3 control points, fewer than 2 control bars; the focal "
@@ -1292,16 +1293,20 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
     references to keep it)."""
     from .engine.bundle import SOLVERS
-    from .engine.sfm import GNSS_MODES
+    from .engine.sfm import GNSS_MODES, resolve_optimize_engine
 
+    try:
+        used = resolve_optimize_engine(engine)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--engine")
     if gnss not in GNSS_MODES:
         raise typer.BadParameter(f"one of {', '.join(GNSS_MODES)}", param_hint="--gnss")
-    if engine == "colmap" and gnss in ("plain", "bias"):
+    if used == "colmap" and gnss in ("plain", "bias"):
         raise typer.BadParameter(f"{gnss} needs --engine ppg (COLMAP's adjustment takes auto or off)",
                                  param_hint="--gnss")
     if solver not in SOLVERS:
         raise typer.BadParameter(f"one of {', '.join(SOLVERS)}", param_hint="--solver")
-    if engine == "colmap" and solver != "auto":
+    if used == "colmap" and solver != "auto":
         raise typer.BadParameter(f"{solver} needs --engine ppg (COLMAP's adjustment has no solver to choose)",
                                  param_hint="--solver")
     doc, ch = _open(project, chunk)

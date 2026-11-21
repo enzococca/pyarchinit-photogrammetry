@@ -505,7 +505,7 @@ class Chunk:
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
-                         progress: ProgressCallback | None = None, engine: str = "colmap", gnss: str = "auto",
+                         progress: ProgressCallback | None = None, engine: str = "auto", gnss: str = "auto",
                          rolling_shutter: bool = False, solver: str = "auto") -> float:
         """Global bundle adjustment; with 3 or more control points, or 2 or more control scale
         bars, they are part of it (the block bends to fit them), else ``gnss="auto"`` holds the
@@ -513,7 +513,8 @@ class Chunk:
         an adjustment that bends the block away from those positions is undone (see
         :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
         positions of the photos - ``gnss`` "plain" or "bias" - the rolling shutter and its ``solver``:
-        ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report). Returns
+        ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
+        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Returns
         the mean reprojection error in pixels; the control/check point, scale bar and GNSS report
         is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
@@ -521,7 +522,8 @@ class Chunk:
         err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,
                                    marker_weight=marker_weight, progress=as_progress(progress), engine=engine,
                                    gnss=gnss, rolling_shutter=rolling_shutter, solver=solver)
-        if any(m.projections for m in self.markers) and engine != "ppg":  # ours adjusts them with the block
+        if any(m.projections for m in self.markers) and sfm.resolve_optimize_engine(engine) != "ppg":
+            # ours adjusts them with the block
             self.triangulate_markers()
         self.forget_precision()
         return err

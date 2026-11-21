@@ -2609,6 +2609,13 @@ def _marker_report(chunk: Chunk) -> dict:
     return out
 
 
+# the formulations of optimize_cameras ("engine"): COLMAP's adjustment with the control points fixed in steps, or our
+# own (engine/bundle.py) with everything weighted by its accuracy; "auto" is the choice of the program
+OPTIMIZE_ENGINES = ("auto", "colmap", "ppg")
+# what "auto" runs: COLMAP's formulation until measurements say otherwise (native engine design 7.4: on the large set
+# only the steps reached the targets, one adjustment from metres away diverged; to be decided in milestone 3). The
+# native solver is already the default under "ppg" (bundle.NATIVE_BY_DEFAULT)
+OPTIMIZE_AUTO_ENGINE = "colmap"
 GNSS_MODES = ("auto", "off", "plain", "bias")  # the GNSS positions of the photos in optimize_cameras
 GNSS_PRIOR_MAX_M = 0.5  # m: positions this accurate (mean horizontal accuracy: fix, float, PPK) hold the block
 GNSS_PRIOR_SPREAD = 50.0  # the positions must spread across the block this many times their accuracy
@@ -3000,8 +3007,16 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     return err
 
 
+def resolve_optimize_engine(engine: str) -> str:
+    """The formulation that :func:`optimize_cameras` runs for ``engine`` (:data:`OPTIMIZE_ENGINES`): ``"auto"`` is
+    :data:`OPTIMIZE_AUTO_ENGINE`; a word that is not an engine raises a ValueError that names them."""
+    if engine not in OPTIMIZE_ENGINES:
+        raise ValueError(f"unknown adjustment engine {engine!r}: auto, colmap or ppg")
+    return OPTIMIZE_AUTO_ENGINE if engine == "auto" else engine
+
+
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
-                     marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
+                     marker_weight: int = 4, progress: Progress | None = None, engine: str = "auto",
                      gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto") -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
@@ -3059,12 +3074,16 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     scipy where it cannot run), ``"native"`` the Levenberg-Marquardt of the core, ``"scipy"`` the
     reference; where the native one cannot run scipy adjusts the block and ``report["solver"]`` says
     so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``). With
-    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
+    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work.
+
+    ``engine="auto"`` (the default, as for the other steps of the program): the formulation the program chooses,
+    :data:`OPTIMIZE_AUTO_ENGINE` (COLMAP's until measurements say otherwise; the native solver is the default under
+    ``"ppg"``), with the restrictions of the one it is; ``report["engine_choice"]`` says which was asked and which
+    ran."""
     from .bundle import SOLVERS
 
     progress = as_progress(progress)
-    if engine not in ("colmap", "ppg"):
-        raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
+    requested, engine = engine, resolve_optimize_engine(engine)
     if gnss not in GNSS_MODES:
         raise ValueError(f"gnss: one of {', '.join(GNSS_MODES)}, not {gnss!r}")
     if engine == "colmap" and gnss in ("plain", "bias"):
@@ -3089,6 +3108,8 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                                     hold_focal=hold_focal, solver=solver)
             else:
                 err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
+            chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})["engine_choice"] = {"requested": requested,
+                                                                                            "used": engine}
             _follow_internal_frame(chunk, frame)
             if kept is not None:
                 err = _undo_a_bend(chunk, before, kept, err, progress)

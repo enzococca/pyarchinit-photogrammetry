@@ -7811,7 +7811,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                                 len(controls), len(bars)), with_markers),
             Field("weight", "Peso di una misura di marker (in osservazioni di punti di legame)", 4, minimum=1, maximum=50),
             Field("pp", "Ottimizza anche il punto principale (cx, cy)", False),
-            Field("engine", "Motore", "colmap", choices=[
+            Field("engine", "Motore", "auto", choices=[
+                ("auto", "Automatico (la scelta del programma: COLMAP per ora)"),
                 ("colmap", "COLMAP"),
                 ("ppg", "Proprio: GCP secondo la loro accuratezza, barre come distanze, GNSS, rolling shutter")]),
             Field("gnss", "Posizioni GNSS delle foto", "auto", choices=[
@@ -7846,12 +7847,13 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             return
 
         def job(p):
-            own = v.get("engine", "colmap") == "ppg"
+            engine = v.get("engine", "auto")
+            own = sfm.resolve_optimize_engine(engine) == "ppg"
             gnss = v.get("gnss", "auto")
             if not own and gnss in ("plain", "bias"):  # options of our own engine: COLMAP holds the block on its own
                 gnss = "auto"
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
-                                      marker_weight=int(v["weight"]), progress=p, engine="ppg" if own else "colmap",
+                                      marker_weight=int(v["weight"]), progress=p, engine=engine,
                                       gnss=gnss, rolling_shutter=bool(v.get("rolling")) and own)
             if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
