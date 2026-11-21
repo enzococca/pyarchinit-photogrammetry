@@ -1134,6 +1134,24 @@ def _to_system(points: np.ndarray, src: str | None, dst: str | None, chunk, what
     return crs_mod.transform_points(np.asarray(points, float), src, dst, legacy=Legacy(what, chunk))
 
 
+def world_in(chunk: "Chunk", system) -> tuple[np.ndarray, float | None]:
+    """The map internal -> world of ``system`` of ``chunk`` as it is placed now: its transform when ``system`` is its
+    own (or both are local frames, or they cannot be mixed), else a similarity fitted through the projection on points
+    spread over the chunk (:func:`_sample_points`), with the RMS of that fit (``None`` for the transform itself)."""
+    from ..core import crs as crs_mod
+
+    T = np.asarray(chunk.transform, float)
+    if chunk.crs == system or crs_mod.is_local(chunk.crs) and crs_mod.is_local(system) or not _compatible(chunk.crs,
+                                                                                                       system):
+        return T, None
+    pts = _sample_points(chunk)
+    dst = _to_system(geometry.apply(T, pts), chunk.crs, system, chunk, TIED_POINTS)
+    off = np.round(dst.mean(0))
+    W = geometry.umeyama(pts, dst - off, with_scale=True)
+    err = float(np.sqrt(np.mean(np.sum((geometry.apply(W, pts) - (dst - off)) ** 2, axis=1))))
+    return _translate(off) @ W, err
+
+
 def _sigma3(values, fallback: float) -> np.ndarray:
     v = np.asarray(values if values else [fallback], float).reshape(-1)
     v = np.resize(v, 3) if len(v) != 3 else v
@@ -1458,18 +1476,9 @@ def solve(doc: "Document", unknowns: dict, ties=None, references: bool = True, r
     world_of: dict[int, np.ndarray] = {}
     for key in order:
         ch = chunks[key]
-        T = np.asarray(ch.transform, float)
-        if ch.crs == system or crs_mod.is_local(ch.crs) and crs_mod.is_local(system) or not _compatible(ch.crs, system):
-            world_of[key] = T
-            continue
-        pts = _sample_points(ch)
-        dst = _to_system(geometry.apply(T, pts), ch.crs, system, ch, TIED_POINTS)
-        off = np.round(dst.mean(0))
-        W = geometry.umeyama(pts, dst - off, with_scale=True)
-        err = float(np.sqrt(np.mean(np.sum((geometry.apply(W, pts) - (dst - off)) ** 2, axis=1))))
-        if err > 0.005:
+        world_of[key], err = world_in(ch, system)
+        if err is not None and err > 0.005:
             messages.append(message("approximated", ch.label, ch.crs, system, err, chunk=key))
-        world_of[key] = _translate(off) @ W
     for key in order:
         ch = chunks[key]
         if kinds[key] == "fixed":

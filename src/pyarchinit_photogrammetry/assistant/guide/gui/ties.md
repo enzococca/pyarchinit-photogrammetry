@@ -243,6 +243,25 @@ usual order is: tie the chunks in plan first (ties, *Apply*), then press **Measu
 selected: those in orange) are measured again where the chunks are now, with the same chunks, areas and kind, and
 keep their name and state.
 
+## Plan and plane
+
+Two surveys years apart (a drone flight with its GPS, a survey on total-station targets) often share few points that
+can be told apart in both - corners of houses, joints of a road - and wide ground that did not change. **Plan and
+plane...** (under the table of the stable heights) places a chunk on another taking each from what fixes it:
+
+* the **plan** from the ties between the two chunks (at least 3, made by hand, from a table or automatic): a 2D
+  similarity (rotation about the vertical, scale, shift); every point gets its residual and its leave-one-out (where
+  the others put it), and the worst is left out while its residual is over three times the median of the others (a
+  point clicked on the wrong stone);
+* the **heights** from a plane fitted on the difference of the two DEMs over the stable ground (a polygon layer, or
+  found by itself: gentle slopes, cells that agree), the chunk first moved in plan: the offset and the tilt of a GPS
+  block.
+
+The two are one transform. The measure runs in the background; its report (scale, rotation, RMS and leave-one-out of
+the plan, the points left out, the tilt in cm per 100 m and the NMAD of the heights before and after) is shown with
+the question **Apply** / **Do not apply**. Applied, the chunk moves (one step of *Edit > Undo*); build its DEM and
+orthophoto again. From the command line: `ppg ties plan-height`.
+
 ## Benchmarks and stakes
 
 Benchmarks, GNSS points and the stakes of the excavation grid are often in the photos: a dark round head on the
@@ -329,7 +348,10 @@ Picking ties by hand is slow when there are many surveys - every year of flights
    first, the **RMS** of the residuals and the outcome. A pair that does not show the same ground is **rejected** in
    red, with the reason (too few points agree, an agreement that chance gives too, points on a line). Select a row to
    read its report under *Report*. *Over the whole raster* looks over the whole orthophotos, wherever the chunks are
-   (two unrelated local frames, a GPS far off): slower.
+   (two unrelated local frames, a GPS far off): slower. *Area* limits the matching to the polygons of a layer of the
+   free drawings (the stable ground: roads, houses, not the excavations that changed between the surveys): only the
+   ground inside it is read and every point kept lies in it. *Least matches that agree* (default 12) is how many
+   matches must agree for a pair to be proposed.
 3. **Ties** - *Accept*: the proposed and ticked pairs become ties - at most *Ties per pair* (default 12) of the
    refined points, spread over the overlap, with the precision of the fit (its RMS, at least half a cell), markers
    **auto N** in both chunks. One step of *Edit > Undo*. A pair accepted again replaces the ties it made before.
@@ -383,6 +405,8 @@ ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-refere
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
 ppg ties auto scavo.ppg [--chunks 2024,2025] [--pairs 2024:2025] [--source ortho|relief] [--margin 5] [--whole]
 ppg ties auto scavo.ppg --accept [--max-ties 12] [--json auto.json]   # the pairs proposed made into ties
+ppg ties auto scavo.ppg --pairs 2024:2017 --area 470700,2574400,470900,2574600 [--min-matches 8]  # stable ground only
+ppg ties plan-height scavo.ppg 2017 2024 [--layer Stabile] [--exclude Scavo] [--apply]  # plan from the ties, plane
 ppg ties solve scavo.ppg --unknowns 2024=fixed,voli2025=similarity    # a group's name: its chunks as one block
 ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
 ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # or --agreeing: those confirmed by the photos

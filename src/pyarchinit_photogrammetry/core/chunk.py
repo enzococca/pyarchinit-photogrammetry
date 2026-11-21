@@ -76,6 +76,31 @@ class Chunk:
     def _set_product(self, name: str, path: Path) -> None:
         self.products[name] = os.path.relpath(path, self.data_dir)
 
+    def _frame_moved(self) -> list[str]:
+        """The products marked as left in an earlier internal frame (``meta["frame_moved"]``, an optimisation whose
+        georeference followed the frame: :func:`..engine.sfm._follow_internal_frame`)."""
+        moved = self.meta.get("frame_moved")
+        return list(moved.get("products") or []) if isinstance(moved, dict) else []
+
+    def _unmark(self, name: str) -> None:
+        marked = self._frame_moved()
+        if name in marked:
+            marked = [p for p in marked if p != name]
+            if marked:
+                self.meta["frame_moved"]["products"] = marked
+            else:
+                self.meta.pop("frame_moved", None)
+
+    def _rebuilt(self, name: str) -> None:
+        """The product ``name`` was built again from the alignment of now (a builder, not an edit in place): it is no
+        longer marked as left in an earlier internal frame."""
+        self._unmark(name)
+
+    def _drop_product(self, name: str) -> None:
+        """The product ``name`` taken away from the chunk, with its mark of an earlier internal frame."""
+        self.products.pop(name, None)
+        self._unmark(name)
+
     def own_product_path(self, name: str) -> Path:
         """Where a product changed in place (cleaned, cropped, with its confidence) is written:
         always the chunk folder. A product that is a file of another program - the DEM or the
@@ -505,7 +530,7 @@ class Chunk:
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
-                         progress: ProgressCallback | None = None, engine: str = "colmap", gnss: str = "auto",
+                         progress: ProgressCallback | None = None, engine: str = "auto", gnss: str = "auto",
                          rolling_shutter: bool = False, solver: str = "auto") -> float:
         """Global bundle adjustment; with 3 or more control points, or 2 or more control scale
         bars, they are part of it (the block bends to fit them), else ``gnss="auto"`` holds the
@@ -513,7 +538,8 @@ class Chunk:
         an adjustment that bends the block away from those positions is undone (see
         :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
         positions of the photos - ``gnss`` "plain" or "bias" - the rolling shutter and its ``solver``:
-        ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report). Returns
+        ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
+        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Returns
         the mean reprojection error in pixels; the control/check point, scale bar and GNSS report
         is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
@@ -521,7 +547,8 @@ class Chunk:
         err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,
                                    marker_weight=marker_weight, progress=as_progress(progress), engine=engine,
                                    gnss=gnss, rolling_shutter=rolling_shutter, solver=solver)
-        if any(m.projections for m in self.markers) and engine != "ppg":  # ours adjusts them with the block
+        if any(m.projections for m in self.markers) and sfm.resolve_optimize_engine(engine) != "ppg":
+            # ours adjusts them with the block
             self.triangulate_markers()
         self.forget_precision()
         return err

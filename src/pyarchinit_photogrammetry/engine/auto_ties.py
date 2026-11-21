@@ -153,6 +153,8 @@ class PairResult:
     points_b: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     residuals: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
     placed: dict = field(default_factory=dict)  # the transforms of a and b when matched
+    area: object = None  # where the matching was limited (a box, or the area as given: a layer, a file)
+    min_matches: int = MIN_MATCHES  # the matches that had to agree
 
     @property
     def ok(self) -> bool:
@@ -164,7 +166,8 @@ class PairResult:
 
     def summary(self) -> dict:
         """JSON of the result without its points."""
-        return {"a": self.a, "b": self.b, "a_label": self.a_label, "b_label": self.b_label, "source": self.source,
+        return {"area": self.area, "min_matches": int(self.min_matches),
+                "a": self.a, "b": self.b, "a_label": self.a_label, "b_label": self.b_label, "source": self.source,
                 "crs": self.crs, "cell": float(self.cell), "status": self.status, "messages": self.messages,
                 "matches": int(self.matches), "inliers": int(self.inliers), "refined": int(self.refined),
                 "transform": None if self.transform is None else np.asarray(self.transform, float).tolist(),
@@ -554,15 +557,54 @@ def _spread(points: np.ndarray) -> float:
     return 4.0 * float(np.sqrt(max(0.0, np.linalg.eigvalsh(cov).min())))
 
 
+def _area(doc: "Document", area, chunks: list, system) -> tuple[object, object]:
+    """The area of a matching as a shapely geometry in ``system`` and as it is recorded: a box ``(xmin, ymin, xmax,
+    ymax)`` in the system of the reference, a polygon layer of the free drawings (of the reference, else of the other
+    chunk), a GeoPackage / GeoJSON / DXF file of polygons, or ``{"layer": ...}`` / ``{"file": ...}`` (as the stable
+    ground of :func:`.stable_height.measure`). ``(None, None)`` for None."""
+    import shapely
+
+    from . import stable_height
+
+    if area is None:
+        return None, None
+    if isinstance(area, (tuple, list)) and len(area) == 4 and all(isinstance(v, (int, float)) for v in area):
+        x0, y0, x1, y1 = (float(v) for v in area)
+        if not (x1 > x0 and y1 > y0):
+            raise ValueError(f"area {area!r}: a box is (xmin, ymin, xmax, ymax)")
+        return shapely.box(x0, y0, x1, y1), [x0, y0, x1, y1]
+    spec = stable_height._area_spec(area)
+    geom = stable_height._geometry(doc, spec, chunks, system, "tie")
+    if geom is None or geom.is_empty:
+        raise ValueError(f"the area {area!r} has no polygon")
+    return geom, spec
+
+
+def _inside(geom, points: np.ndarray) -> np.ndarray:
+    """Which of ``points`` (world, plan) lie in ``geom`` (its border included); all of them without an area."""
+    import shapely
+
+    points = np.asarray(points, float).reshape(-1, 3)
+    if geom is None or not len(points):
+        return np.ones(len(points), bool)
+    return np.asarray(shapely.intersects_xy(geom, points[:, 0], points[:, 1]), bool)
+
+
 def match(doc: "Document", a, b, source: str = "ortho", margin: float | None = MARGIN, cell: float | None = None,
-          progress: Progress | None = None) -> PairResult:
+          progress: Progress | None = None, area=None, min_matches: int = MIN_MATCHES) -> PairResult:
     """Steps 2-4 for the pair ``a`` (reference) and ``b``: the matching, the robust estimate, the refinement and the
     residual report (:class:`PairResult`; nothing is changed). ``margin`` None: the whole rasters (no use of where the
     chunks are now); ``cell``: the cell of the matching (default the coarser of the two rasters, grown so that a
-    raster read stays within :data:`MAX_SIDE` pixels). :class:`AutoTieError` (a :class:`.ties.TieError`) for a chunk
-    without DEM (or orthophoto with ``source="ortho"``) or systems that cannot be mixed."""
+    raster read stays within :data:`MAX_SIDE` pixels). ``area`` (:func:`_area`: a box in the system of ``a``, a
+    polygon layer, a file of polygons): only the ground inside it is read and matched - the stable ground of a site
+    whose excavations changed between the surveys -, every point kept lies in it. ``min_matches``: the matches that
+    must agree for the pair (:data:`MIN_MATCHES`; 3 at least). :class:`AutoTieError` (a :class:`.ties.TieError`) for a
+    chunk without DEM (or orthophoto with ``source="ortho"``) or systems that cannot be mixed."""
     if source not in SOURCES:
         raise ValueError(f"source {source!r}: use one of {', '.join(SOURCES)}")
+    min_matches = int(min_matches)
+    if min_matches < 3:
+        raise ValueError(f"min_matches {min_matches}: 3 at least (a similarity needs three points)")
     progress = as_progress(progress)
     ca, cb = ties._chunk(doc, a), ties._chunk(doc, b)
     if ca is cb:
@@ -578,9 +620,15 @@ def match(doc: "Document", a, b, source: str = "ortho", margin: float | None = M
         ba, bb = src_a.bounds, src_b.bounds
     else:
         ba, bb = _cut(src_a.bounds, _grow(src_b.bounds, margin)), _cut(src_b.bounds, _grow(src_a.bounds, margin))
+    geom, recorded = _area(doc, area, [ca, cb], system)
+    if geom is not None:  # only the ground of the area is read; b's grown by the margin, as it may be off by that
+        gb = tuple(float(v) for v in geom.bounds)
+        ba = _cut(ba, gb) if ba is not None else None
+        bb = _cut(bb, gb if margin is None else _grow(gb, margin)) if bb is not None else None
     result = PairResult(a=ca.key, b=cb.key, a_label=ca.label, b_label=cb.label, source=source, crs=system,
                         cell=0.0, placed={"a": np.asarray(ca.transform, float).tolist(),
-                                          "b": np.asarray(cb.transform, float).tolist()})
+                                          "b": np.asarray(cb.transform, float).tolist()},
+                        area=recorded, min_matches=min_matches)
     if ba is None or bb is None:
         result.messages.append(message("no_overlap"))
         return result
@@ -600,15 +648,15 @@ def match(doc: "Document", a, b, source: str = "ortho", margin: float | None = M
     result.matches = len(pairs)
     wa = va.world(ka[pairs[:, 0]]) if len(pairs) else np.zeros((0, 3))
     wb = vb.world(kb[pairs[:, 1]]) if len(pairs) else np.zeros((0, 3))
-    good = np.isfinite(wa[:, 2]) & np.isfinite(wb[:, 2])
+    good = np.isfinite(wa[:, 2]) & np.isfinite(wb[:, 2]) & _inside(geom, wa)
     wa, wb = wa[good], wb[good]
     progress(0.3, f"Automatic ties {cb.label} -> {ca.label}: {len(wa)} matches, robust estimate")
     inl = _ransac(wb, wa, RANSAC_CELLS * c)
     result.inliers = int(inl.sum())
-    if result.inliers < MIN_MATCHES:
-        result.messages.append(message("few_matches", result.inliers, MIN_MATCHES))
+    if result.inliers < min_matches:
+        result.messages.append(message("few_matches", result.inliers, min_matches))
         return result
-    if result.inliers < 3 * MIN_MATCHES and result.inliers < MIN_SHARE * len(wa):
+    if result.inliers < 3 * min_matches and result.inliers < MIN_SHARE * len(wa):
         result.messages.append(message("by_chance", result.inliers, len(wa), result.inliers / max(1, len(wa))))
         return result
     W, used = _fit(wb[inl], wa[inl], RANSAC_CELLS * c)
@@ -617,10 +665,12 @@ def match(doc: "Document", a, b, source: str = "ortho", margin: float | None = M
     for r in range(REFINE_ROUNDS):
         progress.check()
         fa, fb = _refine(va, vb, W, progress.sub(0.4 + 0.25 * r, 0.25))
-        if len(fa) < MIN_MATCHES:
+        keep = _inside(geom, fa)
+        fa, fb = fa[keep], fb[keep]
+        if len(fa) < min_matches:
             break
         W2, used2 = _fit(fb, fa, 0.5 * c)
-        if used2.sum() < MIN_MATCHES:
+        if used2.sum() < min_matches:
             break
         W, pts_a, pts_b, refined = W2, fa[used2], fb[used2], True
         result.refined = int(used2.sum())
@@ -660,16 +710,17 @@ def match(doc: "Document", a, b, source: str = "ortho", margin: float | None = M
 
 
 def run(doc: "Document", pairs, source: str = "ortho", margin: float | None = MARGIN, cell: float | None = None,
-        progress: Progress | None = None) -> list[PairResult]:
-    """:func:`match` for each pair (``(a, b)`` or the dicts of :func:`find_pairs`); a pair that cannot be matched
-    becomes a rejected result with its error."""
+        progress: Progress | None = None, area=None, min_matches: int = MIN_MATCHES) -> list[PairResult]:
+    """:func:`match` for each pair (``(a, b)`` or the dicts of :func:`find_pairs`), with the same ``area`` and
+    ``min_matches``; a pair that cannot be matched becomes a rejected result with its error."""
     progress = as_progress(progress)
     pairs = [(p["a"], p["b"]) if isinstance(p, dict) else tuple(p) for p in pairs]
     out = []
     for i, (a, b) in enumerate(pairs):
         sub = progress.sub(i / max(1, len(pairs)), 1 / max(1, len(pairs)))
         try:
-            out.append(match(doc, a, b, source=source, margin=margin, cell=cell, progress=sub))
+            out.append(match(doc, a, b, source=source, margin=margin, cell=cell, progress=sub, area=area,
+                             min_matches=min_matches))
         except ties.TieError as exc:
             ca, cb = ties._chunk(doc, a), ties._chunk(doc, b)
             r = PairResult(a=ca.key, b=cb.key, a_label=ca.label, b_label=cb.label, source=source, crs=ca.crs, cell=0.0)

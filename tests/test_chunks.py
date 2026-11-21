@@ -98,6 +98,87 @@ def test_align_cameras(doc, scene):
 
 
 @pytest.mark.slow
+def test_align_cameras_leaves_out_an_absurd_photo(doc, scene):
+    """One photo in common placed a kilometre away in its chunk (Khutm, 2026-11-19: an exported orthophoto among the
+    photos, aligned kilometres off: RMSE 206 m) is left out of the fit and named in the report; the chunk is tied
+    as well as without it."""
+    a, b = doc.chunks
+    unit = _metres_per_unit(b, scene)  # metres per unit of B's own frame
+    moved = common_cameras(b, a)[3][0]
+    shift = np.eye(4)
+    shift[:3, 3] = [1000.0 / unit, 0.0, 0.0]
+    moved.transform = shift @ np.asarray(moved.transform, float)
+    info = doc.align_chunks("A", ["B"], method="cameras")["chunks"][0]
+    assert info["rejected"] == [moved.label]
+    assert b.meta["chunk_alignment"]["rejected"] == [moved.label]
+    assert info["correspondences"] == SHARED - 1
+    flagged = {r["label"]: r for r in info["residuals"]}
+    assert flagged[moved.label]["rejected"] is True and flagged[moved.label]["error"] * _metres_per_unit(a, scene) > 900
+    unit_a = _metres_per_unit(a, scene)
+    assert info["rmse"] * unit_a < 0.002 and info["max_error"] * unit_a < 0.003
+    errors = [np.linalg.norm(b.to_world(cb.center) - a.to_world(ca.center)) * unit_a
+              for cb, ca in common_cameras(b, a) if cb is not moved]
+    assert max(errors) < 0.002
+    assert info["robust_check"] is True and info["rmse_all"] * unit_a > 300  # the photo left out weighs here
+
+
+def test_the_robust_check_of_the_photos_in_common():
+    """robust_inliers says whether it could judge: photos on a line (a corridor flown once) cannot be told apart from
+    an absurd one by a similarity, and all are kept, said; four photos or more spread over a plane can."""
+    rng = np.random.default_rng(1)
+    src = rng.uniform(0, 10, (8, 3))
+    dst = src * 1.5 + 2.0
+    dst[3] += 500.0
+    keep, ran = chunks_mod.robust_inliers(src, dst)
+    assert ran and list(np.flatnonzero(~keep)) == [3]
+    line = np.column_stack([np.linspace(0, 10, 8), np.zeros(8), np.zeros(8)])
+    keep, ran = chunks_mod.robust_inliers(line, line * 2.0)
+    assert not ran and keep.all()
+    keep, ran = chunks_mod.robust_inliers(src[:3], dst[:3])
+    assert not ran and keep.all()
+
+
+@pytest.mark.slow
+def test_a_robust_check_that_cannot_run_is_said(doc, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(chunks_mod, "robust_inliers", lambda src, dst, **k: (np.ones(len(src), bool), False))
+    with caplog.at_level(logging.WARNING):
+        info = doc.align_chunks("A", ["B"], method="cameras")["chunks"][0]
+    assert info["robust_check"] is False and info["rmse_all"] == pytest.approx(info["rmse"])
+    assert any("could not be checked" in r.getMessage() for r in caplog.records)
+    b = doc.chunks[1]
+    assert b.meta["chunk_alignment"]["robust_check"] is False
+    assert b.meta["chunk_alignment"]["rmse_all"] == pytest.approx(info["rmse_all"])
+
+
+def test_the_window_says_the_rmse_of_every_photo_and_a_check_that_could_not_run(monkeypatch):
+    """The message of *Allinea chunk* (offscreen): with photos left out, the RMSE over every photo in common next to
+    the one of the photos used; a robust check that could not run said on its own line."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from pyarchinit_photogrammetry.gui import i18n
+    from pyarchinit_photogrammetry.gui.main_window import chunk_alignment_lines
+
+    i18n.set_current("en")
+    try:
+        left = {"label": "B", "correspondences": 6, "rmse": 0.0012, "rmse_all": 412.5, "scale": 1.0,
+                "rejected": ["IMG_0013"], "robust_check": True}
+        lines = chunk_alignment_lines({"chunks": [left]}, "A", metric=True)
+        assert "IMG_0013" in lines[0] and "1.2 mm" in lines[0] and "412" in lines[0]
+        flat = {"label": "C", "correspondences": 5, "rmse": 0.004, "rmse_all": 0.004, "scale": 1.0, "rejected": [],
+                "robust_check": False}
+        lines = chunk_alignment_lines({"chunks": [flat]}, "A", metric=True)
+        assert any("could not be checked" in line for line in lines)
+        assert not any("could not be checked" in line
+                       for line in chunk_alignment_lines({"chunks": [left]}, "A", metric=True))
+    finally:
+        i18n.set_current(None)
+
+
+@pytest.mark.slow
 def test_align_points_from_markers(doc, scene):
     a, b = doc.chunks
     info = doc.align_chunks(a, [b], method="points")["chunks"][0]

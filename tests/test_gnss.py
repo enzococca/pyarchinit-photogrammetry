@@ -834,6 +834,45 @@ def test_positions_in_several_systems_on_one_metric_frame(tmp_path, first):
     assert not gcp.cameras_span_their_accuracy(ch, factor=1.1 * span)
 
 
+def test_pose_priors_written_again_on_a_continuation(tmp_path):
+    """A continuation of the alignment (``align_cameras(reset=False)``) writes the priors on a database that has
+    them already: they are updated in place, never inserted twice (COLMAP: one prior per frame, Khutm 2026-11-19
+    "SQLite error: constraint failed"); a moved reference reaches the database, a photo without one gets it."""
+    import pycolmap
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    ch, truth = _mixed("EPSG:32633")
+    names = {c.key: f"{c.label}.jpg" for c in ch.cameras}
+    db_path = tmp_path / "database.db"
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        camera = db.write_camera(pycolmap.Camera.create_from_model_id(0, pycolmap.CameraModelId.SIMPLE_PINHOLE,
+                                                                      100.0, 64, 48))
+        for name in names.values():
+            db.write_image(pycolmap.Image(name=name, camera_id=camera))
+    finally:
+        db.close()
+    held = ch.cameras[5].reference.location
+    ch.cameras[5].reference.location = None  # this one has no position yet
+    first = sfm._write_pose_priors(ch, db_path, names)
+    assert first["count"] == 5
+    ch.cameras[5].reference.location = held
+    ch.cameras[0].reference.location = list(np.asarray(ch.cameras[0].reference.location, float) + [0.0, 0.0, 3.0])
+    again = sfm._write_pose_priors(ch, db_path, names, first)
+    assert again["count"] == 6 and again["offset"] == first["offset"] and again["crs"] == first["crs"]
+    db = pycolmap.Database.open(str(db_path))
+    try:
+        by_image = {image.image_id: image.name for image in db.read_all_images()}
+        priors = {by_image[p.corr_data_id.id]: np.asarray(p.position) for p in db.read_all_pose_priors()}
+    finally:
+        db.close()
+    assert len(priors) == 6
+    moved = truth.copy()
+    moved[0, 2] += 3.0
+    assert np.array([priors[names[k]] for k in range(6)]) + first["offset"] == pytest.approx(moved, abs=1e-3)
+
+
 # --- ppg gnss and the GNSS pane --------------------------------------------------------------------------------
 
 def _project(tmp_path, names=("a.JPG", "b.JPG", "c.JPG")):

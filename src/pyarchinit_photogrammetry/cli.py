@@ -1275,8 +1275,9 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                                                                    "in the adjustment; check points and bars are reported"),
              marker_weight: int = typer.Option(4, help="a marker measurement counts as this many tie point observations"),
              principal_point: bool = False,
-             engine: str = typer.Option("colmap", help="colmap, or ppg: our own adjustment (control points by their "
-                                                       "accuracy, bars as distances, GNSS, rolling shutter)"),
+             engine: str = typer.Option("auto", help="auto (the program's choice: colmap for now), colmap, or ppg: "
+                                                     "our own adjustment (control points by their accuracy, bars as "
+                                                     "distances, GNSS, rolling shutter)"),
              gnss: str = typer.Option("auto", help="the GNSS positions of the photos: auto (the accurate ones - fix, float, "
                                                    "PPK, 0.5 m or better - hold the block when no fixed points do: "
                                                    "fewer than 3 control points, fewer than 2 control bars; the focal "
@@ -1292,16 +1293,20 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
     references to keep it)."""
     from .engine.bundle import SOLVERS
-    from .engine.sfm import GNSS_MODES
+    from .engine.sfm import GNSS_MODES, resolve_optimize_engine
 
+    try:
+        used = resolve_optimize_engine(engine)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--engine")
     if gnss not in GNSS_MODES:
         raise typer.BadParameter(f"one of {', '.join(GNSS_MODES)}", param_hint="--gnss")
-    if engine == "colmap" and gnss in ("plain", "bias"):
+    if used == "colmap" and gnss in ("plain", "bias"):
         raise typer.BadParameter(f"{gnss} needs --engine ppg (COLMAP's adjustment takes auto or off)",
                                  param_hint="--gnss")
     if solver not in SOLVERS:
         raise typer.BadParameter(f"one of {', '.join(SOLVERS)}", param_hint="--solver")
-    if engine == "colmap" and solver != "auto":
+    if used == "colmap" and solver != "auto":
         raise typer.BadParameter(f"{solver} needs --engine ppg (COLMAP's adjustment has no solver to choose)",
                                  param_hint="--solver")
     doc, ch = _open(project, chunk)
@@ -1670,6 +1675,11 @@ def align_chunks(project: Path,
         extra = f", initial position {c['initial']}" if c.get("initial") else ""
         typer.echo(f"{c['label']} -> {report['reference']['label']}: {c['method']}, {c['correspondences']} "
                    f"correspondences, RMSE {rmse}, scale {c['scale']:.6g}{extra}")
+        if c.get("rejected"):
+            typer.echo(f"  photos left out of the fit (out of place): {', '.join(c['rejected'])}; RMSE over every photo "
+                       f"in common {c['rmse_all']:.4g}")
+        if c.get("robust_check") is False and c.get("correspondences", 0) >= 4:
+            typer.echo("  the photos in common could not be checked for one out of place (nearly on a line)")
         if c.get("stale_products"):
             typer.echo(f"  build again: {', '.join(c['stale_products'])}")
 
@@ -4909,6 +4919,49 @@ def ties_height(project: Path,
     typer.echo(f"added {_height_line(doc, h)}")
 
 
+@ties_app.command("plan-height")
+def ties_plan_height(project: Path,
+                     chunk: str = typer.Argument(..., help="the chunk to place (B: label or key)"),
+                     reference: str = typer.Argument(..., help="the reference chunk (A)"),
+                     layer: Optional[str] = typer.Option(None, "--layer", help="the stable ground: a polygon layer of "
+                                                         "the free drawings (of A, else of B)"),
+                     area: Optional[Path] = typer.Option(None, "--area", help="the stable ground: polygons of a "
+                                                         "GeoPackage, GeoJSON or DXF file"),
+                     exclude: Optional[str] = typer.Option(None, "--exclude", help="ground left out: a polygon layer, "
+                                                           "or a file (.gpkg, .geojson, .json, .dxf)"),
+                     reject: float = typer.Option(3.0, "--reject", help="a common point further than this many "
+                                                  "medians of the others' residuals is left out"),
+                     apply: bool = typer.Option(False, "--apply", help="apply the transform to CHUNK and save"),
+                     as_json: Optional[Path] = typer.Option(None, "--json", help="write the report to this JSON file")):
+    """Place CHUNK on REFERENCE by a tie in plan and a height plane: the plan (a 2D similarity, leave-one-out, the
+    outliers left out) from the point ties between the two chunks, the heights from a plane fitted on the difference
+    of their DEMs over stable ground (the tilt of a GPS block included), one 4x4 transform. Nothing is changed
+    without --apply; then build the DEM and the orthophoto of CHUNK again."""
+    from .engine import plan_height
+    from .engine import ties as ties_mod
+
+    if layer is not None and area is not None:
+        raise typer.BadParameter("give --layer or --area, not both")
+    doc = Document.open(project)
+    cb, ca = _tie_chunk(doc, chunk), _tie_chunk(doc, reference)
+    where = {"layer": layer} if layer is not None else {"file": str(area)} if area is not None else None
+    try:
+        result = plan_height.measure(doc, cb, ca, area=where, exclude=exclude, reject=reject, progress=print_progress)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    typer.echo(plan_height.report_text(result))
+    if as_json is not None:
+        as_json.write_text(json.dumps(result, indent=1))
+        typer.echo(f"written {as_json}")
+    if not apply:
+        typer.echo("not applied (--apply to place the chunk)")
+        return
+    changed = plan_height.apply(doc, result)
+    doc.save()
+    stale = changed["stale_products"].get(cb.key)
+    typer.echo(f"applied to {cb.label}; project saved" + (f"; build again: {', '.join(stale)}" if stale else ""))
+
+
 @ties_app.command("heights")
 def ties_heights(project: Path,
                  as_json: bool = typer.Option(False, "--json", help="print the stable heights as JSON")):
@@ -5043,6 +5096,11 @@ def ties_auto(project: Path,
               same_group: bool = typer.Option(False, "--same-group", help="pair chunks of one group too"),
               accept: bool = typer.Option(False, "--accept", help="make the pairs proposed into ties and save"),
               max_ties: int = typer.Option(12, "--max-ties", help="ties per pair accepted, spread over the overlap"),
+              area: Optional[str] = typer.Option(None, "--area", help="match only inside this area (the stable "
+                                                 "ground): xmin,ymin,xmax,ymax in the system of the reference, a "
+                                                 "polygon layer of the free drawings, or a .gpkg/.geojson/.dxf file"),
+              min_matches: int = typer.Option(12, "--min-matches", help="matches that must agree for a pair (3 at "
+                                                                        "least)"),
               as_json: Optional[Path] = typer.Option(None, "--json", help="write the pairs and the results (with "
                                                                           "their points) to this JSON file")):
     """Automatic ties between chunks: the candidate pairs (overlap where the chunks are now), the matching of their
@@ -5054,6 +5112,17 @@ def ties_auto(project: Path,
     doc = Document.open(project)
     if source not in auto_ties.SOURCES:
         raise typer.BadParameter(f"use one of {', '.join(auto_ties.SOURCES)}", param_hint="--source")
+    if min_matches < 3:
+        raise typer.BadParameter("3 at least", param_hint="--min-matches")
+    where = None
+    if area:
+        parts = [p.strip() for p in area.split(",")]
+        try:
+            where = tuple(float(p) for p in parts) if len(parts) == 4 else area
+        except ValueError:
+            where = area  # a layer whose name has commas
+        if isinstance(where, tuple) and not (where[2] > where[0] and where[3] > where[1]):
+            raise typer.BadParameter("xmin,ymin,xmax,ymax", param_hint="--area")
     found = []
     if pairs:
         todo = []
@@ -5077,8 +5146,11 @@ def ties_auto(project: Path,
                 if p["candidate"] or (whole and (p["reason"] or {}).get("code") == "small_overlap")]
         if not todo:
             typer.echo("No pair to match (try --whole, or --pairs)")
-    results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
-                            progress=print_progress)
+    try:
+        results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
+                                progress=print_progress, area=where, min_matches=min_matches)
+    except (ValueError, FileNotFoundError) as exc:  # an area that is not one
+        _ties_error(exc)
     for r in results:
         typer.echo(auto_ties.report_text(r))
     if as_json is not None:

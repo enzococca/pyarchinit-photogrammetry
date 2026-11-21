@@ -877,7 +877,7 @@ def _write_model(chunk, mesh: Mesh, internal: np.ndarray, progress: Progress) ->
     if names:
         chunk._set_product("model_textured", data_dir / names[0])
     else:
-        chunk.products.pop("model_textured", None)
+        chunk._drop_product("model_textured")
     progress(1.0, "Model written")
     return {"pages": len(names), "size": size, "double": double}
 

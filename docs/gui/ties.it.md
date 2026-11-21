@@ -252,6 +252,26 @@ l'ordine solito è: prima legare i chunk in pianta (legami, *Applica*), poi prem
 (nessuna scelta: quelle in arancione) sono misurate di nuovo dove i chunk sono adesso, con gli stessi chunk, aree e
 tipo, e tengono nome e stato.
 
+## Pianta e piano
+
+Due rilievi a distanza di anni (un volo di drone con il suo GPS, un rilievo su target della stazione totale) hanno
+spesso pochi punti riconoscibili in entrambi - spigoli di case, giunti di una strada - e ampie zone di terreno che non
+sono cambiate. **Pianta e piano...** (sotto la tabella delle quote stabili) aggancia un chunk a un altro prendendo
+ciascuna cosa da ciò che la fissa:
+
+* la **pianta** dai legami fra i due chunk (almeno 3, fatti a mano, da una tabella o automatici): una similitudine 2D
+  (rotazione attorno alla verticale, scala, spostamento); ogni punto ha il suo residuo e il suo leave-one-out (dove lo
+  mettono gli altri), e il peggiore viene escluso finché il suo residuo supera tre volte la mediana degli altri (un
+  punto cliccato sulla pietra sbagliata);
+* le **quote** da un piano adattato alla differenza dei due DEM sul terreno stabile (un layer di poligoni, oppure
+  trovato da sé: pendenze basse, celle concordi), dopo aver spostato il chunk in pianta: lo scostamento e
+  l'inclinazione di un blocco GPS.
+
+Le due cose sono una sola trasformazione. La misura gira in background; il suo rapporto (scala, rotazione, RMS e
+leave-one-out della pianta, i punti esclusi, l'inclinazione in cm su 100 m e l'NMAD delle quote prima e dopo) compare
+con la domanda **Applica** / **Non applicare**. Applicata, il chunk si sposta (un passo di *Modifica > Annulla*);
+ricostruisci il suo DEM e la sua ortofoto. Da riga di comando: `ppg ties plan-height`.
+
 ## Capisaldi e picchetti
 
 Capisaldi, punti GNSS e i picchetti della quadrettatura dello scavo sono spesso nelle foto: una testa scura e rotonda
@@ -342,7 +362,9 @@ fare, … in corso, ✓ fatto, ! da rifare):
    mostra lo stesso terreno è **scartata**, in rosso, con il motivo (troppo pochi punti concordano, un accordo che dà
    anche il caso, punti su una linea). Scegli una riga per leggerne il rapporto in *Rapporto*. *Su tutto il raster*
    cerca su tutte le ortofoto, ovunque siano i chunk (due sistemi locali senza relazione, un GPS molto sbagliato): più
-   lento.
+   lento. *Area* limita l'abbinamento ai poligoni di un layer dei disegni liberi (la zona stabile: strade, case, non
+   gli scavi cambiati fra i rilievi): si legge solo il terreno al suo interno e ogni punto tenuto vi cade dentro.
+   *Punti concordi minimi* (predefinito 12) è quante corrispondenze devono concordare perché una coppia sia proposta.
 3. **Legami** - *Accetta*: le coppie proposte e spuntate diventano legami - al più *Legami per coppia* (predefinito 12)
    dei punti raffinati, distribuiti sulla sovrapposizione, con la precisione della stima (il suo RMS, almeno mezza
    cella), marker **auto N** nei due chunk. Un passo di *Modifica > Annulla*. Una coppia accettata di nuovo sostituisce
@@ -398,6 +420,8 @@ ppg ties check scavo.ppg --unknowns 2024=fixed,2025=plan [--robust] [--no-refere
 ppg ties solve scavo.ppg --unknowns 2024=fixed,2025=plan [--yes]
 ppg ties auto scavo.ppg [--chunks 2024,2025] [--pairs 2024:2025] [--source ortho|relief] [--margin 5] [--whole]
 ppg ties auto scavo.ppg --accept [--max-ties 12] [--json auto.json]   # le coppie proposte diventano legami
+ppg ties auto scavo.ppg --pairs 2024:2017 --area 470700,2574400,470900,2574600 [--min-matches 8]  # solo zona stabile
+ppg ties plan-height scavo.ppg 2017 2024 [--layer Stabile] [--exclude Scavo] [--apply]  # pianta dai legami, piano
 ppg ties solve scavo.ppg --unknowns 2024=fixed,voli2025=similarity    # il nome di un gruppo: i suoi chunk come un blocco
 ppg stakes find scavo.ppg 2025 capisaldi.csv [--crs EPSG:3004] [--radius 3] [--head 0.03,0.12] [--out prop.json]
 ppg stakes accept scavo.ppg 2025 prop.json --ids CS1,CS4 [--yes]   # o --agreeing: quelle confermate dalle foto

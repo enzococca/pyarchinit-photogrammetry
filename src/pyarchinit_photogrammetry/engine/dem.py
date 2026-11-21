@@ -1,6 +1,7 @@
 """Digital elevation model (GeoTIFF, float32, in the chunk CRS)."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,8 @@ from ..core import geometry, stamps
 from ..core.chunk import Chunk
 from ..core.pointcloud import NOISE_CLASSES
 from ..core.progress import Progress, as_progress
+
+log = logging.getLogger(__name__)
 
 NODATA = -32767.0
 
@@ -539,6 +542,75 @@ def _fit_grid(bounds, resolution: float, asked: bool) -> float:
     return fit
 
 
+EXTENT_PERCENTILES = (0.5, 99.5)  # the points that set the extent of a DEM, on each axis
+EXTENT_MARGIN = 0.1  # ... with this share of their size added on each side
+EXTENT_GAIN = 2.0  # clipped only when the whole box is more than this many times larger than the clipped one
+EXTENT_GAP = 0.25  # ... and only beyond a gap of this share of the size of the bulk of the points
+
+
+def _reach(values: np.ndarray, start: float, step: float, sign: int) -> float:
+    """From ``start`` outwards (``sign`` +1 up, -1 down) through the sorted ``values`` beyond it while no two
+    neighbours are more than ``step`` apart: where the points stop before the first gap."""
+    beyond = np.sort(values[values > start]) if sign > 0 else -np.sort(-values[values < start])
+    if not len(beyond):
+        return start
+    jumps = np.abs(np.diff(np.concatenate([[start], beyond])))
+    wide = np.flatnonzero(jumps > step)
+    last = (wide[0] if len(wide) else len(beyond)) - 1  # the last point before the first gap (-1: none)
+    return float(beyond[last]) if last >= 0 else start
+
+
+def _camera_footprint(cam: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The plan box of the camera centres ``cam`` ``(n, 2)`` without a stray one: from their middle half (the 25-75
+    percentiles) outwards on each side as far as the cameras go without a gap wider than that middle half, so that
+    one camera placed kilometres away (an exported orthophoto aligned among
+    the photos) does not widen the footprint."""
+    if len(cam) < 4:
+        return cam.min(axis=0), cam.max(axis=0)
+    lo, hi = np.percentile(cam, 25, axis=0), np.percentile(cam, 75, axis=0)
+    step = float(max((hi - lo).max(), 1e-12))
+    lo, hi = lo.copy(), hi.copy()
+    for axis in (0, 1):
+        lo[axis] = _reach(cam[:, axis], lo[axis], step, -1)
+        hi[axis] = _reach(cam[:, axis], hi[axis], step, +1)
+    return lo, hi
+
+
+def robust_extent(xy: np.ndarray, percentiles=EXTENT_PERCENTILES, margin: float = EXTENT_MARGIN,
+                  gain: float = EXTENT_GAIN, gap: float = EXTENT_GAP, cameras=None) -> tuple | None:
+    """The box ``(xmin, ymin, xmax, ymax)`` of the points ``xy`` without a few stray ones far away (Khutm,
+    2026-11-19: a few points kilometres off made the grid too large for the memory at the cell asked). Only a gap
+    clips: the ``percentiles`` of each axis with ``margin`` times their size added on each side (and the plan of the
+    ``cameras``, ``(n, 2)``, with the same margin - the ground of a flight is never stray - without a stray camera:
+    :func:`_camera_footprint`), then on each side the points
+    beyond as far as they go without a gap wider than ``gap`` times the larger size of the percentile box - a sparse
+    surround that reaches out continuously (the edges of a flight) is kept, what lies beyond a gap is not. None when
+    the box is not ``gain`` times smaller in area than the box of all the points (the extent as it was)."""
+    xy = np.asarray(xy, float)
+    if len(xy) < 20:
+        return None
+    lo = np.percentile(xy, percentiles[0], axis=0)
+    hi = np.percentile(xy, percentiles[1], axis=0)
+    size = np.maximum(hi - lo, 0.0)
+    pad = margin * size
+    lo, hi = lo - pad, hi + pad
+    if cameras is not None and len(cameras):
+        c_lo, c_hi = _camera_footprint(np.asarray(cameras, float)[:, :2])
+        cpad = margin * np.maximum(c_hi - c_lo, size)
+        lo, hi = np.minimum(lo, c_lo - cpad), np.maximum(hi, c_hi + cpad)
+    step = gap * float(max(size.max(), 1e-12))
+    for axis in (0, 1):
+        lo[axis] = _reach(xy[:, axis], lo[axis], step, -1)
+        hi[axis] = _reach(xy[:, axis], hi[axis], step, +1)
+    full_lo, full_hi = xy.min(axis=0), xy.max(axis=0)
+    lo, hi = np.maximum(lo, full_lo), np.minimum(hi, full_hi)
+    area = float(np.prod(np.maximum(hi - lo, 1e-12)))
+    full = float(np.prod(np.maximum(full_hi - full_lo, 1e-12)))
+    if full <= gain * area:
+        return None
+    return float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])
+
+
 def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "point_cloud", interpolate: bool = True,
               classes=None, progress: Progress | None = None, despike: bool = True,
               fill_voids: float | None = None, fill_voids_area: float | None = None) -> Path:
@@ -551,7 +623,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
     ensure_level(chunk)
     progress(0.05, "Collecting surface points")
     classes = None if classes is None else sorted({int(c) for c in classes})
-    asked, limited = resolution is not None, None
+    asked, limited, clipped = resolution is not None, None, None
     measured: list = []  # the cells with a height before the interpolation
     surface = model_surface(chunk) if source == "model" and classes is None else None
     if surface is not None:  # a large model: its points go on the grid block by block, never all in memory
@@ -577,7 +649,23 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
             whole = pts
         # with classes, the box of the whole cloud: a DEM of other classes on the same grid
         box = whole[:, 0].min(), whole[:, 1].min(), whole[:, 0].max(), whole[:, 1].max()
+        from .region import get_region
+
+        # a few stray points far away do not set the extent (a region set on the chunk decides by itself)
+        cams = [chunk.to_world(np.asarray(c.center, float)[None])[0, :2] for c in chunk.aligned_cameras]
+        robust = (robust_extent(whole[:, :2], cameras=np.array(cams, float).reshape(-1, 2))
+                  if get_region(chunk) is None else None)
         del whole
+        if robust is not None:
+            x0, y0, x1, y1 = robust
+            inside = (pts[:, 0] >= x0) & (pts[:, 0] <= x1) & (pts[:, 1] >= y0) & (pts[:, 1] <= y1)
+            clipped = {"box": [x0, y0, x1, y1], "points_left_out": int(len(pts) - inside.sum())}
+            pts, box = pts[inside], robust
+            msg = (f"{clipped['points_left_out']:,} points far from the others left out of the DEM: its extent is "
+                   f"{x1 - x0:.4g} x {y1 - y0:.4g} from ({x0:.10g}, {y0:.10g}), the 0.5-99.5 percentiles of the "
+                   "points with a margin, as far as the points go without a gap (set a region to choose it)")
+            log.info(msg)
+            progress(0.25, msg)
         fit = _fit_grid(box, resolution, asked)
         if fit != resolution:
             limited, resolution = resolution, fit
@@ -615,6 +703,8 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         chunk.meta["dem"]["voids_filled"] = voids
     if limited is not None:  # the resolution of the points, too fine for the memory
         chunk.meta["dem"]["memory_limited"] = limited
+    if clipped is not None:  # a few points far away left out of the extent
+        chunk.meta["dem"]["extent_clipped"] = clipped
     progress(1.0, f"DEM {out.shape[1]}x{out.shape[0]} px")
     return path
 

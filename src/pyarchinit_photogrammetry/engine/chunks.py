@@ -37,6 +37,7 @@ chunks should share the world frame (aligned or georeferenced in a CRS) before m
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from collections import Counter
@@ -52,6 +53,8 @@ from ..core.marker import Marker, Projection, ScaleBar
 from ..core.pointcloud import PointCloud
 from ..core.progress import Progress, as_progress
 from ..gnss.frames import Legacy
+
+log = logging.getLogger(__name__)
 
 # what converts points from the system of one chunk to another's: they carry no frame and epoch, and from or to ITRF2020
 # convert as gnss.frames.legacy_transform does (core.crs.transform_points with legacy, whose warning names them)
@@ -320,6 +323,57 @@ def _align_markers(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, di
                "max_error": max(r["error"] for r in res)}
 
 
+CAMERA_OUTLIER_FACTOR = 5.0  # a common photo further than this many median residuals from the robust fit is left out
+CAMERA_OUTLIER_FLOOR = 0.002  # ... and never closer than this share of the spread of the photos (RMS from their middle)
+CAMERA_OUTLIER_SAMPLES = 400  # triples of photos tried by the robust fit (all of them when there are fewer)
+
+
+def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
+                   factor: float = CAMERA_OUTLIER_FACTOR, samples: int = CAMERA_OUTLIER_SAMPLES,
+                   floor: float = CAMERA_OUTLIER_FLOOR, seed: int = 0) -> tuple[np.ndarray, bool]:
+    """Which of the corresponding points ``src`` -> ``dst`` a similarity can hold together, robust to a few absurd
+    ones (a photo placed kilometres away in its chunk: Khutm 2026-11-19, RMSE 206 m with it): the least median of
+    squares over triples of points (every triple up to ``samples``, else a random ``samples`` of them), then the
+    points within ``factor`` times the median residual of the best triple's fit (never less than ``floor`` times
+    the spread of ``dst``: the photos of a block are not equally well placed - obliques, edges), fitted again on
+    those and judged once more. Fewer than four points, points on a line, or a robust fit that keeps fewer than half of
+    them: all are kept and the check did not run. Returns ``(mask, ran)``."""
+    from itertools import combinations
+
+    src, dst = np.asarray(src, float), np.asarray(dst, float)
+    n = len(src)
+    keep = np.ones(n, bool)
+    if n < 4:
+        return keep, False
+    combos = list(combinations(range(n), 3)) if n * (n - 1) * (n - 2) // 6 <= samples else None
+    rng = np.random.default_rng(seed)
+    best, best_med = None, np.inf
+    for t in range(samples if combos is None else len(combos)):
+        idx = list(combos[t]) if combos is not None else list(rng.choice(n, 3, replace=False))
+        if not (_spread(src[idx], 1e-6) and _spread(dst[idx], 1e-6)):
+            continue
+        try:
+            m = geometry.umeyama(src[idx], dst[idx], with_scale=with_scale)
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        med = float(np.median(np.linalg.norm(geometry.apply(m, src) - dst, axis=1)))
+        if med < best_med:
+            best, best_med = m, med
+    if best is None:
+        return keep, False
+    span = float(np.sqrt(np.mean(np.sum((dst - dst.mean(0)) ** 2, axis=1))))
+    for _ in range(2):  # the triple's fit, then the fit on the photos it keeps
+        err = np.linalg.norm(geometry.apply(best, src) - dst, axis=1)
+        med = float(np.median(err))
+        tol = max(factor * med, floor * span)
+        inside = err <= tol
+        if inside.sum() < max(3, (n + 1) // 2) or not (_spread(src[inside]) and _spread(dst[inside])):
+            return np.ones(n, bool), False
+        keep = inside
+        best = geometry.umeyama(src[keep], dst[keep], with_scale=with_scale)
+    return keep, True
+
+
 def _align_cameras(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, dict]:
     pairs = common_cameras(ch, ref)
     if not pairs or (len(pairs) < 2 and not fix_scale):
@@ -327,16 +381,31 @@ def _align_cameras(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, di
                          f"(at least 2 are needed, 1 with a fixed scale)")
     src = [frame.pose(c) for c, _ in pairs]
     dst = [ref_frame.pose(r) for _, r in pairs]
-    W = pose_similarity(src, dst, with_scale=not fix_scale)
     labels = [c.label for c, _ in pairs]
-    res = _residuals(W, labels, np.array([p[:3, 3] for p in src]), np.array([p[:3, 3] for p in dst]))
+    cs, cd = np.array([p[:3, 3] for p in src]), np.array([p[:3, 3] for p in dst])
+    # a photo placed absurdly in one of the chunks (an exported orthophoto among the photos) is left out of the fit
+    keep, checked = robust_inliers(cs, cd, with_scale=not fix_scale)
+    if not checked and len(pairs) >= 4:
+        log.warning("%s: the %d photos in common with %s could not be checked for one out of place (they lie nearly on "
+                    "a line, or too few agree): all are used", ch.label, len(pairs), ref.label)
+    W = pose_similarity([s for s, k in zip(src, keep) if k], [d for d, k in zip(dst, keep) if k],
+                        with_scale=not fix_scale)
+    res = _residuals(W, labels, cs, cd)
     rot = W[:3, :3] / _scale_of(W)
-    for r, s, d in zip(res, src, dst):
+    for r, s, d, k in zip(res, src, dst, keep):
         delta = d[:3, :3].T @ rot @ s[:3, :3]
         r["angle_deg"] = float(np.degrees(np.arccos(np.clip((np.trace(delta) - 1) / 2, -1.0, 1.0))))
-    return W, {"method": "cameras", "correspondences": len(pairs), "residuals": res, "rmse": _rmse(res),
-               "max_error": max(r["error"] for r in res),
-               "max_angle_deg": max(r["angle_deg"] for r in res)}
+        if not k:
+            r["rejected"] = True
+    used = [r for r in res if not r.get("rejected")]
+    rejected = [r["label"] for r in res if r.get("rejected")]
+    if rejected:
+        log.warning("%s: %d photos in common with %s left out of the fit (too far from where the others put them): "
+                    "%s", ch.label, len(rejected), ref.label, ", ".join(rejected))
+    return W, {"method": "cameras", "correspondences": len(used), "residuals": res, "rmse": _rmse(used),
+               "max_error": max(r["error"] for r in used),
+               "max_angle_deg": max(r["angle_deg"] for r in used), "rejected": rejected,
+               "rmse_all": _rmse(res), "robust_check": bool(checked)}
 
 
 def registration_cloud(chunk: "Chunk", max_points: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray | None, str]:
@@ -888,6 +957,11 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
         ch.meta["chunk_alignment"] = {"reference": ref.label, "reference_key": ref.key, "method": info["method"],
                                       "rmse": info.get("rmse"), "correspondences": info.get("correspondences"),
                                       "fix_scale": bool(fix_scale)}
+        if info.get("rejected"):
+            ch.meta["chunk_alignment"]["rejected"] = list(info["rejected"])
+        for key in ("rmse_all", "robust_check"):  # the photos in common: every one, and whether they were checked
+            if key in info:
+                ch.meta["chunk_alignment"][key] = info[key]
     from ..core import free_drawings
 
     for ch in [ref] + [ch for ch, _T, _info in results]:  # the reference too: levelled above
@@ -1506,6 +1580,47 @@ def _copy_inputs(chunk: "Chunk", dup: "Chunk") -> None:
         cam.path = str(target)
 
 
+def _copy_sparse_model(chunk: "Chunk", dup: "Chunk", keys: set) -> bool:
+    """The COLMAP model of ``chunk`` into ``dup`` whole - the tie points with the observations of the photos, as the
+    alignment and the optimisations left them - so that an optimisation of the copy adjusts what the original would
+    (a model written again from the poses has its observations projected exactly: nothing to adjust, Khutm
+    2026-11-19). With some of the photos (``keys``) the others leave the model: their observations go, a point seen
+    by fewer than two of the photos kept goes with them, their poses are deregistered. False when ``chunk`` has no
+    model to copy, or its photos are not named in it."""
+    import pycolmap
+
+    from .sfm import _sfm_dir
+
+    src = chunk.product_path("reconstruction")
+    names = (chunk.meta.get("sfm") or {}).get("names") or {}
+    if src is None or not src.is_dir() or not names:
+        return False
+    rec = pycolmap.Reconstruction()
+    rec.read(str(src))
+    key_of = {v: int(k) for k, v in names.items()}
+    if not any(key_of.get(im.name) in keys for im in rec.images.values()):
+        return False
+    dropped = {iid for iid, im in rec.images.items() if key_of.get(im.name) not in keys}
+    for iid in dropped:
+        image = rec.images[iid]
+        for idx in list(image.get_observation_point2D_idxs()):
+            if image.points2D[idx].has_point3D():
+                rec.delete_observation(iid, idx)
+    for fid, frame in list(rec.frames.items()):
+        if frame.has_pose and all(int(d.id) in dropped for d in frame.data_ids
+                                  if d.sensor_id.type == pycolmap.SensorType.CAMERA):
+            rec.deregister_frame(fid)
+    out = _sfm_dir(dup) / "model"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    rec.write(str(out))
+    dup._set_product("reconstruction", out)
+    sfm_meta = dup.meta.setdefault("sfm", {})
+    sfm_meta["names"] = {k: v for k, v in names.items() if int(k) in keys}  # the photos of the copy, as written
+    sfm_meta.setdefault("image_root", (chunk.meta.get("sfm") or {}).get("image_root"))
+    return True
+
+
 def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | None = None,
                     keep_products: bool = False) -> "Chunk":
     """See :meth:`Document.duplicate_chunk`."""
@@ -1557,8 +1672,9 @@ def duplicate_chunk(doc: "Document", chunk: "Chunk", cameras=None, label: str | 
             out = dup.data_dir / src.name
             shutil.copy2(src, out)
             dup._set_product("tie_points", out)
-        if any(c.aligned for c in dup.cameras):
-            # the poses as a COLMAP model observing the tie points of the source: depth maps run on it
+        if any(c.aligned for c in dup.cameras) and not _copy_sparse_model(chunk, dup, keys):
+            # no model to copy (poses imported from elsewhere): the poses as a COLMAP model observing the tie
+            # points of the source - depth maps run on it
             write_reconstruction_from_chunk(dup, points=tie)
     except BaseException:
         doc.remove_chunk(dup)

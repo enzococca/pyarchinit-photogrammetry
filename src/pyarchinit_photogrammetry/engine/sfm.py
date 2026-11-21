@@ -1644,7 +1644,8 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     COLMAP database as pose priors, on metric axes less a round offset: the incremental mapper
     then holds the block to them (``use_prior_position``), as Metashape's alignment holds it to
     the camera references. ``previous`` (the report of an earlier call, when the database is
-    kept) keeps the same axes and only gives the photos without a prior theirs. Returns the
+    kept) keeps the same axes: the priors already there are updated in place, the photos without
+    one get theirs. Returns the
     report (``count``, ``crs``, ``offset``), None with fewer than three positions."""
     import pycolmap
 
@@ -1677,29 +1678,34 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     db = pycolmap.Database.open(str(db_path))
     try:
         images = db.read_all_images()
-        have = set()
-        if previous and db.num_pose_priors():  # the priors written before stay
-            for image in images:
-                try:
-                    if db.exists_pose_prior(image.image_id, True):
-                        have.add(image.name)
-                except Exception:  # pragma: no cover - the lookup differs between versions
-                    pass
+        # the priors written here before (a continuation keeps the database): COLMAP holds one per frame,
+        # so they are updated in place - a second insert fails ("SQLite error: constraint failed", Khutm)
+        have = {}
+        if previous and db.num_pose_priors():
+            for prior in db.read_all_pose_priors():
+                have[int(prior.corr_data_id.id)] = prior
         n = 0
         for image in images:
             got = by_name.get(image.name)
-            if got is None or image.name in have:
+            if got is None:
                 continue
             pos, acc = got
             acc = np.resize(np.maximum(np.asarray(acc, float).reshape(-1)[:3], 1e-3), 3)
-            prior = pycolmap.PosePrior(position=np.asarray(pos, float), position_covariance=np.diag(acc ** 2),
-                                       coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
-            prior.corr_data_id = image.data_id
-            db.write_pose_prior(prior)
+            old = have.get(int(image.data_id.id))
+            if old is not None:
+                old.position = np.asarray(pos, float)
+                old.position_covariance = np.diag(acc ** 2)
+                old.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
+                db.update_pose_prior(old)
+            else:
+                prior = pycolmap.PosePrior(position=np.asarray(pos, float), position_covariance=np.diag(acc ** 2),
+                                           coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
+                prior.corr_data_id = image.data_id
+                db.write_pose_prior(prior)
             n += 1
     finally:
         db.close()
-    return {"count": n + len(have), "crs": crs, "offset": [float(v) for v in offset]}
+    return {"count": n, "crs": crs, "offset": [float(v) for v in offset]}
 
 
 def _drop_masked_tie_points(chunk: Chunk, rec, names: dict[int, str]) -> int:
@@ -2603,6 +2609,13 @@ def _marker_report(chunk: Chunk) -> dict:
     return out
 
 
+# the formulations of optimize_cameras ("engine"): COLMAP's adjustment with the control points fixed in steps, or our
+# own (engine/bundle.py) with everything weighted by its accuracy; "auto" is the choice of the program
+OPTIMIZE_ENGINES = ("auto", "colmap", "ppg")
+# what "auto" runs: COLMAP's formulation until measurements say otherwise (native engine design 7.4: on the large set
+# only the steps reached the targets, one adjustment from metres away diverged; to be decided in milestone 3). The
+# native solver is already the default under "ppg" (bundle.NATIVE_BY_DEFAULT)
+OPTIMIZE_AUTO_ENGINE = "colmap"
 GNSS_MODES = ("auto", "off", "plain", "bias")  # the GNSS positions of the photos in optimize_cameras
 GNSS_PRIOR_MAX_M = 0.5  # m: positions this accurate (mean horizontal accuracy: fix, float, PPK) hold the block
 GNSS_PRIOR_SPREAD = 50.0  # the positions must spread across the block this many times their accuracy
@@ -2839,6 +2852,8 @@ def _keep_alignment(chunk: Chunk) -> dict | None:
         shutil.rmtree(kept, ignore_errors=True)
         raise
     return {"model": kept, "transform": np.array(chunk.transform, float), "crs": chunk.crs,
+            # the drawings, the stamps of the products, the marks of a followed frame: put back with the transform
+            "meta": copy.deepcopy({k: v for k, v in chunk.meta.items() if k != "sfm"}),
             "markers": {m.key: None if m.position is None else np.array(m.position, float) for m in chunk.markers},
             "rolling_shutter": {c.key: list(c.meta["rolling_shutter"]) for c in chunk.cameras
                                 if c.meta.get("rolling_shutter") is not None},
@@ -2851,6 +2866,8 @@ def _put_back(chunk: Chunk, kept: dict) -> float:
     calibration and the tie points from it, the georeference, the markers, the rolling-shutter velocities and the
     report of the optimisation before (none when there was none: a run that stopped leaves no report of its own).
     Returns its mean reprojection error."""
+    import copy
+
     model = chunk.product_path("reconstruction")
     bent = model.with_name(model.name + ".bent")
     shutil.rmtree(bent, ignore_errors=True)
@@ -2865,6 +2882,12 @@ def _put_back(chunk: Chunk, kept: dict) -> float:
     import_reconstruction(chunk, rec)
     chunk.transform = kept["transform"]
     chunk.crs = kept["crs"]
+    if "meta" in kept:
+        for key in [k for k in chunk.meta if k != "sfm"]:
+            if key not in kept["meta"]:
+                del chunk.meta[key]
+        for key, value in kept["meta"].items():
+            chunk.meta[key] = copy.deepcopy(value)
     for m in chunk.markers:
         if m.key in kept["markers"]:
             m.position = kept["markers"][m.key]
@@ -2994,8 +3017,16 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     return err
 
 
+def resolve_optimize_engine(engine: str) -> str:
+    """The formulation that :func:`optimize_cameras` runs for ``engine`` (:data:`OPTIMIZE_ENGINES`): ``"auto"`` is
+    :data:`OPTIMIZE_AUTO_ENGINE`; a word that is not an engine raises a ValueError that names them."""
+    if engine not in OPTIMIZE_ENGINES:
+        raise ValueError(f"unknown adjustment engine {engine!r}: auto, colmap or ppg")
+    return OPTIMIZE_AUTO_ENGINE if engine == "auto" else engine
+
+
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
-                     marker_weight: int = 4, progress: Progress | None = None, engine: str = "colmap",
+                     marker_weight: int = 4, progress: Progress | None = None, engine: str = "auto",
                      gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto") -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
@@ -3053,12 +3084,16 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     scipy where it cannot run), ``"native"`` the Levenberg-Marquardt of the core, ``"scipy"`` the
     reference; where the native one cannot run scipy adjusts the block and ``report["solver"]`` says
     so (``requested``, ``used``, ``fallback``, ``seconds``, ``linear_solver``). With
-    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work."""
+    ``engine="colmap"`` any ``solver`` but ``"auto"`` is refused before any work.
+
+    ``engine="auto"`` (the default, as for the other steps of the program): the formulation the program chooses,
+    :data:`OPTIMIZE_AUTO_ENGINE` (COLMAP's until measurements say otherwise; the native solver is the default under
+    ``"ppg"``), with the restrictions of the one it is; ``report["engine_choice"]`` says which was asked and which
+    ran."""
     from .bundle import SOLVERS
 
     progress = as_progress(progress)
-    if engine not in ("colmap", "ppg"):
-        raise ValueError(f"unknown adjustment engine {engine!r}: colmap or ppg")
+    requested, engine = engine, resolve_optimize_engine(engine)
     if gnss not in GNSS_MODES:
         raise ValueError(f"gnss: one of {', '.join(GNSS_MODES)}, not {gnss!r}")
     if engine == "colmap" and gnss in ("plain", "bias"):
@@ -3068,6 +3103,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     if engine == "colmap" and solver != "auto":
         raise ValueError(f"solver={solver!r} is an option of engine='ppg': COLMAP's adjustment has no solver to choose")
     before = {False: _gnss_offsets(chunk), True: _gnss_offsets(chunk, placed=True)}
+    frame = _internal_frame(chunk)  # where the cameras are in the internal frame, under which georeference
     kept = None
     try:
         kept = _keep_alignment(chunk) if before[False] else None  # what the safety net puts back
@@ -3082,6 +3118,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                                     hold_focal=hold_focal, solver=solver)
             else:
                 err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
+            chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})["engine_choice"] = {"requested": requested,
+                                                                                            "used": engine}
+            _follow_internal_frame(chunk, frame)
             if kept is not None:
                 err = _undo_a_bend(chunk, before, kept, err, progress)
         except BaseException as exc:  # stopped half way (an error, a cancel): the alignment of before comes back
@@ -3102,6 +3141,89 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
 
         free_drawings.follow(chunk)
     return err
+
+
+def _internal_frame(chunk: Chunk) -> dict:
+    """The camera centres of ``chunk`` in its internal frame ({key: centre}) with its georeference (``transform``,
+    ``crs``): what :func:`_follow_internal_frame` compares the adjusted block with."""
+    return {"centres": {c.key: np.asarray(c.center, float) for c in chunk.aligned_cameras},
+            "transform": np.array(chunk.transform, float), "crs": chunk.crs}
+
+
+def _follow_internal_frame(chunk: Chunk, frame: dict) -> dict | None:
+    """The georeference after an adjustment that nothing held in its frame: a free adjustment fixes the gauge of the
+    block in its own way and may scale, turn and move the whole block in the internal frame (Khutm, 2026-11-19: 7
+    times, with scipy and the native solver), while ``chunk.transform`` still maps the frame of before - the photos
+    out of place in the CRS until ``update_transform``. The transform follows the frame: composed with the
+    similarity that puts the adjusted camera centres back on those of before, so the cameras stay where they were
+    in the CRS whatever placed the chunk (references, ties, a transform set by hand). Nothing is done when the
+    adjustment fitted the georeference itself (control points, bars, our own adjustment with references), when the
+    GNSS positions of the photos held the block (their priors are in the internal frame) or on a chunk without a
+    georeference. ``report["internal_frame"]`` of the optimisation: ``scale`` (of the new frame against the old),
+    ``rotation_deg``, ``shift`` (RMS motion of the cameras in the units of the CRS, before the follow),
+    ``residual_m`` (RMS of the cameras off the similarity: what the adjustment changed in the shape of the block),
+    ``followed`` (the similarity differs from the identity by more than :data:`FRAME_FOLLOW_TOL` in scale, rotation
+    or shift relative to the block), ``stale_products``. Followed, the rasters in the coordinate system that were
+    current are stamped with the new transform (:func:`..core.stamps.rebase`: they did not move), the products in the
+    internal frame (:data:`INTERNAL_PRODUCTS`) are marked in ``chunk.meta["frame_moved"]`` until rebuilt and said in
+    the log. Returns it, None when nothing was judged."""
+    from ..core import free_drawings, geometry
+    from ..markers import gcp
+
+    old = frame["transform"]
+    if chunk.crs != frame["crs"] or not np.allclose(np.asarray(chunk.transform, float), old, rtol=0.0, atol=1e-12):
+        return None  # the adjustment fitted the georeference again
+    if np.allclose(old, np.eye(4), rtol=0.0, atol=1e-12):
+        return None  # no georeference: the internal frame is the chunk's own
+    report = chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})
+    if ((report.get("gnss") or {}).get("photos") or 0) > 0:
+        return None  # the positions of the photos held the block in its frame
+    keys = [c.key for c in chunk.aligned_cameras if c.key in frame["centres"]]
+    if len(keys) < 3:
+        return None
+    new = np.array([chunk.camera(k).center for k in keys], float)
+    was = np.array([frame["centres"][k] for k in keys], float)
+    if not (np.all(np.isfinite(new)) and np.all(np.isfinite(was))) or not gcp._non_collinear(was):
+        return None
+    m = geometry.umeyama(new, was, with_scale=True)  # new internal -> old internal
+    scale = float(np.cbrt(np.linalg.det(m[:3, :3])))
+    rot = m[:3, :3] / scale
+    angle = float(np.degrees(np.arccos(np.clip((np.trace(rot) - 1.0) / 2.0, -1.0, 1.0))))
+    to_world = float(np.cbrt(abs(np.linalg.det(old[:3, :3]))))
+    shift = float(np.sqrt(np.mean(np.sum((new - was) ** 2, axis=1)))) * to_world
+    residual = float(np.sqrt(np.mean(np.sum((geometry.apply(m, new) - was) ** 2, axis=1)))) * to_world
+    size = float(np.sqrt(np.mean(np.sum((was - was.mean(0)) ** 2, axis=1)))) or 1.0
+    middle = new.mean(0)
+    moved = float(np.linalg.norm(geometry.apply(m, middle[None])[0] - middle)) / size
+    followed = max(abs(scale - 1.0), float(np.radians(angle)), moved) > FRAME_FOLLOW_TOL
+    out = {"scale": 1.0 / scale, "rotation_deg": angle, "shift": shift, "residual_m": residual, "followed": followed}
+    report["internal_frame"] = out
+    if followed:
+        from ..core import stamps
+
+        free_drawings.follow(chunk)  # anything pending under the transform of before, first
+        chunk.transform = old @ m
+        drawings = chunk.meta.get("drawings")
+        if drawings:  # the model stays where it was in the CRS: so do the drawings on it
+            free_drawings.based(drawings, chunk.meta.get("alignment_id"), chunk.transform)
+        # the rasters in the coordinate system did not move either: those current before are current now
+        stamps.rebase(chunk, old, chunk.transform)
+        # the products in the internal frame are no longer in it: marked until rebuilt (Chunk._set_product)
+        inside = [name for name in INTERNAL_PRODUCTS if (chunk.products or {}).get(name)]
+        out["stale_products"] = inside
+        if inside:
+            mark = chunk.meta.setdefault("frame_moved", {"products": []})
+            mark["products"] = list(dict.fromkeys([*mark.get("products", []), *inside]))
+            log.warning("camera optimisation: the internal frame moved (scale %.4g): %s no longer match the "
+                        "cameras - build them again (dense cloud, model)", 1.0 / scale, ", ".join(inside))
+        log.info("camera optimisation: the block moved in its internal frame (scale %.4g, %.2f degrees, cameras "
+                 "%.3g CRS units) - the georeference follows it, the cameras stay where they were", 1.0 / scale,
+                 angle, shift)
+    return out
+
+
+FRAME_FOLLOW_TOL = 1e-6  # the frame is followed when its scale, rotation (rad) or shift (share of the block) moved more
+INTERNAL_PRODUCTS = ("point_cloud", "model", "model_textured")  # products written in the internal frame of the chunk
 
 
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,

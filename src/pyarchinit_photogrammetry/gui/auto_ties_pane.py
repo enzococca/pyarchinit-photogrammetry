@@ -105,6 +105,22 @@ class AutoTiesPanel(QWidget):
         opts.addStretch(1)
         lay.addLayout(opts)
 
+        limits = QHBoxLayout()
+        limits.addWidget(QLabel(tr("Area")))
+        self.area = QComboBox()
+        self.area.setToolTip(tr("Cerca i legami solo dentro i poligoni di un layer dei disegni liberi (la zona stabile: "
+                                "non gli scavi cambiati fra i rilievi)"))
+        limits.addWidget(self.area)
+        limits.addWidget(QLabel(tr("Punti concordi minimi")))
+        self.min_matches = QSpinBox()
+        self.min_matches.setRange(3, 1000)
+        self.min_matches.setValue(auto_ties.MIN_MATCHES)
+        self.min_matches.setToolTip(tr("Quante corrispondenze devono concordare perché una coppia sia proposta"))
+        limits.addWidget(self.min_matches)
+        limits.addStretch(1)
+        lay.addLayout(limits)
+        self.fill_areas()
+
         self.table = QTableWidget(0, len(self.COLS))
         self.table.setHorizontalHeaderLabels([tr("Usa"), tr("Coppia"), tr("Sovrapposizione"), tr("Corrispondenze"),
                                               tr("Concordi"), tr("Raffinati"), tr("Rotazione (°)"), tr("Scala (ppm)"),
@@ -159,6 +175,25 @@ class AutoTiesPanel(QWidget):
         ok = any(r.ok for r in self.results.values())
         for b, on in ((self.b_pairs, True), (self.b_match, bool(self.pairs)), (self.b_accept, ok)):
             b.setEnabled(on and not self.busy)
+
+    def fill_areas(self) -> None:
+        """The choices of the area: the whole overlap, then every polygon layer of the free drawings of the chunks."""
+        from ..core import free_drawings
+
+        current = self.area.currentData()
+        names = []
+        for chunk in self.doc.chunks if self.doc is not None else []:
+            for layer in free_drawings.layers(chunk):
+                if layer["name"] not in names and free_drawings.polygons_in_world(chunk, layer["name"]):
+                    names.append(layer["name"])
+        self.area.blockSignals(True)
+        self.area.clear()
+        self.area.addItem(tr("Tutta la sovrapposizione"), None)
+        for name in names:
+            self.area.addItem(name, name)
+        i = self.area.findData(current) if current is not None else 0
+        self.area.setCurrentIndex(max(0, i))
+        self.area.blockSignals(False)
 
     def follow(self) -> None:
         """The chunks changed (moved, added, removed): a matching done before no longer holds."""
@@ -261,6 +296,7 @@ class AutoTiesPanel(QWidget):
         """Step 1 in the worker. Returns whether it started."""
         doc = self.doc
         margin = float(self.margin.value())
+        self.fill_areas()
 
         def work(p):
             return auto_ties.find_pairs(doc, margin=margin, progress=p)
@@ -293,10 +329,21 @@ class AutoTiesPanel(QWidget):
         doc = self.doc
         source = self.source.currentData()
         margin = None if self.whole.isChecked() else float(self.margin.value())
+        area = self.area.currentData()
+        if area is not None:
+            from ..core import free_drawings
+
+            if not any(free_drawings.polygons_in_world(ch, area) for ch in doc.chunks):
+                self.window._warn(tr("Il layer «{0}» scelto come area non ha più poligoni: disegnane o scegli un'altra "
+                                     "area (nessun abbinamento fatto).", area))
+                self.fill_areas()
+                return False
+            area = {"layer": area}
+        least = int(self.min_matches.value())
         placed = placement(doc)
 
         def work(p):
-            return auto_ties.run(doc, todo, source=source, margin=margin, progress=p)
+            return auto_ties.run(doc, todo, source=source, margin=margin, progress=p, area=area, min_matches=least)
 
         def done(results):
             if self._gone(doc):

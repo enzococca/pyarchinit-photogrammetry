@@ -150,7 +150,9 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
                                       fill_holes=fill, report=report)
         chunk.meta["model"] = {"source": source, "surface": surface, "classes": None,
                                **_height_field_report(chunk, report, fill_holes)}
-        return _save_model(chunk, mesh, progress)
+        mesh = _save_model(chunk, mesh, progress)
+        _rebuilt_model(chunk, source)
+        return mesh
     pc = chunk.point_cloud if source == "point_cloud" else chunk.tie_points
     if pc is not None and (classes is not None or np.isin(pc.classification, NOISE_CLASSES).any()):
         pc = pc.subset(pc.class_mask(classes, exclude=NOISE_CLASSES))  # noise never makes a surface
@@ -183,7 +185,9 @@ def build_model(chunk: Chunk, source: str = "point_cloud", surface: str = "arbit
     chunk.meta["model"] = {"source": source, "surface": surface,
                            "classes": None if classes is None else sorted({int(c) for c in classes}),
                            **_height_field_report(chunk, report, fill_holes)}
-    return _save_model(chunk, mesh, progress)
+    mesh = _save_model(chunk, mesh, progress)
+    _rebuilt_model(chunk, source)
+    return mesh
 
 
 def _height_field_report(chunk: Chunk, report: dict, fill_holes: float | None) -> dict:
@@ -240,9 +244,19 @@ def _save_model(chunk: Chunk, mesh, progress: Progress):
     chunk._before_product_write("model")
     mesh.export(str(path))
     chunk._set_product("model", path)
-    chunk.products.pop("model_textured", None)
+    chunk._drop_product("model_textured")
     progress(1.0, f"Mesh: {len(mesh.faces):,} faces")
     return mesh
+
+
+def _rebuilt_model(chunk: Chunk, source: str) -> bool:
+    """The model just built from ``source`` is in the internal frame of now - unless it was built from a dense cloud
+    still marked as left in an earlier one (:meth:`.Chunk._frame_moved`), which it then stays like. Returns whether
+    its mark was taken away."""
+    if source == "point_cloud" and "point_cloud" in chunk._frame_moved():
+        return False
+    chunk._rebuilt("model")
+    return True
 
 
 class PoissonFailed(RuntimeError):

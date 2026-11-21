@@ -347,7 +347,7 @@ def test_cli_optimize_gnss_option(tmp_path, monkeypatch):
         return 0.5
 
     monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
-    for args, engine, gnss in ((["--gnss", "off"], "colmap", "off"), ([], "colmap", "auto"),
+    for args, engine, gnss in ((["--gnss", "off"], "auto", "off"), ([], "auto", "auto"),
                                (["--engine", "ppg"], "ppg", "auto"),
                                (["--engine", "ppg", "--gnss", "bias"], "ppg", "bias"),
                                (["--engine", "ppg", "--gnss", "plain"], "ppg", "plain")):
@@ -741,3 +741,235 @@ def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
     english = rows(ch, "en")
     assert [label for label, _value in english] == ["Reprojection error (px)", "Undone by the safety net"]
     assert english[1][1] == "yes" and float(english[0][1]) == pytest.approx(kept, abs=1e-3)
+
+
+def _world_centres(ch) -> np.ndarray:
+    """The camera centres in the CRS of the chunk, in the order of the cameras."""
+    return np.array([ch.to_world(c.center) for c in ch.cameras], float)
+
+
+def _drift(rec, scale: float = 7.0) -> None:
+    """What a free adjustment can do to the gauge of a block (Khutm, 2026-11-19: 7 times): the whole block scaled,
+    turned and moved in its internal frame, its shape kept."""
+    turn = pycolmap.Rotation3d(np.array([0.0, 0.0, np.sin(0.15), np.cos(0.15)]))  # x, y, z, w: 17 degrees
+    rec.transform(pycolmap.Sim3d(scale, turn, np.array([3.0, -2.0, 1.5])))
+
+
+def _tiny(rec) -> None:
+    """A drift far below anything that matters: a scale of 1 + 1e-8."""
+    rec.transform(pycolmap.Sim3d(1.0 + 1e-8, pycolmap.Rotation3d(np.array([0.0, 0.0, 0.0, 1.0])), np.zeros(3)))
+
+
+def test_a_negligible_drift_is_not_followed(tmp_path, monkeypatch):
+    """A frame that moved by numerical noise (a scale of 1 + 1e-8) is not followed: the transform and every stamp
+    stay as they were."""
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    transform = ch.transform.copy()
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _tiny(rec))
+    ch.optimize_cameras()
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["followed"] is False
+    assert np.array_equal(ch.transform, transform)
+
+
+def test_products_after_a_followed_frame(tmp_path, monkeypatch, caplog):
+    """When the georeference follows the frame, the products in the coordinate system did not move: those that were
+    current are stamped with the new transform (current still), one already stale stays stale; the products in the
+    internal frame (dense cloud, model) are no longer in it: marked, said in the log, the mark gone once rebuilt."""
+    import logging
+
+    from pyarchinit_photogrammetry.core import stamps
+
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    old = ch.transform.copy()
+    for name in ("dem", "orthomosaic", "point_cloud", "model"):
+        ch.products[name] = f"{name}.dat"
+    stamps.stamp(ch, "dem")
+    ch.meta["built_in"]["orthomosaic"] = old.tolist()
+    ch.meta["built_in"]["orthomosaic"][0][3] += 5.0  # built in another transform: stale
+    ch.meta["relief"] = {"hillshade": stamps.stamp_entry(ch, {"file": "relief.tif"})}
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    with caplog.at_level(logging.WARNING):
+        ch.optimize_cameras()
+    assert not np.allclose(ch.transform, old)
+    stale = {x["product"] for x in stamps.stale_products(ch)}
+    assert "dem" not in stale and "hillshade" not in stale and "orthomosaic" in stale
+    assert np.allclose(ch.meta["built_in"]["dem"], ch.transform)
+    assert sorted(ch.meta["frame_moved"]["products"]) == ["model", "point_cloud"]
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["stale_products"] == ["point_cloud", "model"]
+    assert any("dense cloud" in r.getMessage() or "point_cloud" in r.getMessage() for r in caplog.records)
+    ch._set_product("point_cloud", ch.data_dir / "point_cloud.ply")  # an edit in place (cleaned): still stale
+    assert sorted(ch.meta["frame_moved"]["products"]) == ["model", "point_cloud"]
+    ch._rebuilt("point_cloud")  # built again from the alignment of now
+    assert ch.meta["frame_moved"]["products"] == ["model"]
+    ch._rebuilt("model")
+    assert "frame_moved" not in ch.meta
+
+
+def test_the_mark_of_a_moved_frame_follows_the_products(tmp_path, monkeypatch):
+    """The mark of a product left in an old internal frame stays across edits in place, goes with a product taken
+    away, and goes when the builders make the product again from the alignment of now - the model built from a dense
+    cloud still marked stays marked, as does the texture of a marked model."""
+    from pyarchinit_photogrammetry.engine import meshing, texturing
+
+    doc, ch = _rtk_block(tmp_path)
+    for name in ("point_cloud", "model", "model_textured"):
+        ch.products[name] = f"{name}.dat"
+    ch.meta["frame_moved"] = {"products": ["point_cloud", "model", "model_textured"]}
+    ch._drop_product("model_textured")
+    assert "model_textured" not in ch.products and ch.meta["frame_moved"]["products"] == ["point_cloud", "model"]
+    assert meshing._rebuilt_model(ch, "point_cloud") is False  # from a cloud still in the old frame
+    assert ch.meta["frame_moved"]["products"] == ["point_cloud", "model"]
+    assert meshing._rebuilt_model(ch, "tie_points") is True
+    assert ch.meta["frame_moved"]["products"] == ["point_cloud"]
+    ch.meta["frame_moved"]["products"] += ["model", "model_textured"]
+    assert texturing._rebuilt_texture(ch) is False  # on a model still in the old frame
+    ch._rebuilt("model")
+    assert texturing._rebuilt_texture(ch) is True and ch.meta["frame_moved"]["products"] == ["point_cloud"]
+
+
+def test_an_undone_bend_after_a_followed_frame_puts_the_drawings_back(tmp_path, monkeypatch):
+    """A free adjustment that bends the block (the safety net undoes it) after the georeference followed its frame:
+    the free drawings come back with their basis of before, where they were."""
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    doc, ch = _rtk_block(tmp_path)
+    free_drawings.add(ch, "line", [[500000.0, 4500000.0, 60.0], [500010.0, 4500000.0, 60.0]])
+    drawings = json_copy(ch.meta["drawings"])
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: (_drift(rec, 1.5), _dome(rec)))
+    ch.optimize_cameras(gnss="off")
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["reverted"] is True and rep["undone"]["internal_frame"]["followed"] is True
+    assert ch.meta["drawings"] == drawings
+
+
+def json_copy(value):
+    import json
+
+    return json.loads(json.dumps(value))
+
+
+def test_a_drifting_free_adjustment_leaves_the_cameras_in_place(tmp_path, monkeypatch):
+    """An optimisation without fixed points on photos with GPS of the drone (5 m: nothing holds the block) whose
+    adjustment scales and moves the whole block in its internal frame (Khutm: 7 times) keeps the georeference: the
+    chunk transform follows the new internal frame, the cameras stay where they were in the CRS and the report says
+    by how much the frame changed (without it the photos were out of place until ``update_transform``)."""
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(ch)
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    ch.optimize_cameras()
+    assert np.abs(_world_centres(ch) - before).max() < 1e-6
+    frame = ch.meta["sfm"]["optimize"]["internal_frame"]
+    assert frame["scale"] == pytest.approx(7.0, rel=1e-6) and frame["followed"] is True
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_our_free_adjustment_keeps_the_georeference(tmp_path, monkeypatch, solver):
+    """The same through our own adjustment (scipy and the native solver): the block scaled 7 times in its internal
+    frame by the adjustment, the cameras in the CRS where the same adjustment without the drift puts them (within a
+    millimetre) and within a few centimetres of where they were (the shape the adjustment refined)."""
+    from pyarchinit_photogrammetry.engine import bundle
+
+    _doc, plain = _rtk_block(tmp_path / "plain", accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(plain)
+    plain.optimize_cameras(engine="ppg", solver=solver)
+    expected = _world_centres(plain)
+    assert np.abs(expected - before).max() < 0.05
+
+    _doc, ch = _rtk_block(tmp_path / "drift", accuracy=(5.0, 5.0, 10.0), status=None)
+    real = bundle.write_back
+
+    def drifted(chunk, rec, ids, res):
+        real(chunk, rec, ids, res)
+        _drift(rec)
+
+    monkeypatch.setattr(bundle, "write_back", drifted)
+    ch.optimize_cameras(engine="ppg", solver=solver)
+    assert np.abs(_world_centres(ch) - expected).max() < 1e-3
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["scale"] == pytest.approx(7.0, rel=1e-3)
+
+
+def test_colmaps_free_adjustment_keeps_the_cameras_in_the_crs(tmp_path):
+    """COLMAP's real free adjustment of the synthetic block moves it in its internal frame (its own gauge: cameras up
+    to 45 cm from where they were); the georeference follows, the cameras in the CRS within centimetres (the shape
+    the adjustment refined: the free adjustment lets a flat block curve a little). A chunk with RTK fixes holding the
+    block keeps its transform as it was."""
+    doc, ch = _rtk_block(tmp_path / "gps", accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(ch)
+    ch.optimize_cameras()
+    assert np.abs(_world_centres(ch) - before).max() < 0.1
+    frame = ch.meta["sfm"]["optimize"]["internal_frame"]
+    assert frame["followed"] is True and frame["residual_m"] < 0.05 and frame["shift"] > frame["residual_m"]
+
+    doc, ch = _rtk_block(tmp_path / "rtk")
+    transform = ch.transform.copy()
+    ch.optimize_cameras()
+    assert "internal_frame" not in ch.meta["sfm"]["optimize"] and np.array_equal(ch.transform, transform)
+
+
+def _observations(ch) -> int:
+    rec = sfm.load_reconstruction(ch)
+    return sum(p.track.length() for p in rec.points3D.values())
+
+
+def test_a_duplicate_carries_the_tie_points_and_their_observations(tmp_path):
+    """A duplicate of a chunk carries its sparse model whole - the tie points with the observations of the photos -
+    so that an optimisation of the copy adjusts what the original would (Khutm, 2026-11-19: the copy was written from
+    the poses, the observations projected exactly, and its optimisation stopped at 1 iteration with 0.000 px). With
+    some of the photos the copy keeps their observations, the points still seen by two of them."""
+    doc, ch = _rtk_block(tmp_path)
+    dup = doc.duplicate_chunk(ch)
+    assert _observations(dup) == _observations(ch)
+    assert _mean_reprojection_error(dup) == pytest.approx(_mean_reprojection_error(ch), rel=1e-9)
+    assert _mean_reprojection_error(dup) > 0.3  # half a pixel of noise: not projections written exactly
+    assert dup.optimize_cameras(gnss="off") == pytest.approx(ch.optimize_cameras(gnss="off"), rel=1e-6)
+
+    doc, ch = _rtk_block(tmp_path / "subset")
+    some = ch.cameras[:16]  # the first two strips
+    part = doc.duplicate_chunk(ch, some)
+    rec = sfm.load_reconstruction(part)
+    names = {ch.meta["sfm"]["names"][str(c.key)] for c in some}
+    assert {im.name for im in rec.images.values() if im.has_pose} == names
+    assert all(p.track.length() >= 2 for p in rec.points3D.values())
+    assert all(rec.images[el.image_id].name in names for p in rec.points3D.values() for el in p.track.elements)
+    assert _mean_reprojection_error(part) > 0.3
+    assert part.optimize_cameras(gnss="off") > 0.3
+
+
+def test_the_engine_of_the_optimisation_is_auto_by_default(tmp_path, monkeypatch):
+    """``engine="auto"`` is the default of the optimisation, as of the other steps of the program: the formulation
+    the program chooses (:data:`sfm.OPTIMIZE_AUTO_ENGINE`; the native solver is the default of ``"ppg"`` since its
+    gate), recorded in the report with the one asked for; the options of our own adjustment are refused under
+    ``auto`` while it is COLMAP's, as under ``colmap``; a word that is not an engine is refused."""
+    import inspect
+
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    assert inspect.signature(Chunk.optimize_cameras).parameters["engine"].default == "auto"
+    assert inspect.signature(sfm.optimize_cameras).parameters["engine"].default == "auto"
+    assert sfm.resolve_optimize_engine("auto") == sfm.OPTIMIZE_AUTO_ENGINE
+    assert sfm.resolve_optimize_engine("ppg") == "ppg" and sfm.resolve_optimize_engine("colmap") == "colmap"
+    with pytest.raises(ValueError, match="auto, colmap or ppg"):
+        sfm.resolve_optimize_engine("native")
+    doc, ch = _rtk_block(tmp_path)
+    ch.optimize_cameras()
+    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": "auto", "used": sfm.OPTIMIZE_AUTO_ENGINE}
+    ch.optimize_cameras(engine="ppg")
+    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": "ppg", "used": "ppg"}
+    if sfm.OPTIMIZE_AUTO_ENGINE == "colmap":
+        with pytest.raises(ValueError, match="engine='ppg'"):
+            ch.optimize_cameras(gnss="plain")
+
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    seen = []
+    def optimise(self, **kwargs):
+        seen.append(kwargs)
+        self.meta.setdefault("sfm", {})["optimize"] = {"reprojection_error": 0.5}
+        return 0.5
+
+    monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
+    result = CliRunner().invoke(app, ["optimize", str(doc.path)])
+    assert result.exit_code == 0, result.output
+    assert seen[-1]["engine"] == "auto"
