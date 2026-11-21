@@ -148,3 +148,20 @@ def test_a_few_far_points_do_not_widen_the_dem(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: np.vstack([pts, far]))
     with pytest.raises(MemoryError, match="coarser resolution"):
         ch.build_dem(resolution=0.05, source="point_cloud")
+
+
+def test_a_sparse_genuine_surround_keeps_the_extent():
+    """Only a gap clips: a dense centre with a sparse surround that reaches out without a gap (the edges of a flight,
+    a few points over the fields around) keeps its full extent; three points 10 km away beyond a gap are clipped;
+    a surround within the footprint of the aligned cameras is kept whatever its gaps."""
+    rng = np.random.default_rng(0)
+    centre = rng.uniform(0.0, 20.0, (200_000, 2))
+    surround = rng.uniform(-60.0, 80.0, (600, 2))  # 0.3 % of the points over 49 times the area
+    xy = np.vstack([centre, surround])
+    assert dem_engine.robust_extent(xy) is None
+    far = np.vstack([xy, [[10_000.0, 5.0], [10_001.0, 6.0], [10_002.0, 7.0]]])
+    box = dem_engine.robust_extent(far)
+    assert box is not None and box[0] <= -59.0 and box[1] <= -59.0 and 79.0 <= box[2] < 100.0 and box[3] >= 79.0
+    lonely = np.vstack([centre, [[200.0, 10.0], [201.0, 11.0], [202.0, 12.0]]])  # beyond a gap, near the block
+    assert dem_engine.robust_extent(lonely) is not None
+    assert dem_engine.robust_extent(lonely, cameras=np.array([[0.0, 0.0], [210.0, 20.0]])) is None

@@ -545,23 +545,48 @@ def _fit_grid(bounds, resolution: float, asked: bool) -> float:
 EXTENT_PERCENTILES = (0.5, 99.5)  # the points that set the extent of a DEM, on each axis
 EXTENT_MARGIN = 0.1  # ... with this share of their size added on each side
 EXTENT_GAIN = 2.0  # clipped only when the whole box is more than this many times larger than the clipped one
+EXTENT_GAP = 0.25  # ... and only beyond a gap of this share of the size of the bulk of the points
+
+
+def _reach(values: np.ndarray, start: float, step: float, sign: int) -> float:
+    """From ``start`` outwards (``sign`` +1 up, -1 down) through the sorted ``values`` beyond it while no two
+    neighbours are more than ``step`` apart: where the points stop before the first gap."""
+    beyond = np.sort(values[values > start]) if sign > 0 else -np.sort(-values[values < start])
+    if not len(beyond):
+        return start
+    jumps = np.abs(np.diff(np.concatenate([[start], beyond])))
+    wide = np.flatnonzero(jumps > step)
+    last = (wide[0] if len(wide) else len(beyond)) - 1  # the last point before the first gap (-1: none)
+    return float(beyond[last]) if last >= 0 else start
 
 
 def robust_extent(xy: np.ndarray, percentiles=EXTENT_PERCENTILES, margin: float = EXTENT_MARGIN,
-                  gain: float = EXTENT_GAIN) -> tuple | None:
+                  gain: float = EXTENT_GAIN, gap: float = EXTENT_GAP, cameras=None) -> tuple | None:
     """The box ``(xmin, ymin, xmax, ymax)`` of the points ``xy`` without a few stray ones far away (Khutm,
-    2026-11-19: a few points kilometres off made the grid too large for the memory at the cell asked): the
-    ``percentiles`` of each axis with ``margin`` times their size added on each side, within the box of all the
-    points. None when it is not ``gain`` times smaller in area than the box of all the points (nothing far
-    away: the extent as it was)."""
+    2026-11-19: a few points kilometres off made the grid too large for the memory at the cell asked). Only a gap
+    clips: the ``percentiles`` of each axis with ``margin`` times their size added on each side (and the plan of the
+    ``cameras``, ``(n, 2)``, with the same margin: the ground of a flight is never stray), then on each side the points
+    beyond as far as they go without a gap wider than ``gap`` times the larger size of the percentile box - a sparse
+    surround that reaches out continuously (the edges of a flight) is kept, what lies beyond a gap is not. None when
+    the box is not ``gain`` times smaller in area than the box of all the points (the extent as it was)."""
     xy = np.asarray(xy, float)
     if len(xy) < 20:
         return None
     lo = np.percentile(xy, percentiles[0], axis=0)
     hi = np.percentile(xy, percentiles[1], axis=0)
-    pad = margin * np.maximum(hi - lo, 0.0)
+    size = np.maximum(hi - lo, 0.0)
+    pad = margin * size
+    lo, hi = lo - pad, hi + pad
+    if cameras is not None and len(cameras):
+        cam = np.asarray(cameras, float)[:, :2]
+        cpad = margin * np.maximum(cam.max(axis=0) - cam.min(axis=0), size)
+        lo, hi = np.minimum(lo, cam.min(axis=0) - cpad), np.maximum(hi, cam.max(axis=0) + cpad)
+    step = gap * float(max(size.max(), 1e-12))
+    for axis in (0, 1):
+        lo[axis] = _reach(xy[:, axis], lo[axis], step, -1)
+        hi[axis] = _reach(xy[:, axis], hi[axis], step, +1)
     full_lo, full_hi = xy.min(axis=0), xy.max(axis=0)
-    lo, hi = np.maximum(lo - pad, full_lo), np.minimum(hi + pad, full_hi)
+    lo, hi = np.maximum(lo, full_lo), np.minimum(hi, full_hi)
     area = float(np.prod(np.maximum(hi - lo, 1e-12)))
     full = float(np.prod(np.maximum(full_hi - full_lo, 1e-12)))
     if full <= gain * area:
@@ -610,7 +635,9 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
         from .region import get_region
 
         # a few stray points far away do not set the extent (a region set on the chunk decides by itself)
-        robust = robust_extent(whole[:, :2]) if get_region(chunk) is None else None
+        cams = [chunk.to_world(np.asarray(c.center, float)[None])[0, :2] for c in chunk.aligned_cameras]
+        robust = (robust_extent(whole[:, :2], cameras=np.array(cams, float).reshape(-1, 2))
+                  if get_region(chunk) is None else None)
         del whole
         if robust is not None:
             x0, y0, x1, y1 = robust
@@ -619,7 +646,7 @@ def build_dem(chunk: Chunk, resolution: float | None = None, source: str = "poin
             pts, box = pts[inside], robust
             msg = (f"{clipped['points_left_out']:,} points far from the others left out of the DEM: its extent is "
                    f"{x1 - x0:.4g} x {y1 - y0:.4g} from ({x0:.10g}, {y0:.10g}), the 0.5-99.5 percentiles of the "
-                   "points with a margin (set a region to choose it)")
+                   "points with a margin, as far as the points go without a gap (set a region to choose it)")
             log.info(msg)
             progress(0.25, msg)
         fit = _fit_grid(box, resolution, asked)
