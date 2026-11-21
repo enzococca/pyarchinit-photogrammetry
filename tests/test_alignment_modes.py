@@ -359,6 +359,24 @@ def test_photos_added_to_an_alignment_held_by_gps(scene_dir, scene, tmp_path):
     assert again["count"] == len(photos) and again["offset"] == first["offset"]
 
 
+@pytest.mark.parametrize("engine", ["colmap", "ppg"])
+def test_optimisation_of_a_block_placed_by_its_gps_keeps_it_in_place(scene_dir, scene, tmp_path, engine):
+    """The synthetic trench aligned with the GPS of a drone (5 m: nothing holds the block in the optimisation, Khutm
+    2026-11-19) and optimised, with COLMAP and with our adjustment: the cameras stay where they were in the CRS (the
+    georeference follows the internal frame of the adjusted block), within a centimetre."""
+    _doc, ch = _project(scene_dir, tmp_path)
+    _with_gps(ch, scene)
+    for cam in ch.cameras:
+        cam.reference.accuracy = [5.0, 5.0, 10.0]
+    ch.match_photos(quality="high")
+    assert ch.align_cameras(mapper="incremental") == len(ch.cameras)
+    before = {c.key: ch.to_world(c.center) for c in ch.aligned_cameras}
+    ch.optimize_cameras(engine=engine, use_markers=False)
+    after = {c.key: ch.to_world(c.center) for c in ch.aligned_cameras}
+    assert set(after) == set(before)
+    assert max(np.linalg.norm(after[k] - before[k]) for k in before) < 0.01
+
+
 def test_photos_added_to_an_alignment(scene_dir, tmp_path):
     photos = sorted((scene_dir / "photos").glob("*.jpg"))
     _doc, ch = _project(scene_dir, tmp_path, photos[:14])

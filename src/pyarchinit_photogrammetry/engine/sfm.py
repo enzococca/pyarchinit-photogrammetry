@@ -3074,6 +3074,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     if engine == "colmap" and solver != "auto":
         raise ValueError(f"solver={solver!r} is an option of engine='ppg': COLMAP's adjustment has no solver to choose")
     before = {False: _gnss_offsets(chunk), True: _gnss_offsets(chunk, placed=True)}
+    frame = _internal_frame(chunk)  # where the cameras are in the internal frame, under which georeference
     kept = None
     try:
         kept = _keep_alignment(chunk) if before[False] else None  # what the safety net puts back
@@ -3088,6 +3089,7 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                                     hold_focal=hold_focal, solver=solver)
             else:
                 err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
+            _follow_internal_frame(chunk, frame)
             if kept is not None:
                 err = _undo_a_bend(chunk, before, kept, err, progress)
         except BaseException as exc:  # stopped half way (an error, a cancel): the alignment of before comes back
@@ -3108,6 +3110,66 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
 
         free_drawings.follow(chunk)
     return err
+
+
+def _internal_frame(chunk: Chunk) -> dict:
+    """The camera centres of ``chunk`` in its internal frame ({key: centre}) with its georeference (``transform``,
+    ``crs``): what :func:`_follow_internal_frame` compares the adjusted block with."""
+    return {"centres": {c.key: np.asarray(c.center, float) for c in chunk.aligned_cameras},
+            "transform": np.array(chunk.transform, float), "crs": chunk.crs}
+
+
+def _follow_internal_frame(chunk: Chunk, frame: dict) -> dict | None:
+    """The georeference after an adjustment that nothing held in its frame: a free adjustment fixes the gauge of the
+    block in its own way and may scale, turn and move the whole block in the internal frame (Khutm, 2026-11-19: 7
+    times, with scipy and the native solver), while ``chunk.transform`` still maps the frame of before - the photos
+    out of place in the CRS until ``update_transform``. The transform follows the frame: composed with the
+    similarity that puts the adjusted camera centres back on those of before, so the cameras stay where they were
+    in the CRS whatever placed the chunk (references, ties, a transform set by hand). Nothing is done when the
+    adjustment fitted the georeference itself (control points, bars, our own adjustment with references), when the
+    GNSS positions of the photos held the block (their priors are in the internal frame) or on a chunk without a
+    georeference. ``report["internal_frame"]`` of the optimisation: ``scale`` (of the new frame against the old),
+    ``rotation_deg``, ``shift`` (RMS motion of the cameras in the units of the CRS, before the follow),
+    ``residual_m`` (RMS of the cameras off the similarity: what the adjustment changed in the shape of the block),
+    ``followed``. Returns it, None when nothing was judged."""
+    from ..core import free_drawings, geometry
+    from ..markers import gcp
+
+    old = frame["transform"]
+    if chunk.crs != frame["crs"] or not np.allclose(np.asarray(chunk.transform, float), old, rtol=0.0, atol=1e-12):
+        return None  # the adjustment fitted the georeference again
+    if np.allclose(old, np.eye(4), rtol=0.0, atol=1e-12):
+        return None  # no georeference: the internal frame is the chunk's own
+    report = chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})
+    if ((report.get("gnss") or {}).get("photos") or 0) > 0:
+        return None  # the positions of the photos held the block in its frame
+    keys = [c.key for c in chunk.aligned_cameras if c.key in frame["centres"]]
+    if len(keys) < 3:
+        return None
+    new = np.array([chunk.camera(k).center for k in keys], float)
+    was = np.array([frame["centres"][k] for k in keys], float)
+    if not (np.all(np.isfinite(new)) and np.all(np.isfinite(was))) or not gcp._non_collinear(was):
+        return None
+    m = geometry.umeyama(new, was, with_scale=True)  # new internal -> old internal
+    scale = float(np.cbrt(np.linalg.det(m[:3, :3])))
+    rot = m[:3, :3] / scale
+    angle = float(np.degrees(np.arccos(np.clip((np.trace(rot) - 1.0) / 2.0, -1.0, 1.0))))
+    to_world = float(np.cbrt(abs(np.linalg.det(old[:3, :3]))))
+    shift = float(np.sqrt(np.mean(np.sum((new - was) ** 2, axis=1)))) * to_world
+    residual = float(np.sqrt(np.mean(np.sum((geometry.apply(m, new) - was) ** 2, axis=1)))) * to_world
+    followed = not np.allclose(m, np.eye(4), rtol=0.0, atol=1e-9)
+    out = {"scale": 1.0 / scale, "rotation_deg": angle, "shift": shift, "residual_m": residual, "followed": followed}
+    report["internal_frame"] = out
+    if followed:
+        free_drawings.follow(chunk)  # anything pending under the transform of before, first
+        chunk.transform = old @ m
+        drawings = chunk.meta.get("drawings")
+        if drawings:  # the model stays where it was in the CRS: so do the drawings on it
+            free_drawings.based(drawings, chunk.meta.get("alignment_id"), chunk.transform)
+        log.info("camera optimisation: the block moved in its internal frame (scale %.4g, %.2f degrees, cameras "
+                 "%.3g CRS units) - the georeference follows it, the cameras stay where they were", 1.0 / scale,
+                 angle, shift)
+    return out
 
 
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,

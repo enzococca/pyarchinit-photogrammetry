@@ -741,3 +741,74 @@ def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
     english = rows(ch, "en")
     assert [label for label, _value in english] == ["Reprojection error (px)", "Undone by the safety net"]
     assert english[1][1] == "yes" and float(english[0][1]) == pytest.approx(kept, abs=1e-3)
+
+
+def _world_centres(ch) -> np.ndarray:
+    """The camera centres in the CRS of the chunk, in the order of the cameras."""
+    return np.array([ch.to_world(c.center) for c in ch.cameras], float)
+
+
+def _drift(rec, scale: float = 7.0) -> None:
+    """What a free adjustment can do to the gauge of a block (Khutm, 2026-11-19: 7 times): the whole block scaled,
+    turned and moved in its internal frame, its shape kept."""
+    turn = pycolmap.Rotation3d(np.array([0.0, 0.0, np.sin(0.15), np.cos(0.15)]))  # x, y, z, w: 17 degrees
+    rec.transform(pycolmap.Sim3d(scale, turn, np.array([3.0, -2.0, 1.5])))
+
+
+def test_a_drifting_free_adjustment_leaves_the_cameras_in_place(tmp_path, monkeypatch):
+    """An optimisation without fixed points on photos with GPS of the drone (5 m: nothing holds the block) whose
+    adjustment scales and moves the whole block in its internal frame (Khutm: 7 times) keeps the georeference: the
+    chunk transform follows the new internal frame, the cameras stay where they were in the CRS and the report says
+    by how much the frame changed (without it the photos were out of place until ``update_transform``)."""
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(ch)
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    ch.optimize_cameras()
+    assert np.abs(_world_centres(ch) - before).max() < 1e-6
+    frame = ch.meta["sfm"]["optimize"]["internal_frame"]
+    assert frame["scale"] == pytest.approx(7.0, rel=1e-6) and frame["followed"] is True
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_our_free_adjustment_keeps_the_georeference(tmp_path, monkeypatch, solver):
+    """The same through our own adjustment (scipy and the native solver): the block scaled 7 times in its internal
+    frame by the adjustment, the cameras in the CRS where the same adjustment without the drift puts them (within a
+    millimetre) and within a few centimetres of where they were (the shape the adjustment refined)."""
+    from pyarchinit_photogrammetry.engine import bundle
+
+    _doc, plain = _rtk_block(tmp_path / "plain", accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(plain)
+    plain.optimize_cameras(engine="ppg", solver=solver)
+    expected = _world_centres(plain)
+    assert np.abs(expected - before).max() < 0.05
+
+    _doc, ch = _rtk_block(tmp_path / "drift", accuracy=(5.0, 5.0, 10.0), status=None)
+    real = bundle.write_back
+
+    def drifted(chunk, rec, ids, res):
+        real(chunk, rec, ids, res)
+        _drift(rec)
+
+    monkeypatch.setattr(bundle, "write_back", drifted)
+    ch.optimize_cameras(engine="ppg", solver=solver)
+    assert np.abs(_world_centres(ch) - expected).max() < 1e-3
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["scale"] == pytest.approx(7.0, rel=1e-3)
+
+
+def test_colmaps_free_adjustment_keeps_the_cameras_in_the_crs(tmp_path):
+    """COLMAP's real free adjustment of the synthetic block moves it in its internal frame (its own gauge: cameras up
+    to 45 cm from where they were); the georeference follows, the cameras in the CRS within centimetres (the shape
+    the adjustment refined: the free adjustment lets a flat block curve a little). A chunk with RTK fixes holding the
+    block keeps its transform as it was."""
+    doc, ch = _rtk_block(tmp_path / "gps", accuracy=(5.0, 5.0, 10.0), status=None)
+    before = _world_centres(ch)
+    ch.optimize_cameras()
+    assert np.abs(_world_centres(ch) - before).max() < 0.1
+    frame = ch.meta["sfm"]["optimize"]["internal_frame"]
+    assert frame["followed"] is True and frame["residual_m"] < 0.05 and frame["shift"] > frame["residual_m"]
+
+    doc, ch = _rtk_block(tmp_path / "rtk")
+    transform = ch.transform.copy()
+    ch.optimize_cameras()
+    assert "internal_frame" not in ch.meta["sfm"]["optimize"] and np.array_equal(ch.transform, transform)
+
