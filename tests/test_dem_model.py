@@ -165,3 +165,30 @@ def test_a_sparse_genuine_surround_keeps_the_extent():
     lonely = np.vstack([centre, [[200.0, 10.0], [201.0, 11.0], [202.0, 12.0]]])  # beyond a gap, near the block
     assert dem_engine.robust_extent(lonely) is not None
     assert dem_engine.robust_extent(lonely, cameras=np.array([[0.0, 0.0], [210.0, 20.0]])) is None
+
+
+def test_one_camera_far_away_does_not_widen_the_dem(tmp_path, monkeypatch):
+    """The footprint of the aligned cameras is kept only as far as the cameras go without a gap: one camera placed
+    10 km away (an exported orthophoto aligned among the photos, Khutm) does not bring the three far points back, and
+    the DEM is built at the cell asked."""
+    import types
+
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.engine import satellite
+
+    ch = _mesh_chunk(tmp_path, side=60)
+    pts = dem_engine.surface_points_world(ch, "model")
+    far = pts[:3] + [10_000.0, 0.0, 0.0]
+    monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: np.vstack([pts, far]))
+    grid = [(x, y) for x in np.linspace(0.5, 9.5, 6) for y in np.linspace(0.5, 9.5, 6)]  # internal: the 20 m block
+    cams = [types.SimpleNamespace(center=np.array([x, y, 30.0])) for x, y in grid]
+    cams.append(types.SimpleNamespace(center=np.array([5000.0, 5.0, 30.0])))  # 10 km away once in the world
+    monkeypatch.setattr(Chunk, "aligned_cameras", property(lambda self: cams))
+    cells = (20.0 / 0.05) ** 2
+    monkeypatch.setattr(satellite, "_physical_memory", lambda: 8 * dem_engine.GRID_BYTES_PER_CELL * cells)
+    dem, _frame = _read(ch.build_dem(resolution=0.05, source="point_cloud"))
+    assert ch.meta["dem"]["resolution"] == 0.05 and dem.shape[1] * 0.05 < 40.0
+    assert ch.meta["dem"]["extent_clipped"]["points_left_out"] == 3
+    world = np.array([[1000.0 + 2 * x, 2000.0 + 2 * y] for x, y in grid] + [[11000.0, 2010.0]])
+    box = dem_engine.robust_extent(np.vstack([pts, far])[:, :2], cameras=world)
+    assert box is not None and box[2] < 1100.0

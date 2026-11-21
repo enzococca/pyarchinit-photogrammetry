@@ -560,12 +560,29 @@ def _reach(values: np.ndarray, start: float, step: float, sign: int) -> float:
     return float(beyond[last]) if last >= 0 else start
 
 
+def _camera_footprint(cam: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The plan box of the camera centres ``cam`` ``(n, 2)`` without a stray one: from their middle half (the 25-75
+    percentiles) outwards on each side as far as the cameras go without a gap wider than that middle half, so that
+    one camera placed kilometres away (an exported orthophoto aligned among
+    the photos) does not widen the footprint."""
+    if len(cam) < 4:
+        return cam.min(axis=0), cam.max(axis=0)
+    lo, hi = np.percentile(cam, 25, axis=0), np.percentile(cam, 75, axis=0)
+    step = float(max((hi - lo).max(), 1e-12))
+    lo, hi = lo.copy(), hi.copy()
+    for axis in (0, 1):
+        lo[axis] = _reach(cam[:, axis], lo[axis], step, -1)
+        hi[axis] = _reach(cam[:, axis], hi[axis], step, +1)
+    return lo, hi
+
+
 def robust_extent(xy: np.ndarray, percentiles=EXTENT_PERCENTILES, margin: float = EXTENT_MARGIN,
                   gain: float = EXTENT_GAIN, gap: float = EXTENT_GAP, cameras=None) -> tuple | None:
     """The box ``(xmin, ymin, xmax, ymax)`` of the points ``xy`` without a few stray ones far away (Khutm,
     2026-11-19: a few points kilometres off made the grid too large for the memory at the cell asked). Only a gap
     clips: the ``percentiles`` of each axis with ``margin`` times their size added on each side (and the plan of the
-    ``cameras``, ``(n, 2)``, with the same margin: the ground of a flight is never stray), then on each side the points
+    ``cameras``, ``(n, 2)``, with the same margin - the ground of a flight is never stray - without a stray camera:
+    :func:`_camera_footprint`), then on each side the points
     beyond as far as they go without a gap wider than ``gap`` times the larger size of the percentile box - a sparse
     surround that reaches out continuously (the edges of a flight) is kept, what lies beyond a gap is not. None when
     the box is not ``gain`` times smaller in area than the box of all the points (the extent as it was)."""
@@ -578,9 +595,9 @@ def robust_extent(xy: np.ndarray, percentiles=EXTENT_PERCENTILES, margin: float 
     pad = margin * size
     lo, hi = lo - pad, hi + pad
     if cameras is not None and len(cameras):
-        cam = np.asarray(cameras, float)[:, :2]
-        cpad = margin * np.maximum(cam.max(axis=0) - cam.min(axis=0), size)
-        lo, hi = np.minimum(lo, cam.min(axis=0) - cpad), np.maximum(hi, cam.max(axis=0) + cpad)
+        c_lo, c_hi = _camera_footprint(np.asarray(cameras, float)[:, :2])
+        cpad = margin * np.maximum(c_hi - c_lo, size)
+        lo, hi = np.minimum(lo, c_lo - cpad), np.maximum(hi, c_hi + cpad)
     step = gap * float(max(size.max(), 1e-12))
     for axis in (0, 1):
         lo[axis] = _reach(xy[:, axis], lo[axis], step, -1)
