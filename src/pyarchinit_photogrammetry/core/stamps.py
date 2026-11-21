@@ -144,6 +144,41 @@ def restamp_entries(chunk, kinds=("elevations",)) -> int:
     return n
 
 
+def rebase(chunk, old, new) -> int:
+    """Every stamp of ``chunk`` equal to ``old`` (:func:`same_transform`) - the products of ``meta["built_in"]`` and
+    every record of ``chunk.meta`` with a ``"built_in"`` - written as ``new``: the transform changed while the products
+    did not move in the coordinate system (the georeference following the internal frame of an optimisation), so
+    those current before stay current; a stamp of another transform (already stale) is left as it is. Returns how
+    many."""
+    new_list = _matrix(new).tolist()
+    n = 0
+    built = chunk.meta.get("built_in")
+    if isinstance(built, dict):
+        for name, value in list(built.items()):
+            if value is not None and same_transform(value, old):
+                built[name] = [list(r) for r in new_list]
+                n += 1
+
+    def walk(node) -> None:
+        nonlocal n
+        if isinstance(node, dict):
+            value = node.get("built_in")
+            if value is not None and not isinstance(value, dict) and same_transform(value, old):
+                node["built_in"] = [list(r) for r in new_list]
+                n += 1
+            for k, v in node.items():
+                if k != "built_in":
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    for key, value in chunk.meta.items():
+        if key not in ("built_in", "drawings", "sfm"):
+            walk(value)
+    return n
+
+
 def _item(kind: str, product: str, name: str, eid) -> dict:
     return {"kind": kind, "product": product, "name": name, "id": eid}
 

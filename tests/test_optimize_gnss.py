@@ -755,6 +755,75 @@ def _drift(rec, scale: float = 7.0) -> None:
     rec.transform(pycolmap.Sim3d(scale, turn, np.array([3.0, -2.0, 1.5])))
 
 
+def _tiny(rec) -> None:
+    """A drift far below anything that matters: a scale of 1 + 1e-8."""
+    rec.transform(pycolmap.Sim3d(1.0 + 1e-8, pycolmap.Rotation3d(np.array([0.0, 0.0, 0.0, 1.0])), np.zeros(3)))
+
+
+def test_a_negligible_drift_is_not_followed(tmp_path, monkeypatch):
+    """A frame that moved by numerical noise (a scale of 1 + 1e-8) is not followed: the transform and every stamp
+    stay as they were."""
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    transform = ch.transform.copy()
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _tiny(rec))
+    ch.optimize_cameras()
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["followed"] is False
+    assert np.array_equal(ch.transform, transform)
+
+
+def test_products_after_a_followed_frame(tmp_path, monkeypatch, caplog):
+    """When the georeference follows the frame, the products in the coordinate system did not move: those that were
+    current are stamped with the new transform (current still), one already stale stays stale; the products in the
+    internal frame (dense cloud, model) are no longer in it: marked, said in the log, the mark gone once rebuilt."""
+    import logging
+
+    from pyarchinit_photogrammetry.core import stamps
+
+    doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
+    old = ch.transform.copy()
+    for name in ("dem", "orthomosaic", "point_cloud", "model"):
+        ch.products[name] = f"{name}.dat"
+    stamps.stamp(ch, "dem")
+    ch.meta["built_in"]["orthomosaic"] = old.tolist()
+    ch.meta["built_in"]["orthomosaic"][0][3] += 5.0  # built in another transform: stale
+    ch.meta["relief"] = {"hillshade": stamps.stamp_entry(ch, {"file": "relief.tif"})}
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    with caplog.at_level(logging.WARNING):
+        ch.optimize_cameras()
+    assert not np.allclose(ch.transform, old)
+    stale = {x["product"] for x in stamps.stale_products(ch)}
+    assert "dem" not in stale and "hillshade" not in stale and "orthomosaic" in stale
+    assert np.allclose(ch.meta["built_in"]["dem"], ch.transform)
+    assert sorted(ch.meta["frame_moved"]["products"]) == ["model", "point_cloud"]
+    assert ch.meta["sfm"]["optimize"]["internal_frame"]["stale_products"] == ["point_cloud", "model"]
+    assert any("dense cloud" in r.getMessage() or "point_cloud" in r.getMessage() for r in caplog.records)
+    ch._set_product("point_cloud", ch.data_dir / "point_cloud.ply")
+    assert ch.meta["frame_moved"]["products"] == ["model"]
+    ch._set_product("model", ch.data_dir / "model.ply")
+    assert "frame_moved" not in ch.meta
+
+
+def test_an_undone_bend_after_a_followed_frame_puts_the_drawings_back(tmp_path, monkeypatch):
+    """A free adjustment that bends the block (the safety net undoes it) after the georeference followed its frame:
+    the free drawings come back with their basis of before, where they were."""
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    doc, ch = _rtk_block(tmp_path)
+    free_drawings.add(ch, "line", [[500000.0, 4500000.0, 60.0], [500010.0, 4500000.0, 60.0]])
+    drawings = json_copy(ch.meta["drawings"])
+    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: (_drift(rec, 1.5), _dome(rec)))
+    ch.optimize_cameras(gnss="off")
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["reverted"] is True and rep["undone"]["internal_frame"]["followed"] is True
+    assert ch.meta["drawings"] == drawings
+
+
+def json_copy(value):
+    import json
+
+    return json.loads(json.dumps(value))
+
+
 def test_a_drifting_free_adjustment_leaves_the_cameras_in_place(tmp_path, monkeypatch):
     """An optimisation without fixed points on photos with GPS of the drone (5 m: nothing holds the block) whose
     adjustment scales and moves the whole block in its internal frame (Khutm: 7 times) keeps the georeference: the

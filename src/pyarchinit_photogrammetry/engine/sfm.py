@@ -2852,6 +2852,8 @@ def _keep_alignment(chunk: Chunk) -> dict | None:
         shutil.rmtree(kept, ignore_errors=True)
         raise
     return {"model": kept, "transform": np.array(chunk.transform, float), "crs": chunk.crs,
+            # the drawings, the stamps of the products, the marks of a followed frame: put back with the transform
+            "meta": copy.deepcopy({k: v for k, v in chunk.meta.items() if k != "sfm"}),
             "markers": {m.key: None if m.position is None else np.array(m.position, float) for m in chunk.markers},
             "rolling_shutter": {c.key: list(c.meta["rolling_shutter"]) for c in chunk.cameras
                                 if c.meta.get("rolling_shutter") is not None},
@@ -2864,6 +2866,8 @@ def _put_back(chunk: Chunk, kept: dict) -> float:
     calibration and the tie points from it, the georeference, the markers, the rolling-shutter velocities and the
     report of the optimisation before (none when there was none: a run that stopped leaves no report of its own).
     Returns its mean reprojection error."""
+    import copy
+
     model = chunk.product_path("reconstruction")
     bent = model.with_name(model.name + ".bent")
     shutil.rmtree(bent, ignore_errors=True)
@@ -2878,6 +2882,12 @@ def _put_back(chunk: Chunk, kept: dict) -> float:
     import_reconstruction(chunk, rec)
     chunk.transform = kept["transform"]
     chunk.crs = kept["crs"]
+    if "meta" in kept:
+        for key in [k for k in chunk.meta if k != "sfm"]:
+            if key not in kept["meta"]:
+                del chunk.meta[key]
+        for key, value in kept["meta"].items():
+            chunk.meta[key] = copy.deepcopy(value)
     for m in chunk.markers:
         if m.key in kept["markers"]:
             m.position = kept["markers"][m.key]
@@ -3152,7 +3162,11 @@ def _follow_internal_frame(chunk: Chunk, frame: dict) -> dict | None:
     georeference. ``report["internal_frame"]`` of the optimisation: ``scale`` (of the new frame against the old),
     ``rotation_deg``, ``shift`` (RMS motion of the cameras in the units of the CRS, before the follow),
     ``residual_m`` (RMS of the cameras off the similarity: what the adjustment changed in the shape of the block),
-    ``followed``. Returns it, None when nothing was judged."""
+    ``followed`` (the similarity differs from the identity by more than :data:`FRAME_FOLLOW_TOL` in scale, rotation
+    or shift relative to the block), ``stale_products``. Followed, the rasters in the coordinate system that were
+    current are stamped with the new transform (:func:`..core.stamps.rebase`: they did not move), the products in the
+    internal frame (:data:`INTERNAL_PRODUCTS`) are marked in ``chunk.meta["frame_moved"]`` until rebuilt and said in
+    the log. Returns it, None when nothing was judged."""
     from ..core import free_drawings, geometry
     from ..markers import gcp
 
@@ -3178,19 +3192,38 @@ def _follow_internal_frame(chunk: Chunk, frame: dict) -> dict | None:
     to_world = float(np.cbrt(abs(np.linalg.det(old[:3, :3]))))
     shift = float(np.sqrt(np.mean(np.sum((new - was) ** 2, axis=1)))) * to_world
     residual = float(np.sqrt(np.mean(np.sum((geometry.apply(m, new) - was) ** 2, axis=1)))) * to_world
-    followed = not np.allclose(m, np.eye(4), rtol=0.0, atol=1e-9)
+    size = float(np.sqrt(np.mean(np.sum((was - was.mean(0)) ** 2, axis=1)))) or 1.0
+    middle = new.mean(0)
+    moved = float(np.linalg.norm(geometry.apply(m, middle[None])[0] - middle)) / size
+    followed = max(abs(scale - 1.0), float(np.radians(angle)), moved) > FRAME_FOLLOW_TOL
     out = {"scale": 1.0 / scale, "rotation_deg": angle, "shift": shift, "residual_m": residual, "followed": followed}
     report["internal_frame"] = out
     if followed:
+        from ..core import stamps
+
         free_drawings.follow(chunk)  # anything pending under the transform of before, first
         chunk.transform = old @ m
         drawings = chunk.meta.get("drawings")
         if drawings:  # the model stays where it was in the CRS: so do the drawings on it
             free_drawings.based(drawings, chunk.meta.get("alignment_id"), chunk.transform)
+        # the rasters in the coordinate system did not move either: those current before are current now
+        stamps.rebase(chunk, old, chunk.transform)
+        # the products in the internal frame are no longer in it: marked until rebuilt (Chunk._set_product)
+        inside = [name for name in INTERNAL_PRODUCTS if (chunk.products or {}).get(name)]
+        out["stale_products"] = inside
+        if inside:
+            mark = chunk.meta.setdefault("frame_moved", {"products": []})
+            mark["products"] = list(dict.fromkeys([*mark.get("products", []), *inside]))
+            log.warning("camera optimisation: the internal frame moved (scale %.4g): %s no longer match the "
+                        "cameras - build them again (dense cloud, model)", 1.0 / scale, ", ".join(inside))
         log.info("camera optimisation: the block moved in its internal frame (scale %.4g, %.2f degrees, cameras "
                  "%.3g CRS units) - the georeference follows it, the cameras stay where they were", 1.0 / scale,
                  angle, shift)
     return out
+
+
+FRAME_FOLLOW_TOL = 1e-6  # the frame is followed when its scale, rotation (rad) or shift (share of the block) moved more
+INTERNAL_PRODUCTS = ("point_cloud", "model", "model_textured")  # products written in the internal frame of the chunk
 
 
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,

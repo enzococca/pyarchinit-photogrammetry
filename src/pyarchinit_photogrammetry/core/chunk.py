@@ -75,6 +75,11 @@ class Chunk:
 
     def _set_product(self, name: str, path: Path) -> None:
         self.products[name] = os.path.relpath(path, self.data_dir)
+        moved = self.meta.get("frame_moved")  # a product of the internal frame built again: in the frame of now
+        if isinstance(moved, dict) and name in (moved.get("products") or []):
+            moved["products"] = [p for p in moved["products"] if p != name]
+            if not moved["products"]:
+                self.meta.pop("frame_moved", None)
 
     def own_product_path(self, name: str) -> Path:
         """Where a product changed in place (cleaned, cropped, with its confidence) is written:
