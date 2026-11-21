@@ -217,9 +217,9 @@ def _put_aside(chunk, product: str, vid: str, move: bool) -> dict | None:
 
 
 def _forget_active(chunk, product: str) -> None:
-    chunk.products.pop(product, None)
+    chunk._drop_product(product)
     if product == "model":
-        chunk.products.pop("model_textured", None)
+        chunk._drop_product("model_textured")
 
 
 def keep_active(chunk, product: str, move: bool = False) -> dict | None:

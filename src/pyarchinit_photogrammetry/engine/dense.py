@@ -356,6 +356,7 @@ def build_point_cloud(chunk: Chunk, point_colors: bool = True, progress: Progres
     if len(pc) == 0:
         raise RuntimeError("dense reconstruction produced no points")
     chunk.point_cloud = pc
+    chunk._rebuilt("point_cloud")  # from the depth maps of the cameras of now
     chunk.meta["point_cloud_source"] = f"mappe di profondita' (qualita' {info.get('quality', '?')})"  # not imported
     progress(1.0, f"Point cloud: {len(pc):,} points")
     return pc

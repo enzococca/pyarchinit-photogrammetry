@@ -548,6 +548,15 @@ def display_texture(chunk: Chunk, texcoords: np.ndarray, texnumber: np.ndarray |
     return out, uv.reshape(-1, 6).astype(np.float32)
 
 
+def _rebuilt_texture(chunk: Chunk) -> bool:
+    """The textured model just built is in the internal frame of now when its model is (not marked as left in an
+    earlier frame: :meth:`.Chunk._frame_moved`). Returns whether its mark was taken away."""
+    if "model" in chunk._frame_moved():
+        return False
+    chunk._rebuilt("model_textured")
+    return True
+
+
 def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | None = None,
                   skip_unreadable: bool = False, mapping: str = "auto", colour_correction: bool | None = None,
                   page_size: int = PAGE_SIZE) -> Path:
@@ -596,6 +605,7 @@ def build_texture(chunk: Chunk, texture_size: int = 4096, progress: Progress | N
         mesh.set_texture_file(paths[0].name)
     chunk._set_product("model", write_mesh(chunk.own_product_path("model"), mesh))
     chunk._set_product("model_textured", paths[0])
+    _rebuilt_texture(chunk)
     first = atlases[0]
     chunk.meta["texture"] = {"mapping": mapping, "size": [int(first.shape[1]), int(first.shape[0])],
                              "pages": len(paths), "texture_size": int(texture_size),

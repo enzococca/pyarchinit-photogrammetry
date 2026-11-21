@@ -797,10 +797,34 @@ def test_products_after_a_followed_frame(tmp_path, monkeypatch, caplog):
     assert sorted(ch.meta["frame_moved"]["products"]) == ["model", "point_cloud"]
     assert ch.meta["sfm"]["optimize"]["internal_frame"]["stale_products"] == ["point_cloud", "model"]
     assert any("dense cloud" in r.getMessage() or "point_cloud" in r.getMessage() for r in caplog.records)
-    ch._set_product("point_cloud", ch.data_dir / "point_cloud.ply")
+    ch._set_product("point_cloud", ch.data_dir / "point_cloud.ply")  # an edit in place (cleaned): still stale
+    assert sorted(ch.meta["frame_moved"]["products"]) == ["model", "point_cloud"]
+    ch._rebuilt("point_cloud")  # built again from the alignment of now
     assert ch.meta["frame_moved"]["products"] == ["model"]
-    ch._set_product("model", ch.data_dir / "model.ply")
+    ch._rebuilt("model")
     assert "frame_moved" not in ch.meta
+
+
+def test_the_mark_of_a_moved_frame_follows_the_products(tmp_path, monkeypatch):
+    """The mark of a product left in an old internal frame stays across edits in place, goes with a product taken
+    away, and goes when the builders make the product again from the alignment of now - the model built from a dense
+    cloud still marked stays marked, as does the texture of a marked model."""
+    from pyarchinit_photogrammetry.engine import meshing, texturing
+
+    doc, ch = _rtk_block(tmp_path)
+    for name in ("point_cloud", "model", "model_textured"):
+        ch.products[name] = f"{name}.dat"
+    ch.meta["frame_moved"] = {"products": ["point_cloud", "model", "model_textured"]}
+    ch._drop_product("model_textured")
+    assert "model_textured" not in ch.products and ch.meta["frame_moved"]["products"] == ["point_cloud", "model"]
+    assert meshing._rebuilt_model(ch, "point_cloud") is False  # from a cloud still in the old frame
+    assert ch.meta["frame_moved"]["products"] == ["point_cloud", "model"]
+    assert meshing._rebuilt_model(ch, "tie_points") is True
+    assert ch.meta["frame_moved"]["products"] == ["point_cloud"]
+    ch.meta["frame_moved"]["products"] += ["model", "model_textured"]
+    assert texturing._rebuilt_texture(ch) is False  # on a model still in the old frame
+    ch._rebuilt("model")
+    assert texturing._rebuilt_texture(ch) is True and ch.meta["frame_moved"]["products"] == ["point_cloud"]
 
 
 def test_an_undone_bend_after_a_followed_frame_puts_the_drawings_back(tmp_path, monkeypatch):

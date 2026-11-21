@@ -75,11 +75,31 @@ class Chunk:
 
     def _set_product(self, name: str, path: Path) -> None:
         self.products[name] = os.path.relpath(path, self.data_dir)
-        moved = self.meta.get("frame_moved")  # a product of the internal frame built again: in the frame of now
-        if isinstance(moved, dict) and name in (moved.get("products") or []):
-            moved["products"] = [p for p in moved["products"] if p != name]
-            if not moved["products"]:
+
+    def _frame_moved(self) -> list[str]:
+        """The products marked as left in an earlier internal frame (``meta["frame_moved"]``, an optimisation whose
+        georeference followed the frame: :func:`..engine.sfm._follow_internal_frame`)."""
+        moved = self.meta.get("frame_moved")
+        return list(moved.get("products") or []) if isinstance(moved, dict) else []
+
+    def _unmark(self, name: str) -> None:
+        marked = self._frame_moved()
+        if name in marked:
+            marked = [p for p in marked if p != name]
+            if marked:
+                self.meta["frame_moved"]["products"] = marked
+            else:
                 self.meta.pop("frame_moved", None)
+
+    def _rebuilt(self, name: str) -> None:
+        """The product ``name`` was built again from the alignment of now (a builder, not an edit in place): it is no
+        longer marked as left in an earlier internal frame."""
+        self._unmark(name)
+
+    def _drop_product(self, name: str) -> None:
+        """The product ``name`` taken away from the chunk, with its mark of an earlier internal frame."""
+        self.products.pop(name, None)
+        self._unmark(name)
 
     def own_product_path(self, name: str) -> Path:
         """Where a product changed in place (cleaned, cropped, with its confidence) is written:
