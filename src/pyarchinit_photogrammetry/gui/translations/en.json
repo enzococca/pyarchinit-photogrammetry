@@ -3957,6 +3957,7 @@
   "Cambio del percorso delle foto non riuscito": "Changing the path of the photos failed"
  },
  "formats": {
+  "Il layer «{0}» scelto come area non ha più poligoni: disegnane o scegli un'altra area (nessun abbinamento fatto).": "The layer «{0}» chosen as the area has no polygons any more: draw some or choose another area (nothing matched).",
   "{0} su {1}: pianta da {2} punti comuni, scala {3}, rotazione {4}°, RMS {5} m, leave-one-out massimo {6} m.": "{0} on {1}: plan from {2} common points, scale {3}, rotation {4}°, RMS {5} m, leave-one-out at most {6} m.",
   "Esclusi perché fuori posto: {0}.": "Left out as out of place: {0}.",
   "Quote: piano su {0} celle stabili, inclinazione {1} / {2} cm su 100 m (est / nord), NMAD {3} m (prima {4} m).": "Heights: plane on {0} stable cells, tilt {1} / {2} cm per 100 m (east / north), NMAD {3} m (before {4} m).",

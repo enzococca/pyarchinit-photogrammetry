@@ -330,7 +330,15 @@ class AutoTiesPanel(QWidget):
         source = self.source.currentData()
         margin = None if self.whole.isChecked() else float(self.margin.value())
         area = self.area.currentData()
-        area = None if area is None else {"layer": area}
+        if area is not None:
+            from ..core import free_drawings
+
+            if not any(free_drawings.polygons_in_world(ch, area) for ch in doc.chunks):
+                self.window._warn(tr("Il layer «{0}» scelto come area non ha più poligoni: disegnane o scegli un'altra "
+                                     "area (nessun abbinamento fatto).", area))
+                self.fill_areas()
+                return False
+            area = {"layer": area}
         least = int(self.min_matches.value())
         placed = placement(doc)
 

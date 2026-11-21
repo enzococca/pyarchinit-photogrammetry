@@ -138,5 +138,11 @@ def test_the_matching_limited_to_a_layer_and_its_least_matches(qapp, scenes, tmp
         assert res.ok and res.summary()["area"] == {"layer": "stabile"}
         pts = res.points_a
         assert np.all((pts[:, 0] >= box[0] - 1e-6) & (pts[:, 0] <= box[2] + 1e-6))
+        # the layer chosen lost its polygons: said, and no matching over the whole overlap instead
+        chunk_a = w.doc.chunks[0]
+        free_drawings.remove(chunk_a, [f["id"] for f in free_drawings.features(chunk_a, "stabile")])
+        runs = len(seen)
+        assert not auto.match()
+        assert len(seen) == runs and any(x[0] == "warn" and "stabile" in x[1] for x in w.said)
     finally:
         _close_window(w)
