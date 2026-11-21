@@ -15,12 +15,14 @@ and the plan not at all. :func:`measure` takes each from what fixes it:
    reference's on stable ground - an area (a polygon layer of the free drawings, a file), else the stable-ground rules
    of the coregistration (gentle slopes, cells that agree) - and a plane fitted on the differences with Huber weights
    (:func:`..archaeo.coreg.height_offset`, as the stable heights of :mod:`.stable_height` with ``plane``).
-3. **One transform**: the plan similarity and the height plane are one world -> world 4x4, an affine one - the plane
-   shears the heights - which :func:`apply` puts before the chunk's transform (one step of *Annulla*, the report in
+3. **One transform**: the plan similarity and the height plane are one world -> world 4x4 in the system of the
+   reference, an affine one - the plane shears the heights - which :func:`apply` puts before the chunk's transform (one step of *Annulla*, the report in
    ``chunk.meta["chunk_alignment"]``, method ``"plan_plane"``). The DEM and the orthophoto of the chunk are then built
    again.
 
-Nothing is stored by :func:`measure`. No Qt here.
+A chunk in another projected system is carried into the reference's as the joint solve of the ties carries it
+(:func:`.ties.world_in`: a similarity fitted through the projection, its RMS in ``system_fit_rms``); a geographic
+reference is refused. Nothing is stored by :func:`measure`. No Qt here.
 """
 from __future__ import annotations
 
@@ -148,6 +150,11 @@ def measure(doc: "Document", chunk, reference, area=None, exclude=None, reject: 
         raise ValueError("a chunk cannot be placed on itself: choose another reference")
     if not ties._compatible(cb.crs, ca.crs):
         raise ties._not_same_frame(cb.label, cb.crs, ca.label, ca.crs)
+    from ..core import crs as crs_mod
+
+    if crs_mod.is_geographic(ca.crs):  # as the joint solve of the ties
+        raise ties.TieError(f"the system {ca.crs} is geographic; use a projected system (e.g. the UTM zone)",
+                            f"il sistema {ca.crs} è geografico; usa un sistema proiettato (es. il fuso UTM)")
     names, src, dst = _common_points(doc, ca, cb)
     if len(names) < MIN_POINTS:
         raise ties.TieError(f"{cb.label} -> {ca.label}: {len(names)} common points (point ties between the two chunks)"
@@ -158,12 +165,10 @@ def measure(doc: "Document", chunk, reference, area=None, exclude=None, reject: 
     fit, plan = plan_fit(names, src, dst, reject)
     P = plan_matrix(fit)
     before = np.asarray(cb.transform, float).copy()
+    # B internal -> the world of A's system, as the joint solve carries a chunk of another projected system
+    W, approx = ties.world_in(cb, ca.crs)
     progress(0.2, f"Heights of {cb.label} on {ca.label}: the plane of the stable ground")
-    try:  # B in A's plan for the measure of the heights, put back right after
-        cb.transform = P @ before
-        h = _height_plane(doc, ca, cb, area, exclude)
-    finally:
-        cb.transform = before
+    h = _height_plane(doc, ca, cb, P, area, exclude)  # the chunk never changed here: the measure runs in a worker
     M = height_matrix(h) @ P
     progress(1.0, f"{cb.label} on {ca.label}: plan RMS {plan['rms']:.4f}, heights NMAD {h.nmad_after:.4f}")
     return {"chunk": cb.key, "chunk_label": cb.label, "reference": ca.key, "reference_label": ca.label,
@@ -171,20 +176,31 @@ def measure(doc: "Document", chunk, reference, area=None, exclude=None, reject: 
             "height": {**h.to_dict(), "centre": [float(v) for v in h.centre], "cells": int(h.cells),
                        "compared": int(h.compared), "tilt_cm_per_100m": [float(h.tilt_x * 1e4), float(h.tilt_y * 1e4)],
                        "area": stable_height._area_spec(area), "exclude": stable_height._area_spec(exclude)},
-            "transform": M.tolist(), "new_transform": (M @ before).tolist(),
+            "transform": M.tolist(), "new_transform": (M @ W).tolist(), "system_fit_rms": approx,
             "placed": {"a": np.asarray(ca.transform, float).tolist(), "b": before.tolist(), "crs_b": cb.crs},
             "when": datetime.now().isoformat(timespec="seconds")}
 
 
-def _height_plane(doc: "Document", ca, cb, area, exclude) -> coreg.HeightOffset:
-    """The plane of B over A on the stable ground, the DEMs as the chunks are placed now (as
-    :func:`.stable_height.measure` reads them)."""
+def _height_plane(doc: "Document", ca, cb, P: np.ndarray, area, exclude) -> coreg.HeightOffset:
+    """The plane of B over A on the stable ground, B's DEM read in A's system as B is placed now
+    (:func:`.stable_height.dem_in_world`), then carried in plan by the similarity ``P`` (its heights scaled by its
+    scale) and resampled north up - the chunk itself is not touched."""
+    from affine import Affine
+
     zr, tr_r = stable_height.dem_in_world(ca, ca)
     hr, wr = zr.shape
     margin = stable_height.BOUNDS_MARGIN * abs(tr_r.a)
-    ra = (tr_r.c, tr_r.c + wr * tr_r.a, tr_r.f + hr * tr_r.e, tr_r.f)
-    zd, tr_d = stable_height.dem_in_world(cb, ca, bounds=(ra[0] - margin, ra[2] - margin, ra[1] + margin,
-                                                          ra[3] + margin))
+    ra = (tr_r.c - margin, tr_r.f + hr * tr_r.e - margin, tr_r.c + wr * tr_r.a + margin, tr_r.f + margin)
+    back = np.linalg.inv(P)  # A's grid carried back to where B lies now
+    corners = np.array([[x, y, 0.0] for x in (ra[0], ra[2]) for y in (ra[1], ra[3])])
+    xy = (corners @ back[:3, :3].T + back[:3, 3])[:, :2]
+    zd, tr_d = stable_height.dem_in_world(cb, ca, bounds=(xy[:, 0].min(), xy[:, 1].min(), xy[:, 0].max(),
+                                                          xy[:, 1].max()))
+    if zd.size:
+        zd = (P[2, 2] * zd).astype(np.float32)
+        tr_d = Affine(P[0, 0], P[0, 1], P[0, 3], P[1, 0], P[1, 1], P[1, 3]) @ tr_d
+        found = stable_height._north_up(zd, tr_d, ca.crs, ca.crs, ra)
+        zd, tr_d = found if found is not None else (np.zeros((0, 0), np.float32), tr_d)
     if not zd.size:
         raise ValueError(f"the DEMs of {cb.label} and {ca.label} do not overlap once placed in plan")
     system = ca.crs
@@ -204,6 +220,9 @@ def apply(doc: "Document", result: dict) -> dict:
 
     ca, cb = ties._chunk(doc, result["reference"]), ties._chunk(doc, result["chunk"])
     placed = result["placed"]
+    if cb.crs != placed.get("crs_b", cb.crs):
+        raise ties.TieError(f"chunk {cb.label} moved after the measure: measure again",
+                            f"il chunk {cb.label} si è spostato dopo la misura: misura di nuovo")
     for ch, key in ((ca, "a"), (cb, "b")):
         if not np.allclose(np.asarray(ch.transform, float), np.asarray(placed[key], float), rtol=0.0, atol=1e-9):
             raise ties.TieError(f"chunk {ch.label} moved after the measure: measure again",

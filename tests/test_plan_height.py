@@ -86,6 +86,72 @@ def test_plan_from_points_and_heights_from_a_plane(tmp_path, scene):
     assert np.allclose(np.asarray(b.transform, float), before)
 
 
+def _to_other_system(b, crs: str) -> None:
+    """Chunk ``b`` carried into another projected system as a chunk surveyed there would be: its transform through
+    the projection (as the solve of the ties carries it), its DEM reprojected and stamped with the new transform."""
+    import rasterio
+    from rasterio.warp import Resampling, calculate_default_transform, reproject
+
+    from pyarchinit_photogrammetry.core import stamps
+    from pyarchinit_photogrammetry.engine.dem import NODATA
+
+    T, _err = ties.world_in(b, crs)
+    src_path = b.dem_path
+    with rasterio.open(src_path) as src:
+        z = src.read(1)
+        tr, w, h = calculate_default_transform(src.crs, crs, src.width, src.height, *src.bounds)
+        out = np.full((h, w), NODATA, np.float32)
+        reproject(z, out, src_transform=src.transform, src_crs=src.crs, src_nodata=NODATA, dst_transform=tr,
+                  dst_crs=crs, dst_nodata=NODATA, resampling=Resampling.bilinear)
+    path = b.data_dir / "dem_other.tif"
+    with rasterio.open(path, "w", driver="GTiff", width=w, height=h, count=1, dtype="float32", crs=crs, transform=tr,
+                       nodata=NODATA) as dst:
+        dst.write(out, 1)
+    b.transform = T
+    b.crs = crs
+    b._set_product("dem", path)
+    stamps.stamp(b, "dem")
+
+
+def test_a_chunk_in_another_projected_system(tmp_path, scene):
+    """B surveyed in another projected system (Gauss-Boaga west against east: another false easting and a
+    convergence of the meridians of degrees): the plan is fitted in the system of A, the DEM of B read there, and B
+    ends in A's system where it truly is. A reference in a geographic system is refused, as by the solve."""
+    doc, a, b, truth_b = _surveys(tmp_path, scene)
+    _to_other_system(b, "EPSG:3003")
+    r = plan_height.measure(doc, b, a)
+    assert r["plan"]["rejected"] == ["P5"] and r["height"]["nmad_after"] < 0.005
+    assert 0.0 < r["system_fit_rms"] < 0.02
+    plan_height.apply(doc, r)
+    assert b.crs == a.crs
+    _shift, rot, _ppm, worst = _errors(doc, b, truth_b, scene.origin)
+    # a similarity through the projection (as the solve carries a chunk) cannot scale x, y and not z: here 900 ppm
+    # (6 degrees from the meridian of the west zone) over the heights of the box, twice - B was carried there the same
+    # way. Before the fix B landed hundreds of metres off
+    assert worst < 0.03 and rot < 0.1
+    a.crs = "EPSG:4326"
+    with pytest.raises(ties.TieError, match="geographic"):
+        plan_height.measure(doc, b, a)
+
+
+def test_the_measure_never_moves_the_chunk(tmp_path, scene, monkeypatch):
+    """The measure runs in the worker: the chunk it places is never changed while it runs (no transform written to
+    it, not even for a moment)."""
+    doc, a, b, _truth = _surveys(tmp_path, scene)
+    seen = []
+    cls = type(b)
+    original = np.asarray(b.transform, float).copy()
+
+    def watch(obj, name, value):
+        if name == "transform" and obj is b:
+            seen.append(np.asarray(value, float).copy())
+        object.__setattr__(obj, name, value)
+
+    monkeypatch.setattr(cls, "__setattr__", watch)
+    plan_height.measure(doc, b, a)
+    assert not seen and np.allclose(np.asarray(b.transform, float), original)
+
+
 def test_too_few_points_or_moved_chunks_are_refused(tmp_path, scene):
     doc, a, b, _truth = _surveys(tmp_path, scene, outlier=False)
     for t in ties.ties_of(doc)[2:]:
