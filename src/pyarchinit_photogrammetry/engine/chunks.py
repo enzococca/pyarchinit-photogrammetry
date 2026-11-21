@@ -959,6 +959,9 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
                                       "fix_scale": bool(fix_scale)}
         if info.get("rejected"):
             ch.meta["chunk_alignment"]["rejected"] = list(info["rejected"])
+        for key in ("rmse_all", "robust_check"):  # the photos in common: every one, and whether they were checked
+            if key in info:
+                ch.meta["chunk_alignment"][key] = info[key]
     from ..core import free_drawings
 
     for ch in [ref] + [ch for ch, _T, _info in results]:  # the reference too: levelled above

@@ -498,6 +498,42 @@ class _Appended:
                                                               if not any(s is x for x in self.window.sections)])
 
 
+
+def chunk_alignment_lines(report: dict, reference: str, metric: bool) -> list[str]:
+    """The lines of the message of *Allinea chunk* for the chunks of ``report`` (:func:`..engine.chunks.align_chunks`)
+    aligned on ``reference``: correspondences, error, scale, the photos left out with the RMSE over every photo in
+    common, a robust check of the photos that could not run, what to build again and how the chunk sits on the
+    reference."""
+    from .chunk_views import length_text
+
+    def error(value) -> str:
+        return tr("{0:.1f} mm", value * 1000) if metric else f"{value:.4g}"
+
+    lines = []
+    for e in report["chunks"]:
+        rmse = e.get("rmse")
+        err = "" if rmse is None else (tr(", errore medio {0:.1f} mm", rmse * 1000) if metric else f", RMSE {rmse:.4g}")
+        left = ""
+        if e.get("rejected"):
+            left = tr("; foto lasciate fuori perché fuori posto: {0}", ", ".join(e["rejected"]))
+            if e.get("rmse_all") is not None:
+                left += tr(" (con tutte le foto in comune: {0})", error(e["rmse_all"]))
+        lines.append(tr("{0}: {1} corrispondenze{2}, scala {3:.4f}", e["label"], e.get("correspondences", 0), err,
+                        e["scale"])
+                     + left
+                     + (tr("; da ricostruire: {0}", ", ".join(e["stale_products"])) if e.get("stale_products") else ""))
+        if e.get("robust_check") is False and e.get("correspondences", 0) >= 4:
+            lines.append("    " + tr("le foto in comune non si sono potute controllare per una fuori posto (quasi su "
+                                     "una linea): usate tutte"))
+        d = e.get("distances")
+        if d is not None and d.get("median") is not None:  # how well it sits on the reference now
+            lines.append("    " + tr("sovrapposizione {0} % (entro {1}), distanza mediana {2}, NMAD {3}",
+                                       f"{d['overlap'] * 100:.0f}", length_text(d["threshold"], metric),
+                                       length_text(d["median"], metric, signed=True), length_text(d["nmad"], metric)))
+        elif d is not None:
+            lines.append("    " + tr("nessuna sovrapposizione con {0}", reference))
+    return lines
+
 class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
@@ -4403,27 +4439,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         metric = _is_scaled(ref)
 
         def done(report):
-            from .chunk_views import length_text
-
-            lines = []
-            for e in report["chunks"]:
-                rmse = e.get("rmse")
-                err = "" if rmse is None else (tr(", errore medio {0:.1f} mm",
-                                                  rmse * 1000) if metric else f", RMSE {rmse:.4g}")
-                lines.append(tr("{0}: {1} corrispondenze{2}, scala {3:.4f}",
-                                e['label'], e.get('correspondences', 0), err, e['scale'])
-                             + (tr("; foto lasciate fuori perché fuori posto: {0}",
-                                   ', '.join(e['rejected'])) if e.get("rejected") else "")
-                             + (tr("; da ricostruire: {0}",
-                                   ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
-                d = e.get("distances")
-                if d is not None and d.get("median") is not None:  # how well it sits on the reference now
-                    lines.append("    " + tr("sovrapposizione {0} % (entro {1}), distanza mediana {2}, NMAD {3}",
-                                               f"{d['overlap'] * 100:.0f}", length_text(d["threshold"], metric),
-                                               length_text(d["median"], metric, signed=True),
-                                               length_text(d["nmad"], metric)))
-                elif d is not None:
-                    lines.append("    " + tr("nessuna sovrapposizione con {0}", ref.label))
+            lines = chunk_alignment_lines(report, ref.label, metric)
             if report.get("levelled_reference"):
                 lines.append(tr("Il chunk {0} è stato prima messo in bolla (come per il DEM).", ref.label))
             text = tr("Allineati a {0} ({1}):\n",

@@ -1,5 +1,6 @@
 {
  "texts": {
+  "le foto in comune non si sono potute controllare per una fuori posto (quasi su una linea): usate tutte": "the photos in common could not be checked for one out of place (nearly on a line): all used",
   "Pianta e piano...": "Plan and plane...",
   "Pianta e piano": "Plan and plane",
   "Aggancia un chunk a un altro: la pianta dai legami fra i due (similitudine 2D, punti fuori posto esclusi), le quote da un piano sul terreno stabile dei DEM (anche l'inclinazione); una sola trasformazione": "Place a chunk on another: the plan from the ties between the two (2D similarity, points out of place left out), the heights from a plane on the stable ground of the DEMs (the tilt too); one transform",
@@ -3957,6 +3958,8 @@
   "Cambio del percorso delle foto non riuscito": "Changing the path of the photos failed"
  },
  "formats": {
+  "{0:.1f} mm": "{0:.1f} mm",
+  " (con tutte le foto in comune: {0})": " (with every photo in common: {0})",
   "Il layer «{0}» scelto come area non ha più poligoni: disegnane o scegli un'altra area (nessun abbinamento fatto).": "The layer «{0}» chosen as the area has no polygons any more: draw some or choose another area (nothing matched).",
   "{0} su {1}: pianta da {2} punti comuni, scala {3}, rotazione {4}°, RMS {5} m, leave-one-out massimo {6} m.": "{0} on {1}: plan from {2} common points, scale {3}, rotation {4}°, RMS {5} m, leave-one-out at most {6} m.",
   "Esclusi perché fuori posto: {0}.": "Left out as out of place: {0}.",

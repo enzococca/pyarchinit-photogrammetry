@@ -147,6 +147,35 @@ def test_a_robust_check_that_cannot_run_is_said(doc, monkeypatch, caplog):
         info = doc.align_chunks("A", ["B"], method="cameras")["chunks"][0]
     assert info["robust_check"] is False and info["rmse_all"] == pytest.approx(info["rmse"])
     assert any("could not be checked" in r.getMessage() for r in caplog.records)
+    b = doc.chunks[1]
+    assert b.meta["chunk_alignment"]["robust_check"] is False
+    assert b.meta["chunk_alignment"]["rmse_all"] == pytest.approx(info["rmse_all"])
+
+
+def test_the_window_says_the_rmse_of_every_photo_and_a_check_that_could_not_run(monkeypatch):
+    """The message of *Allinea chunk* (offscreen): with photos left out, the RMSE over every photo in common next to
+    the one of the photos used; a robust check that could not run said on its own line."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from pyarchinit_photogrammetry.gui import i18n
+    from pyarchinit_photogrammetry.gui.main_window import chunk_alignment_lines
+
+    i18n.set_current("en")
+    try:
+        left = {"label": "B", "correspondences": 6, "rmse": 0.0012, "rmse_all": 412.5, "scale": 1.0,
+                "rejected": ["IMG_0013"], "robust_check": True}
+        lines = chunk_alignment_lines({"chunks": [left]}, "A", metric=True)
+        assert "IMG_0013" in lines[0] and "1.2 mm" in lines[0] and "412" in lines[0]
+        flat = {"label": "C", "correspondences": 5, "rmse": 0.004, "rmse_all": 0.004, "scale": 1.0, "rejected": [],
+                "robust_check": False}
+        lines = chunk_alignment_lines({"chunks": [flat]}, "A", metric=True)
+        assert any("could not be checked" in line for line in lines)
+        assert not any("could not be checked" in line
+                       for line in chunk_alignment_lines({"chunks": [left]}, "A", metric=True))
+    finally:
+        i18n.set_current(None)
 
 
 @pytest.mark.slow
