@@ -66,6 +66,11 @@ position less the bias of its flight). From the command line: `ppg optimize proj
 (`plain` and `bias` with `--engine ppg`); the output says how many photos held the block and whether the focal
 length was kept.
 
+*Engine*: *Automatic* (the default, as for the other steps: the program's choice, COLMAP for now), *COLMAP* or *Own*
+(`ppg optimize --engine auto|colmap|ppg`). Held by nothing (the GPS of a drone, no control points) the adjustment may
+scale and move the whole block in its internal frame; the georeference follows it, so the photos stay where they were
+in the coordinate system (before, they were out of place until *Update georeference*).
+
 ### Diagnostics of the alignment
 
 *Tools > Diagnostics of the alignment* tells why an alignment fails:

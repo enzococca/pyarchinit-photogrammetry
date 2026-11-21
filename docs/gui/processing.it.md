@@ -68,6 +68,12 @@ posizione meno il bias del suo volo). Dalla riga di comando: `ppg optimize proge
 (`plain` e `bias` con `--engine ppg`); l'uscita dice quante foto hanno tenuto il blocco e se la focale è rimasta
 quella dell'allineamento.
 
+*Motore*: *Automatico* (il predefinito, come per gli altri passi: la scelta del programma, per ora COLMAP), *COLMAP* o
+*Proprio* (`ppg optimize --engine auto|colmap|ppg`). Senza niente che lo tenga (il GPS di un drone, nessun punto di
+controllo) la compensazione può scalare e spostare tutto il blocco nel suo sistema interno; la georeferenziazione lo
+segue, così le foto restano dov'erano nel sistema di coordinate (prima finivano fuori posto fino ad *Aggiorna
+georeferenziazione*).
+
 ### Diagnostica dell'allineamento
 
 *Strumenti > Diagnostica dell'allineamento* dice perché un allineamento non va:
