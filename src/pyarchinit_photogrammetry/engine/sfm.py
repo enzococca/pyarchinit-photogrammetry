@@ -1644,7 +1644,8 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     COLMAP database as pose priors, on metric axes less a round offset: the incremental mapper
     then holds the block to them (``use_prior_position``), as Metashape's alignment holds it to
     the camera references. ``previous`` (the report of an earlier call, when the database is
-    kept) keeps the same axes and only gives the photos without a prior theirs. Returns the
+    kept) keeps the same axes: the priors already there are updated in place, the photos without
+    one get theirs. Returns the
     report (``count``, ``crs``, ``offset``), None with fewer than three positions."""
     import pycolmap
 
@@ -1677,29 +1678,34 @@ def _write_pose_priors(chunk: Chunk, db_path: Path, names: dict[int, str], previ
     db = pycolmap.Database.open(str(db_path))
     try:
         images = db.read_all_images()
-        have = set()
-        if previous and db.num_pose_priors():  # the priors written before stay
-            for image in images:
-                try:
-                    if db.exists_pose_prior(image.image_id, True):
-                        have.add(image.name)
-                except Exception:  # pragma: no cover - the lookup differs between versions
-                    pass
+        # the priors written here before (a continuation keeps the database): COLMAP holds one per frame,
+        # so they are updated in place - a second insert fails ("SQLite error: constraint failed", Khutm)
+        have = {}
+        if previous and db.num_pose_priors():
+            for prior in db.read_all_pose_priors():
+                have[int(prior.corr_data_id.id)] = prior
         n = 0
         for image in images:
             got = by_name.get(image.name)
-            if got is None or image.name in have:
+            if got is None:
                 continue
             pos, acc = got
             acc = np.resize(np.maximum(np.asarray(acc, float).reshape(-1)[:3], 1e-3), 3)
-            prior = pycolmap.PosePrior(position=np.asarray(pos, float), position_covariance=np.diag(acc ** 2),
-                                       coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
-            prior.corr_data_id = image.data_id
-            db.write_pose_prior(prior)
+            old = have.get(int(image.data_id.id))
+            if old is not None:
+                old.position = np.asarray(pos, float)
+                old.position_covariance = np.diag(acc ** 2)
+                old.coordinate_system = pycolmap.PosePriorCoordinateSystem.CARTESIAN
+                db.update_pose_prior(old)
+            else:
+                prior = pycolmap.PosePrior(position=np.asarray(pos, float), position_covariance=np.diag(acc ** 2),
+                                           coordinate_system=pycolmap.PosePriorCoordinateSystem.CARTESIAN)
+                prior.corr_data_id = image.data_id
+                db.write_pose_prior(prior)
             n += 1
     finally:
         db.close()
-    return {"count": n + len(have), "crs": crs, "offset": [float(v) for v in offset]}
+    return {"count": n, "crs": crs, "offset": [float(v) for v in offset]}
 
 
 def _drop_masked_tie_points(chunk: Chunk, rec, names: dict[int, str]) -> int:

@@ -341,6 +341,24 @@ def test_guided_matching_and_adaptive_camera_fitting_keep_the_accuracy(scene_dir
     assert same is rec and not rep["kept"]
 
 
+def test_photos_added_to_an_alignment_held_by_gps(scene_dir, scene, tmp_path):
+    """Photos added to a chunk aligned with the GPS of its photos: the continuation writes the priors again on the
+    database that has them (updated in place, not inserted twice: Khutm 2026-11-19), and aligns them all."""
+    photos = sorted((scene_dir / "photos").glob("*.jpg"))
+    _doc, ch = _project(scene_dir, tmp_path, photos[:14])
+    _with_gps(ch, scene)
+    ch.match_photos(quality="high")
+    assert ch.align_cameras(mapper="incremental") == 14
+    first = ch.meta["sfm"]["gps_priors"]
+    assert first["count"] == 14
+    ch.add_photos(photos[14:])
+    _with_gps(ch, scene)
+    ch.match_photos(quality="high", reset=False)
+    assert ch.align_cameras(reset=False) == len(photos)
+    again = ch.meta["sfm"]["gps_priors"]
+    assert again["count"] == len(photos) and again["offset"] == first["offset"]
+
+
 def test_photos_added_to_an_alignment(scene_dir, tmp_path):
     photos = sorted((scene_dir / "photos").glob("*.jpg"))
     _doc, ch = _project(scene_dir, tmp_path, photos[:14])
