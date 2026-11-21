@@ -273,7 +273,7 @@ dataset pubblici WorldView-3.
   mandati a PyArchInit come suoi media. Vedi
   [Disegni sui prospetti e sulle sezioni](gui/processing.md#disegni-sui-prospetti-e-sulle-sezioni).
 
-## Fatto nelle 1.7.1 - 1.10.2
+## Fatto nelle 1.7.1 - 1.11.0
 
 * **Chunk legati e raggruppati** (1.7.6 - 1.10.0): i chunk dello stesso sito legati in automatico e tenuti in
   gruppi.
@@ -289,6 +289,10 @@ dataset pubblici WorldView-3.
 * **Un rilievo sul web** (1.9.0 - 1.10.2): `ppg web build` e il pannello *Pubblica sul web* - pianta, DEM, US,
   modello, nuvola, sezioni e prospetti, più date con il selettore del tempo, schede e layer dei plugin -
   pubblicato su Cloudflare Pages con l'accesso dell'utente e tolto con *Rimuovi dal web*.
+* **Primi passi del motore nativo** (1.11.0): `ppg bench` per misurare, la scelta del mapper che rinuncia
+  presto al globale quando non regge, la cache delle foto commisurata alla memoria, il bundle adjustment nativo in
+  Rust per `engine="ppg"` (10-20 volte COLMAP, 500 volte scipy, stesso costo); il matching nativo c'e' ma resta
+  spento finche' non supera la sua soglia. Correzioni trovate sul progetto pluriennale di Khutm.
 
 ## Prossimi passi
 
