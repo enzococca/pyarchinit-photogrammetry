@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
                                QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import crs as crs_mod
-from ..engine import auto_ties, stable_height
+from ..engine import auto_ties, plan_height, stable_height
 from ..engine import ties as ties_mod
 from . import i18n
 from .dialogs import Field, ParamDialog, choice
@@ -365,6 +365,26 @@ class TiesStep:
         self.window._ties_reload()
 
 
+class PlanHeightStep(TiesStep):
+    """A tie in plan and a height plane applied (:func:`..engine.plan_height.apply`) as one step of *Modifica >
+    Annulla*: as :class:`TiesStep`, for the one chunk it moved."""
+
+    def __init__(self, window, result: dict, changed: dict):
+        self.window, self.result, self.changed, self.report = window, result, changed, None
+        self.expected = self._now()
+
+    def _now(self) -> dict:
+        chunks = self._chunks()
+        k = self.result["chunk"]
+        return {k: None if k not in chunks else (np.asarray(chunks[k].transform, float).tolist(), chunks[k].crs)}
+
+    def redo(self) -> None:
+        self._check()
+        self.changed = plan_height.apply(self.window.doc, self.result)
+        self.expected = self._now()
+        self.window._ties_reload()
+
+
 class TiesDialog(QDialog):
     """The ties of the project, the unknowns per chunk, the check and the apply (see the module)."""
 
@@ -457,7 +477,11 @@ class TiesDialog(QDialog):
                                               "di nuovo dove i chunk sono adesso"))
         self.b_remove_height = QPushButton(tr("Rimuovi"))
         self.b_remove_height.setToolTip(tr("Rimuovi le quote stabili scelte nella tabella"))
-        for b in (self.b_measure_height, self.b_remeasure_height, self.b_remove_height):
+        self.b_plan_height = QPushButton(tr("Pianta e piano..."))
+        self.b_plan_height.setToolTip(tr("Aggancia un chunk a un altro: la pianta dai legami fra i due (similitudine "
+                                         "2D, punti fuori posto esclusi), le quote da un piano sul terreno stabile dei "
+                                         "DEM (anche l'inclinazione); una sola trasformazione"))
+        for b in (self.b_measure_height, self.b_remeasure_height, self.b_remove_height, self.b_plan_height):
             hrow.addWidget(b)
         hrow.addStretch(1)
         ml.addLayout(hrow)
@@ -524,6 +548,7 @@ class TiesDialog(QDialog):
         self.b_measure_height.clicked.connect(self.ask_measure)
         self.b_remeasure_height.clicked.connect(self.remeasure_selected)
         self.b_remove_height.clicked.connect(self.remove_selected_heights)
+        self.b_plan_height.clicked.connect(self.ask_plan_height)
         self.c_robust.toggled.connect(lambda _on: self.invalidate())
         self.c_references.toggled.connect(lambda _on: self.invalidate())
         self.finished.connect(self._forget)  # Esc / reject: Qt closes the dialog without a closeEvent
@@ -906,6 +931,114 @@ class TiesDialog(QDialog):
                     names.append(f["layer"])
         return names
 
+    def ask_plan_height(self) -> bool:
+        """*Pianta e piano...*: the chunk, the reference, the stable ground and what to leave out asked, then
+        :meth:`measure_plan_height`."""
+        with_dem = [ch for ch in self.doc.chunks if ch.dem_path is not None]
+        if len(with_dem) < 2:
+            self.window._warn(tr("Pianta e piano confronta i DEM di due chunk: servono almeno due chunk con il DEM e "
+                                 "almeno 3 legami fra loro."))
+            return False
+        choices = [(ch.key, ch.label) for ch in with_dem]
+        current = self.window.chunk if self.window.chunk in with_dem else with_dem[0]
+        reference = next(ch for ch in with_dem if ch is not current)
+        layers = self._polygon_layers()
+        v = ParamDialog.ask(self, tr("Pianta e piano"), [
+            Field("chunk", tr("Chunk da agganciare"), current.key, choices=choices),
+            Field("reference", tr("Rispetto a"), reference.key, choices=choices),
+            Field("area", tr("Terreno stabile"), self.AUTOMATIC,
+                  choices=[(self.AUTOMATIC, tr("Automatica (pendenze basse, celle concordi)"))]
+                  + [(n, n) for n in layers]),
+            Field("exclude", tr("Escludi"), self.AUTOMATIC,
+                  choices=[(self.AUTOMATIC, tr("niente"))] + [(n, n) for n in layers])],
+            intro=tr("La pianta dai legami fra i due chunk (almeno 3 punti comuni: una similitudine 2D, ogni punto con "
+                     "il suo leave-one-out, quelli fuori posto esclusi), le quote da un piano adattato alla differenza "
+                     "dei DEM sul terreno stabile (anche l'inclinazione di un blocco GPS): una sola trasformazione, "
+                     "applicata dopo la tua conferma."))
+        if not v:
+            return False
+        if v["chunk"] == v["reference"]:
+            self.window._warn(tr("Scegli due chunk diversi."))
+            return False
+        return self.measure_plan_height(v["chunk"], v["reference"], layer=v["area"] or None,
+                                        exclude=v["exclude"] or None)
+
+    def measure_plan_height(self, chunk_key: int, reference_key: int, layer: str | None = None,
+                            exclude: str | None = None) -> bool:
+        """:func:`..engine.plan_height.measure` in the worker; the report then shown and, on its confirmation,
+        applied (:meth:`apply_plan_height`). Returns whether the measure started."""
+        doc = self.doc
+        area = None if layer is None else {"layer": layer}
+        out = None if exclude is None else {"layer": exclude}
+
+        def work(p):
+            try:
+                return plan_height.measure(doc, chunk_key, reference_key, area=area, exclude=out, progress=p)
+            except (ties_mod.TieError, ValueError, KeyError) as exc:
+                return {"error": exc}
+
+        return self._run_heights(tr("Pianta e piano"), work, self._plan_measured)
+
+    def plan_height_text(self, result: dict) -> str:
+        """The report of a tie in plan and a height plane, in the language of the interface."""
+        plan, h = result["plan"], result["height"]
+        out = tr("{0} su {1}: pianta da {2} punti comuni, scala {3}, rotazione {4}°, RMS {5} m, leave-one-out "
+                 "massimo {6} m.", result["chunk_label"], result["reference_label"], plan["points"],
+                 i18n.number(plan["scale"], 6), i18n.number(plan["rotation_deg"], 4), i18n.number(plan["rms"], 3),
+                 i18n.number(plan["loo_max"], 3))
+        if plan["rejected"]:
+            out += " " + tr("Esclusi perché fuori posto: {0}.", ", ".join(plan["rejected"]))
+        out += "\n" + tr("Quote: piano su {0} celle stabili, inclinazione {1} / {2} cm su 100 m (est / nord), NMAD {3} m "
+                         "(prima {4} m).", i18n.number(h["cells"], 0), i18n.number(h["tilt_cm_per_100m"][0], 1),
+                         i18n.number(h["tilt_cm_per_100m"][1], 1), i18n.number(h["nmad_after"] or 0.0, 3),
+                         i18n.number(h["nmad_before"] or 0.0, 3))
+        return out
+
+    def _plan_measured(self, result, doc) -> None:
+        if self._gone(doc):
+            return
+        self._update_buttons()
+        if "error" in result:
+            self.window._warn(tr("Pianta e piano: {0}", error_text(result["error"])))
+            return
+        text = self.plan_height_text(result)
+        self.window.log_pane.info(text)
+        if choice(self, "question", tr("Pianta e piano"), text + "\n\n" + tr("Applicare la trasformazione a {0}?",
+                                                                              result["chunk_label"]),
+                  [tr("Applica"), tr("Non applicare")], default=0, cancel=None) != 0:
+            return
+        self.apply_plan_height(result)
+
+    def apply_plan_height(self, result: dict) -> bool:
+        """A tie in plan and a height plane applied to its chunk: the drawings the window holds stored first when the
+        active chunk moves, one step of *Modifica > Annulla* (:class:`PlanHeightStep`), the project saved, the views
+        read again. Returns whether it was applied."""
+        w = self.window
+        active_moves = w.chunk is not None and w.chunk.key == result["chunk"]
+        if active_moves:
+            w._rustgis_leave()
+            w._store_drawings()
+            w._save_sections()
+        try:
+            changed = plan_height.apply(self.doc, result)
+        except (ties_mod.TieError, ValueError, KeyError) as exc:
+            w._warn(tr("Pianta e piano: {0}", error_text(exc)))
+            return False
+        if w.history is not None:
+            w.history.push(tr("Pianta e piano"), PlanHeightStep(w, result, changed), document=True)
+        if self.doc.path:
+            try:
+                self.doc.save()
+            except Exception as exc:  # noqa: BLE001 - applied: the project stays to be saved
+                log.error("Salvataggio non riuscito: %s", exc)
+        w._ties_shown(active_moves)
+        if w.history is not None:
+            w.history.rebase()
+        stale = changed["stale_products"].get(result["chunk"])
+        w.log_pane.info(tr("Pianta e piano applicato a {0}.", result["chunk_label"])
+                        + (" " + tr("Da ricostruire: {0}.", ", ".join(stale)) if stale else ""))
+        return True
+
     def ask_measure(self) -> bool:
         """*Misura quota stabile...*: the chunk, the reference, the area (a polygon layer or automatic), what to leave
         out and offset or plane asked, then :meth:`measure_height`."""
@@ -1113,7 +1246,7 @@ class TiesDialog(QDialog):
     def _update_buttons(self, busy: bool = False) -> None:
         self.checking = busy
         for b in (self.b_check, self.b_remove, self.b_from_markers, self.b_import, self.b_confirm,
-                  self.b_measure_height, self.b_remeasure_height, self.b_remove_height):
+                  self.b_measure_height, self.b_remeasure_height, self.b_remove_height, self.b_plan_height):
             b.setEnabled(not busy)
         self.b_apply.setEnabled(not busy and self.result is not None)
 

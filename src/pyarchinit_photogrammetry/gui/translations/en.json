@@ -1,5 +1,11 @@
 {
  "texts": {
+  "Pianta e piano...": "Plan and plane...",
+  "Pianta e piano": "Plan and plane",
+  "Aggancia un chunk a un altro: la pianta dai legami fra i due (similitudine 2D, punti fuori posto esclusi), le quote da un piano sul terreno stabile dei DEM (anche l'inclinazione); una sola trasformazione": "Place a chunk on another: the plan from the ties between the two (2D similarity, points out of place left out), the heights from a plane on the stable ground of the DEMs (the tilt too); one transform",
+  "Pianta e piano confronta i DEM di due chunk: servono almeno due chunk con il DEM e almeno 3 legami fra loro.": "Plan and plane compares the DEMs of two chunks: at least two chunks with a DEM and at least 3 ties between them are needed.",
+  "Chunk da agganciare": "Chunk to place",
+  "La pianta dai legami fra i due chunk (almeno 3 punti comuni: una similitudine 2D, ogni punto con il suo leave-one-out, quelli fuori posto esclusi), le quote da un piano adattato alla differenza dei DEM sul terreno stabile (anche l'inclinazione di un blocco GPS): una sola trasformazione, applicata dopo la tua conferma.": "The plan from the ties between the two chunks (at least 3 common points: a 2D similarity, every point with its leave-one-out, those out of place left out), the heights from a plane fitted on the difference of the DEMs over stable ground (the tilt of a GPS block too): one transform, applied after your confirmation.",
   "Cerca i legami solo dentro i poligoni di un layer dei disegni liberi (la zona stabile: non gli scavi cambiati fra i rilievi)": "Look for ties only inside the polygons of a layer of the free drawings (the stable ground: not the excavations that changed between the surveys)",
   "Punti concordi minimi": "Least matches that agree",
   "Quante corrispondenze devono concordare perché una coppia sia proposta": "How many matches must agree for a pair to be proposed",
@@ -3951,6 +3957,13 @@
   "Cambio del percorso delle foto non riuscito": "Changing the path of the photos failed"
  },
  "formats": {
+  "{0} su {1}: pianta da {2} punti comuni, scala {3}, rotazione {4}°, RMS {5} m, leave-one-out massimo {6} m.": "{0} on {1}: plan from {2} common points, scale {3}, rotation {4}°, RMS {5} m, leave-one-out at most {6} m.",
+  "Esclusi perché fuori posto: {0}.": "Left out as out of place: {0}.",
+  "Quote: piano su {0} celle stabili, inclinazione {1} / {2} cm su 100 m (est / nord), NMAD {3} m (prima {4} m).": "Heights: plane on {0} stable cells, tilt {1} / {2} cm per 100 m (east / north), NMAD {3} m (before {4} m).",
+  "Applicare la trasformazione a {0}?": "Apply the transform to {0}?",
+  "Pianta e piano: {0}": "Plan and plane: {0}",
+  "Pianta e piano applicato a {0}.": "Plan and plane applied to {0}.",
+  "Da ricostruire: {0}.": "To build again: {0}.",
   "\n\nIl chunk è georeferenziato ({0}): la barra è proposta come verifica, misura l'errore della scala senza cambiarla. Togli la spunta per scalare con la barra: con punti di controllo o posizioni delle camere si stima insieme a loro; senza riferimenti il rilievo viene scalato attorno alla barra, nel suo sistema (DEM e ortofoto vanno poi ricostruiti).": "\n\nThe chunk is georeferenced ({0}): the bar is proposed as a check, it measures the error of the scale without changing it. Untick it to scale with the bar: with control points or camera positions it is estimated together with them; without references the survey is scaled around the bar, in its own frame (DEM and orthophoto must then be rebuilt).",
   "\nCopia di sicurezza: {0}": "\nBackup copy: {0}",
   "\nFaccia «{0}» della foto 360° {1}": "\nFace «{0}» of the 360° photo {1}",
