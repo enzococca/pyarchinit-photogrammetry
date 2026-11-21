@@ -330,21 +330,21 @@ CAMERA_OUTLIER_SAMPLES = 400  # triples of photos tried by the robust fit (all o
 
 def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
                    factor: float = CAMERA_OUTLIER_FACTOR, samples: int = CAMERA_OUTLIER_SAMPLES,
-                   floor: float = CAMERA_OUTLIER_FLOOR, seed: int = 0) -> np.ndarray:
+                   floor: float = CAMERA_OUTLIER_FLOOR, seed: int = 0) -> tuple[np.ndarray, bool]:
     """Which of the corresponding points ``src`` -> ``dst`` a similarity can hold together, robust to a few absurd
     ones (a photo placed kilometres away in its chunk: Khutm 2026-11-19, RMSE 206 m with it): the least median of
     squares over triples of points (every triple up to ``samples``, else a random ``samples`` of them), then the
     points within ``factor`` times the median residual of the best triple's fit (never less than ``floor`` times
     the spread of ``dst``: the photos of a block are not equally well placed - obliques, edges), fitted again on
-    those and judged once more. Fewer than four points, or a robust fit that keeps fewer than half of them: all are kept. Returns a
-    boolean mask."""
+    those and judged once more. Fewer than four points, points on a line, or a robust fit that keeps fewer than half of
+    them: all are kept and the check did not run. Returns ``(mask, ran)``."""
     from itertools import combinations
 
     src, dst = np.asarray(src, float), np.asarray(dst, float)
     n = len(src)
     keep = np.ones(n, bool)
     if n < 4:
-        return keep
+        return keep, False
     combos = list(combinations(range(n), 3)) if n * (n - 1) * (n - 2) // 6 <= samples else None
     rng = np.random.default_rng(seed)
     best, best_med = None, np.inf
@@ -360,7 +360,7 @@ def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
         if med < best_med:
             best, best_med = m, med
     if best is None:
-        return keep
+        return keep, False
     span = float(np.sqrt(np.mean(np.sum((dst - dst.mean(0)) ** 2, axis=1))))
     for _ in range(2):  # the triple's fit, then the fit on the photos it keeps
         err = np.linalg.norm(geometry.apply(best, src) - dst, axis=1)
@@ -368,10 +368,10 @@ def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
         tol = max(factor * med, floor * span)
         inside = err <= tol
         if inside.sum() < max(3, (n + 1) // 2) or not (_spread(src[inside]) and _spread(dst[inside])):
-            return keep
+            return np.ones(n, bool), False
         keep = inside
         best = geometry.umeyama(src[keep], dst[keep], with_scale=with_scale)
-    return keep
+    return keep, True
 
 
 def _align_cameras(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, dict]:
@@ -384,7 +384,10 @@ def _align_cameras(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, di
     labels = [c.label for c, _ in pairs]
     cs, cd = np.array([p[:3, 3] for p in src]), np.array([p[:3, 3] for p in dst])
     # a photo placed absurdly in one of the chunks (an exported orthophoto among the photos) is left out of the fit
-    keep = robust_inliers(cs, cd, with_scale=not fix_scale)
+    keep, checked = robust_inliers(cs, cd, with_scale=not fix_scale)
+    if not checked and len(pairs) >= 4:
+        log.warning("%s: the %d photos in common with %s could not be checked for one out of place (they lie nearly on "
+                    "a line, or too few agree): all are used", ch.label, len(pairs), ref.label)
     W = pose_similarity([s for s, k in zip(src, keep) if k], [d for d, k in zip(dst, keep) if k],
                         with_scale=not fix_scale)
     res = _residuals(W, labels, cs, cd)
@@ -401,7 +404,8 @@ def _align_cameras(ch, ref, frame, ref_frame, fix_scale) -> tuple[np.ndarray, di
                     "%s", ch.label, len(rejected), ref.label, ", ".join(rejected))
     return W, {"method": "cameras", "correspondences": len(used), "residuals": res, "rmse": _rmse(used),
                "max_error": max(r["error"] for r in used),
-               "max_angle_deg": max(r["angle_deg"] for r in used), "rejected": rejected}
+               "max_angle_deg": max(r["angle_deg"] for r in used), "rejected": rejected,
+               "rmse_all": _rmse(res), "robust_check": bool(checked)}
 
 
 def registration_cloud(chunk: "Chunk", max_points: int, seed: int = 0) -> tuple[np.ndarray, np.ndarray | None, str]:

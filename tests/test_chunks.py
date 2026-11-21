@@ -119,6 +119,34 @@ def test_align_cameras_leaves_out_an_absurd_photo(doc, scene):
     errors = [np.linalg.norm(b.to_world(cb.center) - a.to_world(ca.center)) * unit_a
               for cb, ca in common_cameras(b, a) if cb is not moved]
     assert max(errors) < 0.002
+    assert info["robust_check"] is True and info["rmse_all"] * unit_a > 300  # the photo left out weighs here
+
+
+def test_the_robust_check_of_the_photos_in_common():
+    """robust_inliers says whether it could judge: photos on a line (a corridor flown once) cannot be told apart from
+    an absurd one by a similarity, and all are kept, said; four photos or more spread over a plane can."""
+    rng = np.random.default_rng(1)
+    src = rng.uniform(0, 10, (8, 3))
+    dst = src * 1.5 + 2.0
+    dst[3] += 500.0
+    keep, ran = chunks_mod.robust_inliers(src, dst)
+    assert ran and list(np.flatnonzero(~keep)) == [3]
+    line = np.column_stack([np.linspace(0, 10, 8), np.zeros(8), np.zeros(8)])
+    keep, ran = chunks_mod.robust_inliers(line, line * 2.0)
+    assert not ran and keep.all()
+    keep, ran = chunks_mod.robust_inliers(src[:3], dst[:3])
+    assert not ran and keep.all()
+
+
+@pytest.mark.slow
+def test_a_robust_check_that_cannot_run_is_said(doc, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(chunks_mod, "robust_inliers", lambda src, dst, **k: (np.ones(len(src), bool), False))
+    with caplog.at_level(logging.WARNING):
+        info = doc.align_chunks("A", ["B"], method="cameras")["chunks"][0]
+    assert info["robust_check"] is False and info["rmse_all"] == pytest.approx(info["rmse"])
+    assert any("could not be checked" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.slow

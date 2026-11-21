@@ -1676,7 +1676,10 @@ def align_chunks(project: Path,
         typer.echo(f"{c['label']} -> {report['reference']['label']}: {c['method']}, {c['correspondences']} "
                    f"correspondences, RMSE {rmse}, scale {c['scale']:.6g}{extra}")
         if c.get("rejected"):
-            typer.echo(f"  photos left out of the fit (out of place): {', '.join(c['rejected'])}")
+            typer.echo(f"  photos left out of the fit (out of place): {', '.join(c['rejected'])}; RMSE over every photo "
+                       f"in common {c['rmse_all']:.4g}")
+        if c.get("robust_check") is False and c.get("correspondences", 0) >= 4:
+            typer.echo("  the photos in common could not be checked for one out of place (nearly on a line)")
         if c.get("stale_products"):
             typer.echo(f"  build again: {', '.join(c['stale_products'])}")
 
