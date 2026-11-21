@@ -48,7 +48,8 @@ def scenes():
 
 def _survey(doc, scene, label, x_range, truth, error=np.eye(4), light=(1.0, 1.0), seed=0, noise=(3.0, 0.001)):
     """A chunk seeing ``x_range`` (local metres) of ``scene``: its rasters made in the world where ``error @ truth``
-    puts it (plan rotation, scale and shift only, so the inverse in plan does not need the height)."""
+    puts it (plan rotation, scale and shift, and heights tilted by the third row: the inverse in plan does not need
+    the height)."""
     rng = np.random.default_rng(seed)
     ch = doc.add_chunk(label)
     ch.crs = CRS
@@ -74,7 +75,8 @@ def _survey(doc, scene, label, x_range, truth, error=np.eye(4), light=(1.0, 1.0)
     bgr = 255.0 * (np.clip(bgr * gain, 0, 255) / 255.0) ** gamma + rng.normal(0, noise[0], bgr.shape)
     rgb = np.clip(bgr[:, ::-1], 0, 255).astype(np.uint8).reshape(h, w, 3)
     z_true = scene.height_at(lx, ly) + z0
-    z = (s * z_true + D[2, 3] + rng.normal(0, noise[1], z_true.shape)).reshape(h, w).astype(np.float32)
+    tilt = D[2, 0] * (lx + x0) + D[2, 1] * (ly + y0)  # an error that tilts the heights (zero for a similarity)
+    z = (s * z_true + tilt + D[2, 3] + rng.normal(0, noise[1], z_true.shape)).reshape(h, w).astype(np.float32)
     inside = inside.reshape(h, w)
     ortho = np.zeros((4, h, w), np.uint8)
     ortho[:3] = np.moveaxis(rgb, -1, 0)

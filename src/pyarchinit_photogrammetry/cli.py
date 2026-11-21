@@ -4916,6 +4916,49 @@ def ties_height(project: Path,
     typer.echo(f"added {_height_line(doc, h)}")
 
 
+@ties_app.command("plan-height")
+def ties_plan_height(project: Path,
+                     chunk: str = typer.Argument(..., help="the chunk to place (B: label or key)"),
+                     reference: str = typer.Argument(..., help="the reference chunk (A)"),
+                     layer: Optional[str] = typer.Option(None, "--layer", help="the stable ground: a polygon layer of "
+                                                         "the free drawings (of A, else of B)"),
+                     area: Optional[Path] = typer.Option(None, "--area", help="the stable ground: polygons of a "
+                                                         "GeoPackage, GeoJSON or DXF file"),
+                     exclude: Optional[str] = typer.Option(None, "--exclude", help="ground left out: a polygon layer, "
+                                                           "or a file (.gpkg, .geojson, .json, .dxf)"),
+                     reject: float = typer.Option(3.0, "--reject", help="a common point further than this many "
+                                                  "medians of the others' residuals is left out"),
+                     apply: bool = typer.Option(False, "--apply", help="apply the transform to CHUNK and save"),
+                     as_json: Optional[Path] = typer.Option(None, "--json", help="write the report to this JSON file")):
+    """Place CHUNK on REFERENCE by a tie in plan and a height plane: the plan (a 2D similarity, leave-one-out, the
+    outliers left out) from the point ties between the two chunks, the heights from a plane fitted on the difference
+    of their DEMs over stable ground (the tilt of a GPS block included), one 4x4 transform. Nothing is changed
+    without --apply; then build the DEM and the orthophoto of CHUNK again."""
+    from .engine import plan_height
+    from .engine import ties as ties_mod
+
+    if layer is not None and area is not None:
+        raise typer.BadParameter("give --layer or --area, not both")
+    doc = Document.open(project)
+    cb, ca = _tie_chunk(doc, chunk), _tie_chunk(doc, reference)
+    where = {"layer": layer} if layer is not None else {"file": str(area)} if area is not None else None
+    try:
+        result = plan_height.measure(doc, cb, ca, area=where, exclude=exclude, reject=reject, progress=print_progress)
+    except (ties_mod.TieError, ValueError, KeyError, FileNotFoundError) as exc:
+        _ties_error(exc)
+    typer.echo(plan_height.report_text(result))
+    if as_json is not None:
+        as_json.write_text(json.dumps(result, indent=1))
+        typer.echo(f"written {as_json}")
+    if not apply:
+        typer.echo("not applied (--apply to place the chunk)")
+        return
+    changed = plan_height.apply(doc, result)
+    doc.save()
+    stale = changed["stale_products"].get(cb.key)
+    typer.echo(f"applied to {cb.label}; project saved" + (f"; build again: {', '.join(stale)}" if stale else ""))
+
+
 @ties_app.command("heights")
 def ties_heights(project: Path,
                  as_json: bool = typer.Option(False, "--json", help="print the stable heights as JSON")):
