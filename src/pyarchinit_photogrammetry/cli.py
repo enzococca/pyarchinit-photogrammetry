@@ -5050,6 +5050,11 @@ def ties_auto(project: Path,
               same_group: bool = typer.Option(False, "--same-group", help="pair chunks of one group too"),
               accept: bool = typer.Option(False, "--accept", help="make the pairs proposed into ties and save"),
               max_ties: int = typer.Option(12, "--max-ties", help="ties per pair accepted, spread over the overlap"),
+              area: Optional[str] = typer.Option(None, "--area", help="match only inside this area (the stable "
+                                                 "ground): xmin,ymin,xmax,ymax in the system of the reference, a "
+                                                 "polygon layer of the free drawings, or a .gpkg/.geojson/.dxf file"),
+              min_matches: int = typer.Option(12, "--min-matches", help="matches that must agree for a pair (3 at "
+                                                                        "least)"),
               as_json: Optional[Path] = typer.Option(None, "--json", help="write the pairs and the results (with "
                                                                           "their points) to this JSON file")):
     """Automatic ties between chunks: the candidate pairs (overlap where the chunks are now), the matching of their
@@ -5061,6 +5066,17 @@ def ties_auto(project: Path,
     doc = Document.open(project)
     if source not in auto_ties.SOURCES:
         raise typer.BadParameter(f"use one of {', '.join(auto_ties.SOURCES)}", param_hint="--source")
+    if min_matches < 3:
+        raise typer.BadParameter("3 at least", param_hint="--min-matches")
+    where = None
+    if area:
+        parts = [p.strip() for p in area.split(",")]
+        try:
+            where = tuple(float(p) for p in parts) if len(parts) == 4 else area
+        except ValueError:
+            where = area  # a layer whose name has commas
+        if isinstance(where, tuple) and not (where[2] > where[0] and where[3] > where[1]):
+            raise typer.BadParameter("xmin,ymin,xmax,ymax", param_hint="--area")
     found = []
     if pairs:
         todo = []
@@ -5084,8 +5100,11 @@ def ties_auto(project: Path,
                 if p["candidate"] or (whole and (p["reason"] or {}).get("code") == "small_overlap")]
         if not todo:
             typer.echo("No pair to match (try --whole, or --pairs)")
-    results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
-                            progress=print_progress)
+    try:
+        results = auto_ties.run(doc, todo, source=source, margin=None if whole else margin, cell=cell,
+                                progress=print_progress, area=where, min_matches=min_matches)
+    except (ValueError, FileNotFoundError) as exc:  # an area that is not one
+        _ties_error(exc)
     for r in results:
         typer.echo(auto_ties.report_text(r))
     if as_json is not None:

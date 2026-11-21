@@ -1,5 +1,9 @@
 {
  "texts": {
+  "Cerca i legami solo dentro i poligoni di un layer dei disegni liberi (la zona stabile: non gli scavi cambiati fra i rilievi)": "Look for ties only inside the polygons of a layer of the free drawings (the stable ground: not the excavations that changed between the surveys)",
+  "Punti concordi minimi": "Least matches that agree",
+  "Quante corrispondenze devono concordare perché una coppia sia proposta": "How many matches must agree for a pair to be proposed",
+  "Tutta la sovrapposizione": "The whole overlap",
   "Analisi": "Analyses",
   "Curve di livello, volume scavo / riporto, pianta a quota": "Contour lines, cut / fill volume, plan at a height",
   "\n\nAttenzione: questo modello è stato scritto da pose importate (Metashape, WebODM o chunk uniti): gli errori di riproiezione sono quasi nulli e conta solo l'incertezza di ricostruzione. Per una selezione completa allinea di nuovo le foto qui.": "\n\nNote: this model was written from imported poses (Metashape, WebODM or merged chunks): the reprojection errors are almost zero and only the reconstruction uncertainty counts. For a complete selection align the photos again here.",

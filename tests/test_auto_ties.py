@@ -242,3 +242,29 @@ def test_the_relief_of_the_dems_ties_chunks_whose_colours_changed(tmp_path, scen
     print(f"auto ties relief: shift {shift * 1000:.2f} mm, rotation {rot:.4f} deg, scale {ppm:+.0f} ppm, "
           f"worst corner {worst * 1000:.2f} mm, refined {res.refined}, RMS {res.rms * 1000:.2f} mm")
     assert worst < 0.010
+
+
+def test_matching_limited_to_an_area_and_the_threshold_of_matches(tmp_path, scenes):
+    """The matching of a pair limited to an area in the system of the reference (a box or polygons: the stable ground
+    of a site whose excavations changed, Khutm 2026-11-19): every point kept lies in it and the pair still agrees;
+    the number of matches that must agree is a parameter; the CLI takes both."""
+    doc, _truth = _project(tmp_path, scenes)
+    a, b, _c = doc.chunks
+    x0, y0, _z0 = scenes[0].origin
+    box = (x0 + 1.5, y0 + 0.2, x0 + 2.4, y0 + 2.0)
+    res = auto_ties.match(doc, a, b, area=box)
+    assert res.ok, auto_ties.report_text(res)
+    pts = res.points_a
+    assert len(pts) >= auto_ties.MIN_MATCHES
+    assert np.all((pts[:, 0] >= box[0]) & (pts[:, 0] <= box[2]) & (pts[:, 1] >= box[1]) & (pts[:, 1] <= box[3]))
+    assert res.summary()["area"] == list(box)
+    assert abs(res.rotation_deg - 1.5) < 0.05
+    strict = auto_ties.match(doc, a, b, area=box, min_matches=100_000)
+    assert not strict.ok and strict.messages[0]["code"] == "few_matches"
+    assert strict.messages[0]["args"][1] == 100_000
+    with pytest.raises(ValueError, match="min_matches"):
+        auto_ties.match(doc, a, b, min_matches=2)
+    out = CliRunner().invoke(app, ["ties", "auto", str(tmp_path / "p.ppg"), "--pairs", "A:B", "--area",
+                                   ",".join(f"{v:.3f}" for v in box), "--min-matches", "100000"])
+    assert out.exit_code == 0, out.output
+    assert "B -> A (ortho): rejected" in out.output

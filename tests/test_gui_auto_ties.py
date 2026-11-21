@@ -97,3 +97,46 @@ def test_chunks_of_a_group_get_the_group_unknowns(qapp, scenes, tmp_path, monkey
         assert dlg.chunks.cellWidget(2, 1).currentText() == "con il gruppo"
     finally:
         _close_window(w)
+
+
+def test_the_matching_limited_to_a_layer_and_its_least_matches(qapp, scenes, tmp_path, monkeypatch):
+    """The area of the matching is a polygon layer of the free drawings (the stable ground), chosen in the pane, and
+    the matches that must agree a number of the pane: both reach the matching, every point kept lies in the layer."""
+    from PySide6.QtCore import Qt
+
+    from pyarchinit_photogrammetry.core import free_drawings
+
+    doc, _truth = _project(tmp_path / "p", scenes)
+    x0, y0, z0 = scenes[0].origin
+    box = (x0 + 1.5, y0 + 0.2, x0 + 2.4, y0 + 2.0)
+    ring = [[box[0], box[1], z0], [box[2], box[1], z0], [box[2], box[3], z0], [box[0], box[3], z0]]
+    free_drawings.add(doc.chunks[0], "polygon", ring, layer="stabile")
+    doc.save()
+    seen = []
+    real = auto_ties.run
+    monkeypatch.setattr(auto_ties, "run", lambda *a, **k: seen.append(k) or real(*a, **k))
+    w = _window(qapp, doc, tmp_path, monkeypatch)
+    try:
+        dlg = _open(w, qapp)
+        auto = dlg.auto
+        assert auto.find_pairs()
+        w.runner.wait()
+        qapp.processEvents()
+        assert [auto.area.itemData(i) for i in range(auto.area.count())] == [None, "stabile"]
+        auto.area.setCurrentIndex(1)
+        auto.min_matches.setValue(15)
+        a, b, _c = (ch.key for ch in w.doc.chunks)
+        for i in range(auto.table.rowCount()):  # B -> A only
+            pair = auto.table.item(i, 1).text()
+            auto.table.item(i, 0).setCheckState(Qt.CheckState.Checked if pair == "B → A" else Qt.CheckState.Unchecked)
+        assert auto.checked_pairs() == [(a, b)]
+        assert auto.match()
+        w.runner.wait()
+        qapp.processEvents()
+        assert seen[-1]["area"] == {"layer": "stabile"} and seen[-1]["min_matches"] == 15
+        res = auto.results[(a, b)]
+        assert res.ok and res.summary()["area"] == {"layer": "stabile"}
+        pts = res.points_a
+        assert np.all((pts[:, 0] >= box[0] - 1e-6) & (pts[:, 0] <= box[2] + 1e-6))
+    finally:
+        _close_window(w)
