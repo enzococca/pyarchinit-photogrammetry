@@ -1670,6 +1670,8 @@ def align_chunks(project: Path,
         extra = f", initial position {c['initial']}" if c.get("initial") else ""
         typer.echo(f"{c['label']} -> {report['reference']['label']}: {c['method']}, {c['correspondences']} "
                    f"correspondences, RMSE {rmse}, scale {c['scale']:.6g}{extra}")
+        if c.get("rejected"):
+            typer.echo(f"  photos left out of the fit (out of place): {', '.join(c['rejected'])}")
         if c.get("stale_products"):
             typer.echo(f"  build again: {', '.join(c['stale_products'])}")
 

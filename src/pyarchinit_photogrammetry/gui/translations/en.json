@@ -4026,6 +4026,7 @@
   "; blocco tenuto dalle posizioni GNSS di {0} foto ({1})": "; block held by the GNSS positions of {0} photos ({1})",
   "; da ricostruire: {0}": "; to rebuild: {0}",
   "; dopo l'ottimizzazione {0} px": "; after the optimisation {0} px",
+  "; foto lasciate fuori perché fuori posto: {0}": "; photos left out as out of place: {0}",
   "; il {0}% è nascosto dal modello (chiome, muri)": "; {0}% is hidden by the model (tree crowns, walls)",
   "; l'ortofoto ora ne prende il {0}%": "; the orthophoto now takes {0}% from it",
   "; la compensazione con le posizioni GNSS non è riuscita ({0}): il blocco resta come l'ha lasciato l'allineamento": "; the adjustment held by the GNSS positions failed ({0}): the block stays as the alignment left it",

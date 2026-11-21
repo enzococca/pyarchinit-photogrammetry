@@ -98,6 +98,30 @@ def test_align_cameras(doc, scene):
 
 
 @pytest.mark.slow
+def test_align_cameras_leaves_out_an_absurd_photo(doc, scene):
+    """One photo in common placed a kilometre away in its chunk (Khutm, 2026-11-19: an exported orthophoto among the
+    photos, aligned kilometres off: RMSE 206 m) is left out of the fit and named in the report; the chunk is tied
+    as well as without it."""
+    a, b = doc.chunks
+    unit = _metres_per_unit(b, scene)  # metres per unit of B's own frame
+    moved = common_cameras(b, a)[3][0]
+    shift = np.eye(4)
+    shift[:3, 3] = [1000.0 / unit, 0.0, 0.0]
+    moved.transform = shift @ np.asarray(moved.transform, float)
+    info = doc.align_chunks("A", ["B"], method="cameras")["chunks"][0]
+    assert info["rejected"] == [moved.label]
+    assert b.meta["chunk_alignment"]["rejected"] == [moved.label]
+    assert info["correspondences"] == SHARED - 1
+    flagged = {r["label"]: r for r in info["residuals"]}
+    assert flagged[moved.label]["rejected"] is True and flagged[moved.label]["error"] * _metres_per_unit(a, scene) > 900
+    unit_a = _metres_per_unit(a, scene)
+    assert info["rmse"] * unit_a < 0.002 and info["max_error"] * unit_a < 0.003
+    errors = [np.linalg.norm(b.to_world(cb.center) - a.to_world(ca.center)) * unit_a
+              for cb, ca in common_cameras(b, a) if cb is not moved]
+    assert max(errors) < 0.002
+
+
+@pytest.mark.slow
 def test_align_points_from_markers(doc, scene):
     a, b = doc.chunks
     info = doc.align_chunks(a, [b], method="points")["chunks"][0]

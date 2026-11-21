@@ -4412,6 +4412,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                                                   rmse * 1000) if metric else f", RMSE {rmse:.4g}")
                 lines.append(tr("{0}: {1} corrispondenze{2}, scala {3:.4f}",
                                 e['label'], e.get('correspondences', 0), err, e['scale'])
+                             + (tr("; foto lasciate fuori perché fuori posto: {0}",
+                                   ', '.join(e['rejected'])) if e.get("rejected") else "")
                              + (tr("; da ricostruire: {0}",
                                    ', '.join(e['stale_products'])) if e.get("stale_products") else ""))
                 d = e.get("distances")
