@@ -113,3 +113,38 @@ def test_dem_grid_kept_within_the_memory(tmp_path, monkeypatch):
     monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: pts)
     with pytest.raises(MemoryError, match="coarser resolution"):
         ch.build_dem(resolution=resolution, source="point_cloud")
+
+
+def test_a_few_far_points_do_not_widen_the_dem(tmp_path, monkeypatch, caplog):
+    """Three points of the cloud 10 km away (Khutm, 2026-11-19: a few stray points refused the fine cells for the
+    memory) do not set the extent of the DEM: it covers the 0.5-99.5 percentiles of the points with a margin, at the
+    cell asked, and says so in the log and in its record. A region set on the chunk wins: the extent as before."""
+    import logging
+
+    from pyarchinit_photogrammetry.engine import region as region_mod
+    from pyarchinit_photogrammetry.engine import satellite
+
+    ch = _mesh_chunk(tmp_path, side=60)
+    pts = dem_engine.surface_points_world(ch, "model")
+    far = pts[:3] + [10_000.0, 0.0, 0.0]
+    monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: np.vstack([pts, far]))
+    cells = (20.0 / 0.05) ** 2  # the 20 x 20 m of the surface at 5 cm
+    monkeypatch.setattr(satellite, "_physical_memory", lambda: 8 * dem_engine.GRID_BYTES_PER_CELL * cells)
+    with caplog.at_level(logging.INFO):
+        dem, frame = _read(ch.build_dem(resolution=0.05, source="point_cloud"))
+    assert ch.meta["dem"]["resolution"] == 0.05 and "memory_limited" not in ch.meta["dem"]
+    assert dem.shape[1] * 0.05 < 30.0 and np.isfinite(dem).mean() > 0.9
+    clipped = ch.meta["dem"]["extent_clipped"]
+    assert clipped["points_left_out"] == 3 and len(clipped["box"]) == 4
+    assert any("left out of the DEM" in r.getMessage() for r in caplog.records)
+    # without the far points nothing is clipped: the DEM as before
+    monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: pts)
+    plain, plain_frame = _read(ch.build_dem(resolution=0.05, source="point_cloud"))
+    assert "extent_clipped" not in ch.meta["dem"]
+    assert plain.shape == dem.shape and plain_frame == frame
+    # a region on the chunk: the points are its business, no clipping by the percentiles
+    region_mod.set_region(ch, region_mod.Region(center=[1010.0, 2010.0, 50.0], size=[30.0, 30.0, 10.0],
+                                                rotation=np.eye(3)))
+    monkeypatch.setattr(dem_engine, "surface_points_world", lambda *a, **k: np.vstack([pts, far]))
+    with pytest.raises(MemoryError, match="coarser resolution"):
+        ch.build_dem(resolution=0.05, source="point_cloud")
