@@ -51,7 +51,9 @@ pub struct Run<U, R> {
     pub log: Vec<String>,
 }
 
-/// The environment variable of the test hook: the unit at which every GPU worker is retired.
+/// The environment variable of the test hook. It fires in two places: here, every GPU worker is
+/// retired at its N-th unit; in the matching of the pairs, a GPU shared by every worker is lost at
+/// its N-th request (first stage or brute force, from any worker).
 pub const FAIL_AFTER_VAR: &str = "PPG_TEST_GPU_FAIL_AFTER";
 
 /// The unit at which the test hook retires every GPU worker, when the variable is set to 1 or

@@ -93,8 +93,9 @@ pub struct PairsReport {
 pub type Bests<'a> = dyn FnMut(u64, &[u8], u64, &[u8]) -> Result<Vec<[u32; 3]>, String> + 'a;
 
 /// A device that does the first stage (and brute force) of the pairs of a worker: a GPU
-/// ([`Matcher`]), or a fake in a test. An error retires the worker; its pair goes back to the
-/// queue for the others.
+/// ([`Matcher`]), or a fake in a test, shared by every worker. An error marks the device lost for
+/// every worker: its own GPU worker is retired (its pair goes back to the queue for the others), a
+/// CPU worker does that call on the CPU.
 pub trait Device: Send {
     /// What the log and the report call the device.
     fn name(&self) -> String;
