@@ -151,18 +151,21 @@ epipolar lines of the model they give; brute force where the first stage is unsu
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
 `database.db` as the classic step writes it, so `align_cameras` runs the classic mapper on it. The
 arguments are those of the classic step; `guided_matching` is ignored (the native matching always
-follows the epipolar lines).
+follows the epipolar lines). `PPG_RANSAC_SEED` (the seed of COLMAP's geometric verification, `ppg bench run
+--seed`) applies to the classic matching only: the native step does not read it.
 
 When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
 than API 14, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
 not know - or fails half way, the classic step runs with the same arguments, a line in the log says
 why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. With
 `auto` a request the native engine does not take (the list above, not a failure) is the program's
-choice of the classic step: no reason kept and no line in the log (`switch.decline`). A cancel and a
+choice of the classic step: no reason kept, and no line in the log but one INFO line when the core is
+missing, switched off or too old (`switch.decline`). A cancel and a
 full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it (the
 system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was. So does a
-request the step refuses - an `apply_masks` or a preselection it does not know, a chunk without enabled
-photos or not in a project: the caller gets the error the classic step gives, whichever engine runs.
+request the step refuses - an `apply_masks`, a preselection or a number of neighbours it does not take, a
+reference preselection that finds no pairs, a chunk without enabled photos or not in a project: the
+caller gets the error the classic step gives, whichever engine runs, before any point is detected.
 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,

@@ -153,19 +153,22 @@ lungo le linee epipolari del modello che danno; forza bruta dove la prima fase �
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
 `database.db` di COLMAP come lo scrive il passo classico, così `align_cameras` vi fa girare il mapper
 classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
-nativo segue sempre le linee epipolari).
+nativo segue sempre le linee epipolari). `PPG_RANSAC_SEED` (il seme della verifica geometrica di COLMAP,
+`ppg bench run --seed`) vale solo per il matching classico: il passo nativo non lo legge.
 
 Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
 dell'API 14, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
 che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
 dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Con
 `auto` una richiesta che il motore nativo non accetta (l'elenco qui sopra, non un errore) è la scelta del
-programma per il passo classico: nessun motivo tenuto e nessuna riga nel log (`switch.decline`). Un
+programma per il passo classico: nessun motivo tenuto, e nessuna riga nel log salvo una riga INFO quando
+il nucleo è assente, spento o troppo vecchio (`switch.decline`). Un
 annullamento e un disco pieno invece fermano il passo: un disco pieno è un `OSError` di ENOSPC
 qualunque strato lo dica (il sistema, sqlite, pycolmap; `native_match.disk_full`), e il progetto resta
-com'era. Lo stesso vale per una richiesta che il passo rifiuta - un `apply_masks` o una preselezione che
-non conosce, un chunk senza foto abilitate o fuori da un progetto: chi chiama riceve l'errore che dà il
-passo classico, qualunque motore giri.
+com'era. Lo stesso vale per una richiesta che il passo rifiuta - un `apply_masks`, una preselezione o un
+numero di vicini che non accetta, una preselezione per riferimento che non trova coppie, un chunk senza
+foto abilitate o fuori da un progetto: chi chiama riceve l'errore che dà il passo classico, qualunque
+motore giri, prima che sia rilevato alcun punto.
 
 `meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
