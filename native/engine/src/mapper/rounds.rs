@@ -144,7 +144,8 @@ pub struct SigmaEstimate {
 /// of the positioning, the positions with the photos whose position is an outlier (ascending), the
 /// sigmas used for each position, the estimate of their accuracy, the bias of each flight (sorted,
 /// as the positioning gives them) and, after the rounds, the posterior covariance of the biases of
-/// the last adjustment (`bundle::bias_covariance`; the reference flight has none); the
+/// the last adjustment (`posterior_bias_covariance`; the reference flight has none) with the
+/// variance factors of its groups (tie points, horizontal and vertical positions); the
 /// observations of the tracks with a point that the last filter saw and those it kept; notes of
 /// the rounds.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +165,7 @@ pub struct State {
     pub sigma_estimate: Option<SigmaEstimate>,
     pub bias: Vec<(i64, [f64; 3])>,
     pub bias_covariance: Vec<(i64, [[f64; 3]; 3])>,
+    pub variance_factors: Option<[f64; 3]>,
     pub last_filter: (usize, usize),
     pub notes: Vec<String>,
 }
@@ -592,6 +594,50 @@ fn intrinsics(state: &State, round: usize, rounds: usize, positions: bool) -> (V
     (free, names)
 }
 
+/// The posterior covariance of the biases of the flights after the adjustment `sol` of `b`, with a
+/// variance component per group of observations (ruling R14): the normal matrix is the sum of the
+/// groups' each over its own factor, then inverted (`bundle::bias_covariance` on the problem with
+/// the sigmas so scaled). The factor of the positions is the one `estimate_sigmas` found
+/// (horizontal and vertical, the recorded accuracy times its square root, not clamped); the
+/// factor of the tie points is `v^T P v / r` of their own residuals (twice their cost), `r` their
+/// rows less the unknowns plus the part of the unknowns the positions take (`tr(H)` of the
+/// positions, from the redundancy `estimate_sigmas` measured). The robust loss keeps its scale in
+/// pixels. The covariance, and the factors (tie points, horizontal, vertical).
+fn posterior_bias_covariance(
+    state: &State,
+    b: &Built,
+    sol: &Solution,
+    o: &Options,
+) -> Result<(Vec<(i64, [[f64; 3]; 3])>, [f64; 3]), String> {
+    let (fh, fv, taken) = match &state.sigma_estimate {
+        Some(e) => (e.factor[0], e.factor[1], 3.0 * e.positions as f64 - e.redundancy[0] - e.redundancy[1]),
+        None => (1.0, 1.0, 0.0),
+    };
+    let fit = fitted(&b.pb, sol);
+    let gnss_cost: f64 = b
+        .pb
+        .gnss
+        .iter()
+        .zip(&fit)
+        .map(|(&(_, target, sigma, _), f)| (0..3).map(|a| ((f[a] - target[a]) / sigma[a]).powi(2)).sum::<f64>())
+        .sum::<f64>()
+        / 2.0;
+    let tie_cost = sol.cost - gnss_cost;
+    let unknowns = bundle::Layout::new(&b.pb).size as f64;
+    let redundancy = 2.0 * b.pb.obs.len() as f64 - (unknowns - taken);
+    let ft = if redundancy > 0.0 && tie_cost > 0.0 { 2.0 * tie_cost / redundancy } else { 1.0 };
+    let mut pb = b.pb.clone();
+    let g = state.gnss.as_ref();
+    for (j, &k) in b.positions.iter().enumerate() {
+        let rec = g.expect("positions").sigma[k];
+        pb.gnss[j].2 = [rec[0] * fh.sqrt(), rec[1] * fh.sqrt(), rec[2] * fv.sqrt()];
+    }
+    pb.pixel_sigma = b.pb.pixel_sigma * ft.sqrt();
+    let scale = o.ba_loss_scale_px / pb.pixel_sigma;
+    let loss = if o.ba_loss_cauchy { Loss::Cauchy(scale) } else { Loss::Huber(scale) };
+    Ok((bundle::bias_covariance(&pb, sol, loss)?, [ft, fh, fv]))
+}
+
 /// Whether round `round` is the last adjustment (no adjustment with every track after it).
 fn last_adjustment(o: &Options, round: usize) -> bool {
     !o.final_all_tracks && round == o.rounds
@@ -614,7 +660,9 @@ fn adjust_state(
     let sol = adjust(&b.pb, o, observe)?;
     write_back(state, &b, &sol);
     if covariance && b.pb.gnss_bias {
-        state.bias_covariance = bundle::bias_covariance(&b.pb, &sol, loss_of(o))?.0;
+        let (covariance, factors) = posterior_bias_covariance(state, &b, &sol, o)?;
+        state.bias_covariance = covariance;
+        state.variance_factors = Some(factors);
     }
     let (cost_initial, mut cost) = (sol.cost_initial, sol.cost);
     if estimate && !b.positions.is_empty() {

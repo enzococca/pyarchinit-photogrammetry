@@ -164,14 +164,13 @@ pub(crate) fn solve_with_limits(
 
 /// The covariance of the bias of each flight of the solution `sol` of `pb` (the flights of
 /// `Layout::flights`, sorted): the 3 x 3 blocks of the inverse of the normal matrix at the
-/// solution (`lm::covariance_block`, the robust curvature of `loss` on the tie points) times the
-/// a-posteriori variance factor, twice the cost over the redundancy (the residuals less the
-/// unknowns), which is also returned. Dense: for blocks of a few thousand photos.
-pub fn bias_covariance(
-    pb: &Problem,
-    sol: &Solution,
-    loss: Loss,
-) -> Result<(Vec<(i64, [[f64; 3]; 3])>, f64), String> {
+/// solution (`lm::covariance_block`, the robust curvature of `loss` on the tie points). The
+/// accuracies of `pb` are taken as they are, with no variance factor after the inverse: a caller
+/// whose groups of observations have their own variance components puts them into the sigmas
+/// first (`pixel_sigma`, the sigmas of the positions), so that the normal matrix is the sum of the
+/// groups' each over its own factor (the mapper does, `rounds`). Dense: for blocks of a few
+/// thousand photos.
+pub fn bias_covariance(pb: &Problem, sol: &Solution, loss: Loss) -> Result<Vec<(i64, [[f64; 3]; 3])>, String> {
     pb.check()?;
     let mut model = BundleModel::new(pb, loss);
     let params = sol.parameters();
@@ -194,20 +193,16 @@ pub fn bias_covariance(
         })
         .collect();
     let block = covariance_block(&model, &cols)?;
-    let rows = 2 * (pb.obs.len() + pb.mobs.len()) + 3 * (pb.gcps.len() + pb.gnss.len()) + pb.bars.len()
-        + if pb.rolling_shutter { 6 * pb.centres.len() } else { 0 };
-    let unknowns = model.cam_size.iter().sum::<usize>() + 3 * pb.points.len();
-    let factor = if rows > unknowns { 2.0 * sol.cost / (rows - unknowns) as f64 } else { f64::NAN };
     let k = cols.len();
     let out = flights
         .iter()
         .enumerate()
         .map(|(f, &id)| {
-            let at = |a: usize, b: usize| factor * block[(3 * f + a) * k + 3 * f + b];
+            let at = |a: usize, b: usize| block[(3 * f + a) * k + 3 * f + b];
             (id, std::array::from_fn(|a| std::array::from_fn(|b| at(a, b))))
         })
         .collect();
-    Ok((out, factor))
+    Ok(out)
 }
 
 /// The bundle adjustment of a problem as a `Model`: the parameters it is at, the layout of their

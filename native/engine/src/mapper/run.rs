@@ -48,7 +48,8 @@ fn name(stage: Stage) -> &'static str {
 /// share of the observations of the triangulated tracks the last filter kept, the median
 /// reprojection error in pixels, the accuracy of the positions estimated again, the bias of each
 /// flight and the posterior standard deviation of each axis of the biases that were adjusted (the
-/// reference flight has none), the reports of the rounds and their notes.
+/// reference flight has none) with the variance factors of the groups it used (tie points,
+/// horizontal and vertical positions), the reports of the rounds and their notes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MapperReport {
     pub photos: usize,
@@ -75,6 +76,7 @@ pub struct MapperReport {
     pub sigma_v: Option<f64>,
     pub bias: Vec<(i64, [f64; 3])>,
     pub bias_sd: Vec<(i64, [f64; 3])>,
+    pub variance_factors: Option<[f64; 3]>,
     pub rounds: Vec<RoundReport>,
     pub notes: Vec<String>,
 }
@@ -310,6 +312,7 @@ impl Mapper {
             sigma_estimate: None,
             bias: p.bias.clone(),
             bias_covariance: Vec::new(),
+            variance_factors: None,
             last_filter: (0, 0),
             notes: Vec::new(),
         };
@@ -345,6 +348,7 @@ impl Mapper {
                 r.bias.clone_from(&state.bias);
                 let sd = |c: &[[f64; 3]; 3]| std::array::from_fn(|a| c[a][a].sqrt());
                 r.bias_sd = state.bias_covariance.iter().map(|(f, c)| (*f, sd(c))).collect();
+                r.variance_factors = state.variance_factors;
                 r.rounds = reports;
                 r.notes.clone_from(&state.notes);
                 self.state = Some(state);

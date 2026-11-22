@@ -258,27 +258,31 @@ fn a_turned_world_is_not_a_transposed_one() {
     assert!(report.points > 400 && report.median_reprojection_px < 0.7, "{report:?}");
 }
 
-/// Ruling R6 and Review Focus 2 after the rounds, judged as ruling R13 sets it: a second flight
-/// whose positions are off by (3, -2, 1) m is taken by its bias, each axis of the error within 3
-/// posterior standard deviations of that axis (`MapperReport::bias_sd`, from the inverse of the
-/// normal matrix of the last adjustment times its variance factor), the first flight held at
-/// exactly zero, with the accuracy recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38, the
-/// estimate of the accuracy staying near it) and for an RTK receiver (0.03 m / 0.05 m, seeds
-/// 34-36); a fix 100 m off is the only outlier, left out of the rounds, and its photo is placed
-/// with the others. Every case runs and prints its figures before the checks, and the standard
-/// deviations of the RTK cases are about a tenth of the others (the accuracy of the positions).
+/// Ruling R6 and Review Focus 2 after the rounds, judged as rulings R13 and R14 set it: a second
+/// flight whose positions are off by (3, -2, 1) m is taken by its bias, and the errors of the bias
+/// are calibrated against its posterior standard deviations (`MapperReport::bias_sd`: the inverse
+/// of the normal matrix of the last adjustment, each group of observations over its own variance
+/// factor): over the 27 normalised errors (9 cases, 3 axes) at most one beyond 3, none beyond 4,
+/// their root mean square between 0.5 and 1.5. The cases: the accuracy recorded as the noise drawn
+/// (0.3 m / 0.5 m, seeds 33-38, the estimate of the accuracy staying near it) and an RTK receiver
+/// (0.03 m / 0.05 m, seeds 34-36, its standard deviations below the others' on every axis). In
+/// every case the first flight is held at exactly zero and a fix 100 m off is the only outlier,
+/// left out of the rounds, its photo placed with the others. Every case runs and prints its
+/// figures before the checks.
 ///
 /// Why against the bias's own precision: the second flight is half the ring, and a bias of half
 /// the ring trades with a tilt (vertical) or a turn (horizontal) of the whole block and with the
 /// bending the tie points allow, which only the positions fix: on seed 35 at 0.3 m / 0.5 m even the
-/// rigid true block fitted to the positions puts the vertical bias 0.63 m off.
+/// rigid true block fitted to the positions puts the vertical bias 0.63 m off. At RTK the bending,
+/// not the positions, limits the bias.
 #[test]
-#[ignore = "R13: normalised errors beyond 3 on 4 of 9 cases (global variance factor); figures to the owner"]
+#[ignore = "R14: 2 of 27 normalised errors beyond 3 (rms 1.44); figures to the session owner"]
 fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
     let offset = Vector3::new(3.0, -2.0, 1.0);
     let cases = (33..=38).map(|seed| (seed, 0.3, 0.5)).chain((34..=36).map(|seed| (seed, 0.03, 0.05)));
     let mut failures = Vec::new();
     let mut sds = Vec::new();
+    let mut normalised_all = Vec::new();
     for (seed, plan, height) in cases {
         let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
         let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], seed, &[]);
@@ -293,16 +297,17 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
         let normalised: [f64; 3] = std::array::from_fn(|a| error[a] / sd[a]);
         let (sh, sv) = (report.sigma_h.unwrap_or(f64::NAN), report.sigma_v.unwrap_or(f64::NAN));
         eprintln!("seed {seed}, accuracy {plan} / {height} m: error {error:.3?} m, posterior sd {sd:.3?} m, \
-                   normalised {normalised:.2?}; outliers {:?}; centres {shape:.3} m; sigma {sh:.3} / {sv:.3} m",
+                   normalised {normalised:.2?}; factors (ties, h, v) {:.3?}; outliers {:?}; centres {shape:.3} m; \
+                   sigma {sh:.3} / {sv:.3} m", report.variance_factors.unwrap_or([f64::NAN; 3]),
                   report.gnss_outliers);
         sds.push((plan, sd));
+        normalised_all.extend(normalised);
         let case = format!("seed {seed}, accuracy {plan} / {height} m");
         let checks = [
             (report.placed == PHOTOS, format!("placed {}", report.placed)),
             (report.gnss_outliers == vec![37], format!("outliers {:?}", report.gnss_outliers)),
             (report.bias.len() == 2 && report.bias[0] == (1, [0.0; 3]) && report.bias[1].0 == 2,
              format!("biases {:?}", report.bias)),
-            (normalised.iter().all(|z| z.abs() <= 3.0), format!("error {error:.3?}, sd {sd:.3?}")),
             (shape < 0.005 * DIAMETER, format!("centres {shape:.3} m")),
             (residuals[37].norm() < 0.005 * DIAMETER,
              format!("the photo of the wrong fix {:.3} m", residuals[37].norm())),
@@ -312,17 +317,22 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
         ];
         failures.extend(checks.into_iter().filter(|(ok, _)| !ok).map(|(_, why)| format!("{case}: {why}")));
     }
-    // the posterior standard deviations follow the accuracy of the positions: about a tenth at RTK
+    let beyond_3 = normalised_all.iter().filter(|z| z.abs() > 3.0).count();
+    let beyond_4 = normalised_all.iter().filter(|z| z.abs() > 4.0).count();
+    let rms = (normalised_all.iter().map(|z| z * z).sum::<f64>() / normalised_all.len() as f64).sqrt();
+    eprintln!("27 normalised errors: rms {rms:.3}, {beyond_3} beyond 3, {beyond_4} beyond 4");
+    if !(beyond_3 <= 1 && beyond_4 == 0 && rms.is_finite() && (0.5..=1.5).contains(&rms)) {
+        failures.push(format!("calibration: rms {rms:.3}, {beyond_3} beyond 3, {beyond_4} beyond 4"));
+    }
+    // RTK holds the bias better on every axis
     let mean = |plan: f64, a: usize| {
         let v: Vec<f64> = sds.iter().filter(|(p, _)| *p == plan).map(|(_, sd)| sd[a]).collect();
         v.iter().sum::<f64>() / v.len() as f64
     };
     for a in 0..3 {
-        let ratio = mean(0.3, a) / mean(0.03, a);
-        eprintln!("axis {a}: mean posterior sd {:.4} m at 0.3 / 0.5 m, {:.4} m at RTK, ratio {ratio:.1}",
-                  mean(0.3, a), mean(0.03, a));
-        if !(ratio > 3.0 && ratio < 30.0) {
-            failures.push(format!("axis {a}: the posterior sd of RTK is {ratio:.1} times smaller"));
+        eprintln!("axis {a}: mean posterior sd {:.4} m at 0.3 / 0.5 m, {:.4} m at RTK", mean(0.3, a), mean(0.03, a));
+        if !(mean(0.03, a) < mean(0.3, a)) {
+            failures.push(format!("axis {a}: the posterior sd of RTK is not below the others'"));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
