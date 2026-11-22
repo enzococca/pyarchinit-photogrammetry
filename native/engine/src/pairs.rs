@@ -25,7 +25,9 @@
 //! seeded by the pair.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 
 use nalgebra::{Matrix3, Vector3};
@@ -437,6 +439,12 @@ fn guided_bests(da: &[u8], pa: &Prepared, db: &[u8], pb: &Prepared, f: &Matrix3<
         Frame::Ideal => (&pa.ideal, &pb.ideal, &pb.grid_ideal),
         Frame::Raw => (&pa.raw, &pb.raw, &pb.grid_raw),
     };
+    bests_along(da, points_a, db, points_b, grid_b, f, e)
+}
+
+/// [`guided_bests`] on the points of A and B in one frame, those of B in their grid.
+fn bests_along(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], grid_b: &Grid,
+               f: &Matrix3<f64>, e: f64) -> Vec<[u32; 3]> {
     let (n_a, n_b) = (points_a.len(), points_b.len());
     let mut out = Vec::with_capacity(n_a + n_b);
     let mut cols = vec![Best::NONE; n_b];
@@ -575,6 +583,20 @@ pub fn match_pair(a: &FeatureView, b: &FeatureView, name_a: &str, name_b: &str, 
     match_prepared(a, &pa, b, &pb, name_a, name_b, cam_a, cam_b, calibrated, preselected, o, bests)
 }
 
+/// A device of a run shared by every worker: its own GPU worker and the CPU workers, which take
+/// their first stage (and brute force) from it and keep the second stage and the verification on
+/// their threads, so that the GPU serves the pairs of every core instead of the one thread of its
+/// worker. The first error (or panic) of the device marks it lost: its own worker is retired as
+/// before, the CPU workers do the bests on the CPU from then on.
+struct SharedDevice<'a> {
+    /// Its name in the report and the log (two devices of one name told apart, `#2`).
+    name: String,
+    device: Mutex<Box<dyn Device + 'a>>,
+    lost: AtomicBool,
+    /// The pairs whose first stage it was asked for, for the test hook.
+    asked: AtomicUsize,
+}
+
 /// What the workers of a run share.
 struct Context<'a> {
     /// The pairs, sorted by name.
@@ -585,24 +607,93 @@ struct Context<'a> {
     out: &'a MatchStore,
     o: &'a Options,
     cell: f64,
+    devices: Vec<SharedDevice<'a>>,
+    /// The CPU workers made so far: each starts its search for a free device at its own.
+    cpu_workers: AtomicUsize,
+    /// `sched::fail_after`: a device is lost at its N-th pair, whichever worker asked.
+    fail_after: Option<usize>,
+    /// The devices lost under a CPU worker (the retired GPU workers are in the log of `sched`).
+    log: Mutex<Vec<String>>,
     /// Set when a result could not be put into the match store: a pair failing then is the
     /// store's fault (a full disk), never given up as dropped.
     store_failed: AtomicBool,
 }
 
-/// A worker doing whole pairs: the first stage on its device (or the CPU twin without one), the
-/// second on its thread, the result into the store. The photos it prepared last stay with it.
-struct PairWorker<'a> {
-    ctx: &'a Context<'a>,
-    device: Option<Box<dyn Device + 'a>>,
-    /// The device's place in the report: its index among the devices, or one past them for the
-    /// CPU.
-    slot: usize,
+impl Context<'_> {
+    /// The bests of `device` for the first stage (`first`, which the test hook counts) or brute
+    /// force of a pair; an error, or a panic, marks the device lost.
+    /// `Err(None)` when it was lost before the call.
+    fn on_device(&self, device: &SharedDevice<'_>, first: bool, key_a: u64, a: &[u8], key_b: u64, b: &[u8])
+                 -> Result<Vec<[u32; 3]>, Option<String>> {
+        let mut guard = device.device.lock().unwrap_or_else(PoisonError::into_inner);
+        if device.lost.load(Ordering::SeqCst) {
+            return Err(None);
+        }
+        let asked = if first { device.asked.fetch_add(1, Ordering::SeqCst) + 1 } else { 0 };
+        let result = if first && self.fail_after == Some(asked) {
+            Err(sched::FAIL_AFTER_VAR.to_owned())
+        } else {
+            match catch_unwind(AssertUnwindSafe(|| guard.bests(key_a, a, key_b, b))) {
+                Ok(result) => result,
+                Err(_) => Err("the device panicked".to_owned()),
+            }
+        };
+        if result.is_err() {
+            device.lost.store(true, Ordering::SeqCst);
+        }
+        result.map_err(Some)
+    }
+
+    /// The bests of a pair for a worker, and the slot of the device that gave them: a GPU worker
+    /// (`own`) asks its device, whose error is the worker's; a CPU worker (`own` None) asks the
+    /// first free device from its `start`, or waits for one, and does them on the CPU when every
+    /// device is lost (a device lost under it is logged, and the CPU does that call).
+    #[allow(clippy::too_many_arguments)]
+    fn bests(&self, own: Option<usize>, start: usize, first: bool, key_a: u64, a: &[u8], key_b: u64, b: &[u8])
+             -> Result<(usize, Vec<[u32; 3]>), String> {
+        if let Some(k) = own {
+            let device = &self.devices[k];
+            return self.on_device(device, first, key_a, a, key_b, b)
+                .map(|bests| (k, bests))
+                .map_err(|problem| problem.unwrap_or_else(|| format!("{} was lost on another worker", device.name)));
+        }
+        let n = self.devices.len();
+        loop {
+            let alive: Vec<usize> =
+                (0..n).map(|k| (start + k) % n).filter(|&k| !self.devices[k].lost.load(Ordering::SeqCst)).collect();
+            let Some(&preferred) = alive.first() else { break };
+            // a free device first, else the worker's own turn waits for its device
+            let k = alive.iter().copied().find(|&k| !self.devices[k].lost.load(Ordering::SeqCst)
+                                                      && self.devices[k].device.try_lock().is_ok())
+                .unwrap_or(preferred);
+            match self.on_device(&self.devices[k], first, key_a, a, key_b, b) {
+                Ok(bests) => return Ok((k, bests)),
+                Err(None) => {}
+                Err(Some(problem)) => {
+                    let line = format!("{}: {problem}; the CPU workers do their first stage on the CPU or on the \
+                                        other GPUs", self.devices[k].name);
+                    self.log.lock().unwrap_or_else(PoisonError::into_inner).push(line);
+                }
+            }
+        }
+        Ok((n, bests_cpu(a, b)))
+    }
+}
+
+/// A worker doing whole pairs: the first stage on its device (a GPU worker), or on the free GPU of
+/// the run (a CPU worker; the CPU twin without one), the second on its thread, the result into
+/// the store. The photos it prepared last stay with it.
+struct PairWorker<'c, 'a> {
+    ctx: &'c Context<'a>,
+    /// The index of its device among the devices of the run, `None` for a CPU worker.
+    own: Option<usize>,
+    /// Where a CPU worker starts looking for a free device.
+    start: usize,
     /// The photos prepared, the one used last at the end.
     cache: Vec<(String, FeatureView, Prepared)>,
 }
 
-impl PairWorker<'_> {
+impl PairWorker<'_, '_> {
     /// The photo `name` prepared (mapped and prepared now when it is not in the cache, the
     /// photo used least recently forgotten when the cache is full) and moved to the end.
     fn prepare(&mut self, name: &str) -> Result<(), String> {
@@ -619,11 +710,17 @@ impl PairWorker<'_> {
         self.cache.push((name.to_owned(), view, prepared));
         Ok(())
     }
+
+    /// Its place in the report when no device was asked: its device's, or one past the devices
+    /// for the CPU.
+    fn slot(&self) -> usize {
+        self.own.unwrap_or(self.ctx.devices.len())
+    }
 }
 
-impl Worker<usize, (Route, usize)> for PairWorker<'_> {
+impl Worker<usize, (Route, usize)> for PairWorker<'_, '_> {
     fn name(&self) -> String {
-        self.device.as_ref().map_or_else(|| "CPU".to_owned(), |d| d.name())
+        self.own.map_or_else(|| "CPU".to_owned(), |k| self.ctx.devices[k].name.clone())
     }
 
     fn run(&mut self, unit: &usize) -> Result<(Route, usize), String> {
@@ -637,13 +734,17 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
         let (ia, ib) = (at(&self.cache, name_a), at(&self.cache, name_b));
         let (cam_a, cam_b) = (&ctx.cams[name_a], &ctx.cams[name_b]);
         let calibrated = ctx.calibrated.contains(name_a) && ctx.calibrated.contains(name_b);
+        // the device of the first stage, the pair's place in the report
+        let mut stage1_slot = None;
         let result = {
             let (_, va, pa) = &self.cache[ia];
             let (_, vb, pb) = &self.cache[ib];
-            let device = &mut self.device;
-            let mut bests = |key_a: u64, a: &[u8], key_b: u64, b: &[u8]| match device {
-                Some(d) => d.bests(key_a, a, key_b, b),
-                None => Ok(bests_cpu(a, b)),
+            let (own, start) = (self.own, self.start);
+            let mut bests = |key_a: u64, a: &[u8], key_b: u64, b: &[u8]| {
+                let first = stage1_slot.is_none();
+                let (slot, bests) = ctx.bests(own, start, first, key_a, a, key_b, b)?;
+                stage1_slot.get_or_insert(slot);
+                Ok(bests)
             };
             match_prepared(va, pa, vb, pb, name_a, name_b, cam_a, cam_b, calibrated, *preselected, ctx.o, &mut bests)?
         };
@@ -651,14 +752,14 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
             ctx.store_failed.store(true, Ordering::SeqCst);
             return Err(format!("the match store: {e}"));
         }
-        Ok((result.route, self.slot))
+        Ok((result.route, stage1_slot.unwrap_or_else(|| self.slot())))
     }
 
     /// A pair that failed on another worker and then on the CPU (a photo whose features cannot be
     /// mapped any more, or a defect on that pair): dropped, unless the match store failed - the
     /// step's error, not the pair's.
     fn give_up(&mut self, _unit: &usize, _why: &str) -> Option<(Route, usize)> {
-        (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot))
+        (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot()))
     }
 }
 
@@ -704,26 +805,33 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
     let mut sorted = pairs.to_vec();
     sorted.sort();
     let cell = cell_side(o.two_view.ransac.max_error);
-    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell, store_failed: AtomicBool::new(false) };
     let mut names: Vec<String> = Vec::with_capacity(devices.len());
     for device in &devices {
         let name = device.name();
         let twins = names.iter().filter(|n| **n == name || n.starts_with(&format!("{name} #"))).count();
         names.push(if twins == 0 { name } else { format!("{name} #{}", twins + 1) });
     }
-    let cpu_slot = names.len();
-    let gpus: Vec<Box<dyn Worker<usize, (Route, usize)> + '_>> = devices
+    let shared: Vec<SharedDevice<'_>> = devices
         .into_iter()
-        .enumerate()
-        .map(|(slot, device)| {
-            Box::new(PairWorker { ctx: &ctx, device: Some(device), slot, cache: Vec::new() })
+        .zip(&names)
+        .map(|(device, name)| SharedDevice { name: name.clone(), device: Mutex::new(device),
+                                             lost: AtomicBool::new(false), asked: AtomicUsize::new(0) })
+        .collect();
+    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell, devices: shared,
+                        cpu_workers: AtomicUsize::new(0), fail_after: sched::fail_after(), log: Mutex::new(Vec::new()),
+                        store_failed: AtomicBool::new(false) };
+    let cpu_slot = names.len();
+    let gpus: Vec<Box<dyn Worker<usize, (Route, usize)> + '_>> = (0..names.len())
+        .map(|k| {
+            Box::new(PairWorker { ctx: &ctx, own: Some(k), start: k, cache: Vec::new() })
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
         })
         .collect();
     let cpu: Option<sched::Factory<'_, usize, (Route, usize)>> = {
         let ctx = &ctx;
         Some(Box::new(move || {
-            Box::new(PairWorker { ctx, device: None, slot: cpu_slot, cache: Vec::new() })
+            let start = ctx.cpu_workers.fetch_add(1, Ordering::SeqCst);
+            Box::new(PairWorker { ctx, own: None, start, cache: Vec::new() })
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
         }))
     };
@@ -731,9 +839,14 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
     let standby = thread::available_parallelism().map_or(1, |n| n.get());
     let run = sched::run_with_standby(units, gpus, cpu, cpu_threads, standby, cancel, progress);
     let flushed = out.flush().map_err(|e| format!("the match store: {e}"));
+    let lost = std::mem::take(&mut *ctx.log.lock().unwrap_or_else(PoisonError::into_inner));
     let run = match run {
-        Ok(run) => run,
+        Ok(mut run) => {
+            run.log.extend(lost);
+            run
+        }
         Err((reason, mut log)) => {
+            log.extend(lost);
             log.extend(flushed.err());
             return Err(failed(reason, log));
         }
@@ -944,5 +1057,59 @@ mod tests {
             best = best.min(start.elapsed().as_secs_f64());
         }
         println!("band walk: {:.1} ms for {} lines, {found} points found", best * 1e3, lines.len());
+    }
+
+    /// `n` descriptors as SIFT's bytes (the squares of uniform values scaled to a norm of 512),
+    /// out of the generator of `random_points_and_lines`.
+    fn random_descriptors(seed: u64, n: usize) -> Vec<u8> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut out = Vec::with_capacity(n * DIM);
+        for _ in 0..n {
+            let values: Vec<f64> = (0..DIM).map(|_| next().powi(2)).collect();
+            let norm = values.iter().map(|v| v * v).sum::<f64>().sqrt();
+            out.extend(values.iter().map(|v| (v / norm * 512.0).round().clamp(0.0, 255.0) as u8));
+        }
+        out
+    }
+
+    /// The fundamental matrix of two photos taken side by side: `[e]x` with the epipole `e` far
+    /// to the left of a 6000 x 4000 photo, so that every line crosses the photo nearly level.
+    fn side_by_side() -> Matrix3<f64> {
+        let e = Vector3::new(-40000.0, 1500.0, 1.0);
+        Matrix3::new(0.0, -e.z, e.y, e.z, 0.0, -e.x, -e.y, e.x, 0.0)
+    }
+
+    /// A timing probe, not a check (`cargo test --release -p ppg_engine --lib guided_stage -- --ignored
+    /// --nocapture`): the bests of the second stage of a pair of 30,000 points each over a 6000 x 4000
+    /// photo, the band of COLMAP's 4 px, on one thread.
+    #[test]
+    #[ignore]
+    fn timing_of_the_guided_stage() {
+        const N: usize = 30000;
+        let (points_a, _) = random_points_and_lines(11, N, 0);
+        let (points_b, _) = random_points_and_lines(12, N, 0);
+        let (da, db) = (random_descriptors(13, N), random_descriptors(14, N));
+        let grid = Grid::new(&points_b, cell_side(4.0));
+        let f = side_by_side();
+        let mut candidates = 0usize;
+        for p in &points_a {
+            let l = f * Vector3::new(p[0], p[1], 1.0);
+            let norm = (l.x * l.x + l.y * l.y).sqrt();
+            grid.along([l.x / norm, l.y / norm, l.z / norm], 4.0, &points_b, |_| candidates += 1);
+        }
+        let mut best = f64::INFINITY;
+        let mut sum = 0u64;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let bests = bests_along(&da, &points_a, &db, &points_b, &grid, &f, 4.0);
+            best = best.min(start.elapsed().as_secs_f64());
+            sum = bests.iter().map(|b| u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2])).sum();
+        }
+        println!("guided stage: {:.1} ms for {N} x {N} points, {candidates} candidates ({:.1} ns each), checksum {sum}",
+                 best * 1e3, best * 1e9 / candidates as f64);
     }
 }

@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1031,6 +1031,8 @@ fn match_all_is_the_same_on_every_device() {
         same(&both, &format!("{what} with the CPU"));
         assert_eq!(on.stage1_by_device.iter().map(|(_, n)| n).sum::<usize>(), total, "{what}");
         assert_eq!(on.stage1_by_device.len(), 2, "{what}: {:?}", on.stage1_by_device);
+        // the CPU threads take their first stage from the GPU too
+        assert_eq!(on.stage1_by_device[1], ("CPU".to_owned(), 0), "{what}: {:?}", on.stage1_by_device);
         // and alone, through the adapter index with no CPU thread
         let alone = MatchStore::create(&dir.join(format!("alone{}", adapter.index))).unwrap();
         let on = pairs::match_all(&list, &store, &cams, &calibrated, &alone, &[adapter.index], Some(0), &o, &never,
@@ -1184,5 +1186,79 @@ fn a_lost_gpu_alone_a_pair_no_device_can_do_and_twin_names() {
         assert!(!problem.contains("given up"), "{problem}");
     }
     drop((reference, alone, twins, damaged, store));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A device that counts its calls across the workers and breaks at the call `fail_at`, and on
+/// every call after it.
+struct Counting {
+    name: &'static str,
+    calls: Arc<AtomicUsize>,
+    fail_at: Option<usize>,
+}
+
+impl Device for Counting {
+    fn name(&self) -> String {
+        self.name.to_owned()
+    }
+
+    fn bests(&mut self, _: u64, a: &[u8], _: u64, b: &[u8]) -> Result<Vec<[u32; 3]>, String> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_at.is_some_and(|n| call >= n) {
+            return Err("broken on purpose".to_owned());
+        }
+        Ok(matching::bests_cpu(a, b))
+    }
+}
+
+#[test]
+fn the_cpu_workers_take_their_first_stage_from_the_gpu() {
+    const PHOTOS: usize = 6;
+    let dir = folder("shared");
+    let store = scene(&dir.join("features"), PHOTOS, 120, 200);
+    let names = store.names();
+    let cams: HashMap<String, Camera> = names.iter().map(|n| (n.clone(), camera())).collect();
+    let calibrated: HashSet<String> = names.iter().cloned().collect();
+    let list: Vec<(String, String, bool)> = (0..PHOTOS)
+        .flat_map(|i| (i + 1..PHOTOS).map(move |j| (photo_name(i), photo_name(j), j == i + 1)))
+        .collect();
+    let total = list.len();
+    let o = options(400);
+    let never = AtomicBool::new(false);
+    let reference = MatchStore::create(&dir.join("cpu")).unwrap();
+    let want = pairs::match_all(&list, &store, &cams, &calibrated, &reference, &[], Some(1), &o, &never, &|_, _| {})
+        .unwrap();
+    let same = |other: &MatchStore, what: &str| {
+        for (a, b, _) in &list {
+            assert_eq!(other.get(a, b), reference.get(a, b), "{what}: ({a}, {b})");
+        }
+    };
+
+    // a GPU beside three CPU threads: every first stage is the GPU's, whichever worker took the pair
+    let calls = Arc::new(AtomicUsize::new(0));
+    let shared = MatchStore::create(&dir.join("shared")).unwrap();
+    let device: Box<dyn Device> = Box::new(Counting { name: "shared GPU", calls: calls.clone(), fail_at: None });
+    let on = pairs::match_on(&list, &store, &cams, &calibrated, &shared, vec![device], 3, &o, &never, &|_, _| {})
+        .unwrap();
+    same(&shared, "the shared GPU");
+    assert_eq!((on.done, on.by_route), (total, want.by_route));
+    assert_eq!(on.stage1_by_device, vec![("shared GPU".to_owned(), total), ("CPU".to_owned(), 0)]);
+    assert!(on.log.is_empty(), "{:?}", on.log);
+    assert!(calls.load(Ordering::SeqCst) >= total);
+
+    // the GPU lost at its third call: the pairs after it are the CPU's, with the same results, and
+    // the log names the GPU
+    let calls = Arc::new(AtomicUsize::new(0));
+    let lost = MatchStore::create(&dir.join("lost")).unwrap();
+    let device: Box<dyn Device> = Box::new(Counting { name: "failing GPU", calls: calls.clone(), fail_at: Some(3) });
+    let on = pairs::match_on(&list, &store, &cams, &calibrated, &lost, vec![device], 3, &o, &never, &|_, _| {})
+        .unwrap();
+    same(&lost, "a GPU lost");
+    assert_eq!((on.done, on.by_route), (total, want.by_route));
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "the device is not asked again once lost");
+    let (gpu, cpu) = (on.stage1_by_device[0].1, on.stage1_by_device[1].1);
+    assert!(gpu <= 2 && gpu + cpu == total, "{:?}", on.stage1_by_device);
+    assert!(on.log.iter().any(|l| l.starts_with("failing GPU") && l.contains("broken on purpose")), "{:?}", on.log);
+    drop((reference, shared, lost, store));
     fs::remove_dir_all(&dir).unwrap();
 }

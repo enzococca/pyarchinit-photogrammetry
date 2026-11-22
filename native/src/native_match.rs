@@ -534,13 +534,14 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
 /// scales, then along the epipolar lines of their model; brute force where the first stage is unsure;
 /// a pair not preselected with too little is dropped), every result into the match store ``matches``
 /// as it is made, on the GPUs ``devices`` (adapter indices, -1 the best GPU) and the CPU threads together
-/// (``cpu_share`` false leaves the pairs to the GPUs alone, when there is one). ``cameras`` as in
+/// (``cpu_share`` false leaves the pairs to the GPUs alone, when there is one; the CPU threads take their first stage
+/// and brute force from the GPUs while they are there). ``cameras`` as in
 /// :func:`native_preselect`, ``options`` the flat dict of the fields of `pairs::Options` (``stage1_points``,
 /// ``trust_inliers``, ``drop_inliers`` given; ``max_ratio``, ``max_distance``, ``cross_check``,
 /// ``max_num_matches`` COLMAP's unless given; ``guided``, ``guided_max_ratio``, ``guided_band`` of the second
 /// stage; the verification's under ``two_view_*`` and ``ransac_*``).
 /// Returns ``done``, ``guided``, ``brute_force``, ``dropped`` (the pairs by route), ``by_device`` (the pairs
-/// whose first stage each device did, by its name, ``CPU`` for the threads) and ``log``.
+/// whose first stage each device did, by its name, ``CPU`` for the CPU twin) and ``log``.
 /// ``progress(done, total, message)`` counts the pairs: at the start, then at most every ``min_interval``
 /// seconds, and with the last state when the step ends. The GIL is released (`pairs::match_all`).
 #[pyfunction]

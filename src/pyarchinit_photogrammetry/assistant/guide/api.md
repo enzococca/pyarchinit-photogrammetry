@@ -164,14 +164,14 @@ and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whi
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
 `dropped`), `preselection_size` and the settings read from the environment (`native_dct`,
 `native_guided`, `native_guided_ratio`, `native_guided_band`, below; a benchmark record keeps them); `gpu`
-and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs each did. `meta["timings"]["match_photos"]` has the stages `features`,
+and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs whose first stage each did (with a GPU the CPU threads take their first stage from it, so `cpu_pairs` counts the pairs of a GPU lost or of none). `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
 Environment variables: `PPG_NATIVE_DCT=1` decodes a JPEG at the DCT scale its reduction allows,
 chosen for the larger of its two reductions - the matching's and the preselection's - so that one
 decoding gives both (by default every JPEG is decoded whole and reduced as COLMAP reduces it: the DCT
 scale is a little faster but gives another raster and fewer tie points); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
-and the pairs to the GPUs when there is one. Three tune the second stage of a pair, the matching along
+and the pairs to the GPUs when there is one (by default the CPU threads work beside them: on the pairs they do the second stage and the verification, with the first stage from the GPU). Three tune the second stage of a pair, the matching along
 the epipolar lines of the model of the first: `PPG_NATIVE_GUIDED=0` matches the trusted pairs point
 against point instead (the first stage still decides which pairs are trusted, kept or dropped),
 `PPG_NATIVE_GUIDED_RATIO` (a number above 0, at most 1; by default 0.6: a point there is
