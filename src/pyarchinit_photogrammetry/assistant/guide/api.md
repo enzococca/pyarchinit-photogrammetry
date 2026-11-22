@@ -145,7 +145,7 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
 `auto`, the default, is the native engine for this step since it passed its gate - the classic one for the
 alignment and the depth maps) does the step with the native engine of the core (`engine.native_match`,
-`ppg_core` API 14): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
+`ppg_core` API 15): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
@@ -155,7 +155,7 @@ follows the epipolar lines). `PPG_RANSAC_SEED` (the seed of COLMAP's geometric v
 --seed`) applies to the classic matching only: the native step does not read it.
 
 When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
-than API 14, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
+than API 15, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
 not know - or fails half way, the classic step runs with the same arguments, a line in the log says
 why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. With
 `auto` a request the native engine does not take (the list above, not a failure) is the program's

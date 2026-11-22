@@ -147,7 +147,7 @@ database vengono aggiornati sul posto (gli stessi assi), le foto aggiunte ricevo
 `match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
 `auto`, il predefinito, è il motore nativo per questo passo da quando ha superato il suo collaudo - il
 classico per l'allineamento e le depth map) fa il passo con il motore nativo del nucleo
-(`engine.native_match`, `ppg_core` API 14): il suo SIFT (che segue quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
+(`engine.native_match`, `ppg_core` API 15): il suo SIFT (che segue quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
 immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
@@ -157,7 +157,7 @@ nativo segue sempre le linee epipolari). `PPG_RANSAC_SEED` (il seme della verifi
 `ppg bench run --seed`) vale solo per il matching classico: il passo nativo non lo legge.
 
 Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
-dell'API 14, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
+dell'API 15, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
 che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
 dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Con
 `auto` una richiesta che il motore nativo non accetta (l'elenco qui sopra, non un errore) è la scelta del

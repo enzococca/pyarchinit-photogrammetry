@@ -1,6 +1,6 @@
 """The matching step of the native engine: ``match_photos(engine="native")``.
 
-The features of the photos are extracted by the native core (``ppg_core`` API 13,
+The features of the photos are extracted by the native core (``ppg_core`` API 15,
 :func:`.._native.native_match_kernels`) into a feature store, the pairs that overlap are found on a small store
 (the generic preselection), the pairs are matched in two stages into a match store, and the result is exported to
 COLMAP's database - cameras, images, key points, matches and two-view geometries as the classic step writes them -
@@ -235,8 +235,8 @@ def core_unavailable() -> str | None:
 
 def cannot_run(chunk: Chunk, matcher: str, reset: bool) -> str | None:
     """Why the native step cannot do the matching of ``chunk``, or None when nothing keeps it: the native core
-    missing, switched off (``PPG_NATIVE=0``) or below API 13; a learned ``matcher``; rigs of 360-degree photos;
-    processing nodes that would share the points (:mod:`.nodes`, as the classic step counts them: present, and
+    missing, switched off (``PPG_NATIVE=0``) or below API 15 (:data:`.._native.NATIVE_MATCH_API`); a learned
+    ``matcher``; rigs of 360-degree photos; processing nodes that would share the points (:mod:`.nodes`, as the classic step counts them: present, and
     enough photos to detect); a camera model the engine does not know (the model the photos are aligned with,
     :func:`.sfm.mapping_camera`). A chunk without enabled photos or without a folder is not the engine's to refuse:
     the step says so itself, whichever engine runs it."""

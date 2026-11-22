@@ -1,4 +1,4 @@
-"""The bindings of the native matching (``ppg_core`` API 14, ``_native.native_match_kernels()``): the
+"""The bindings of the native matching (``ppg_core`` API 15, ``_native.native_match_kernels()``): the
 features step into a feature store, the preselection on the small store, the two-stage matching of
 the pairs into a match store, the stores read and written from Python, and the photos read and
 reduced as COLMAP reads them. Every binding releases the GIL and reports through ``progress(done,
@@ -17,7 +17,7 @@ from pyarchinit_photogrammetry.core.progress import Cancelled
 
 ppg_core = pytest.importorskip("ppg_core")
 pytestmark = pytest.mark.skipif(_native.native_match_kernels() is None,
-                                reason="the native core with the native matching (API 14) is not installed")
+                                reason="the native core with the native matching (API 15) is not installed")
 
 PHOTOS = 28  # the trench of ``scene_dir``: 20 nadir photos and the 8 of the tilted ring, 1200 x 900
 LIMIT = 600  # quality "high": the 1200-pixel photos reduced by two (the CPU SIFT takes tens of ms each)
@@ -73,10 +73,11 @@ def trench_store(scene_dir, tmp_path_factory):
     return root / "features", root / "small", report, [p.name for p in photos], calls
 
 
-def test_the_kernels_are_declared_at_api_14(monkeypatch):
-    """``_native`` names the native matching as a feature of API 14 (13 with the options of its second stage) and
-    gives its bindings as a namespace, None when the extension is switched off."""
-    assert _native.NATIVE_MATCH_API == 14 and _native.api() >= 14
+def test_the_kernels_are_declared_at_api_15(monkeypatch):
+    """``_native`` names the native matching as a feature of API 15 (13 with the options of its second stage at 14,
+    the check of the second stage at 15) and gives its bindings as a namespace, None when the extension is switched
+    off. A core of API 14 matches without the check: it is not taken (``cannot_run`` names the API needed)."""
+    assert _native.NATIVE_MATCH_API == 15 and _native.api() >= 15
     assert _native.has("native_match") and _native.supports("native_match")
     k = _native.native_match_kernels()
     assert k.features is ppg_core.native_features and k.match_pairs is ppg_core.native_match_pairs
@@ -86,6 +87,14 @@ def test_the_kernels_are_declared_at_api_14(monkeypatch):
     assert k.feature_store is ppg_core.NativeFeatureStore and k.match_store is ppg_core.NativeMatchStore
     monkeypatch.setenv("PPG_NATIVE", "0")
     assert _native.native_match_kernels() is None
+    monkeypatch.delenv("PPG_NATIVE")
+    # a core of API 14 (no check of the second stage) is not taken: auto goes classic and says why
+    from pyarchinit_photogrammetry.engine import native_match
+
+    monkeypatch.setattr(_native, "api", lambda: 14)
+    assert _native.native_match_kernels() is None
+    reason = native_match.core_unavailable()
+    assert reason is not None and "(API 14)" in reason and "API 15 is needed" in reason
 
 
 # ------------------------------------------------------------------------------- the photos as COLMAP reads them
