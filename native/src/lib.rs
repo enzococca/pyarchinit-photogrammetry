@@ -960,6 +960,7 @@ fn bundle_problem(d: &Bound<'_, PyDict>) -> PyResult<bundle::Problem> {
         fixed_images: fixed.as_array().iter().copied().collect(),
         rolling_shutter: entry(d, "rolling_shutter")?.extract()?,
         gnss_bias: entry(d, "gnss_bias")?.extract()?,
+        reference_flight: None,
         pixel_sigma: entry(d, "pixel_sigma")?.extract()?,
         marker_sigma: entry(d, "marker_sigma")?.extract()?,
         rs_sigma: value_list(&entry(d, "rs_sigma")?.extract()?),
