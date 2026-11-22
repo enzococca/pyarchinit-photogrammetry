@@ -336,11 +336,11 @@ def scene():
 PROCESSED_RANSAC_SEED = "1"
 
 
-@pytest.fixture(scope="session")
-def processed(scene_dir):
-    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. The photos are matched
-    by the classic engine (COLMAP's database, which tests compare the native kernels with), its RANSAC seeded with
-    ``PROCESSED_RANSAC_SEED`` and the variable put back as it was right after."""
+def _process_trench(scene_dir, project, engine, surfaces=True, ransac_seed=None):
+    """The trench of ``scene_dir`` processed into ``project``: markers, matching with ``engine`` (COLMAP's RANSAC
+    seeded with ``ransac_seed`` while the photos are matched, the variable put back as it was right after),
+    alignment, georeferencing by the targets, depth maps, dense cloud, (``surfaces``: mesh and texture,) DEM and
+    orthomosaic. Returns ``(doc, chunk, report of the georeferencing)``."""
     import os
 
     import pyarchinit_photogrammetry as ppg
@@ -348,13 +348,14 @@ def processed(scene_dir):
 
     doc = ppg.Document()
     ch = doc.add_chunk("Saggio 1")
-    doc.save(scene_dir / "project.ppg")
+    doc.save(project)
     ch.add_photos([scene_dir / "photos"])
     ch.detect_markers("aruco_4x4_50")
     previous = os.environ.get(sfm.RANSAC_SEED_ENV)
-    os.environ[sfm.RANSAC_SEED_ENV] = PROCESSED_RANSAC_SEED
+    if ransac_seed is not None:
+        os.environ[sfm.RANSAC_SEED_ENV] = ransac_seed
     try:
-        ch.match_photos(quality="high", engine="classic")
+        ch.match_photos(quality="high", engine=engine)
     finally:
         if previous is None:
             os.environ.pop(sfm.RANSAC_SEED_ENV, None)
@@ -365,12 +366,30 @@ def processed(scene_dir):
     report = ch.update_transform()
     ch.build_depth_maps(quality="high")
     ch.build_point_cloud()
-    ch.build_model()
-    ch.build_texture(texture_size=2048)
+    if surfaces:
+        ch.build_model()
+        ch.build_texture(texture_size=2048)
     ch.build_dem()
     ch.build_orthomosaic()
     doc.save()
     return doc, ch, report
+
+
+@pytest.fixture(scope="session")
+def processed(scene_dir):
+    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. The photos are matched
+    by the classic engine (COLMAP's database, which tests compare the native kernels with), its RANSAC seeded with
+    ``PROCESSED_RANSAC_SEED`` and the variable put back as it was right after."""
+    return _process_trench(scene_dir, scene_dir / "project.ppg", "classic", ransac_seed=PROCESSED_RANSAC_SEED)
+
+
+@pytest.fixture(scope="session")
+def processed_auto(scene_dir, tmp_path_factory):
+    """The trench processed as ``processed``, with the matching left to ``auto`` (the engine users get: the native
+    matching where the native core is installed, the classic one without it) and no mesh or texture (the metric
+    checks read the alignment, the DEM and the orthomosaic). For the metric gates of tests/test_pipeline.py."""
+    return _process_trench(scene_dir, tmp_path_factory.mktemp("trench_auto") / "project.ppg", "auto",
+                           surfaces=False)
 
 
 TRENCH_ORIGIN = (2480000.0, 4500000.0)  # metre coordinates in Gauss-Boaga: float32 would round them
