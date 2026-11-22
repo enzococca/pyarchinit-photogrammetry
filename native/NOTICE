@@ -61,7 +61,18 @@ src/colmap/geometry/homography_matrix.cc (Malis and Vargas 2007); the PROSAC sam
 from the paper (Chum and Matas 2005). COLMAP is distributed under the BSD 3-clause license below
 (after VLFeat's).
 
-RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's.
+The view graph of the native mapper - native/engine/src/mapper/graph.rs - is arranged as GLOMAP's
+(https://github.com/colmap/glomap): the calibration of the guessed focal lengths from the
+fundamental matrices of the pairs (glomap/estimators/view_graph_calibration.h and .cc: the pairs
+of a calibrated or uncalibrated configuration, the Cauchy loss of scale 1e-2, the cameras with a
+prior focal length held, the estimates beyond a tenth or ten times the guess rejected, every focal
+length of the model set to the estimate), with the residual of Sweeney et al. 2015 on the
+singular values; and the relative poses estimated again from the inliers of every verified pair
+(glomap/estimators/relpose_estimation.cc, with PoseLib's epipolar threshold of 1 pixel). The
+least squares and the robust estimation are this package's own; no file of GLOMAP is compiled
+into the extension. GLOMAP is distributed under the BSD 3-clause license below (after COLMAP's).
+
+RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.
 
 ================================================================================
 
@@ -177,3 +188,39 @@ affect the resulting COLMAP license.
     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
     ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
     POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+
+GLOMAP's license (its file LICENSE) follows; it applies to native/engine/src/mapper/graph.rs as
+explained above.
+
+--------------------------------------------------------------------------------
+
+Copyright (c) 2024, ETH Zurich.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+
+    * Neither the name of ETH Zurich nor the names of its contributors may
+      be used to endorse or promote products derived from this software
+      without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

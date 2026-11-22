@@ -180,6 +180,17 @@ impl Camera {
         (self.fx + self.fy) / 2.0
     }
 
+    /// Every focal length of the model set to `f` (COLMAP's `SetFocalLength`: both of a model
+    /// with two).
+    pub fn set_focal(&mut self, f: f64) {
+        self.p[0] = f;
+        if !matches!(self.model, Model::SimplePinhole | Model::SimpleRadial | Model::Radial) {
+            self.p[1] = f;
+        }
+        self.fx = f;
+        self.fy = f;
+    }
+
     /// Pixel of the normalised point `(u, v) = (x / z, y / z)`.
     #[inline]
     pub fn pixel(&self, u: f64, v: f64) -> (f64, f64) {
