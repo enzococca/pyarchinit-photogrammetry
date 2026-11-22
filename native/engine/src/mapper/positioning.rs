@@ -958,6 +958,9 @@ pub fn position(
         for &i in &far {
             fix_of[i] = None;
         }
+        // the fixes taken back are not checked again after the second solve: one that the block
+        // then leaves far stays in, its pull bounded by the Huber loss here and by the rounds'
+        // filter of the positions (`gnss_outliers` are left out of the rounds, the others weighed)
         for f in back {
             fix_of[f.photo] = all_fixes[f.photo];
             m.fixes.push(f);

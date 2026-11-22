@@ -85,6 +85,11 @@ pub struct MapperReport {
 /// `tracks`, `position`, `refine` in this order, each once, then `write_model`. A stage called out
 /// of its order is an `Err` naming the stage it needs; a stage that fails or is cancelled can be
 /// called again but for `refine`, after which the mapper only reports.
+///
+/// `view_graph`, `rotations` and `tracks` call `observe` only between their steps (the relative
+/// poses of all the pairs, the averaging and the union-find run whole); `position` and `refine`
+/// also call it after every iteration of their solves. The bindings (Task 8), which must give
+/// progress at most every 0.5 s, need it inside those steps too.
 pub struct Mapper {
     input: Input,
     o: Options,

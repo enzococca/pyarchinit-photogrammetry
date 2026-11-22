@@ -685,7 +685,9 @@ fn intrinsics(state: &State, round: usize, rounds: usize, positions: bool) -> (V
 /// (horizontal and vertical, the recorded accuracy times its square root, not clamped); the
 /// factor of the tie points is `v^T P v / r` of their own residuals (twice their cost), `r` their
 /// rows less the unknowns plus the part of the unknowns the positions take (`tr(H)` of the
-/// positions, from the redundancy `estimate_sigmas` measured). The robust loss keeps its scale in
+/// positions, from the redundancy `estimate_sigmas` measured). That trace is round 1's, reused on
+/// the problem of the last adjustment (other tracks, other free intrinsics): an approximation,
+/// small beside the thousands of rows of the tie points. The robust loss keeps its scale in
 /// pixels. The covariance, and the factors (tie points, horizontal, vertical).
 fn posterior_bias_covariance(
     state: &State,
@@ -741,14 +743,12 @@ fn adjust_state(
     let b = build(state, input, free, all_tracks);
     let sol = adjust(&b.pb, o, observe)?;
     write_back(state, &b, &sol);
-    if covariance && b.pb.gnss_bias {
-        let (covariance, factors) = posterior_bias_covariance(state, &b, &sol, o)?;
-        state.bias_covariance = covariance;
-        state.variance_factors = Some(factors);
-    }
     let (cost_initial, mut cost) = (sol.cost_initial, sol.cost);
-    if estimate && !b.positions.is_empty() {
-        if let Some([fh, fv, rh, rv, ft]) = estimate_sigmas(&b, &sol, o, observe)? {
+    let observations = b.pb.obs.len();
+    // the block and the solution the covariance is taken from: the last solve of this adjustment
+    let mut last = (b, sol);
+    if estimate && !last.0.positions.is_empty() {
+        if let Some([fh, fv, rh, rv, ft]) = estimate_sigmas(&last.0, &last.1, o, observe)? {
             let g = state.gnss.as_ref().expect("positions");
             let mut largest = [0.0f64; 2];
             for k in 0..g.image.len() {
@@ -763,15 +763,37 @@ fn adjust_state(
                 tie_factor: ft,
                 sigma_h: clamped_sigma(largest[0], fh),
                 sigma_v: clamped_sigma(largest[1], fv),
-                positions: b.positions.len(),
+                positions: last.0.positions.len(),
             });
             let again = build(state, input, free, all_tracks);
             let sol = adjust(&again.pb, o, observe)?;
             write_back(state, &again, &sol);
             cost = sol.cost;
+            last = (again, sol);
         }
     }
-    Ok((cost_initial, cost, b.pb.obs.len()))
+    if covariance && last.0.pb.gnss_bias {
+        let result = posterior_bias_covariance(state, &last.0, &last.1, o);
+        record_covariance(state, result);
+    }
+    Ok((cost_initial, cost, observations))
+}
+
+/// The posterior covariance of the biases into the state; when it cannot be computed (a reduced
+/// system that is not positive definite: a parameter the observations hardly hold) the mapper goes
+/// on without it, the reason in the notes, the covariance and the factors left empty.
+fn record_covariance(state: &mut State, result: Result<(Vec<(i64, [[f64; 3]; 3])>, [f64; 3]), String>) {
+    match result {
+        Ok((covariance, factors)) => {
+            state.bias_covariance = covariance;
+            state.variance_factors = Some(factors);
+        }
+        Err(why) => {
+            state.bias_covariance.clear();
+            state.variance_factors = None;
+            state.notes.push(format!("no posterior covariance of the biases of the flights: {why}"));
+        }
+    }
 }
 
 /// The rounds of adjustment of the state (see the module): one report per round, and one for the
@@ -887,4 +909,45 @@ pub fn refine(
         });
     }
     Ok(reports)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mapper::tracks::Tracks;
+
+    fn empty_state() -> State {
+        State {
+            world_from_cam: Vec::new(),
+            centres: Vec::new(),
+            cameras: Vec::new(),
+            opencv_sensor: Vec::new(),
+            tracks: Tracks { observations: Vec::new(), offsets: vec![0], dropped_conflicts: 0, refused: None },
+            selected: Vec::new(),
+            points: Vec::new(),
+            keep: Vec::new(),
+            frame: Frame::Gnss,
+            gnss: None,
+            gnss_outliers: Vec::new(),
+            gnss_sigma: Vec::new(),
+            sigma_estimate: None,
+            bias: Vec::new(),
+            bias_covariance: vec![(2, [[1.0; 3]; 3])],
+            variance_factors: Some([1.0; 3]),
+            last_filter: (0, 0),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_covariance_that_cannot_be_computed_is_a_note() {
+        let mut state = empty_state();
+        record_covariance(&mut state, Err("pivot 7 of the reduced system is not positive".into()));
+        assert!(state.bias_covariance.is_empty() && state.variance_factors.is_none());
+        assert_eq!(state.notes.len(), 1);
+        assert!(state.notes[0].contains("pivot 7"), "{:?}", state.notes);
+        record_covariance(&mut state, Ok((vec![(2, [[0.04; 3]; 3])], [0.25, 1.0, 1.0])));
+        assert_eq!(state.bias_covariance, vec![(2, [[0.04; 3]; 3])]);
+        assert_eq!(state.variance_factors, Some([0.25, 1.0, 1.0]));
+    }
 }
