@@ -82,25 +82,50 @@ const STEP_CONVERGENCE: f64 = 1e-3;
 const ROTATION_TOLERANCE: f64 = 1e-6;
 
 /// The rotations of the photos: `world_from_cam` of each photo of the part placed, `None` for the
-/// others; the edges dropped (their indices in `ViewGraph::edges`, ascending): those that disagree
-/// with the averaged rotations and those that cannot be used (a photo out of range, both ends on
-/// one photo, a matrix that is not a rotation); the sizes of the connected parts of the photos
-/// joined by the edges left, largest first (a photo in no edge is in none).
+/// others; `placed` the number of those photos; the edges dropped (their indices in
+/// `ViewGraph::edges`, ascending): those that disagree with the averaged rotations and those that
+/// cannot be used (a photo out of range, both ends on one photo, a matrix that is not a rotation);
+/// the sizes of the connected parts of the photos joined by the edges left, largest first (a photo
+/// in no edge is in none); `refused` the reason when nothing was averaged because the view graph
+/// was refused (its own reason) or `Options::max_rotation_error_deg` is not a positive finite
+/// number, everything else then empty.
 ///
-/// The part placed is the largest of the part averaged, which is the first of `components`
-/// unless the edges dropped split the part averaged below the size of another part.
+/// The part placed is the largest of the part averaged. It is the first of `components` but in a
+/// rare case: when the edges dropped by the second filter split the part averaged below the size
+/// of a part that was never averaged, the first of `components` is that part and has no rotations.
+/// The check of the photos placed (90 % of them) and the report of the parts read `placed` and
+/// `world_from_cam`, never `components[0]`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rotations {
     pub world_from_cam: Vec<Option<[[f64; 3]; 3]>>,
+    pub placed: usize,
     pub dropped: Vec<usize>,
     pub components: Vec<usize>,
+    pub refused: Option<String>,
 }
 
 /// The rotations of the `n_images` photos from the edges of `graph` (see the module): a graph that
-/// was refused or has no edge places nothing.
+/// was refused, or a `max_rotation_error_deg` that is not a positive finite number, is refused
+/// with the reason; a graph without edges places nothing.
 pub fn average(graph: &ViewGraph, n_images: usize, o: &Options) -> Rotations {
-    let mut out = Rotations { world_from_cam: vec![None; n_images], dropped: Vec::new(), components: Vec::new() };
-    if graph.refused.is_some() || graph.edges.is_empty() {
+    let mut out = Rotations {
+        world_from_cam: vec![None; n_images],
+        placed: 0,
+        dropped: Vec::new(),
+        components: Vec::new(),
+        refused: None,
+    };
+    if let Some(reason) = &graph.refused {
+        out.refused = Some(reason.clone());
+        return out;
+    }
+    let limit_deg = o.max_rotation_error_deg;
+    if !(limit_deg > 0.0 && limit_deg.is_finite()) {
+        let reason = format!("max_rotation_error_deg must be a positive finite number, not {limit_deg}");
+        out.refused = Some(reason);
+        return out;
+    }
+    if graph.edges.is_empty() {
         return out;
     }
     let edges = &graph.edges;
@@ -126,7 +151,7 @@ pub fn average(graph: &ViewGraph, n_images: usize, o: &Options) -> Rotations {
             let (a, b) = (edges[k].a, edges[k].b);
             let (qa, qb) = (rotations[a].unwrap(), rotations[b].unwrap());
             let rab = relative[k].unwrap();
-            // not `>=`: an edge at the limit is kept, and a limit that is not a number drops none
+            // not `>=`: an edge at the limit is kept
             if (rab.inverse() * qb * qa.inverse()).angle() > limit {
                 active[k] = false;
                 out.dropped.push(k);
@@ -139,6 +164,7 @@ pub fn average(graph: &ViewGraph, n_images: usize, o: &Options) -> Rotations {
         for i in placed {
             let w = rotations[i].expect("a photo of the part averaged").inverse().to_rotation_matrix();
             out.world_from_cam[i] = Some(std::array::from_fn(|r| std::array::from_fn(|c| w[(r, c)])));
+            out.placed += 1;
         }
     }
     out.components = parts.iter().map(|p| p.len()).collect();
@@ -234,6 +260,11 @@ fn average_part(nodes: &[usize], edges: &[Edge], inside: &[usize], relative: &[O
 /// of its links wrong), can be held there by the averaging, its right links all disagreeing with
 /// it; this puts it back where they agree before the disagreeing links are dropped. The number of
 /// photos moved.
+///
+/// The root of the part may be moved too. That changes only the gauge (the rotation of the whole
+/// part about the world, which nothing fixes): the next reweighted least squares hold the root
+/// where it now is, and the agreement of the links, the only thing read afterwards, does not depend
+/// on the gauge.
 fn reseat(links: &[Link], rotations: &mut [UnitQuaternion<f64>], limit: f64) -> usize {
     let mut around: Vec<Vec<usize>> = vec![Vec::new(); rotations.len()];
     for (k, &(a, b, _, _)) in links.iter().enumerate() {

@@ -178,6 +178,14 @@ fn outliers_are_dropped() {
         }
     }
     assert!(wrong > 20, "{wrong} wrong edges");
+    // and the right edges are kept: none whose rotation is within 2 degrees of the truth is dropped
+    for &k in &r.dropped {
+        let e = &t.graph.edges[k];
+        let err = rotation_error_deg(&matrix(&e.rotation), &t.relative(e.a, e.b));
+        assert!(err >= 2.0, "edge {k} ({}-{}) of error {err} deg dropped", e.a, e.b);
+    }
+    assert_eq!(r.placed, 100);
+    assert!(r.refused.is_none());
     let e = errors_deg(&t, &r);
     let (med, max) = (median(&e), *e.last().unwrap());
     println!("median {med:.4} deg, largest {max:.4} deg, {} dropped of {} wrong", r.dropped.len(), wrong);
@@ -196,6 +204,11 @@ fn wrong_edges_in_the_spanning_tree_are_overcome() {
         let t = noisy_ring(seed, 0.1);
         let r = average(&t.graph, 100, &options());
         assert_eq!(r.components, vec![100], "seed {seed}");
+        for &k in &r.dropped {
+            let e = &t.graph.edges[k];
+            let err = rotation_error_deg(&matrix(&e.rotation), &t.relative(e.a, e.b));
+            assert!(err >= 2.0, "seed {seed}: edge {k} ({}-{}) of error {err} deg dropped", e.a, e.b);
+        }
         for &k in &t.outliers {
             let e = &t.graph.edges[k];
             if rotation_error_deg(&matrix(&e.rotation), &t.relative(e.a, e.b)) > 10.0 {
@@ -224,6 +237,7 @@ fn two_parts_give_two_components() {
     // two parts of one size: the part of the first photo is placed, the other is not
     assert!(r.world_from_cam[..30].iter().all(|w| w.is_some()));
     assert!(r.world_from_cam[30..].iter().all(|w| w.is_none()));
+    assert_eq!(r.placed, 30);
     // two rings of 30 without long edges hold their rotations less tightly than the ring of 100
     let med = median(&errors_deg(&t, &r));
     println!("two parts: median {med:.4} deg");
@@ -234,6 +248,7 @@ fn two_parts_give_two_components() {
     let t = Truth { truth, graph: graph_of(edges), outliers: Vec::new() };
     let r = average(&t.graph, 60, &options());
     assert_eq!(r.components, vec![60]);
+    assert_eq!(r.placed, 60);
     assert!(r.world_from_cam.iter().all(|w| w.is_some()));
     let med = median(&errors_deg(&t, &r));
     println!("joined: median {med:.4} deg");
@@ -246,11 +261,28 @@ fn nothing_is_placed_from_a_refused_or_empty_graph() {
     let r = average(&empty, 5, &options());
     assert_eq!(r.world_from_cam, vec![None; 5]);
     assert!(r.components.is_empty() && r.dropped.is_empty());
+    assert_eq!((r.placed, r.refused.is_none()), (0, true));
     let mut refused = noisy_ring(3, 0.0).graph;
     refused.refused = Some("2 cameras given, 1 in the input".into());
     let r = average(&refused, 100, &options());
     assert_eq!(r.world_from_cam, vec![None; 100]);
     assert!(r.components.is_empty());
+    assert_eq!(r.placed, 0);
+    assert_eq!(r.refused.as_deref(), Some("2 cameras given, 1 in the input"));
+}
+
+#[test]
+fn a_limit_that_is_not_positive_is_refused() {
+    let graph = noisy_ring(3, 0.0).graph;
+    for limit in [0.0, -1.0, f64::NAN] {
+        let r = average(&graph, 100, &Options { max_rotation_error_deg: limit, ..Options::default() });
+        assert_eq!(r.world_from_cam, vec![None; 100], "{limit}");
+        assert_eq!((r.placed, r.components.len(), r.dropped.len()), (0, 0, 0), "{limit}");
+        let reason = r.refused.unwrap();
+        assert!(reason.contains("max_rotation_error_deg"), "{reason}");
+    }
+    let r = average(&graph, 100, &Options { max_rotation_error_deg: 10.0, ..Options::default() });
+    assert_eq!(r.placed, 100);
 }
 
 #[test]
