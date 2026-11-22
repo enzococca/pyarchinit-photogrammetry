@@ -148,8 +148,11 @@ fn point_shape(s: &Scene, m: &Mapper) -> (f64, usize) {
     let state = m.state().expect("a refined mapper");
     let (mut est, mut truth) = (Vec::new(), Vec::new());
     for (t, x) in state.points.iter().enumerate() {
-        if let Some(x) = x {
-            let (image, k) = state.tracks.track(t)[0];
+        // the truth of a point is that of an observation the last filter kept (a wrong match of
+        // the track may be the first)
+        let kept = (state.tracks.offsets[t]..state.tracks.offsets[t + 1]).find(|&i| state.keep[i]);
+        if let (Some(x), Some(i)) = (x, kept) {
+            let (image, k) = state.tracks.observations[i];
             est.push(Vector3::from(*x));
             truth.push(s.points[s.views[image as usize][k as usize].0]);
         }
@@ -255,24 +258,25 @@ fn a_turned_world_is_not_a_transposed_one() {
     assert!(report.points > 400 && report.median_reprojection_px < 0.7, "{report:?}");
 }
 
-/// Ruling R6 and Review Focus 2 after the rounds: a second flight whose positions are off by (3,
-/// -2, 1) m is taken by its bias (within 0.3 m), the first flight held at zero, with the accuracy
-/// recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38, the estimate staying near it) and for an
-/// RTK receiver (0.03 m / 0.05 m); a fix 100 m off is an outlier, left out of the rounds, and its
-/// photo is placed with the others. Every case runs and prints its figures before the checks.
+/// Ruling R6 and Review Focus 2 after the rounds (tolerances of ruling R10): a second flight whose
+/// positions are off by (3, -2, 1) m is taken by its bias, the first flight held at exactly zero,
+/// with the accuracy recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38: within 1.0 m, the
+/// estimate of the accuracy staying near it) and for an RTK receiver (0.03 m / 0.05 m, seeds 34-36:
+/// within 0.1 m); a fix 100 m off is the only outlier, left out of the rounds, and its photo is
+/// placed with the others. Every case runs and prints its figures before the checks.
 ///
-/// Fails as the rulings state it (see the report of Task 7): the bias of the second flight is
-/// 0.36-0.82 m from the offset on seeds 34, 35 and 38, and the positioning takes 30 accurate
-/// positions of seed 37 for outliers. A bias of half the ring trades with a tilt (vertical) or a
-/// turn (horizontal) of the whole block: on seed 35 even the rigid true block fitted to the
-/// positions by least squares puts the vertical bias 0.63 m off (its standard deviation 0.23 m).
+/// Why not 0.3 m at 0.3 m / 0.5 m: the second flight is half the ring, and a bias of half the ring
+/// trades with a tilt (vertical) or a turn (horizontal) of the whole block, which only the
+/// positions themselves fix. On seed 35 even the rigid true block fitted to the positions by least
+/// squares (the best any estimator can do) puts the vertical bias 0.63 m off, its standard
+/// deviation 0.23 m; the tolerance is set from that noise.
 #[test]
-#[ignore = "R6 fails after the rounds (bias of the second flight beyond 0.3 m): the figures go to the session owner"]
+#[ignore = "R10: the RTK bias of seed 35 is 0.117 m (limit 0.1 m); the figures go to the session owner"]
 fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
     let offset = Vector3::new(3.0, -2.0, 1.0);
-    let cases = (33..=38).map(|seed| (seed, 0.3, 0.5)).chain([(34, 0.03, 0.05)]);
+    let cases = (33..=38).map(|seed| (seed, 0.3, 0.5, 1.0)).chain((34..=36).map(|seed| (seed, 0.03, 0.05, 0.1)));
     let mut failures = Vec::new();
-    for (seed, plan, height) in cases {
+    for (seed, plan, height, tolerance) in cases {
         let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
         let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], seed, &[]);
         second_flight(&mut gnss, PHOTOS / 2, offset.into());
@@ -291,7 +295,7 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
             (report.gnss_outliers == vec![37], format!("outliers {:?}", report.gnss_outliers)),
             (report.bias.len() == 2 && report.bias[0] == (1, [0.0; 3]) && report.bias[1].0 == 2,
              format!("biases {:?}", report.bias)),
-            (error < 0.3, format!("bias {bias:.3?}, {error:.3} m from the offset")),
+            (error < tolerance, format!("bias {bias:.3?}, {error:.3} m from the offset")),
             (shape < 0.005 * DIAMETER, format!("centres {shape:.3} m")),
             (residuals[37].norm() < 0.005 * DIAMETER,
              format!("the photo of the wrong fix {:.3} m", residuals[37].norm())),
@@ -305,13 +309,9 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
 }
 
 /// Ruling R1 with the accuracy recorded as the noise: the estimate of a survey-grade receiver stays
-/// near its recorded accuracy. Every seed runs and prints before the checks.
-///
-/// Fails on seeds 15 and 16 (see the report of Task 7): the positioning takes nearly every position
-/// for an outlier (the block of the rays alone, from the averaged rotations, is bent by more than 5
-/// recorded sigmas of 0.3 m), turns to the `Similarity` frame, and no position enters the rounds.
+/// near its recorded accuracy (the positioning keeps the accurate positions, ruling R9). Every
+/// seed runs and prints before the checks.
 #[test]
-#[ignore = "R1 with accurate positions: the positioning leaves them out on two seeds; figures to the session owner"]
 fn the_estimate_of_accurate_positions_stays_near_them() {
     let mut failures = Vec::new();
     for seed in [14, 15, 16] {
@@ -586,4 +586,5 @@ fn a_model_that_does_not_fit_is_refused() {
     assert!(write_colmap_binary(&dir, &[camera.clone()], &[image.clone()], &[beyond]).is_err());
     assert!(write_colmap_binary(&dir, &[camera.clone(), camera], &[image], &[point]).is_err());
 }
+
 

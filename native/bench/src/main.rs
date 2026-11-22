@@ -451,8 +451,11 @@ fn time_mapper(photos: usize, points: usize, gnss: bool, seed: u64) -> Result<Va
     let state = m.state().ok_or("no block after the rounds")?;
     let (mut est, mut want) = (Vec::new(), Vec::new());
     for (t, x) in state.points.iter().enumerate() {
-        if let Some(x) = x {
-            let (image, k) = state.tracks.track(t)[0];
+        // the truth of a point is that of an observation the last filter kept (a wrong match of
+        // the track may be the first)
+        let kept = (state.tracks.offsets[t]..state.tracks.offsets[t + 1]).find(|&i| state.keep[i]);
+        if let (Some(x), Some(i)) = (x, kept) {
+            let (image, k) = state.tracks.observations[i];
             est.push(*x);
             want.push(truth.points[truth.point_of[image as usize][k as usize]]);
         }

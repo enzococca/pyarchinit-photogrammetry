@@ -28,9 +28,9 @@
 //! - after the solve of round 1 on positions, the accuracy of the positions is estimated again
 //!   (`estimate_sigmas`) and round 1 is solved once more with it.
 //!
-//! Then, unless `Options::final_all_tracks` is false, every track without a point is triangulated
-//! with the poses held, filtered, and one last adjustment runs with all of them (reported as round
-//! `rounds + 1`).
+//! Then, unless `Options::final_all_tracks` is false, every track of three placed photos or more
+//! without a point is triangulated with the poses held, filtered, and one last adjustment runs
+//! with all of them (reported as round `rounds + 1`).
 //!
 //! Everything runs in a fixed order (the problems are built in the order of the photos and of the
 //! tracks, the probes of `estimate_sigmas` drawn from a generator seeded here): two runs give the
@@ -710,7 +710,11 @@ pub fn refine(
             return Err("cancelled".into());
         }
         let before = state.keep.clone();
-        let every: Vec<usize> = (0..state.tracks.len()).collect();
+        // tracks of two photos are not triangulated again (pycolmap's
+        // `mapper.retriangulation.ignore_two_view_tracks`, true): two rays of a wrong match meet
+        // anywhere along its epipolar line
+        let placed_views = |t: usize| state.tracks.track(t).iter().filter(|&&(i, _)| state.placed(i as usize)).count();
+        let every: Vec<usize> = (0..state.tracks.len()).filter(|&t| placed_views(t) >= 3).collect();
         triangulate_missing(state, input, &every);
         filter(state, input, o, 1.0)?;
         let (cost_initial, cost, observations) = adjust_state(state, input, o, &last_free, true, false, observe)?;
