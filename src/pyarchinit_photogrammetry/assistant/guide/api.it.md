@@ -165,14 +165,22 @@ com'era.
 
 `meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
-`dropped`) e `preselection_size`; `gpu` e le chiavi di `gpu_shares` nominano gli adattatori come il
-record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie fatte da ciascuno. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
+`dropped`), `preselection_size` e le impostazioni lette dall'ambiente (`native_dct`, `native_guided`,
+`native_guided_ratio`, `native_guided_band`, sotto; un record di benchmark le conserva); `gpu` e le chiavi
+di `gpu_shares` nominano gli adattatori come il record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie fatte da ciascuno. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
 `pairs` ed `export`.
 
-Due variabili d'ambiente: `PPG_NATIVE_DCT=0` decodifica ogni JPEG per intero (di norma un JPEG viene
+Variabili d'ambiente: `PPG_NATIVE_DCT=0` decodifica ogni JPEG per intero (di norma un JPEG viene
 decodificato alla scala DCT che la sua riduzione permette, scelta per la maggiore delle sue due
 riduzioni - quella del matching e quella della preselezione - così una sola decodifica dà entrambe);
-`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una. Una GPU persa a metà
+`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una. Tre regolano la seconda
+fase di una coppia, il matching lungo le linee epipolari del modello della prima: `PPG_NATIVE_GUIDED=0`
+confronta invece ogni punto con ogni punto nelle coppie affidabili (la prima fase decide ancora quali
+coppie sono affidabili, tenute o scartate), `PPG_NATIVE_GUIDED_RATIO` (un numero sopra 0, al massimo 1; di
+norma 0,8, il test del rapporto della prima fase) è il test del rapporto della seconda, dove un punto è
+confrontato solo con i punti della sua banda, e `PPG_NATIVE_GUIDED_BAND` (sopra 0; di norma 1,0) è la
+semilarghezza della banda come multiplo della soglia della verifica. Un valore che non lo è ferma il
+passo con un errore che nomina la variabile. Una GPU persa a metà
 del passo restituisce il suo lavoro alle altre; se era l'ultima, la CPU prende quello che resta, anche
 con `PPG_NATIVE_CPU_SHARE=0`. Una foto o una coppia che fallisce su un dispositivo e poi anche sulla CPU viene lasciata
 (la foto senza punti, la coppia scartata) con una riga nel log. Una foto la cui riduzione - o la cui

@@ -8,7 +8,9 @@
 //! pixels, the fundamental matrix on the raw key points it was estimated on (the points of the
 //! second photo in a grid of cells in either frame), with the ratio and the distance test among
 //! those candidates and the mutual check from the second photo; the matches are verified again
-//! and the pair is `Route::Guided`. Not trusted, a pair that still has
+//! and the pair is `Route::Guided`. The ratio test of that stage (`guided_max_ratio`) and the width
+//! of its band (`guided_band`) are options of their own, and `guided` false sends the trusted pairs
+//! to brute force instead. Not trusted, a pair that still has
 //! `drop_inliers` inliers, or that the preselection chose, is matched point against point
 //! (`Route::BruteForce`); any other pair is `Route::Dropped` with nothing matched. In every route
 //! the matches that go to the verification are capped to `max_num_matches`, the smallest
@@ -59,6 +61,16 @@ pub struct Options {
     /// `max_num_matches`); `usize::MAX` keeps every match.
     pub max_num_matches: usize,
     pub two_view: two_view::Options,
+    /// The second stage along the epipolar lines; false sends every trusted pair to brute force
+    /// instead (the first stage still decides which pairs are trusted, kept or dropped).
+    pub guided: bool,
+    /// The ratio test of the second stage, in place of `max_ratio`: a point is compared there only
+    /// with the candidates of its band, so a ratio as loose as the first stage's lets through the
+    /// ambiguous matches along the line. `max_ratio` keeps the behaviour of the first stage.
+    pub guided_max_ratio: f32,
+    /// The half-width of the band of the second stage, as a multiple of the verification's
+    /// `max_error` (1.0: the band is the threshold of an inlier).
+    pub guided_band: f64,
 }
 
 /// What the matching of a list of pairs gave: how many pairs were done, how many took each
@@ -468,11 +480,12 @@ fn guide(stage1: &TwoView, cam_a: &Camera, cam_b: &Camera) -> Option<(Matrix3<f6
     }
 }
 
-/// The matches out of the bests (COLMAP's three tests), capped to `cap` with the smallest
-/// distances kept (the earlier match of two equal ones), in the order of the points of A, and
-/// their quality.
-fn selected(bests: &[[u32; 3]], n_a: usize, n_b: usize, o: &Options, cap: usize) -> (Vec<[u32; 2]>, Vec<f32>) {
-    let mut matches = select_matches(bests, n_a, n_b, o.max_ratio, o.max_distance, o.cross_check);
+/// The matches out of the bests (COLMAP's three tests, the ratio test at `max_ratio`), capped to
+/// `cap` with the smallest distances kept (the earlier match of two equal ones), in the order of
+/// the points of A, and their quality.
+fn selected(bests: &[[u32; 3]], n_a: usize, n_b: usize, o: &Options, max_ratio: f32, cap: usize)
+            -> (Vec<[u32; 2]>, Vec<f32>) {
+    let mut matches = select_matches(bests, n_a, n_b, max_ratio, o.max_distance, o.cross_check);
     if matches.len() > cap {
         // the distance of a match falls as the dot product of its descriptors rises
         let mut order: Vec<usize> = (0..matches.len()).collect();
@@ -510,26 +523,29 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
     let (key_a, set_a) = pa.stage1_set(a, name_a);
     let (key_b, set_b) = pb.stage1_set(b, name_b);
     let bests1 = if set_a.is_empty() || set_b.is_empty() { Vec::new() } else { bests(key_a, set_a, key_b, set_b)? };
-    let (m1, q1) = selected(&bests1, set_a.len() / DIM, set_b.len() / DIM, o, usize::MAX);
+    let (m1, q1) = selected(&bests1, set_a.len() / DIM, set_b.len() / DIM, o, o.max_ratio, usize::MAX);
     let m1: Vec<[u32; 2]> = m1.iter().map(|m| [pa.stage1[m[0] as usize], pb.stage1[m[1] as usize]]).collect();
     let stage1 = verify(cam_a, kp_a, cam_b, kp_b, &m1, &q1, calibrated, &o.two_view, seed);
     let inliers = stage1.inliers.len();
 
     // the second stage: along the epipolar lines of the model of the first
-    if inliers >= o.trust_inliers {
+    let trusted = inliers >= o.trust_inliers;
+    if trusted && o.guided {
         if let Some((f, frame)) = guide(&stage1, cam_a, cam_b) {
-            let bests2 = guided_bests(da, pa, db, pb, &f, frame, o.two_view.ransac.max_error);
-            let (matches, quality) = selected(&bests2, n_a, n_b, o, o.max_num_matches);
+            let band = o.two_view.ransac.max_error * o.guided_band;
+            let bests2 = guided_bests(da, pa, db, pb, &f, frame, band);
+            let (matches, quality) = selected(&bests2, n_a, n_b, o, o.guided_max_ratio, o.max_num_matches);
             let two_view = verify(cam_a, kp_a, cam_b, kp_b, &matches, &quality, calibrated, &o.two_view, seed);
             return Ok(PairResult { matches, two_view, route: Route::Guided });
         }
     }
 
-    // brute force: every point against every point (the first stage already, when it took them all)
-    if inliers >= o.drop_inliers || preselected {
+    // brute force: every point against every point (the first stage already, when it took them all);
+    // a trusted pair too when the second stage is off
+    if (trusted && !o.guided) || inliers >= o.drop_inliers || preselected {
         let whole = pa.all_in_stage1 && pb.all_in_stage1;
         let bests_all = if whole { bests1 } else { bests(photo_key(name_a), da, photo_key(name_b), db)? };
-        let (matches, quality) = selected(&bests_all, n_a, n_b, o, o.max_num_matches);
+        let (matches, quality) = selected(&bests_all, n_a, n_b, o, o.max_ratio, o.max_num_matches);
         let two_view = if whole && matches == m1 {
             stage1
         } else {
@@ -841,20 +857,25 @@ mod tests {
     #[test]
     fn the_cap_keeps_the_largest_dot_products_in_the_order_of_a() {
         let o = Options { stage1_points: 10, trust_inliers: 40, drop_inliers: 8, max_ratio: 0.8, max_distance: 0.7,
-                          cross_check: false, max_num_matches: 2, two_view: two_view::Options::default() };
+                          cross_check: false, max_num_matches: 2, two_view: two_view::Options::default(),
+                          guided: true, guided_max_ratio: 0.8, guided_band: 1.0 };
         let s = |cos: f32| (cos * 512.0 * 512.0) as u32;
         // four descriptors of A matched to B: scores 0.95, 0.99, 0.95, 0.97; the cap of two
         // keeps the second and the fourth, in that order
         let bests = vec![[s(0.95), 0, s(0.5)], [s(0.99), 1, s(0.5)], [s(0.95), 2, s(0.5)], [s(0.97), 3, s(0.5)],
                          [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
-        let (matches, quality) = selected(&bests, 4, 4, &o, 2);
+        let (matches, quality) = selected(&bests, 4, 4, &o, o.max_ratio, 2);
         assert_eq!(matches, vec![[1, 1], [3, 3]]);
         assert_eq!(quality.len(), 2);
         // a tie at the cap: the earlier match stays
-        let (matches, _) = selected(&bests, 4, 4, &o, 3);
+        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, 3);
         assert_eq!(matches, vec![[0, 0], [1, 1], [3, 3]]);
-        let (matches, _) = selected(&bests, 4, 4, &o, usize::MAX);
+        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, usize::MAX);
         assert_eq!(matches.len(), 4);
+        // the ratio given, not the options': at 0.1 none passes (their ratios of distances, the
+        // angles of the best and the second best, are 0.14 to 0.31)
+        let (matches, _) = selected(&bests, 4, 4, &o, 0.1, usize::MAX);
+        assert!(matches.is_empty(), "{matches:?}");
     }
 
     /// Points spread over a photo of 6000 x 4000 pixels, a few far outside it, and lines at every

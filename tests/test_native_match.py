@@ -5,6 +5,7 @@ reduced as COLMAP reads them. Every binding releases the GIL and reports through
 total, message)``, whose exception stops the step. Skipped without a core that carries them."""
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 
@@ -467,6 +468,56 @@ def test_the_matching_refuses_what_it_cannot_do(trench_store, tmp_path):
                                     None)
 
 
+def test_the_second_stage_can_be_switched_off_and_tuned(trench_store, preselected, tmp_path):
+    """``guided`` false: the trusted pairs go to brute force (none guided), the routes otherwise the first stage's;
+    ``guided_max_ratio`` and ``guided_band`` are taken; a band that is not a positive number is refused."""
+    store, _, _, names, _ = trench_store
+    report, _ = preselected
+    pairs = [(a, b, True) for a, b, _ in sorted(report["weights"], key=lambda w: -w[2])[:6]]
+    on = ppg_core.native_match_pairs(str(store), str(tmp_path / "on"), pairs, _cameras(names), [], OPTIONS, None)
+    assert on["guided"] > 0
+    off = ppg_core.native_match_pairs(str(store), str(tmp_path / "off"), pairs, _cameras(names), [],
+                                      {**OPTIONS, "guided": False}, None)
+    assert off["guided"] == 0 and off["brute_force"] == on["guided"] + on["brute_force"]
+    assert off["dropped"] == on["dropped"]
+    tuned = ppg_core.native_match_pairs(str(store), str(tmp_path / "tuned"), pairs, _cameras(names), [],
+                                        {**OPTIONS, "guided_max_ratio": 0.7, "guided_band": 1.5}, None)
+    assert tuned["done"] == len(pairs)
+    for band in (0, -1.0, float("nan")):
+        with pytest.raises(ValueError, match="guided_band"):
+            ppg_core.native_match_pairs(str(store), str(tmp_path / "bad"), pairs, _cameras(names), [],
+                                        {**OPTIONS, "guided_band": band}, None)
+
+
+def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch):
+    """``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO`` and ``PPG_NATIVE_GUIDED_BAND`` reach the options of the
+    pairs stage; the defaults add nothing to them (a core that predates them takes the same dict), the default ratio
+    is the matcher's; a value that is not one names its variable."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND"):
+        monkeypatch.delenv(name, raising=False)
+    defaults = native_match.guided_settings()
+    assert defaults == {"guided": True, "guided_max_ratio": native_match.MAX_RATIO, "guided_band": 1.0}
+    assert native_match.MAX_RATIO == inspect.signature(_native.gpu_match).parameters["max_ratio"].default
+    plain = native_match.pair_options(8000, defaults)
+    assert plain == {"stage1_points": native_match.STAGE1_POINTS, "trust_inliers": native_match.TRUST_INLIERS,
+                     "drop_inliers": native_match.DROP_INLIERS, "max_num_matches": 32000}
+    monkeypatch.setenv("PPG_NATIVE_GUIDED", "0")
+    monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", " 0.7 ")
+    monkeypatch.setenv("PPG_NATIVE_GUIDED_BAND", "1.5")
+    settings = native_match.guided_settings()
+    assert settings == {"guided": False, "guided_max_ratio": 0.7, "guided_band": 1.5}
+    assert native_match.pair_options(8000, settings) == {**plain, "guided": False, "guided_max_ratio": 0.7,
+                                                         "guided_band": 1.5}
+    for name, value in (("PPG_NATIVE_GUIDED_RATIO", "much"), ("PPG_NATIVE_GUIDED_RATIO", "1.2"),
+                        ("PPG_NATIVE_GUIDED_BAND", "0"), ("PPG_NATIVE_GUIDED_BAND", "-2")):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ValueError, match=name):
+            native_match.guided_settings()
+        monkeypatch.delenv(name)
+
+
 def test_a_progress_that_raises_stops_the_matching(trench_store, tmp_path):
     """The exception of the progress callback comes out of ``native_match_pairs`` too, the pairs done before it on
     disk. Every pair of the trench is given: the CPU threads (one per core) each hold a pair when the cancel
@@ -647,6 +698,10 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     assert sum(info["routes"].values()) == info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
     assert info["pairs_unmatched"] == 0 and info["rigs"] == 0 and info["nodes"] == [] and not info["continued"]
     assert info["cpu_pairs"] + info["gpu_pairs"] == info["pairs"]
+    # the settings of the run read from the environment, in the record (the defaults here)
+    assert info["native_dct"] is native_match.dct_enabled()
+    assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"]) == \
+        (True, native_match.MAX_RATIO, 1.0)
     for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",
                 "apply_masks", "guided_matching", "stationary_removed", "keypoint_limit", "tiepoint_limit", "added",
                 "gpu", "gpu_shares"):

@@ -63,11 +63,14 @@ ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepo
              "align_cameras": {}, "update_transform": {}, "build_depth_maps": {"quality": "medium"},
              "build_point_cloud": {}, "build_model": {"surface": "arbitrary"}, "build_texture": {}, "build_dem": {},
              "build_orthomosaic": {}}
-# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. The last three are the native
-# matching's (its record names the engine, where the features were found and the routes the pairs took; the classic
-# record names no engine and no routes): facts of the run, not settings, for the table (table.RUN_FACTS)
+# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. "engine", "features" and
+# "routes" are the native matching's (its record names the engine, where the features were found and the routes the
+# pairs took; the classic record names no engine and no routes): facts of the run, not settings, for the table
+# (table.RUN_FACTS). The last four are the native matching's settings read from the environment (the JPEG decoded at
+# a DCT scale, and the second stage: on, its ratio test, its band), None in a classic record: settings, so runs that
+# differ in them are not one measurement
 SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
-                "features", "routes")
+                "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band")
 MATCH_SETTINGS = ("max_ratio", "max_distance", "cross_check")
 PROJECT = "project.ppg"
 RESULT = "result.json"

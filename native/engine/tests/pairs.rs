@@ -260,7 +260,8 @@ fn views(dir: &Path, scene: &Scene) -> (FeatureStore, FeatureView, FeatureView) 
 /// as the program passes them, the first stage on the `stage1_points` largest points.
 fn options(stage1_points: usize) -> Options {
     Options { stage1_points, trust_inliers: 40, drop_inliers: 8, max_ratio: 0.8, max_distance: 0.7, cross_check: true,
-              max_num_matches: 32768, two_view: two_view::Options::default() }
+              max_num_matches: 32768, two_view: two_view::Options::default(), guided: true, guided_max_ratio: 0.8,
+              guided_band: 1.0 }
 }
 
 /// The `bests` of the CPU twin, ignoring the keys.
@@ -394,6 +395,81 @@ fn a_good_pair_goes_guided_and_finds_the_true_matches() {
     assert_eq!(every.route, Route::Guided);
     assert!(found(&scene.truth, &every.two_view.inliers) * 100 >= n * 95);
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn the_guided_options_reach_the_second_stage() {
+    let dir = folder("guided-options");
+    let scene = pair_scene(11, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let (_store, a, b) = views(&dir, &scene);
+    let cam = camera();
+    let raw = |view: &FeatureView| -> Vec<(f64, f64)> {
+        view.keypoints().iter().map(|k| (f64::from(k[0]), f64::from(k[1]))).collect()
+    };
+    let (raw_a, raw_b) = (raw(&a), raw(&b));
+    let n = scene.truth.len();
+    // a stricter ratio and a wider band in the second stage alone: the first stage is unchanged
+    // (its ratio is `max_ratio`), the matches are those of the slow band matching at that ratio
+    // and width, on the fundamental matrix of the first stage (uncalibrated: the raw key points)
+    let o = Options { guided_max_ratio: 0.6, guided_band: 2.0, ..options(1000) };
+    let result = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &o, &mut cpu).unwrap();
+    assert_eq!(result.route, Route::Guided);
+    let stage1 = stage1_model(&a, &b, &cam, &cam, false, &o);
+    let f = stage1.f.unwrap();
+    let e = o.two_view.ransac.max_error;
+    let strict = Options { max_ratio: 0.6, ..o };
+    assert_eq!(result.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, 2.0 * e, &strict));
+    let default = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &options(1000), &mut cpu)
+        .unwrap();
+    assert_eq!(default.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, e, &options(1000)));
+    assert!(found(&scene.truth, &result.two_view.inliers) * 100 >= n * 95);
+    // the twins of this scene are unambiguous, so those options keep the same matches; a ratio
+    // and a band far tighter than the defaults show that each reaches the second stage
+    for (tight, ratio, band) in [(Options { guided_max_ratio: 0.1, ..options(1000) }, 0.1, e),
+                                 (Options { guided_band: 0.02, ..options(1000) }, 0.8, 0.02 * e)] {
+        let r = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &tight, &mut cpu).unwrap();
+        assert_eq!(r.route, Route::Guided);
+        assert_eq!(r.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, band, &Options { max_ratio: ratio, ..o }));
+        assert!(r.matches.len() < default.matches.len(), "{} matches against {}", r.matches.len(),
+                default.matches.len());
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_trusted_pair_goes_to_brute_force_when_the_second_stage_is_off() {
+    let dir = folder("guided-off");
+    let scene = pair_scene(11, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let (_store, a, b) = views(&dir, &scene);
+    let cam = camera();
+    let n = scene.truth.len();
+    let o = Options { guided: false, ..options(1000) };
+    for calibrated in [true, false] {
+        // trusted by the first stage (it goes guided with the second stage on) ...
+        let guided = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, calibrated, false, &options(1000),
+                                       &mut cpu).unwrap();
+        assert_eq!(guided.route, Route::Guided);
+        // ... and matched point against point with it off: COLMAP's tests on every point
+        let result = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, calibrated, false, &o, &mut cpu)
+            .unwrap();
+        assert_eq!(result.route, Route::BruteForce);
+        let bests = matching::bests_cpu(a.descriptors(), b.descriptors());
+        let (n_a, n_b) = (a.keypoints().len(), b.keypoints().len());
+        let want = gpu::select_matches(&bests, n_a, n_b, o.max_ratio, o.max_distance, o.cross_check);
+        assert_eq!(result.matches, want);
+        assert!(found(&scene.truth, &result.two_view.inliers) * 100 >= n * 95);
+    }
+    // a pair the first stage does not trust is still decided by it: dropped unless preselected
+    // (the scene of `a_pair_without_large_scale_matches_goes_to_brute_force`)
+    let far = folder("guided-off-far");
+    let scene = pair_scene(12, &camera(), &camera(), 2000, (8.0, 12.0), 1000, (2.0, 3.0));
+    let (_far_store, fa, fb) = views(&far, &scene);
+    let dropped = pairs::match_pair(&fa, &fb, "a.jpg", "b.jpg", &cam, &cam, true, false, &o, &mut cpu).unwrap();
+    assert_eq!(dropped.route, Route::Dropped);
+    let brute = pairs::match_pair(&fa, &fb, "a.jpg", "b.jpg", &cam, &cam, true, true, &o, &mut cpu).unwrap();
+    assert_eq!(brute.route, Route::BruteForce);
+    fs::remove_dir_all(&dir).unwrap();
+    fs::remove_dir_all(&far).unwrap();
 }
 
 #[test]
