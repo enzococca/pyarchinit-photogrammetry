@@ -2,12 +2,16 @@
 //! Structure-from-Motion Revisited", as GLOMAP): the arrays it starts from (`input`: the key
 //! points and the inlier matches of the verified pairs, as COLMAP's database holds them) and the
 //! view graph of the pairs with their relative poses and the focal lengths found from the
-//! fundamental matrices (`graph`), and the rotations of the photos averaged from the relative
-//! rotations of its edges (`rotation`).
+//! fundamental matrices (`graph`), the rotations of the photos averaged from the relative
+//! rotations of its edges (`rotation`), the tracks joined from the matches and the longest of them
+//! chosen over every photo (`tracks`), and the points triangulated from them with the filter of
+//! their observations (`triangulate`).
 
 pub mod graph;
 pub mod input;
 pub mod rotation;
+pub mod tracks;
+pub mod triangulate;
 
 /// The options of the whole mapper. The defaults are the figures of the plan; the ones that come
 /// from pycolmap are passed by Python in place of them.
@@ -29,6 +33,17 @@ pub struct Options {
     /// by more than this, in degrees, is dropped by the rotation averaging (GLOMAP's
     /// `max_rotation_error`).
     pub max_rotation_error_deg: f64,
+    /// An observation whose reprojection error exceeds this goes (`triangulate::filter`). The error
+    /// is measured in normalised coordinates (the distance between the point seen by the camera,
+    /// divided by its depth, and the normalised key point; about the error in pixels over the focal
+    /// length), as COLMAP's global mapper filters (`ReprojectionErrorType::NORMALIZED`): pycolmap's
+    /// `GlobalPipelineOptions().mapper.max_normalized_reproj_error`, 0.01 in pycolmap 4.2.1, passed
+    /// from Python.
+    pub max_normalized_reprojection: f64,
+    /// The observations of a point go when no two of its rays meet at this angle, in degrees
+    /// (pycolmap's `GlobalPipelineOptions().mapper.min_tri_angle_deg`, 1.0 in pycolmap 4.2.1,
+    /// passed from Python).
+    pub min_triangulation_deg: f64,
 }
 
 impl Default for Options {
@@ -39,6 +54,8 @@ impl Default for Options {
             min_pair_parallax_deg: 1.0,
             max_relpose_trials: 10000,
             max_rotation_error_deg: 10.0,
+            max_normalized_reprojection: 0.01,
+            min_triangulation_deg: 1.0,
         }
     }
 }

@@ -80,8 +80,15 @@ iterations and convergence thresholds, the pairs that disagree by more than 10 d
 the largest connected part averaged a second time. The L1 solver (the alternating direction method
 of Boyd et al. 2011), the inverse Jacobians of the linearisation, the line search, the loops of
 three photos that order the spanning tree and the moving of a photo to the rotation most of its
-pairs agree on are this package's own. GLOMAP is distributed under the BSD 3-clause license below
-(after COLMAP's).
+pairs agree on are this package's own. The filter of the observations of the triangulated points
+- native/engine/src/mapper/triangulate.rs - is arranged as COLMAP's global mapper filters them
+(src/colmap/sfm/observation_manager.cc, FilterPoints3DWithLargeReprojectionError with the
+normalised error and FilterPoints3DWithSmallTriangulationAngle; src/colmap/geometry/triangulation.cc,
+CalculateTriangulationAngle): an observation beyond the threshold goes, all of a point's go when
+fewer than two are left or when no two of its rays meet at the smallest angle, the angle of two
+rays the smaller of it and its supplement. The union-find of the tracks, the selection of the
+tracks over each photo and the least squares of the triangulation are this package's own. GLOMAP
+is distributed under the BSD 3-clause license below (after COLMAP's).
 
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.
 
