@@ -51,7 +51,8 @@
 //!   neighbours only, key points with 0.5 px of noise, a tenth of wrong matches; with `--gnss` the
 //!   positions of the photos with 1 m and 2 m of noise, recorded as 5 m and 10 m), the tie-point
 //!   limit at 500 tracks per photo, the model written into the temporary folder and removed; it
-//!   prints `photos`, `placed`, `tracks` (built), `points` and `observations` (of the model),
+//!   prints `photos`, `placed`, `gnss_outliers` (the positions left out as outliers), `tracks`
+//!   (built), `points` and `observations` (of the model),
 //!   `seconds` (by stage: `view_graph`, `rotations`, `tracks`, `position`, `refine`,
 //!   `write_model`, the ring made before the clock starts), `median_reprojection_px` and `shape`
 //!   (the largest residual of the points after one similarity onto the truth, over the diameter).
@@ -461,7 +462,8 @@ fn time_mapper(photos: usize, points: usize, gnss: bool, seed: u64) -> Result<Va
         }
     }
     let shape = shape_residual(&est, &want).ok_or("too few points for the shape")? / truth.diameter;
-    Ok(json!({"photos": photos, "placed": report.placed, "tracks": report.tracks, "points": report.points,
+    Ok(json!({"photos": photos, "placed": report.placed, "gnss_outliers": report.gnss_outliers.len(),
+              "tracks": report.tracks, "points": report.points,
               "observations": report.observations, "seconds": seconds,
               "median_reprojection_px": report.median_reprojection_px, "shape": shape}))
 }

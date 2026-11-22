@@ -236,11 +236,12 @@ fn adjust_takes_the_solver_and_the_seed_it_is_given() {
 #[test]
 fn map_runs_a_synthetic_ring_through_every_stage() {
     let record = printed(&["map", "--photos", "40", "--points-per-photo", "300", "--gnss"]);
-    let expected = ["median_reprojection_px", "observations", "photos", "placed", "points", "seconds", "shape",
-                    "tracks"];
+    let expected = ["gnss_outliers", "median_reprojection_px", "observations", "photos", "placed", "points",
+                    "seconds", "shape", "tracks"];
     assert_eq!(keys(&record), expected, "{record}");
     assert_eq!(record["photos"], json!(40));
     assert_eq!(record["placed"], json!(40), "{record}");
+    assert_eq!(record["gnss_outliers"], json!(0), "{record}");
     let stages = ["position", "refine", "rotations", "tracks", "view_graph", "write_model"];
     assert_eq!(keys(&record["seconds"]), stages, "{record}");
     assert!(record["observations"].as_u64().is_some_and(|n| n > 1000), "{record}");
