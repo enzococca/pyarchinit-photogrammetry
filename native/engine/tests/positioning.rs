@@ -90,6 +90,11 @@ fn rotations_of(s: &Scene, bend_deg: f64) -> Rotations {
 /// horizontal axis and `height` on the vertical, accuracy 5 m and 10 m recorded, one flight; the
 /// photos of `without` have none.
 fn gnss_of(s: &Scene, plan: f64, height: f64, seed: u64, without: &[usize]) -> Gnss {
+    gnss_with(s, plan, height, [5.0, 5.0, 10.0], seed, without)
+}
+
+/// `gnss_of` with the accuracy `sigma` recorded.
+fn gnss_with(s: &Scene, plan: f64, height: f64, sigma: [f64; 3], seed: u64, without: &[usize]) -> Gnss {
     let mut random = Random::new(seed);
     let mut g = Gnss { image: Vec::new(), xyz: Vec::new(), sigma: Vec::new(), flight: Vec::new() };
     for (i, p) in s.poses.iter().enumerate() {
@@ -99,10 +104,22 @@ fn gnss_of(s: &Scene, plan: f64, height: f64, seed: u64, without: &[usize]) -> G
         }
         g.image.push(i);
         g.xyz.push([p.centre.x + noise[0], p.centre.y + noise[1], p.centre.z + noise[2]]);
-        g.sigma.push([5.0, 5.0, 10.0]);
+        g.sigma.push(sigma);
         g.flight.push(1);
     }
     g
+}
+
+/// The photos of the second half of the ring as flight 2, their positions moved by `offset`.
+fn second_flight(g: &mut Gnss, offset: [f64; 3]) {
+    for k in 0..g.image.len() {
+        if g.image[k] >= PHOTOS / 2 {
+            g.flight[k] = 2;
+            for a in 0..3 {
+                g.xyz[k][a] += offset[a];
+            }
+        }
+    }
 }
 
 fn run(c: &Case, rotations: &Rotations, gnss: Option<&Gnss>) -> Positioned {
@@ -259,14 +276,7 @@ fn a_wrong_gps_fix_and_a_second_flight() {
     let offset = [3.0, -2.0, 1.0];
     for seed in 33..=38 {
         let mut gnss = gnss_of(&s, 0.3, 0.5, seed, &[]);
-        for k in 0..gnss.image.len() {
-            if gnss.image[k] >= PHOTOS / 2 {
-                gnss.flight[k] = 2;
-                for a in 0..3 {
-                    gnss.xyz[k][a] += offset[a];
-                }
-            }
-        }
+        second_flight(&mut gnss, offset);
         let p = run(&c, &rotations, Some(&gnss));
         let (shape, _) = centre_residuals(&s, &p);
         assert_eq!(p.frame, Frame::Gnss);
@@ -280,6 +290,72 @@ fn a_wrong_gps_fix_and_a_second_flight() {
         assert!(shape < 0.005 * DIAMETER, "seed {seed}: {shape} m");
         assert!(p.gnss_outliers.is_empty(), "seed {seed}: {:?}", p.gnss_outliers);
     }
+}
+
+/// Review Focus 2 with positions whose recorded accuracy is their noise (a survey-grade receiver,
+/// and an RTK one): the offset of the second flight is far beyond 5 recorded sigmas, so the
+/// outliers are found with a translation per flight and checked again after the solve with the
+/// biases; no position of the second flight is an outlier, its bias is found (within 1.5 m, R6),
+/// and a fix 100 m off is still caught.
+#[test]
+fn a_second_flight_with_accurate_positions() {
+    let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
+    let c = case_of(&s);
+    let rotations = rotations_of(&s, 0.0);
+    let offset = [3.0, -2.0, 1.0];
+    for (plan, height) in [(0.3, 0.5), (0.03, 0.05)] {
+        let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], 34, &[]);
+        second_flight(&mut gnss, offset);
+        gnss.xyz[37][0] += 100.0;
+        let p = run(&c, &rotations, Some(&gnss));
+        let shape = shape_of(&s, &p);
+        let error = (Vector3::from(p.bias[1].1) - Vector3::from(offset)).norm();
+        eprintln!("accuracy {plan} / {height} m: bias {:.3?}, {error:.3} m from the offset; outliers {:?}; \
+                   horizontal {:.3} m, vertical rms {:.3} m", p.bias, p.gnss_outliers, shape.horizontal,
+                  shape.vertical_rms);
+        assert_eq!(p.frame, Frame::Gnss);
+        assert_eq!(p.gnss_outliers, vec![37], "accuracy {plan} / {height} m");
+        assert_eq!(p.bias[0], (1, [0.0; 3]));
+        assert_eq!(p.bias[1].0, 2);
+        assert!(error < 1.5, "accuracy {plan} / {height} m: bias {:?}", p.bias[1].1);
+        assert!(shape.horizontal < 0.005 * DIAMETER, "{} m", shape.horizontal);
+        assert!(shape.vertical_rms < 2.0, "{} m", shape.vertical_rms);
+    }
+}
+
+/// The averaged rotations in a frame of their own: every one turned by `G` (30 degrees about
+/// (1, 2, 3)), the relative poses unchanged. The frame is turned back onto the positions
+/// (`frame_rotation` is `G^T`) and the block is the ring's. With the rotations of the ring and
+/// patch not symmetric, a transposed rotation anywhere (the poses, the rays, the directions of
+/// the pairs, Horn's solution) fails this test.
+#[test]
+fn the_frame_of_the_rotations_is_turned_onto_the_positions() {
+    let s = ring(PHOTOS, DIAMETER, HEIGHT, 101);
+    let c = case_of(&s);
+    let turn = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)),
+                                          30f64.to_radians())
+        .into_inner();
+    let mut rotations = rotations_of(&s, 0.0);
+    for w in rotations.world_from_cam.iter_mut() {
+        let r = turn * Matrix3::from_fn(|i, j| w.unwrap()[i][j]);
+        *w = Some(array(&r));
+    }
+    let gnss = gnss_of(&s, 1.0, 2.0, 102, &[]);
+    let p = run(&c, &rotations, Some(&gnss));
+    assert_eq!(p.frame, Frame::Gnss);
+    let q = Matrix3::from_fn(|i, j| p.frame_rotation[i][j]);
+    let off = common::rotation_error_deg(&q, &turn.transpose());
+    let shape = shape_of(&s, &p);
+    eprintln!("frame turned by 30 deg: frame_rotation {off:.3} deg from G^T; horizontal {:.3} m, vertical rms \
+               {:.3} m", shape.horizontal, shape.vertical_rms);
+    assert!(off < 0.5, "frame_rotation {off} deg from G^T");
+    assert!(shape.horizontal < 0.005 * DIAMETER, "{} m", shape.horizontal);
+    assert!(shape.vertical_rms < 2.0, "{} m", shape.vertical_rms);
+    // the centres themselves, not only their shape, are on the truth in the frame of the positions
+    let largest = (0..PHOTOS)
+        .map(|i| (Vector3::from(p.centres[i].unwrap()) - s.poses[i].centre).xy().norm())
+        .fold(0.0, f64::max);
+    assert!(largest < 0.005 * DIAMETER, "{largest} m");
 }
 
 /// Review Focus 3 at the level of the positioning: a tenth of the photos without a position are
@@ -411,6 +487,11 @@ fn what_cannot_be_used_is_refused() {
     assert!(go(&rotations, Some(&gnss), &Options::default()).is_err());
     let bad = Options { positioning_huber: 0.0, ..Options::default() };
     assert!(go(&rotations, None, &bad).is_err());
+    let mut graph = c.graph.clone();
+    graph.edges[3].b = 400;
+    let out = position(&c.input, &c.cams, &graph, &rotations, &c.tracks, &c.selected, None, &Options::default(),
+                       &mut || true);
+    assert!(out.unwrap_err().contains("out of range"));
     let mut graph = c.graph.clone();
     graph.refused = Some("cameras".into());
     let out = position(&c.input, &c.cams, &graph, &rotations, &c.tracks, &c.selected, None, &Options::default(),

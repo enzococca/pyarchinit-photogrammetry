@@ -12,9 +12,11 @@
 //!
 //! 1. **With GNSS** (at least 3 placed photos with a position): first the rays alone, as without
 //!    GNSS (step 5), put on the positions by one robust similarity (Umeyama's, iteratively
-//!    reweighted with Huber 1 on the residual in sigmas); a position farther from its centre so
+//!    reweighted with Huber 1 on the residual in sigmas) with, for two flights or more, a
+//!    translation per flight (the first held at zero); a position farther from its centre so
 //!    placed than `OUTLIER_SIGMAS` of its recorded accuracy (the horizontal axes together, or the
-//!    vertical) is an outlier (`gnss_outliers`) and is left out from here on.
+//!    vertical) is left out of the solve of step 4. The directions of the positions of step 2 are
+//!    taken with those translations taken out.
 //! 2. The averaged rotations live in a frame of their own, turned onto the frame of the positions
 //!    by the rotation `Q` that best takes the directions between the photos of the verified pairs
 //!    with parallax (the translation of the pair, put in the averaged frame) onto the directions
@@ -36,7 +38,11 @@
 //!    than the noise), `b` the bias of the position's flight: one per flight when there are two
 //!    flights or more, the first held at zero. The positions hold the gauge. The rays keep GLOMAP's
 //!    scale: at this level the heights of nadir photos are weakly held (the depth along each ray is
-//!    free) and follow their positions; the reprojection of the rounds holds them.
+//!    free) and follow their positions; the reprojection of the rounds holds them. The biases
+//!    start at the translations of step 1. The positions left out are then checked against the
+//!    solved centres and biases: one within `OUTLIER_SIGMAS` comes back and the block is solved
+//!    once more; the positions still left out and those then farther than `OUTLIER_SIGMAS` are
+//!    the outliers (`gnss_outliers`).
 //! 5. **Without GNSS**: centres and points start at random (GLOMAP's start: uniform in a cube of
 //!    `RANDOM_EXTENT`, the scales at 1, from the generator of this file seeded with `SEED`), one
 //!    centre and the first scale held (GLOMAP holds the first scale), the scales above their
@@ -86,11 +92,14 @@ pub const OUTLIER_SIGMAS: f64 = 5.0;
 /// `ScaledLoss` of 0.5 on them).
 const UNCALIBRATED_WEIGHT: f64 = 0.5;
 /// The iterations of a solve (GLOMAP's `max_num_iterations` of its positioning), and of the solve
-/// from the random start.
+/// from the random start (this package's figure: from the random start the solver of milestone 1
+/// takes about 230 iterations on a ring of 100 photos, more than GLOMAP's 100).
 const MAX_ITERATIONS: usize = 100;
 const FREE_MAX_ITERATIONS: usize = 300;
-/// The iterations of the reweighted least squares of the frame and of the similarity.
+/// The iterations of the reweighted least squares of the frame, and of the similarity with the
+/// translations of the flights (solved in turn, so given more).
 const IRLS_ITERATIONS: usize = 100;
+const PLACE_ITERATIONS: usize = 500;
 
 /// The positions of photos: the index of the photo in `Input::images`, its position (metric axes,
 /// less an offset), the recorded accuracy of each axis (one sigma, metres) and the flight it
@@ -120,9 +129,10 @@ pub enum Frame {
 /// `world_from_cam` of a photo is `frame_rotation * Rotations::world_from_cam`); the median angle
 /// between the directions of the pairs and of the positions once the frame was turned (`Gnss`
 /// only); the largest recorded accuracy of the positions used, horizontal and vertical (`None` in a
-/// free frame); the bias of each flight, sorted by flight, the first zero (empty with
-/// one flight or without the `Gnss` frame); the photos whose position is an outlier, ascending; the
-/// scales on their floor and the cost of the last solve.
+/// free frame); the bias of each flight, sorted by flight, the first zero (empty with one flight
+/// or in a free frame; in the `Similarity` frame the translations of the flights); the photos
+/// whose position is an outlier, ascending; the scales on their floor and the cost of the last
+/// solve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Positioned {
     pub centres: Vec<Option<[f64; 3]>>,
@@ -509,6 +519,9 @@ fn check(
     if rotations.world_from_cam.len() != n {
         return Err(format!("{} rotations for {n} images", rotations.world_from_cam.len()));
     }
+    if let Some((k, e)) = graph.edges.iter().enumerate().find(|(_, e)| e.a >= n || e.b >= n || e.a == e.b) {
+        return Err(format!("edge {k}: images {} and {} out of range or the same ({n} images)", e.a, e.b));
+    }
     if let Some(w) = selected.windows(2).find(|w| w[0] >= w[1]) {
         return Err(format!("selected tracks not in increasing order: {} then {}", w[0], w[1]));
     }
@@ -722,11 +735,22 @@ pub fn position(
     if on_positions.frame != Frame::Similarity {
         return Ok(on_positions);
     }
+    let all_fixes = fix_of.clone();
     let mut fix_of = fix_of;
     for &i in &on_positions.gnss_outliers {
         fix_of[i] = None;
     }
-    let Some((q, residual_deg)) = turn_onto_positions(graph, rotations, &fix_of, g, &on_positions.centres) else {
+    // the directions between the positions with the translations of their flights taken out
+    let bias_of = |id: i64| on_positions.bias.iter().find(|(f, _)| *f == id).map_or([0.0; 3], |(_, b)| *b);
+    let mut corrected = g.clone();
+    for (xyz, &id) in corrected.xyz.iter_mut().zip(&g.flight) {
+        let b = bias_of(id);
+        for a in 0..3 {
+            xyz[a] -= b[a];
+        }
+    }
+    let Some((q, residual_deg)) = turn_onto_positions(graph, rotations, &fix_of, &corrected, &on_positions.centres)
+    else {
         return Ok(on_positions);
     };
     if !observe() {
@@ -801,8 +825,40 @@ pub fn position(
         })
         .collect();
     let centres: Vec<[f64; 3]> = start.iter().map(|c| c.map_or([0.0; 3], |c| [c.x, c.y, c.z])).collect();
+    // the flights share the rays of one component of the rotations (the photos placed are one
+    // connected part of the view graph): a flight without rays to the others would let its bias
+    // and its centres trade off
     let mut m = PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber);
-    let cost = solve(&mut m, MAX_ITERATIONS, observe)?;
+    for (f, &id) in flights.iter().enumerate().skip(1) {
+        m.biases[f - 1] = bias_of(id);
+    }
+    let mut cost = solve(&mut m, MAX_ITERATIONS, observe)?;
+    // the positions left out at the start checked again against the solved centres and biases: one
+    // that agrees with them comes back, and the block is solved once more
+    let mut back = false;
+    for i in 0..n {
+        let (Some(k), None, Some(_)) = (all_fixes[i], fix_of[i], m.block_of_photo[i]) else {
+            continue;
+        };
+        let Ok(flight) = flights.binary_search(&g.flight[k]) else {
+            continue;
+        };
+        let fix = Fix { photo: i, flight, xyz: g.xyz[k], sigma: g.sigma[k] };
+        if !is_outlier(&m.fix_residual(&fix), &fix.sigma) {
+            m.fixes.push(fix);
+            fix_of[i] = Some(k);
+            back = true;
+        }
+    }
+    if back {
+        if !observe() {
+            return Err("cancelled".into());
+        }
+        cost = solve(&mut m, MAX_ITERATIONS, observe)?;
+    }
+    let mut gnss_outliers: Vec<usize> = (0..n).filter(|&i| all_fixes[i].is_some() && fix_of[i].is_none()).collect();
+    gnss_outliers.extend(m.fixes.iter().filter(|f| is_outlier(&m.fix_residual(f), &f.sigma)).map(|f| f.photo));
+    gnss_outliers.sort_unstable();
     let largest = |axes: &[usize]| {
         m.fixes.iter().flat_map(|f| axes.iter().map(move |&a| f.sigma[a])).fold(0.0, f64::max)
     };
@@ -818,7 +874,7 @@ pub fn position(
         sigma_h: Some(largest(&[0, 1])),
         sigma_v: Some(largest(&[2])),
         bias,
-        gnss_outliers: on_positions.gnss_outliers,
+        gnss_outliers,
         scales_on_floor: m.scales_on_floor(),
         cost,
     })
@@ -885,9 +941,17 @@ fn free(
     })
 }
 
-/// A block of the free frame put on the positions by one similarity, robust (iteratively
-/// reweighted, Huber 1 on the residual in sigmas), with the accuracy estimated from its residuals
-/// and the outliers beyond `OUTLIER_SIGMAS`.
+/// A block of the free frame put on the positions by one similarity and, with two flights or
+/// more, a translation per flight (the first held at zero: the biases of the flights, which must
+/// be known before a position can be judged), robust: iteratively reweighted least squares with
+/// Huber 1 on the residual in recorded sigmas, from the weighted least squares of all positions;
+/// the similarity and the translations are solved in turn within each iteration. The positions
+/// farther than `OUTLIER_SIGMAS` of their recorded accuracy from their placed centre are
+/// reported as outliers.
+///
+/// The Huber weights bound the pull of a wrong position, but the start from all the positions
+/// has no high breakdown point: many wrong positions that agree with one another (a whole flight
+/// with a wrong datum, beyond its bias) can draw the similarity before the weights catch them.
 fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Result<Positioned, String> {
     let photos: Vec<usize> = (0..fix_of.len()).filter(|&i| fix_of[i].is_some() && block.centres[i].is_some()).collect();
     if photos.len() < 3 {
@@ -896,21 +960,46 @@ fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Re
     let from: Vec<Vector3<f64>> = photos.iter().map(|&i| Vector3::from(block.centres[i].expect("placed"))).collect();
     let to: Vec<Vector3<f64>> = photos.iter().map(|&i| Vector3::from(g.xyz[fix_of[i].expect("fix")])).collect();
     let sigma: Vec<[f64; 3]> = photos.iter().map(|&i| g.sigma[fix_of[i].expect("fix")]).collect();
+    let mut flights: Vec<i64> = photos.iter().map(|&i| g.flight[fix_of[i].expect("fix")]).collect();
+    flights.sort_unstable();
+    flights.dedup();
+    let flight: Vec<usize> = photos
+        .iter()
+        .map(|&i| flights.binary_search(&g.flight[fix_of[i].expect("fix")]).expect("a known flight"))
+        .collect();
     let base: Vec<f64> = sigma.iter().map(|s| 3.0 / (s[0] * s[0] + s[1] * s[1] + s[2] * s[2])).collect();
     let mut w = base.clone();
-    let mut fit = similarity(&from, &to, &w).ok_or("the positions cannot place the block by a similarity")?;
-    for _ in 0..IRLS_ITERATIONS {
+    let mut bias = vec![Vector3::zeros(); flights.len()];
+    let unplaced = "the positions cannot place the block by a similarity";
+    let mut fit = similarity(&from, &to, &w).ok_or(unplaced)?;
+    for _ in 0..PLACE_ITERATIONS {
+        // the translations of the flights after the first on the similarity, then the similarity
+        // on the positions less their translation
         let (s, r, t) = fit;
-        let next: Vec<f64> = (0..photos.len())
+        let mut next_bias = bias.clone();
+        for (f, b) in next_bias.iter_mut().enumerate().skip(1) {
+            let (mut sum, mut total) = (Vector3::zeros(), 0.0);
+            for k in (0..photos.len()).filter(|&k| flight[k] == f) {
+                sum += w[k] * (to[k] - (s * r * from[k] + t));
+                total += w[k];
+            }
+            if total > 0.0 {
+                *b = sum / total;
+            }
+        }
+        let shifted: Vec<Vector3<f64>> = (0..photos.len()).map(|k| to[k] - next_bias[flight[k]]).collect();
+        let next_w: Vec<f64> = (0..photos.len())
             .map(|k| {
-                let e = s * r * from[k] + t - to[k];
+                let e = s * r * from[k] + t - shifted[k];
                 let norm = (0..3).map(|a| (e[a] / sigma[k][a]).powi(2)).sum::<f64>().sqrt();
                 base[k] * if norm <= GNSS_HUBER { 1.0 } else { GNSS_HUBER / norm }
             })
             .collect();
-        let settled = next.iter().zip(&w).all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs());
-        w = next;
-        fit = similarity(&from, &to, &w).ok_or("the positions cannot place the block by a similarity")?;
+        let settled = next_w.iter().zip(&w).all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs())
+            && next_bias.iter().zip(&bias).all(|(a, b)| (a - b).norm() <= 1e-12 * (1.0 + b.norm()));
+        w = next_w;
+        bias = next_bias;
+        fit = similarity(&from, &shifted, &w).ok_or(unplaced)?;
         if settled {
             break;
         }
@@ -922,7 +1011,7 @@ fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Re
     };
     let residuals: Vec<[f64; 3]> = (0..photos.len())
         .map(|k| {
-            let e = s * r * from[k] + t - to[k];
+            let e = s * r * from[k] + t + bias[flight[k]] - to[k];
             [e.x, e.y, e.z]
         })
         .collect();
@@ -942,9 +1031,31 @@ fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Re
         frame_residual_deg: None,
         sigma_h: Some(largest(&[0, 1])),
         sigma_v: Some(largest(&[2])),
-        bias: Vec::new(),
+        bias: if flights.len() >= 2 {
+            flights.iter().zip(&bias).map(|(&id, b)| (id, [b.x, b.y, b.z])).collect()
+        } else {
+            Vec::new()
+        },
         gnss_outliers,
         scales_on_floor: block.scales_on_floor,
         cost: block.cost,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::camera::transform;
+    use nalgebra::{Rotation3, Unit};
+
+    /// `pose_of` gives `cam_from_world` from `world_from_cam`: a point maps to `R^T (X - C)`, with
+    /// a rotation that is not symmetric (a transposed rotation fails).
+    #[test]
+    fn the_pose_is_cam_from_world() {
+        let w = Rotation3::from_axis_angle(&Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)), 0.7).into_inner();
+        let (c, x) = (Vector3::new(3.0, -2.0, 5.0), Vector3::new(1.0, 4.0, -2.0));
+        let want = w.transpose() * (x - c);
+        let (a, b, d) = transform(&pose_of(&w, &c), x.x, x.y, x.z);
+        assert!((Vector3::new(a, b, d) - want).norm() < 1e-12, "{:?} vs {want:?}", (a, b, d));
+    }
 }

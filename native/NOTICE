@@ -96,9 +96,10 @@ in the world, under the Huber loss of scale 0.1; the scales started at 1 (or fro
 already placed) with the lower bound 1e-5 and the first one held; the observations of a camera
 without a prior focal length weighed by a half; the tracks of at least three views; the random
 start of the centres and then of the points, uniform in a cube of 100, with the seed 1; and the
-100 iterations. The positions of the photos as residuals with a bias per flight, the frame turned
-onto them from the directions of the pairs, the robust similarity, the solver and the generator
-of the random start are this package's own. GLOMAP is distributed under the BSD 3-clause license
+100 iterations of a solve (300 from the random start: this package's figure). The positions of
+the photos as residuals with a bias per flight, the frame turned onto them from the directions of
+the pairs, the robust similarity with a translation per flight, the solver and the generator of
+the random start are this package's own. GLOMAP is distributed under the BSD 3-clause license
 below (after COLMAP's).
 
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.

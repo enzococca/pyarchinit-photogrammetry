@@ -210,7 +210,8 @@ fn views_of(poses: &[Pose], points: &[Vector3<f64>]) -> Vec<Vec<(usize, [f64; 2]
 }
 
 /// A ring flown once: `n` nadir photos at `height` over a flat ground with a little relief, their
-/// centres on a circle of `diameter`, each photo's x axis along the circle. The points are drawn
+/// centres on a circle of `diameter`, each photo's x axis along the circle but for a tilt of up
+/// to 3 degrees and a yaw of up to 10 drawn per photo. The points are drawn
 /// per window of four consecutive photos (`POINTS_PER_WINDOW` of them on the ground under the
 /// middle of the window, inside all four photos) and seen by those four only: a photo shares
 /// points with its 3 neighbours on each side and with no other photo. The rays are exact.
@@ -221,8 +222,12 @@ pub fn ring(n: usize, diameter: f64, height: f64, seed: u64) -> Scene {
     let poses: Vec<Pose> = (0..n)
         .map(|i| {
             let (s, c) = angle(i as f64).sin_cos();
-            // rows of cam_from_world: x along the circle, z down, y = z x x
-            let rotation = Matrix3::new(-s, c, 0.0, c, s, 0.0, 0.0, 0.0, -1.0);
+            // rows of cam_from_world: x along the circle, z down, y = z x x; then a tilt of up to
+            // 3 degrees and a yaw of up to 10 (the rotations are not symmetric)
+            let along = Matrix3::new(-s, c, 0.0, c, s, 0.0, 0.0, 0.0, -1.0);
+            let (roll, pitch) = (random.uniform_in(-3.0, 3.0), random.uniform_in(-3.0, 3.0));
+            let yaw = random.uniform_in(-10.0, 10.0);
+            let rotation = rotation_xyz(roll.to_radians(), pitch.to_radians(), yaw.to_radians()) * along;
             Pose { rotation, centre: Vector3::new(radius * c, radius * s, height) }
         })
         .collect();
@@ -258,7 +263,8 @@ pub fn ring(n: usize, diameter: f64, height: f64, seed: u64) -> Scene {
 /// The points of each window of four photos of `ring`.
 pub const POINTS_PER_WINDOW: usize = 40;
 
-/// `nx` x `ny` nadir photos `spacing` apart at `height`, over points of a little relief spread
+/// `nx` x `ny` nadir photos `spacing` apart at `height` (a tilt of up to 3 degrees and a yaw of up
+/// to 10 drawn per photo), over points of a little relief spread
 /// under them: every photo sees most of the others' points.
 pub fn patch(nx: usize, ny: usize, spacing: f64, height: f64, seed: u64) -> Scene {
     let mut random = Random::new(seed);
@@ -267,7 +273,10 @@ pub fn patch(nx: usize, ny: usize, spacing: f64, height: f64, seed: u64) -> Scen
     for j in 0..ny {
         for i in 0..nx {
             let centre = Vector3::new(i as f64 * spacing, j as f64 * spacing, height);
-            poses.push(Pose { rotation: down, centre });
+            let (roll, pitch) = (random.uniform_in(-3.0, 3.0), random.uniform_in(-3.0, 3.0));
+            let yaw = random.uniform_in(-10.0, 10.0);
+            let tilt = rotation_xyz(roll.to_radians(), pitch.to_radians(), yaw.to_radians());
+            poses.push(Pose { rotation: tilt * down, centre });
         }
     }
     let (wx, wy) = ((nx - 1) as f64 * spacing, (ny - 1) as f64 * spacing);
