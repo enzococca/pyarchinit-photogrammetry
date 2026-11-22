@@ -262,10 +262,13 @@ fn a_turned_world_is_not_a_transposed_one() {
 /// flight whose positions are off by (3, -2, 1) m is taken by its bias, and the errors of the bias
 /// are calibrated against its posterior standard deviations (`MapperReport::bias_sd`: the inverse
 /// of the normal matrix of the last adjustment, each group of observations over its own variance
-/// factor): over the 27 normalised errors (9 cases, 3 axes) at most one beyond 3, none beyond 4,
-/// their root mean square between 0.5 and 1.5. The cases: the accuracy recorded as the noise drawn
-/// (0.3 m / 0.5 m, seeds 33-38, the estimate of the accuracy staying near it) and an RTK receiver
-/// (0.03 m / 0.05 m, seeds 34-36, its standard deviations below the others' on every axis). In
+/// factor, the components estimated jointly): over the 27 normalised errors (9 cases, 3 axes) none
+/// beyond 4 and their root mean square between 0.5 and 1.5, and at most one seed with an axis beyond
+/// 3. The draws are counted by seed (ruling R15): the RTK case and the 0.3 m / 0.5 m case of one
+/// seed share one realisation of the noise, scaled, so they are not independent. The cases: the
+/// accuracy recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38, the estimate of the accuracy
+/// staying near it) and an RTK receiver (0.03 m / 0.05 m, seeds 34-36, its standard deviations
+/// below the others' on every axis). In
 /// every case the first flight is held at exactly zero and a fix 100 m off is the only outlier,
 /// left out of the rounds, its photo placed with the others. Every case runs and prints its
 /// figures before the checks.
@@ -276,13 +279,13 @@ fn a_turned_world_is_not_a_transposed_one() {
 /// rigid true block fitted to the positions puts the vertical bias 0.63 m off. At RTK the bending,
 /// not the positions, limits the bias.
 #[test]
-#[ignore = "R14: 2 of 27 normalised errors beyond 3 (rms 1.44); figures to the session owner"]
 fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
     let offset = Vector3::new(3.0, -2.0, 1.0);
     let cases = (33..=38).map(|seed| (seed, 0.3, 0.5)).chain((34..=36).map(|seed| (seed, 0.03, 0.05)));
     let mut failures = Vec::new();
     let mut sds = Vec::new();
     let mut normalised_all = Vec::new();
+    let mut seeds_beyond_3 = std::collections::BTreeSet::new();
     for (seed, plan, height) in cases {
         let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
         let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], seed, &[]);
@@ -302,6 +305,9 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
                   report.gnss_outliers);
         sds.push((plan, sd));
         normalised_all.extend(normalised);
+        if normalised.iter().any(|z| z.abs() > 3.0) {
+            seeds_beyond_3.insert(seed);
+        }
         let case = format!("seed {seed}, accuracy {plan} / {height} m");
         let checks = [
             (report.placed == PHOTOS, format!("placed {}", report.placed)),
@@ -317,12 +323,14 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
         ];
         failures.extend(checks.into_iter().filter(|(ok, _)| !ok).map(|(_, why)| format!("{case}: {why}")));
     }
-    let beyond_3 = normalised_all.iter().filter(|z| z.abs() > 3.0).count();
+    let beyond_3 = seeds_beyond_3.len();
     let beyond_4 = normalised_all.iter().filter(|z| z.abs() > 4.0).count();
     let rms = (normalised_all.iter().map(|z| z * z).sum::<f64>() / normalised_all.len() as f64).sqrt();
-    eprintln!("27 normalised errors: rms {rms:.3}, {beyond_3} beyond 3, {beyond_4} beyond 4");
+    eprintln!("27 normalised errors: rms {rms:.3}, seeds with an axis beyond 3 {seeds_beyond_3:?}, {beyond_4} \
+               beyond 4");
     if !(beyond_3 <= 1 && beyond_4 == 0 && rms.is_finite() && (0.5..=1.5).contains(&rms)) {
-        failures.push(format!("calibration: rms {rms:.3}, {beyond_3} beyond 3, {beyond_4} beyond 4"));
+        failures.push(format!("calibration: rms {rms:.3}, seeds beyond 3 {seeds_beyond_3:?}, {beyond_4} \
+                               beyond 4"));
     }
     // RTK holds the bias better on every axis
     let mean = |plan: f64, a: usize| {

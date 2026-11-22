@@ -62,6 +62,11 @@ pub const FX_FY_NOTE: f64 = 1e-3;
 /// The fewest positions that enter a round (as the positioning needs three).
 pub const MIN_POSITIONS: usize = 3;
 
+/// The Helmert steps of `estimate_sigmas` stop when no factor changes by more than this share, or
+/// after this many steps.
+pub const COMPONENT_TOLERANCE: f64 = 0.05;
+pub const COMPONENT_STEPS: usize = 5;
+
 /// The scale of the filter after the adjustment of round `round` (from 1): 3, 2, then 1.
 pub fn filter_scale(round: usize) -> f64 {
     4usize.saturating_sub(round).max(1) as f64
@@ -126,12 +131,14 @@ fn groups(model: Model) -> [&'static [usize]; 4] {
 pub const INTRINSICS: [&str; 4] = ["focal", "radial", "principal_point", "decentring"];
 
 /// The accuracy of the positions estimated again: the variance factors of the horizontal and the
-/// vertical residuals (in units of the recorded accuracy), their redundancies, the sigmas they give
+/// vertical residuals (in units of the recorded accuracy), their redundancies, the factor of the
+/// tie points estimated with them, the sigmas they give
 /// for the largest recorded accuracy (clamped as `State::gnss_sigma`), and the positions used.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SigmaEstimate {
     pub factor: [f64; 2],
     pub redundancy: [f64; 2],
+    pub tie_factor: f64,
     pub sigma_h: f64,
     pub sigma_v: f64,
     pub positions: usize,
@@ -392,7 +399,21 @@ fn loss_of(o: &Options) -> Loss {
 }
 
 fn adjust(pb: &Problem, o: &Options, observe: &mut dyn FnMut() -> bool) -> Result<Solution, String> {
-    let opts = bundle::Options { loss: loss_of(o), ..bundle::Options::default() };
+    adjust_with(pb, loss_of(o), observe)
+}
+
+/// The loss of the rounds for tie points at `pixel_sigma`: its scale kept in pixels.
+fn scaled_loss(o: &Options, pixel_sigma: f64) -> Loss {
+    let scale = o.ba_loss_scale_px / pixel_sigma;
+    if o.ba_loss_cauchy {
+        Loss::Cauchy(scale)
+    } else {
+        Loss::Huber(scale)
+    }
+}
+
+fn adjust_with(pb: &Problem, loss: Loss, observe: &mut dyn FnMut() -> bool) -> Result<Solution, String> {
+    let opts = bundle::Options { loss, ..bundle::Options::default() };
     bundle::solve(pb, &opts, &mut |_, _| observe())
 }
 
@@ -487,34 +508,35 @@ fn fitted(pb: &Problem, sol: &Solution) -> Vec<[f64; 3]> {
         .collect()
 }
 
-/// The accuracy of the positions estimated again from the solution `sol` of the problem `b`
-/// (variance-component estimation, Förstner's: per axis group, horizontal and vertical,
-/// `sigma^2 = v^T P v / r` with `r = n - tr(H)` the redundancy, `H = J_g N^-1 J_g^T` the part of
-/// the hat matrix of the positions, in units of their sigmas). The trace is Hutchinson's stochastic
-/// one through the solver: the targets moved by one sigma times a random sign each (`SIGMA_PROBES`
-/// draws from `SIGMA_PROBE_SEED`), the problem solved again from `sol`, `H z` the move of the
-/// fitted positions in sigmas, `z^T H z` an unbiased estimate of the trace (summed over the rows of
-/// each group). The residuals of a fit are smaller than the noise by the share the block absorbs;
-/// the redundancy takes that share out.
-fn estimate_sigmas(
-    b: &Built,
+/// One step of the variance-component estimation (Helmert's, after Foerstner) at the solution
+/// `sol` of `pb`: the sums `v^T P v` of the horizontal and the vertical residuals of the positions
+/// (in units of their sigmas in `pb`), their redundancies `r = n - tr(H)` (`H = J_g N^-1 J_g^T`
+/// the part of the hat matrix of the positions), and the cost of the tie points (in units of
+/// `pixel_sigma`). The trace is Hutchinson's stochastic one through the solver: the targets moved
+/// by one sigma times a random sign each (`SIGMA_PROBES` draws from `SIGMA_PROBE_SEED`), the
+/// problem solved again from `sol`, `H z` the move of the fitted positions in sigmas, `z^T H z` an
+/// unbiased estimate of the trace (summed over the rows of each group). The residuals of a fit are
+/// smaller than the noise by the share the block absorbs; the redundancy takes that share out.
+/// `None` with fewer than `MIN_POSITIONS` positions or a redundancy that is not positive.
+fn helmert_step(
+    pb: &Problem,
     sol: &Solution,
-    o: &Options,
+    loss: Loss,
     observe: &mut dyn FnMut() -> bool,
-) -> Result<Option<[f64; 4]>, String> {
-    let m = b.pb.gnss.len();
+) -> Result<Option<[f64; 5]>, String> {
+    let m = pb.gnss.len();
     if m < MIN_POSITIONS {
         return Ok(None);
     }
-    let base = fitted(&b.pb, sol);
+    let base = fitted(pb, sol);
     let (mut sum_h, mut sum_v) = (0.0, 0.0);
-    for (j, &(_, target, sigma, _)) in b.pb.gnss.iter().enumerate() {
+    for (j, &(_, target, sigma, _)) in pb.gnss.iter().enumerate() {
         let v: [f64; 3] = std::array::from_fn(|a| (base[j][a] - target[a]) / sigma[a]);
         sum_h += v[0] * v[0] + v[1] * v[1];
         sum_v += v[2] * v[2];
     }
     // the problem at the solution, the solved biases folded into the targets
-    let mut start = b.pb.clone();
+    let mut start = pb.clone();
     start.rotations.clone_from(&sol.rotations);
     start.centres.clone_from(&sol.centres);
     start.points.clone_from(&sol.points);
@@ -538,12 +560,12 @@ fn estimate_sigmas(
                 g.1[a] += g.2[a] * z[j][a];
             }
         }
-        let moved = adjust(&probe, o, observe)?;
+        let moved = adjust_with(&probe, loss, observe)?;
         let moved_fit = fitted(&probe, &moved);
         for j in 0..m {
-            let sigma = b.pb.gnss[j].2;
+            let sigma = pb.gnss[j].2;
             // the base fit in the frame of the probe: the centre alone (the biases folded)
-            let hz: [f64; 3] = std::array::from_fn(|a| (moved_fit[j][a] - sol.centres[b.pb.gnss[j].0][a]) / sigma[a]);
+            let hz: [f64; 3] = std::array::from_fn(|a| (moved_fit[j][a] - sol.centres[pb.gnss[j].0][a]) / sigma[a]);
             trace_h += z[j][0] * hz[0] + z[j][1] * hz[1];
             trace_v += z[j][2] * hz[2];
         }
@@ -553,7 +575,69 @@ fn estimate_sigmas(
     if !(r_h > 0.0 && r_v > 0.0) {
         return Ok(None);
     }
-    Ok(Some([sum_h / r_h, sum_v / r_v, r_h, r_v]))
+    let tie_cost = sol.cost - 0.5 * (sum_h + sum_v);
+    Ok(Some([sum_h, sum_v, r_h, r_v, tie_cost]))
+}
+
+/// The variance components of the positions and of the tie points estimated jointly (ruling R15):
+/// Helmert steps (`helmert_step`) from the solution `sol` of round 1, each solving the block again
+/// with the sigmas of the step before (the positions at their sigma in `b` times the square root of
+/// their factor, horizontal and vertical; the tie points at `pixel_sigma` times the square root of
+/// theirs, the robust loss keeping its scale in pixels), until no factor changes by more than
+/// `COMPONENT_TOLERANCE` or after `COMPONENT_STEPS`. A one-step estimate is biased when the groups'
+/// factors differ (the tie points at a pixel of accuracy for half a pixel of noise pull the factor
+/// of accurate positions down); the steps take that out. The factors of the horizontal and the
+/// vertical positions (relative to the sigmas of `b`), their redundancies and the factor of the tie
+/// points. The solve of the rounds keeps its own sigmas (`clamped_sigma`).
+fn estimate_sigmas(
+    b: &Built,
+    sol: &Solution,
+    o: &Options,
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Option<[f64; 5]>, String> {
+    let (mut fh, mut fv, mut ft) = (1.0f64, 1.0f64, 1.0f64);
+    let mut redundancy = [f64::NAN; 2];
+    let mut current = sol.clone();
+    let mut pb = b.pb.clone();
+    for step in 0..COMPONENT_STEPS {
+        if step > 0 {
+            // the block solved again with the components of the step before, from where it is
+            pb = b.pb.clone();
+            pb.rotations.clone_from(&current.rotations);
+            pb.centres.clone_from(&current.centres);
+            pb.points.clone_from(&current.points);
+            for (cam, params) in pb.cameras.iter_mut().zip(&current.camera_params) {
+                cam.params.clone_from(params);
+            }
+            for (g, orig) in pb.gnss.iter_mut().zip(&b.pb.gnss) {
+                let bias = sol.bias.iter().find(|(f, _)| *f == g.3).map_or([0.0; 3], |(_, b)| *b);
+                let f = [fh, fh, fv];
+                for a in 0..3 {
+                    g.1[a] = orig.1[a] - bias[a];
+                    g.2[a] = orig.2[a] * f[a].sqrt();
+                }
+            }
+            pb.pixel_sigma = b.pb.pixel_sigma * ft.sqrt();
+            current = adjust_with(&pb, scaled_loss(o, pb.pixel_sigma), observe)?;
+        }
+        let Some([sum_h, sum_v, r_h, r_v, tie_cost]) =
+            helmert_step(&pb, &current, scaled_loss(o, pb.pixel_sigma), observe)?
+        else {
+            return Ok(None);
+        };
+        let unknowns = bundle::Layout::new(&pb).size as f64;
+        let taken = 3.0 * pb.gnss.len() as f64 - r_h - r_v;
+        let r_t = 2.0 * pb.obs.len() as f64 - (unknowns - taken);
+        let steps = [sum_h / r_h, sum_v / r_v, if r_t > 0.0 && tie_cost > 0.0 { 2.0 * tie_cost / r_t } else { 1.0 }];
+        fh *= steps[0];
+        fv *= steps[1];
+        ft *= steps[2];
+        redundancy = [r_h, r_v];
+        if steps.iter().all(|s| (s - 1.0).abs() < COMPONENT_TOLERANCE) {
+            break;
+        }
+    }
+    Ok(Some([fh, fv, redundancy[0], redundancy[1], ft]))
 }
 
 /// The sigma of a recorded accuracy `recorded` scaled by the variance factor `factor`, clamped to
@@ -633,9 +717,7 @@ fn posterior_bias_covariance(
         pb.gnss[j].2 = [rec[0] * fh.sqrt(), rec[1] * fh.sqrt(), rec[2] * fv.sqrt()];
     }
     pb.pixel_sigma = b.pb.pixel_sigma * ft.sqrt();
-    let scale = o.ba_loss_scale_px / pb.pixel_sigma;
-    let loss = if o.ba_loss_cauchy { Loss::Cauchy(scale) } else { Loss::Huber(scale) };
-    Ok((bundle::bias_covariance(&pb, sol, loss)?, [ft, fh, fv]))
+    Ok((bundle::bias_covariance(&pb, sol, scaled_loss(o, pb.pixel_sigma))?, [ft, fh, fv]))
 }
 
 /// Whether round `round` is the last adjustment (no adjustment with every track after it).
@@ -666,7 +748,7 @@ fn adjust_state(
     }
     let (cost_initial, mut cost) = (sol.cost_initial, sol.cost);
     if estimate && !b.positions.is_empty() {
-        if let Some([fh, fv, rh, rv]) = estimate_sigmas(&b, &sol, o, observe)? {
+        if let Some([fh, fv, rh, rv, ft]) = estimate_sigmas(&b, &sol, o, observe)? {
             let g = state.gnss.as_ref().expect("positions");
             let mut largest = [0.0f64; 2];
             for k in 0..g.image.len() {
@@ -678,6 +760,7 @@ fn adjust_state(
             state.sigma_estimate = Some(SigmaEstimate {
                 factor: [fh, fv],
                 redundancy: [rh, rv],
+                tie_factor: ft,
                 sigma_h: clamped_sigma(largest[0], fh),
                 sigma_v: clamped_sigma(largest[1], fv),
                 positions: b.positions.len(),
