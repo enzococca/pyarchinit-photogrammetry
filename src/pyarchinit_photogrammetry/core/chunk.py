@@ -464,9 +464,9 @@ class Chunk:
         kept (with ``auto``, a request the native engine does not take goes to the classic step
         as the program's choice: no reason kept, no warning; :func:`engine.switch.decline`); a
         cancel, a full disk and a request the step refuses (an argument, a chunk without photos:
-        the error the classic step gives) stop the step as they are. ``auto`` is the classic
-        engine until the native matching has passed its gate. What was asked and what was used are kept
-        in ``meta["engine"]``."""
+        the error the classic step gives) stop the step as they are. ``auto`` is the native
+        engine for this step since the native matching passed its gate. What was asked and what
+        was used are kept in ``meta["engine"]``."""
         from ..engine import sfm, switch
 
         choice = switch.resolve("match_photos", engine)

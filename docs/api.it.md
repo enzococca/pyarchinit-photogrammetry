@@ -145,9 +145,9 @@ database vengono aggiornati sul posto (gli stessi assi), le foto aggiunte ricevo
 ### Il matching nativo
 
 `match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
-`auto` resta il motore classico finché il matching nativo non ha superato il suo collaudo) fa il passo
-con il motore nativo del nucleo (`engine.native_match`, `ppg_core` API 14): il suo SIFT (che segue
-quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
+`auto`, il predefinito, è il motore nativo per questo passo da quando ha superato il suo collaudo - il
+classico per l'allineamento e le depth map) fa il passo con il motore nativo del nucleo
+(`engine.native_match`, `ppg_core` API 14): il suo SIFT (che segue quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
 immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
@@ -158,10 +158,14 @@ nativo segue sempre le linee epipolari).
 Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
 dell'API 14, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
 che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
-dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Un
+dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Con
+`auto` una richiesta che il motore nativo non accetta (l'elenco qui sopra, non un errore) è la scelta del
+programma per il passo classico: nessun motivo tenuto e nessuna riga nel log (`switch.decline`). Un
 annullamento e un disco pieno invece fermano il passo: un disco pieno è un `OSError` di ENOSPC
 qualunque strato lo dica (il sistema, sqlite, pycolmap; `native_match.disk_full`), e il progetto resta
-com'era.
+com'era. Lo stesso vale per una richiesta che il passo rifiuta - un `apply_masks` o una preselezione che
+non conosce, un chunk senza foto abilitate o fuori da un progetto: chi chiama riceve l'errore che dà il
+passo classico, qualunque motore giri.
 
 `meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,

@@ -338,9 +338,9 @@ PROCESSED_RANSAC_SEED = "1"
 
 @pytest.fixture(scope="session")
 def processed(scene_dir):
-    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. COLMAP's RANSAC
-    is seeded with ``PROCESSED_RANSAC_SEED`` while the photos are matched, and the variable put back as it was
-    right after."""
+    """Project with alignment, georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. The photos are matched
+    by the classic engine (COLMAP's database, which tests compare the native kernels with), its RANSAC seeded with
+    ``PROCESSED_RANSAC_SEED`` and the variable put back as it was right after."""
     import os
 
     import pyarchinit_photogrammetry as ppg
@@ -354,7 +354,7 @@ def processed(scene_dir):
     previous = os.environ.get(sfm.RANSAC_SEED_ENV)
     os.environ[sfm.RANSAC_SEED_ENV] = PROCESSED_RANSAC_SEED
     try:
-        ch.match_photos(quality="high")
+        ch.match_photos(quality="high", engine="classic")
     finally:
         if previous is None:
             os.environ.pop(sfm.RANSAC_SEED_ENV, None)

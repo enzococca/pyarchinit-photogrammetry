@@ -91,7 +91,7 @@ def test_every_pair_of_photos_named_with_blanks_is_matched_with_the_gpu(scene_di
     _doc, ch = _project(_photos_with_blanks(scene_dir, tmp_path), tmp_path / "Saggio #3")  # the reader of the GPU streams too
     seen = []
     ch.match_photos(quality="high", generic=False, reference="sequential", neighbours=NEIGHBOURS, gpu="auto",
-                    progress=lambda f, m: seen.append(m))
+                    progress=lambda f, m: seen.append(m), engine="classic")  # COLMAP's pair lists
     names, asked = _asked(ch)
     info = ch.meta["sfm"]
     assert info["gpu"] and info["gpu_pairs"] > 0 and info["gpu_pairs"] + info["cpu_pairs"] == len(asked)
@@ -293,7 +293,8 @@ def test_the_pairs_colmap_leaves_out_are_counted_and_said(scene_dir, tmp_path, m
     monkeypatch.setattr(pycolmap, "match_image_pairs", losing)
     _doc, ch = _project([scene_dir / "photos"], tmp_path)
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
-        ch.match_photos(quality="high", generic=False, reference="sequential", neighbours=3, gpu="off")
+        ch.match_photos(quality="high", generic=False, reference="sequential", neighbours=3, gpu="off",
+                        engine="classic")  # COLMAP's pair list
     asked = ch.meta["sfm"]["pairs"]
     lost = asked - asked // 2
     assert lost > 0 and ch.meta["sfm"]["pairs_unmatched"] == lost

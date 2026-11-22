@@ -1819,12 +1819,12 @@ def test_the_verified_pairs_of_two_databases_compare_whatever_their_image_ids(tm
 
 
 # ------------------------------------------------------------------------------------------- what the step refuses
-@pytest.mark.parametrize("engine", ["native"])
+@pytest.mark.parametrize("engine", ["native", None], ids=["native", "auto"])
 def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives_it(scene_dir, tmp_path, monkeypatch,
                                                                                      caplog, engine):
     """An argument the matching does not take (masks, a preselection), a chunk that is not in a project or has no
     enabled photo: the native step refuses it with the error the classic step gives - the same type and text - and the
-    caller gets it: no fallback to the classic engine, no line saying that the
+    caller gets it, with ``native`` as with ``auto``: no fallback to the classic engine, no line saying that the
     native matching failed, no record of an engine. The seconds of the refused step are kept as the classic step
     keeps them (the type of the error under ``failed``)."""
     import pyarchinit_photogrammetry as ppg

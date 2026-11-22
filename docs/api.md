@@ -143,9 +143,9 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 ### The native matching
 
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
-`auto` stays the classic engine until the native matching has passed its gate) does the step with the
-native engine of the core (`engine.native_match`, `ppg_core` API 14): its own SIFT (following VLFeat's,
-as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
+`auto`, the default, is the native engine for this step since it passed its gate - the classic one for the
+alignment and the depth maps) does the step with the native engine of the core (`engine.native_match`,
+`ppg_core` API 14): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
@@ -156,9 +156,13 @@ follows the epipolar lines).
 When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
 than API 14, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
 not know - or fails half way, the classic step runs with the same arguments, a line in the log says
-why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. A cancel
-and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it
-(the system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was.
+why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. With
+`auto` a request the native engine does not take (the list above, not a failure) is the program's
+choice of the classic step: no reason kept and no line in the log (`switch.decline`). A cancel and a
+full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it (the
+system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was. So does a
+request the step refuses - an `apply_masks` or a preselection it does not know, a chunk without enabled
+photos or not in a project: the caller gets the error the classic step gives, whichever engine runs.
 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,

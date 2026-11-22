@@ -5,10 +5,10 @@ chain the program has always had (:mod:`.sfm`, :mod:`.dense`), ``native`` the en
 the choice of the program. The native engine does the matching (:data:`NATIVE_STEPS`, :mod:`.native_match`) and
 none of the other steps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
 reason in the record of the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints. ``auto`` is
-the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate. A
-method whose engine cannot do the step after all (a failure half way) falls back the same way (:func:`fall_back`);
-a request the native engine does not take (the native core missing, a learned matcher...) is a fallback under
-``native`` and, under ``auto``, the program's choice of the classic engine (:func:`decline`).
+the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate: the
+matching is. A method whose engine cannot do the step after all (a failure half way) falls back the same way
+(:func:`fall_back`); a request the native engine does not take (the native core missing, a learned matcher...) is a
+fallback under ``native`` and, under ``auto``, the program's choice of the classic engine (:func:`decline`).
 
 The word comes from the argument, else from the ``PPG_ENGINE`` environment variable, else it is ``auto``.
 """
@@ -26,8 +26,9 @@ STEPS = ("match_photos", "align_cameras", "build_depth_maps")
 # those of them the native engine does: the matching (engine/native_match.py)
 NATIVE_STEPS: frozenset[str] = frozenset({"match_photos"})
 # those of them ``auto`` gives to the native engine: a step goes in once it has passed its gate (the session owner
-# adds it, one line, one commit); none yet
-AUTO_NATIVE_STEPS: frozenset[str] = frozenset()
+# adds it, one line, one commit): the matching, since its gate on the large block (2026-11-22: 2.6 times faster than
+# the classic one, the same precision)
+AUTO_NATIVE_STEPS: frozenset[str] = frozenset({"match_photos"})
 _ACCEPTED = f"{', '.join(ENGINES[:-1])} or {ENGINES[-1]}"
 
 
@@ -58,7 +59,7 @@ def resolve(step: str, engine: str | None = None) -> Choice:
     """The engine that does ``step`` (one of :data:`STEPS`, the name of its method of
     :class:`..core.chunk.Chunk`) when ``engine`` is asked for (:func:`check`). ``classic`` is the classic engine.
     ``auto`` takes the native engine for a step only once that step has passed its gate and is in
-    :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): none is, and ``auto`` is the classic engine. ``native``
+    :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): the matching; the other steps are classic. ``native``
     is the native engine for a step it does (:data:`NATIVE_STEPS`: the matching) and, on a step it does not do,
     falls back to the classic one, with the reason in ``fallback`` and one line in the log: never an error. A name
     that is not a step raises a ValueError that names it, before anything is done under it."""
