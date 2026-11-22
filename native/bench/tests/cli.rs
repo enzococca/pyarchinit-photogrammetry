@@ -233,6 +233,23 @@ fn adjust_takes_the_solver_and_the_seed_it_is_given() {
     assert_ne!(other["cost_initial"].as_f64(), Some(costs[0]), "{other}");
 }
 
+#[test]
+fn map_runs_a_synthetic_ring_through_every_stage() {
+    let record = printed(&["map", "--photos", "40", "--points-per-photo", "300", "--gnss"]);
+    let expected = ["median_reprojection_px", "observations", "photos", "placed", "points", "seconds", "shape",
+                    "tracks"];
+    assert_eq!(keys(&record), expected, "{record}");
+    assert_eq!(record["photos"], json!(40));
+    assert_eq!(record["placed"], json!(40), "{record}");
+    let stages = ["position", "refine", "rotations", "tracks", "view_graph", "write_model"];
+    assert_eq!(keys(&record["seconds"]), stages, "{record}");
+    assert!(record["observations"].as_u64().is_some_and(|n| n > 1000), "{record}");
+    let shape = record["shape"].as_f64().expect("shape");
+    assert!(shape < 0.005, "{record}");
+    let median = record["median_reprojection_px"].as_f64().expect("median");
+    assert!(median > 0.0 && median < 0.7, "{record}");
+}
+
 /// What every record of `features` on the folder of `photo_folder` says, whatever the device.
 fn extracted_the_folder(record: &Value) {
     let expected = ["decode_seconds", "device", "done", "limit", "max_features", "photos", "photos_per_second",
@@ -325,7 +342,7 @@ fn preselect_matches_the_neighbours_on_the_cpu_and_on_the_gpu_alike_or_says_that
 
 #[test]
 fn a_command_line_the_binary_does_not_know_is_refused() {
-    let refused: [&[&str]; 32] = [
+    let refused: [&[&str]; 36] = [
         &["preselect", "--photos", "1"],                     // a pair needs two photos
         &["preselect", "--points", "0"],                     // no descriptor matches nothing
         &["preselect", "--n", "8"],                          // preselect has no --n
@@ -358,6 +375,10 @@ fn a_command_line_the_binary_does_not_know_is_refused() {
         &["adjust", "--solver"],       // no value
         &["adjust", "--solver", "lu"], // not one of the solvers
         &["adjust", "--seed", "-1"],   // not a seed
+        &["map", "--photos", "7"],     // a ring needs 8 photos
+        &["map", "--points-per-photo", "3"], // and 4 points per photo
+        &["map", "--gnss", "yes"],     // --gnss takes no value
+        &["map", "--solver", "dense"], // map has no --solver
     ];
     for args in refused {
         let output = ppg_bench(args);

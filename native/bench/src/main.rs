@@ -45,6 +45,16 @@
 //!   pair), `matches` (over all the pairs), `seconds`, `pairs_per_second`, `ms_per_pair` (the
 //!   design's estimate is about 0.13 ms per pair of 1024 descriptors at 2 TFLOP/s) and, on a GPU,
 //!   `workgroup_kb`. The adapter and `--cpu` are taken as `match` takes them.
+//! - `ppg-bench map [--photos 400] [--points-per-photo 2000] [--gnss] [--seed 1]`: the native
+//!   mapper (`mapper::Mapper`) through every stage on the synthetic ring of `mapper::synthetic`
+//!   (`photos` nadir photos on a circle 6 m of ring per photo across, each sharing points with its
+//!   neighbours only, key points with 0.5 px of noise, a tenth of wrong matches; with `--gnss` the
+//!   positions of the photos with 1 m and 2 m of noise, recorded as 5 m and 10 m), the tie-point
+//!   limit at 500 tracks per photo, the model written into the temporary folder and removed; it
+//!   prints `photos`, `placed`, `tracks` (built), `points` and `observations` (of the model),
+//!   `seconds` (by stage: `view_graph`, `rotations`, `tracks`, `position`, `refine`,
+//!   `write_model`, the ring made before the clock starts), `median_reprojection_px` and `shape`
+//!   (the largest residual of the points after one similarity onto the truth, over the diameter).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +65,8 @@ use std::time::Instant;
 use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{solve, LinearSolver, Options};
 use ppg_engine::features::{extract_all, FeatureOptions, PhotoJob};
+use ppg_engine::mapper::synthetic::{ring, shape_residual};
+use ppg_engine::mapper::{Mapper, Options as MapperOptions};
 use ppg_engine::preselect::{match_blocks, MatchOptions};
 use ppg_engine::store::FeatureStore;
 use ppg_engine::{gpu, gpu_sift, matching};
@@ -86,6 +98,12 @@ const PHOTO_EXTENSIONS: [&str; 5] = ["jpg", "jpeg", "png", "tif", "tiff"];
 const DEFAULT_PHOTOS: usize = 200;
 const DEFAULT_POINTS: usize = 2000;
 const DEFAULT_SEED: u64 = 1;
+
+/// The ring `map` makes when it is not told otherwise, and the tie-point limit of its mapper (the
+/// plan's `max(500, tiepoint_limit // 4)` at its floor): choices, not measured figures.
+const DEFAULT_MAP_PHOTOS: usize = 400;
+const DEFAULT_MAP_POINTS: usize = 2000;
+const MAP_TRACKS_PER_PHOTO: usize = 500;
 
 /// The storage binding wgpu 24 promises on every modern backend (`max_storage_buffer_binding_size`
 /// of `Limits::default()`): 128 MiB. The engine does not say what the device it opens holds, and
@@ -400,6 +418,51 @@ fn time_adjustment(photos: usize, points: usize, solver: LinearSolver, seed: u64
               "cost_initial": sol.cost_initial, "cost": sol.cost, "seconds": seconds}))
 }
 
+/// The native mapper on the synthetic ring of `photos` photos and `points` points per photo (with
+/// the positions of the photos when `gnss`), each stage timed: the record to print.
+fn time_mapper(photos: usize, points: usize, gnss: bool, seed: u64) -> Result<Value, String> {
+    let truth = ring(photos, points, seed)?;
+    let mut m = Mapper::new(truth.input.clone(), MapperOptions::default())?;
+    let mut go = || true;
+    let mut seconds = serde_json::Map::new();
+    let mut clock = Instant::now();
+    let mut lap = |stage: &str, seconds: &mut serde_json::Map<String, Value>| {
+        seconds.insert(stage.to_owned(), json!(clock.elapsed().as_secs_f64()));
+        clock = Instant::now();
+    };
+    m.view_graph(&mut go)?;
+    lap("view_graph", &mut seconds);
+    m.rotations(&mut go)?;
+    lap("rotations", &mut seconds);
+    m.tracks(MAP_TRACKS_PER_PHOTO, &mut go)?;
+    lap("tracks", &mut seconds);
+    m.position(gnss.then_some(&truth.gnss), &mut go)?;
+    lap("position", &mut seconds);
+    m.refine(&mut go)?;
+    lap("refine", &mut seconds);
+    let dir = std::env::temp_dir().join(format!("ppg_bench_map_{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let written = m.write_model(&dir);
+    let removed = fs::remove_dir_all(&dir);
+    written.map_err(|e| format!("the model: {e}"))?;
+    removed.map_err(|e| format!("{}: {e}", dir.display()))?;
+    lap("write_model", &mut seconds);
+    let report = m.report();
+    let state = m.state().ok_or("no block after the rounds")?;
+    let (mut est, mut want) = (Vec::new(), Vec::new());
+    for (t, x) in state.points.iter().enumerate() {
+        if let Some(x) = x {
+            let (image, k) = state.tracks.track(t)[0];
+            est.push(*x);
+            want.push(truth.points[truth.point_of[image as usize][k as usize]]);
+        }
+    }
+    let shape = shape_residual(&est, &want).ok_or("too few points for the shape")? / truth.diameter;
+    Ok(json!({"photos": photos, "placed": report.placed, "tracks": report.tracks, "points": report.points,
+              "observations": report.observations, "seconds": seconds,
+              "median_reprojection_px": report.median_reprojection_px, "shape": shape}))
+}
+
 /// Where `features` runs: a GPU adapter, named or the first that is no software rasteriser, or
 /// the CPU twin of the kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,6 +548,7 @@ enum Command {
     Adjust { photos: usize, points: usize, solver: LinearSolver, seed: u64 },
     Features { dir: PathBuf, limit: usize, max_features: usize, on: Extractor },
     Preselect { photos: usize, points: usize, on: Where },
+    Map { photos: usize, points: usize, gnss: bool, seed: u64 },
 }
 
 /// The value of `--workgroup-kb`: 16 or 32.
@@ -601,6 +665,30 @@ fn command(words: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Adjust { photos, points, solver, seed })
         }
+        Some("map") => {
+            let (mut photos, mut points) = (DEFAULT_MAP_PHOTOS, DEFAULT_MAP_POINTS);
+            let (mut gnss, mut seed) = (false, DEFAULT_SEED);
+            while let Some(option) = words.next() {
+                match option {
+                    "--photos" => {
+                        photos = whole_number(option, words.next())?;
+                        if photos < 8 {
+                            return Err("--photos takes 8 or more: a ring of fewer has no neighbours to share".into());
+                        }
+                    }
+                    "--points-per-photo" => {
+                        points = whole_number(option, words.next())?;
+                        if points < 4 {
+                            return Err("--points-per-photo takes 4 or more: one point per window of four".into());
+                        }
+                    }
+                    "--gnss" => gnss = true,
+                    "--seed" => seed = whole_number(option, words.next())? as u64,
+                    _ => return Err(format!("map has no option {option}")),
+                }
+            }
+            Ok(Command::Map { photos, points, gnss, seed })
+        }
         Some("features") => {
             let dir = match words.next() {
                 Some(word) if !word.starts_with("--") => PathBuf::from(word),
@@ -646,6 +734,7 @@ fn main() -> ExitCode {
         Ok(Command::Adjust { photos, points, solver, seed }) => time_adjustment(photos, points, solver, seed),
         Ok(Command::Features { dir, limit, max_features, on }) => time_features(&dir, limit, max_features, on),
         Ok(Command::Preselect { photos, points, on }) => time_preselect(photos, points, on),
+        Ok(Command::Map { photos, points, gnss, seed }) => time_mapper(photos, points, gnss, seed),
         Err(problem) => {
             eprintln!("ppg-bench: {problem}");
             eprintln!("usage: ppg-bench adapters");
@@ -661,6 +750,10 @@ fn main() -> ExitCode {
             eprintln!(
                 "       ppg-bench preselect [--photos {DEFAULT_PRESELECT_PHOTOS}] \
                  [--points {DEFAULT_PRESELECT_POINTS}] [--device N | --cpu] [--workgroup-kb 16|32]"
+            );
+            eprintln!(
+                "       ppg-bench map [--photos {DEFAULT_MAP_PHOTOS}] [--points-per-photo {DEFAULT_MAP_POINTS}] \
+                 [--gnss] [--seed {DEFAULT_SEED}]"
             );
             return ExitCode::from(2);
         }
