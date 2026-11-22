@@ -87,8 +87,19 @@ normalised error and FilterPoints3DWithSmallTriangulationAngle; src/colmap/geome
 CalculateTriangulationAngle): an observation beyond the threshold goes, all of a point's go when
 fewer than two are left or when no two of its rays meet at the smallest angle, the angle of two
 rays the smaller of it and its supplement. The union-find of the tracks, the selection of the
-tracks over each photo and the least squares of the triangulation are this package's own. GLOMAP
-is distributed under the BSD 3-clause license below (after COLMAP's).
+tracks over each photo and the least squares of the triangulation are this package's own. The
+global positioning - native/engine/src/mapper/positioning.rs - is arranged as GLOMAP's
+(glomap/estimators/global_positioning.h and .cc, the BATAPairwiseDirectionError of
+glomap/estimators/cost_function.h, glomap/estimators/optimization_base.h): the residual of an
+observation, the scale of that observation times the point less the centre against the unit ray
+in the world, under the Huber loss of scale 0.1; the scales started at 1 (or from the point
+already placed) with the lower bound 1e-5 and the first one held; the observations of a camera
+without a prior focal length weighed by a half; the tracks of at least three views; the random
+start of the centres and then of the points, uniform in a cube of 100, with the seed 1; and the
+100 iterations. The positions of the photos as residuals with a bias per flight, the frame turned
+onto them from the directions of the pairs, the robust similarity, the solver and the generator
+of the random start are this package's own. GLOMAP is distributed under the BSD 3-clause license
+below (after COLMAP's).
 
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.
 

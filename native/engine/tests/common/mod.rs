@@ -71,6 +71,11 @@ pub enum Kind {
     /// `n` photos from one centre, each turned 20 degrees about the y axis from the one before:
     /// no baseline, no parallax.
     Rotation,
+    /// A ring flown once (`ring`): nadir photos along one closed circle, each sharing points with
+    /// its 3 neighbours on each side only.
+    Ring,
+    /// Nadir photos on a small grid (`patch`), every photo overlapping every other.
+    Patch,
 }
 
 /// One camera of a scene: `cam_from_world` rotation and centre.
@@ -135,7 +140,8 @@ fn rotation_xyz(roll: f64, pitch: f64, yaw: f64) -> Matrix3<f64> {
     Rotation3::from_euler_angles(roll, pitch, yaw).into_inner()
 }
 
-/// A scene of `n` photos of `kind`, drawn from `seed`.
+/// A scene of `n` photos of `kind`, drawn from `seed` (a ring 600 m across 40 m high, a patch of one row
+/// of photos 4 m apart 20 m high).
 pub fn scene(n: usize, kind: Kind, seed: u64) -> Scene {
     let mut random = Random::new(seed);
     // the camera looking down: its z axis along -z of the world, its y axis along -y
@@ -177,27 +183,102 @@ pub fn scene(n: usize, kind: Kind, seed: u64) -> Scene {
                 .collect();
             (poses, points)
         }
+        Kind::Ring => return ring(n, 600.0, 40.0, seed),
+        Kind::Patch => return patch(n, 1, 4.0, 20.0, seed),
     };
-    let (cx, cy) = (WIDTH / 2.0, HEIGHT / 2.0);
-    let views = poses
+    let views = views_of(&poses, &points);
+    Scene { kind, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
+}
+
+/// The exact pixel of `x` in the photo at `pose`, `None` behind it or outside the photo.
+fn pixel_of(pose: &Pose, x: &Vector3<f64>) -> Option<[f64; 2]> {
+    let c = pose.to_cam(x);
+    if c.z <= 0.0 {
+        return None;
+    }
+    let pixel = [FOCAL * c.x / c.z + WIDTH / 2.0, FOCAL * c.y / c.z + HEIGHT / 2.0];
+    let inside = pixel[0] > 1.0 && pixel[0] < WIDTH - 1.0 && pixel[1] > 1.0 && pixel[1] < HEIGHT - 1.0;
+    inside.then_some(pixel)
+}
+
+/// Per photo the points it sees with their exact pixels, in the order of the points.
+fn views_of(poses: &[Pose], points: &[Vector3<f64>]) -> Vec<Vec<(usize, [f64; 2])>> {
+    poses
         .iter()
-        .map(|pose| {
-            points
-                .iter()
-                .enumerate()
-                .filter_map(|(k, p)| {
-                    let x = pose.to_cam(p);
-                    if x.z <= 0.0 {
-                        return None;
-                    }
-                    let pixel = [FOCAL * x.x / x.z + cx, FOCAL * x.y / x.z + cy];
-                    let inside = pixel[0] > 1.0 && pixel[0] < WIDTH - 1.0 && pixel[1] > 1.0 && pixel[1] < HEIGHT - 1.0;
-                    inside.then_some((k, pixel))
-                })
-                .collect()
+        .map(|pose| points.iter().enumerate().filter_map(|(k, p)| pixel_of(pose, p).map(|px| (k, px))).collect())
+        .collect()
+}
+
+/// A ring flown once: `n` nadir photos at `height` over a flat ground with a little relief, their
+/// centres on a circle of `diameter`, each photo's x axis along the circle. The points are drawn
+/// per window of four consecutive photos (`POINTS_PER_WINDOW` of them on the ground under the
+/// middle of the window, inside all four photos) and seen by those four only: a photo shares
+/// points with its 3 neighbours on each side and with no other photo. The rays are exact.
+pub fn ring(n: usize, diameter: f64, height: f64, seed: u64) -> Scene {
+    let mut random = Random::new(seed);
+    let radius = diameter / 2.0;
+    let angle = |i: f64| std::f64::consts::TAU * i / n as f64;
+    let poses: Vec<Pose> = (0..n)
+        .map(|i| {
+            let (s, c) = angle(i as f64).sin_cos();
+            // rows of cam_from_world: x along the circle, z down, y = z x x
+            let rotation = Matrix3::new(-s, c, 0.0, c, s, 0.0, 0.0, 0.0, -1.0);
+            Pose { rotation, centre: Vector3::new(radius * c, radius * s, height) }
         })
         .collect();
-    Scene { kind, poses, focal: FOCAL, cx, cy, points, views }
+    let mut points = Vec::new();
+    let mut views: Vec<Vec<(usize, [f64; 2])>> = vec![Vec::new(); n];
+    for k in 0..n {
+        let window: Vec<usize> = (0..4).map(|d| (k + d) % n).collect();
+        let mut placed = 0;
+        let mut attempts = 0;
+        while placed < POINTS_PER_WINDOW {
+            attempts += 1;
+            assert!(attempts < 100 * POINTS_PER_WINDOW, "no ground under the window of photo {k}");
+            let (s, c) = angle(k as f64 + 1.5 + random.uniform_in(-0.5, 0.5)).sin_cos();
+            let rho = radius + random.uniform_in(-0.4, 0.4) * height;
+            let x = Vector3::new(rho * c, rho * s, random.uniform_in(-2.0, 2.0));
+            let pixels: Vec<Option<[f64; 2]>> = window.iter().map(|&i| pixel_of(&poses[i], &x)).collect();
+            if pixels.iter().any(|p| p.is_none()) {
+                continue;
+            }
+            for (&i, px) in window.iter().zip(&pixels) {
+                views[i].push((points.len(), px.expect("inside")));
+            }
+            points.push(x);
+            placed += 1;
+        }
+    }
+    for view in &mut views {
+        view.sort_by_key(|&(p, _)| p);
+    }
+    Scene { kind: Kind::Ring, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
+}
+
+/// The points of each window of four photos of `ring`.
+pub const POINTS_PER_WINDOW: usize = 40;
+
+/// `nx` x `ny` nadir photos `spacing` apart at `height`, over points of a little relief spread
+/// under them: every photo sees most of the others' points.
+pub fn patch(nx: usize, ny: usize, spacing: f64, height: f64, seed: u64) -> Scene {
+    let mut random = Random::new(seed);
+    let down = Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0);
+    let mut poses = Vec::new();
+    for j in 0..ny {
+        for i in 0..nx {
+            let centre = Vector3::new(i as f64 * spacing, j as f64 * spacing, height);
+            poses.push(Pose { rotation: down, centre });
+        }
+    }
+    let (wx, wy) = ((nx - 1) as f64 * spacing, (ny - 1) as f64 * spacing);
+    let points: Vec<Vector3<f64>> = (0..40 * poses.len())
+        .map(|_| {
+            Vector3::new(random.uniform_in(-0.5 * height, wx + 0.5 * height),
+                         random.uniform_in(-0.4 * height, wy + 0.4 * height), random.uniform_in(-1.0, 1.0))
+        })
+        .collect();
+    let views = views_of(&poses, &points);
+    Scene { kind: Kind::Patch, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
 }
 
 impl Scene {

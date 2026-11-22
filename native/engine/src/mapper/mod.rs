@@ -9,6 +9,7 @@
 
 pub mod graph;
 pub mod input;
+pub mod positioning;
 pub mod rotation;
 pub mod tracks;
 pub mod triangulate;
@@ -44,6 +45,10 @@ pub struct Options {
     /// (pycolmap's `GlobalPipelineOptions().mapper.min_tri_angle_deg`, 1.0 in pycolmap 4.2.1,
     /// passed from Python).
     pub min_triangulation_deg: f64,
+    /// The scale of the Huber loss on the residuals of the rays in the global positioning
+    /// (`positioning`), in the units of the residual (a difference of unit directions, about an
+    /// angle in radians): GLOMAP's `GlobalPositionerOptions::thres_loss_function`, 0.1.
+    pub positioning_huber: f64,
 }
 
 impl Default for Options {
@@ -56,6 +61,7 @@ impl Default for Options {
             max_rotation_error_deg: 10.0,
             max_normalized_reprojection: 0.01,
             min_triangulation_deg: 1.0,
+            positioning_huber: 0.1,
         }
     }
 }
