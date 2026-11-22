@@ -110,10 +110,10 @@ fn gnss_with(s: &Scene, plan: f64, height: f64, sigma: [f64; 3], seed: u64, with
     g
 }
 
-/// The photos of the second half of the ring as flight 2, their positions moved by `offset`.
-fn second_flight(g: &mut Gnss, offset: [f64; 3]) {
+/// The photos from `first` on as flight 2, their positions moved by `offset`.
+fn second_flight(g: &mut Gnss, first: usize, offset: [f64; 3]) {
     for k in 0..g.image.len() {
-        if g.image[k] >= PHOTOS / 2 {
+        if g.image[k] >= first {
             g.flight[k] = 2;
             for a in 0..3 {
                 g.xyz[k][a] += offset[a];
@@ -276,7 +276,7 @@ fn a_wrong_gps_fix_and_a_second_flight() {
     let offset = [3.0, -2.0, 1.0];
     for seed in 33..=38 {
         let mut gnss = gnss_of(&s, 0.3, 0.5, seed, &[]);
-        second_flight(&mut gnss, offset);
+        second_flight(&mut gnss, PHOTOS / 2, offset);
         let p = run(&c, &rotations, Some(&gnss));
         let (shape, _) = centre_residuals(&s, &p);
         assert_eq!(p.frame, Frame::Gnss);
@@ -305,7 +305,7 @@ fn a_second_flight_with_accurate_positions() {
     let offset = [3.0, -2.0, 1.0];
     for (plan, height) in [(0.3, 0.5), (0.03, 0.05)] {
         let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], 34, &[]);
-        second_flight(&mut gnss, offset);
+        second_flight(&mut gnss, PHOTOS / 2, offset);
         gnss.xyz[37][0] += 100.0;
         let p = run(&c, &rotations, Some(&gnss));
         let shape = shape_of(&s, &p);
@@ -444,6 +444,16 @@ fn the_same_bits_twice() {
     let gnss = gnss_of(&s, 1.0, 2.0, 72, &[3]);
     assert_eq!(run(&c, &rotations, Some(&gnss)), run(&c, &rotations, Some(&gnss)));
     assert_eq!(run(&c, &rotations, None), run(&c, &rotations, None));
+    // two flights, a fix 100 m off and accurate positions (the translations of the flights, the
+    // positions left out at the start and checked again after the solve)
+    let mut gnss = gnss_with(&s, 0.3, 0.5, [0.3, 0.3, 0.5], 73, &[3]);
+    second_flight(&mut gnss, 20, [3.0, -2.0, 1.0]);
+    gnss.xyz[10][1] += 100.0;
+    let wrong = gnss.image[10];
+    let first = run(&c, &rotations, Some(&gnss));
+    assert_eq!(first.bias.len(), 2);
+    assert_eq!(first.gnss_outliers, vec![wrong]);
+    assert_eq!(first, run(&c, &rotations, Some(&gnss)));
 }
 
 #[test]

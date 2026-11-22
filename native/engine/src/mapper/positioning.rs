@@ -829,8 +829,12 @@ pub fn position(
     // connected part of the view graph): a flight without rays to the others would let its bias
     // and its centres trade off
     let mut m = PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber);
+    // the translations of step 1 are measured from the first flight of all the positions; when its
+    // positions were all left out, the first flight here is another one, held at zero
+    let reference = flights.first().map_or([0.0; 3], |&id| bias_of(id));
     for (f, &id) in flights.iter().enumerate().skip(1) {
-        m.biases[f - 1] = bias_of(id);
+        let b = bias_of(id);
+        m.biases[f - 1] = std::array::from_fn(|a| b[a] - reference[a]);
     }
     let mut cost = solve(&mut m, MAX_ITERATIONS, observe)?;
     // the positions left out at the start checked again against the solved centres and biases: one
@@ -947,7 +951,8 @@ fn free(
 /// Huber 1 on the residual in recorded sigmas, from the weighted least squares of all positions;
 /// the similarity and the translations are solved in turn within each iteration. The positions
 /// farther than `OUTLIER_SIGMAS` of their recorded accuracy from their placed centre are
-/// reported as outliers.
+/// reported as outliers. A flight with a single position takes that position in its translation:
+/// such a position can never be judged an outlier.
 ///
 /// The Huber weights bound the pull of a wrong position, but the start from all the positions
 /// has no high breakdown point: many wrong positions that agree with one another (a whole flight
@@ -1005,6 +1010,17 @@ fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Re
         }
     }
     let (s, r, t) = fit;
+    // the translations of the final similarity (the same unless the rounds ran out)
+    for (f, b) in bias.iter_mut().enumerate().skip(1) {
+        let (mut sum, mut total) = (Vector3::zeros(), 0.0);
+        for k in (0..photos.len()).filter(|&k| flight[k] == f) {
+            sum += w[k] * (to[k] - (s * r * from[k] + t));
+            total += w[k];
+        }
+        if total > 0.0 {
+            *b = sum / total;
+        }
+    }
     let map = |x: [f64; 3]| {
         let y = s * r * Vector3::from(x) + t;
         [y.x, y.y, y.z]
