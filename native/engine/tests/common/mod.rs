@@ -110,8 +110,10 @@ pub struct InputOptions {
     /// The focal length the camera starts from.
     pub start_focal: f64,
     pub prior_focal: bool,
-    /// The fundamental matrix of each pair, by the eight-point solver on its exact true matches.
+    /// The fundamental matrix of each pair, by the eight-point solver on its exact true matches ...
     pub with_f: bool,
+    /// ... or on the key points of its true matches (with their noise).
+    pub f_from_keypoints: bool,
     pub seed: u64,
 }
 
@@ -123,6 +125,7 @@ impl Default for InputOptions {
             start_focal: FOCAL,
             prior_focal: true,
             with_f: false,
+            f_from_keypoints: false,
             seed: 1,
         }
     }
@@ -289,8 +292,16 @@ impl Scene {
                 }
             }
             let f = if o.with_f {
-                let x1: Vec<[f64; 2]> = common.iter().map(|&(ka, _)| self.views[a][ka as usize].1).collect();
-                let x2: Vec<[f64; 2]> = common.iter().map(|&(_, kb)| self.views[b][kb as usize].1).collect();
+                let at = |image: usize, k: u32| {
+                    if o.f_from_keypoints {
+                        let p = keypoints[images[image].keypoints.start + k as usize];
+                        [p[0] as f64, p[1] as f64]
+                    } else {
+                        self.views[image][k as usize].1
+                    }
+                };
+                let x1: Vec<[f64; 2]> = common.iter().map(|&(ka, _)| at(a, ka)).collect();
+                let x2: Vec<[f64; 2]> = common.iter().map(|&(_, kb)| at(b, kb)).collect();
                 let f = fundamental_eight_point(&x1, &x2).expect("a fundamental matrix of the exact matches");
                 let mut out = [0.0; 9];
                 for r in 0..3 {

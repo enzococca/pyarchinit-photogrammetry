@@ -37,6 +37,8 @@ const CALIBRATION_TOLERANCE: f64 = 1e-12;
 /// The rounds of refinement of a relative pose on its inliers, each followed by the choice of the
 /// inliers under the refined pose.
 const POSE_REFINEMENTS: usize = 2;
+/// A refined pose is kept only with at least this share of RANSAC's inliers (`refinement_kept`).
+const REFINED_INLIER_SHARE: f64 = 0.9;
 
 /// What the calibration did to a camera without a prior focal length: the focal length before and
 /// after (the same when it was not calibrated) and the pairs with a fundamental matrix it is in.
@@ -89,7 +91,13 @@ fn cauchy(s: f64) -> (f64, f64) {
 /// focal length held), by Levenberg-Marquardt on the logarithms of the focal lengths; each result
 /// is written to `cams` (every focal length of the model) unless it is a tenth of the guess or less,
 /// or ten times or more. One estimate per camera without a prior focal length, in their order.
+///
+/// `input` has passed `Input::check` and `cams` are its cameras (`check_cameras`); cameras that do
+/// not match it give no estimate and are left as they are.
 pub fn calibrate_focals(input: &Input, cams: &mut [Camera]) -> Vec<FocalEstimate> {
+    if check_cameras(input, cams).is_err() {
+        return Vec::new();
+    }
     let pairs = calibration_pairs(input);
     let mut count = vec![0usize; cams.len()];
     for &(ca, cb, _) in &pairs {
@@ -207,10 +215,25 @@ fn solve_focals(pairs: &[&(usize, usize, Matrix3<f64>)], cams: &[Camera], before
     theta.iter().map(|t| t.exp()).collect()
 }
 
+/// `Err` unless `cams` are as many as the cameras of `input`: the contract of `calibrate_focals`
+/// and `ViewGraph::build`, which index them by the cameras of the photos (an input that passed
+/// `Input::check` has those indices in range).
+pub fn check_cameras(input: &Input, cams: &[Camera]) -> Result<(), String> {
+    if cams.len() != input.cameras.len() {
+        return Err(format!("{} cameras given, {} in the input", cams.len(), input.cameras.len()));
+    }
+    Ok(())
+}
+
 /// A pair of the view graph: its index in `Input::pairs`, its photos, the relative pose
 /// `cam_b_from_cam_a` (`X_b = R X_a + t`, `t` of unit norm), its inliers (their count and their
 /// indices in `Input::matches`), the median triangulation angle of the inliers in degrees, whether
 /// that reaches `Options::min_pair_parallax_deg`, and its weight (the inlier count).
+///
+/// An edge without parallax (`parallax == false`: a pair taken from one place, or with too short a
+/// baseline for its depth) has a meaningful rotation only: its translation is the direction the
+/// noise gave. The later stages take such an edge for the rotation averaging alone, never for the
+/// positioning, the triangulation or anything else that reads its translation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Edge {
     pub pair: usize,
@@ -227,12 +250,14 @@ pub struct Edge {
 
 /// The view graph: the edges in the order of the pairs, the pairs left out because their relative
 /// pose could not be estimated (`left_out`) and those with fewer matches than
-/// `Options::min_inliers` (`too_few`, not estimated).
+/// `Options::min_inliers` (`too_few`, not estimated); `refused` the reason when nothing was
+/// estimated because the cameras do not match the input (`check_cameras`), the graph then empty.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewGraph {
     pub edges: Vec<Edge>,
     pub left_out: usize,
     pub too_few: usize,
+    pub refused: Option<String>,
 }
 
 enum Outcome {
@@ -248,10 +273,16 @@ impl ViewGraph {
     /// over the mean focal length of the two photos and the seed `pair_seed` of their names, its
     /// refinement on the Sampson error, then the pose of the essential matrix. A pair whose
     /// estimation fails or keeps fewer than `o.min_inliers` inliers is left out.
+    ///
+    /// `input` has passed `Input::check`; `cams` that do not match it (`check_cameras`) give an
+    /// empty graph with the reason in `refused`.
     pub fn build(input: &Input, cams: &[Camera], o: &Options) -> ViewGraph {
+        if let Err(reason) = check_cameras(input, cams) {
+            return ViewGraph { edges: Vec::new(), left_out: 0, too_few: 0, refused: Some(reason) };
+        }
         let outcomes: Vec<Outcome> =
             (0..input.pairs.len()).into_par_iter().map(|p| relative_pose(input, cams, o, p)).collect();
-        let mut graph = ViewGraph { edges: Vec::new(), left_out: 0, too_few: 0 };
+        let mut graph = ViewGraph { edges: Vec::new(), left_out: 0, too_few: 0, refused: None };
         for outcome in outcomes {
             match outcome {
                 Outcome::TooFew => graph.too_few += 1,
@@ -300,15 +331,19 @@ fn relative_pose(input: &Input, cams: &[Camera], o: &Options, p: usize) -> Outco
     };
     // the pose refined on its inliers and the inliers chosen again under it, twice (RANSAC's
     // refinement is kept only when it loses no inlier, which a wrong match near its epipolar line
-    // can decide against the accuracy of the pose)
+    // can decide against the accuracy of the pose); RANSAC's pose and inliers are kept when the
+    // refinement loses too many of them (`refinement_kept`)
     let max_sq = ro.max_error * ro.max_error;
+    let ransac = (r, t, chosen.clone());
     for _ in 0..POSE_REFINEMENTS {
-        (r, t) = refine_pose(&r, &t, &pick(&chosen, &n1), &pick(&chosen, &n2));
-        let e = skew(&t) * r;
-        chosen = (0..matches.len()).filter(|&i| sampson_sq(&e, n1[i], n2[i]) <= max_sq).collect();
-        if chosen.len() < o.min_inliers {
-            return Outcome::LeftOut;
+        let (rr, tr) = refine_pose(&r, &t, &pick(&chosen, &n1), &pick(&chosen, &n2));
+        let e = skew(&tr) * rr;
+        let again: Vec<usize> = (0..matches.len()).filter(|&i| sampson_sq(&e, n1[i], n2[i]) <= max_sq).collect();
+        if !refinement_kept(ransac.2.len(), again.len()) {
+            (r, t, chosen) = ransac;
+            break;
         }
+        (r, t, chosen) = (rr, tr, again);
     }
     let (i1, i2) = (pick(&chosen, &n1), pick(&chosen, &n2));
     let parallax_deg = median_ray_angle_deg(&r, &i1, &i2);
@@ -324,6 +359,14 @@ fn relative_pose(input: &Input, cams: &[Camera], o: &Options, p: usize) -> Outco
         parallax: parallax_deg >= o.min_pair_parallax_deg,
         weight: chosen.len() as f64,
     })
+}
+
+/// Whether a refined pose with `refined` inliers replaces RANSAC's with `ransac`: when it keeps at
+/// least `REFINED_INLIER_SHARE` of them. A refinement on the inliers by least squares moves the
+/// pose by a fraction of the threshold and keeps nearly all of them; one that loses more has been
+/// pulled away by inliers that were not (a wrong match on its epipolar line, a second motion).
+fn refinement_kept(ransac: usize, refined: usize) -> bool {
+    refined as f64 >= REFINED_INLIER_SHARE * ransac as f64
 }
 
 fn skew(t: &Vector3<f64>) -> Matrix3<f64> {
@@ -354,5 +397,23 @@ fn median_ray_angle_deg(r: &Matrix3<f64>, x1: &[[f64; 2]], x2: &[[f64; 2]]) -> f
         angles[n / 2]
     } else {
         (angles[n / 2 - 1] + angles[n / 2]) / 2.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The guard of the refinement of a relative pose. A pair whose refinement on its own inliers
+    /// loses a tenth of them is not built from synthetic matches without staging the least squares
+    /// themselves (on inliers within 1 px of their epipolar lines the refined pose moves by a
+    /// fraction of a pixel), so the rule is pinned here and the path through it by the scenes.
+    #[test]
+    fn a_refined_pose_that_loses_a_tenth_of_the_inliers_is_not_kept() {
+        assert!(refinement_kept(100, 100));
+        assert!(refinement_kept(100, 103));
+        assert!(refinement_kept(100, 90));
+        assert!(!refinement_kept(100, 89));
+        assert!(!refinement_kept(415, 0));
     }
 }

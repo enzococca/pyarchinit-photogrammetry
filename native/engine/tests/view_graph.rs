@@ -166,7 +166,82 @@ fn a_bad_input_is_refused() {
     bad.pairs[0].matches = 0..bad.matches.len() + 1;
     assert!(bad.check().unwrap_err().contains("pair 0"));
 
-    let mut bad = good;
+    let mut bad = good.clone();
     bad.images[0].camera = 3;
     assert!(bad.check().unwrap_err().contains("camera 3"));
+
+    // a focal length of zero (a broken guess) or below, a size that is not positive
+    for focal in [0.0, -1000.0] {
+        let mut bad = good.clone();
+        bad.cameras[0].params[0] = focal;
+        let err = bad.check().unwrap_err();
+        assert!(err.contains("camera 0") && err.contains("focal"), "{err}");
+    }
+    let mut bad = good.clone();
+    bad.cameras[0].model = "PINHOLE".to_string();
+    bad.cameras[0].params = vec![1000.0, 0.0, 1000.0, 750.0];
+    let err = bad.check().unwrap_err();
+    assert!(err.contains("camera 0") && err.contains("focal"), "{err}");
+    let mut bad = good.clone();
+    bad.cameras[0].width = 0.0;
+    assert!(bad.check().unwrap_err().contains("camera 0"));
+
+    // a pair given twice, in the same or the other order; a photo paired with itself
+    let mut bad = good.clone();
+    let twice = bad.pairs[0].clone();
+    bad.pairs.push(twice);
+    let err = bad.check().unwrap_err();
+    assert!(err.contains("twice"), "{err}");
+    let mut bad = good.clone();
+    let mut swapped = bad.pairs[0].clone();
+    (swapped.a, swapped.b) = (swapped.b, swapped.a);
+    bad.pairs.push(swapped);
+    assert!(bad.check().unwrap_err().contains("twice"));
+    let mut bad = good.clone();
+    bad.pairs[0].b = bad.pairs[0].a;
+    assert!(bad.check().unwrap_err().contains("itself"));
+
+    // a configuration COLMAP does not have
+    let mut bad = good;
+    bad.pairs[0].config = 42;
+    let err = bad.check().unwrap_err();
+    assert!(err.contains("pair 0") && err.contains("42"), "{err}");
+}
+
+#[test]
+fn cameras_that_do_not_match_the_input_are_refused() {
+    let s = scene(12, Kind::Strip, 7);
+    let input = s.input(&InputOptions { start_focal: 1400.0, prior_focal: false, with_f: true, ..Default::default() });
+    let mut cams = cameras_of(&input);
+    cams.push(cams[0].clone());
+    let graph = ViewGraph::build(&input, &cams, &Options::default());
+    assert!(graph.edges.is_empty());
+    let reason = graph.refused.expect("a reason");
+    assert!(reason.contains("2 cameras") && reason.contains("1 in the input"), "{reason}");
+    assert!(calibrate_focals(&input, &mut cams).is_empty());
+    assert_eq!(cams[0].focal(), 1400.0);
+    let graph = ViewGraph::build(&input, &[], &Options::default());
+    assert!(graph.edges.is_empty() && graph.refused.is_some());
+    // the cameras of the input: no reason
+    let input = s.input(&InputOptions::default());
+    assert!(ViewGraph::build(&input, &cameras_of(&input), &Options::default()).refused.is_none());
+}
+
+#[test]
+fn a_guessed_focal_is_found_from_noisy_fundamental_matrices() {
+    let s = scene(12, Kind::Strip, 21);
+    let o = InputOptions {
+        noise_px: 0.5,
+        start_focal: 1400.0,
+        prior_focal: false,
+        with_f: true,
+        f_from_keypoints: true,
+        seed: 4,
+        ..Default::default()
+    };
+    let input = s.input(&o);
+    let mut cams = cameras_of(&input);
+    let e = &calibrate_focals(&input, &mut cams)[0];
+    eprintln!("focal from noisy F {} -> {}", e.before, e.after);
+    assert!((e.after - 1000.0).abs() < 10.0, "focal {}", e.after);
 }

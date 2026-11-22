@@ -53,6 +53,12 @@ pub struct Input {
     pub matches: Vec<[u32; 2]>,
 }
 
+/// The largest configuration number of COLMAP's `TwoViewGeometry` (`CALIBRATED_RIG`). Every known
+/// number is accepted: the mapper reads only `CALIBRATED` (2) and `UNCALIBRATED` (3), for the
+/// calibration of the focal lengths; a pair of any other configuration is a verified pair like the
+/// others for the relative poses. A number outside 0 to 9 is refused.
+pub const MAX_CONFIG: i32 = 9;
+
 fn range_within(r: &Range<usize>, len: usize) -> bool {
     r.start <= r.end && r.end <= len
 }
@@ -65,10 +71,14 @@ impl Input {
     }
 
     /// `Err` naming the first item the mapper could not use: a camera of another model than the six
-    /// of `camera::MODELS`, with too few or not finite parameters or a size that is not positive; a
+    /// of `camera::MODELS`, with too few or not finite parameters, a focal length (fx and fy for the
+    /// models that have both) or a size that is not positive; more than `u32::MAX` matches or key
+    /// points; a
     /// photo whose camera or key point range is out of range; a key point that is not finite; a
-    /// pair whose photos are out of range or the same, whose matches are out of range, whose match
-    /// names a key point beyond those of its photo, or whose fundamental matrix is not finite.
+    /// pair whose photos are out of range or the same, that repeats another pair (in either order),
+    /// whose configuration is not one of COLMAP's (`MAX_CONFIG`), whose matches are out of range,
+    /// whose match names a key point beyond those of its photo, or whose fundamental matrix is not
+    /// finite.
     pub fn check(&self) -> Result<(), String> {
         for (c, cam) in self.cameras.iter().enumerate() {
             if !MODELS.contains(&cam.model.as_str()) {
@@ -81,9 +91,24 @@ impl Input {
             if !cam.params.iter().all(|p| p.is_finite()) {
                 return Err(format!("camera {c}: a parameter is not finite ({:?})", cam.params));
             }
+            // a focal length of zero or below (a broken guess) would make every match an inlier
+            let (model, _) = Model::from_name(&cam.model)?;
+            let focals = match model {
+                Model::SimplePinhole | Model::SimpleRadial | Model::Radial => 1,
+                Model::Pinhole | Model::OpenCv | Model::FullOpenCv => 2,
+            };
+            if let Some(f) = cam.params[..focals].iter().find(|&&f| f <= 0.0) {
+                return Err(format!("camera {c}: focal length {f} is not positive ({:?})", cam.params));
+            }
             if !(cam.width > 0.0 && cam.width.is_finite() && cam.height > 0.0 && cam.height.is_finite()) {
                 return Err(format!("camera {c}: size {} x {} is not positive", cam.width, cam.height));
             }
+        }
+        // the indices the mapper keeps as u32 (`graph::Edge::inlier_matches`, the key points of a
+        // match) cannot overflow
+        if self.matches.len() > u32::MAX as usize || self.keypoints.len() > u32::MAX as usize {
+            return Err(format!("{} matches and {} key points: more than {} are not supported",
+                               self.matches.len(), self.keypoints.len(), u32::MAX));
         }
         for (i, image) in self.images.iter().enumerate() {
             if image.camera >= self.cameras.len() {
@@ -102,6 +127,7 @@ impl Input {
             }
         }
         let n = self.images.len();
+        let mut seen = std::collections::HashMap::new();
         for (p, pair) in self.pairs.iter().enumerate() {
             for image in [pair.a, pair.b] {
                 if image >= n {
@@ -110,6 +136,13 @@ impl Input {
             }
             if pair.a == pair.b {
                 return Err(format!("pair {p}: image {} paired with itself", pair.a));
+            }
+            if let Some(q) = seen.insert((pair.a.min(pair.b), pair.a.max(pair.b)), p) {
+                return Err(format!("pair {p}: images {} and {} given twice (also pair {q})", pair.a, pair.b));
+            }
+            if !(0..=MAX_CONFIG).contains(&pair.config) {
+                return Err(format!("pair {p}: configuration {} is not one of COLMAP's (0 to {MAX_CONFIG})",
+                                   pair.config));
             }
             if !range_within(&pair.matches, self.matches.len()) {
                 return Err(format!("pair {p}: matches {:?} out of range ({} matches)", pair.matches,
