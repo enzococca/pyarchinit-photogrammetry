@@ -46,12 +46,13 @@ FEATURES = {
     "tin": "tin_triangulate",  # constrained Delaunay triangulation and the TIN kernels (API 10)
     "convbin": "raw_to_rinex",  # raw receiver logs converted to RINEX by RTKLIB's convbin (API 11)
     "bundle": "bundle_adjust",  # the bundle adjustment of the native engine (API 12)
-    "native_match": "native_match_pairs",  # the matching step of the native engine: features, pairs, stores (API 13)
+    "native_match": "native_match_pairs",  # the matching step of the native engine: features, pairs, stores (API 14)
 }
 TIN_API = 10  # tin_triangulate, tin_rasterize, tin_contours, tin_volume
 CONVBIN_API = 11  # raw_to_rinex, convert_cancel
 BUNDLE_API = 12  # bundle_adjust, bundle_evaluate
-NATIVE_MATCH_API = 13  # native_features, native_preselect, native_match_pairs, the stores, read_grey, rescale_as_colmap
+NATIVE_MATCH_API = 14  # native_features, native_preselect, native_match_pairs, the stores, read_grey, rescale_as_colmap;
+# 14: the options of the second stage (guided, guided_max_ratio, guided_band)
 
 # the bindings of the native matching, by the name they have in native_match_kernels() (``native_`` in front of
 # each in ppg_core), and the two store handles (classes of ppg_core)
@@ -65,7 +66,7 @@ def supports(model: str) -> bool:
     extension has the feature ``model`` of :data:`FEATURES` (``"ppk"``: RTKLIB's post-processing,
     API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10;
     ``"convbin"``: raw receiver logs converted to RINEX, API 11; ``"bundle"``: the bundle adjustment
-    of the native engine, API 12; ``"native_match"``: the matching step of the native engine, API 13)."""
+    of the native engine, API 12; ``"native_match"``: the matching step of the native engine, API 14)."""
     core = _core() if enabled() else None
     if core is None:
         return False
@@ -94,7 +95,7 @@ def tin_kernel(name: str):
 
 
 def native_match_kernels() -> SimpleNamespace | None:
-    """The bindings of the matching step of the native engine (API 13) as a namespace: ``features`` and
+    """The bindings of the matching step of the native engine (API 14) as a namespace: ``features`` and
     ``features_pixels`` (the features step into a feature store), ``preselect`` (the pairs to match, on the
     small store), ``match_pairs`` (the two-stage matching into a match store), ``store_read``, ``store_write``,
     ``store_names``, ``store_header``, ``match_read``, ``match_pairs_list`` (the stores from Python) - each the

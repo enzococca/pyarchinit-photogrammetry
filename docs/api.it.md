@@ -146,7 +146,7 @@ database vengono aggiornati sul posto (gli stessi assi), le foto aggiunte ricevo
 
 `match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
 `auto` resta il motore classico finché il matching nativo non ha superato il suo collaudo) fa il passo
-con il motore nativo del nucleo (`engine.native_match`, `ppg_core` API 13): il suo SIFT (che segue
+con il motore nativo del nucleo (`engine.native_match`, `ppg_core` API 14): il suo SIFT (che segue
 quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
 immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
@@ -156,7 +156,7 @@ classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene 
 nativo segue sempre le linee epipolari).
 
 Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
-dell'API 13, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
+dell'API 14, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
 che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
 dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Un
 annullamento e un disco pieno invece fermano il passo: un disco pieno è un `OSError` di ENOSPC
@@ -179,7 +179,7 @@ legame);
 fase di una coppia, il matching lungo le linee epipolari del modello della prima: `PPG_NATIVE_GUIDED=0`
 confronta invece ogni punto con ogni punto nelle coppie affidabili (la prima fase decide ancora quali
 coppie sono affidabili, tenute o scartate), `PPG_NATIVE_GUIDED_RATIO` (un numero sopra 0, al massimo 1; di
-norma 0,8, il test del rapporto della prima fase) è il test del rapporto della seconda, dove un punto è
+norma 0,6: lì un punto è confrontato con meno punti che nella prima fase) è il test del rapporto della seconda, dove un punto è
 confrontato solo con i punti della sua banda, e `PPG_NATIVE_GUIDED_BAND` (sopra 0; di norma 1,0) è la
 semilarghezza della banda come multiplo della soglia della verifica. Un valore che non lo è ferma il
 passo con un errore che nomina la variabile. Una GPU persa a metà

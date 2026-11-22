@@ -1,4 +1,4 @@
-"""The bindings of the native matching (``ppg_core`` API 13, ``_native.native_match_kernels()``): the
+"""The bindings of the native matching (``ppg_core`` API 14, ``_native.native_match_kernels()``): the
 features step into a feature store, the preselection on the small store, the two-stage matching of
 the pairs into a match store, the stores read and written from Python, and the photos read and
 reduced as COLMAP reads them. Every binding releases the GIL and reports through ``progress(done,
@@ -17,7 +17,7 @@ from pyarchinit_photogrammetry.core.progress import Cancelled
 
 ppg_core = pytest.importorskip("ppg_core")
 pytestmark = pytest.mark.skipif(_native.native_match_kernels() is None,
-                                reason="the native core with the native matching (API 13) is not installed")
+                                reason="the native core with the native matching (API 14) is not installed")
 
 PHOTOS = 28  # the trench of ``scene_dir``: 20 nadir photos and the 8 of the tilted ring, 1200 x 900
 LIMIT = 600  # quality "high": the 1200-pixel photos reduced by two (the CPU SIFT takes tens of ms each)
@@ -73,10 +73,10 @@ def trench_store(scene_dir, tmp_path_factory):
     return root / "features", root / "small", report, [p.name for p in photos], calls
 
 
-def test_the_kernels_are_declared_at_api_13(monkeypatch):
-    """``_native`` names the native matching as a feature of API 13 and gives its bindings as a namespace, None
-    when the extension is switched off."""
-    assert _native.NATIVE_MATCH_API == 13 and _native.api() >= 13
+def test_the_kernels_are_declared_at_api_14(monkeypatch):
+    """``_native`` names the native matching as a feature of API 14 (13 with the options of its second stage) and
+    gives its bindings as a namespace, None when the extension is switched off."""
+    assert _native.NATIVE_MATCH_API == 14 and _native.api() >= 14
     assert _native.has("native_match") and _native.supports("native_match")
     k = _native.native_match_kernels()
     assert k.features is ppg_core.native_features and k.match_pairs is ppg_core.native_match_pairs
@@ -504,11 +504,12 @@ def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch)
         assert native_match.dct_enabled() is enabled, value
     monkeypatch.delenv("PPG_NATIVE_DCT")
     defaults = native_match.guided_settings()
-    assert defaults == {"guided": True, "guided_max_ratio": native_match.MAX_RATIO, "guided_band": 1.0}
+    assert defaults == {"guided": True, "guided_max_ratio": native_match.GUIDED_RATIO, "guided_band": 1.0}
     assert native_match.MAX_RATIO == inspect.signature(_native.gpu_match).parameters["max_ratio"].default
     plain = native_match.pair_options(8000, defaults)
     assert plain == {"stage1_points": native_match.STAGE1_POINTS, "trust_inliers": native_match.TRUST_INLIERS,
-                     "drop_inliers": native_match.DROP_INLIERS, "max_num_matches": 32000}
+                     "drop_inliers": native_match.DROP_INLIERS, "max_num_matches": 32000,
+                     "guided_max_ratio": native_match.GUIDED_RATIO}
     monkeypatch.setenv("PPG_NATIVE_GUIDED", "0")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", " 0.7 ")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_BAND", "1.5")
@@ -634,21 +635,11 @@ def processed_native(scene_dir, tmp_path_factory):
     """The chain of the session's ``processed`` fixture with the matching on the native engine: alignment,
     georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. ``(doc, chunk, report of update_transform)``.
 
-    The JPEGs are decoded at the DCT scale (``PPG_NATIVE_DCT=1``, off by default), the setting the gates of
-    :func:`test_native_matching_feeds_the_classic_mapper_on_the_trench` were drawn on: on these rendered photos the
-    whole decoding with the default ratio test of the second stage gives fewer tie points (about 850 a photo against
-    1,100) and a median error of the points 1.35 times the classic one, over its bound of 1.1; with a second stage at
-    a ratio of 0.6 (``PPG_NATIVE_GUIDED_RATIO``) it is within it again (1.07 times, 740 tie points a photo)."""
-    previous = os.environ.get("PPG_NATIVE_DCT")
-    os.environ["PPG_NATIVE_DCT"] = "1"
-    try:
-        doc, ch = _project(scene_dir, tmp_path_factory.mktemp("native_chain"), markers=True)
-        ch.match_photos(quality="high", engine="native")
-    finally:
-        if previous is None:
-            os.environ.pop("PPG_NATIVE_DCT", None)
-        else:
-            os.environ["PPG_NATIVE_DCT"] = previous
+    With the defaults of the program (photos decoded whole, a ratio of 0.6 in the second stage): about 740 tie points
+    a photo on these rendered photos and a median error of the points 1.07 times the classic one; the ratio of the
+    first stage there instead (0.8) gives 1.35 times, over the bound of 1.1."""
+    doc, ch = _project(scene_dir, tmp_path_factory.mktemp("native_chain"), markers=True)
+    ch.match_photos(quality="high", engine="native")
     ch.align_cameras()
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     report = ch.update_transform()
@@ -720,9 +711,9 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     assert info["cpu_pairs"] + info["gpu_pairs"] == info["pairs"]
     # the settings of the run read from the environment, in the record (the fixture's DCT, the defaults of the
     # second stage)
-    assert info["native_dct"] is True
+    assert info["native_dct"] is False
     assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"]) == \
-        (True, native_match.MAX_RATIO, 1.0)
+        (True, native_match.GUIDED_RATIO, 1.0)
     for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",
                 "apply_masks", "guided_matching", "stationary_removed", "keypoint_limit", "tiepoint_limit", "added",
                 "gpu", "gpu_shares"):
