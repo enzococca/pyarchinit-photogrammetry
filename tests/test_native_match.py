@@ -490,12 +490,14 @@ def test_the_second_stage_can_be_switched_off_and_tuned(trench_store, preselecte
 
 
 def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch):
-    """``PPG_NATIVE_DCT`` is off unless set to a value other than 0. ``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO`` and ``PPG_NATIVE_GUIDED_BAND`` reach the options of the
+    """``PPG_NATIVE_DCT`` is off unless set to a value other than 0. ``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO``,
+    ``PPG_NATIVE_GUIDED_BAND`` and ``PPG_NATIVE_GUIDED_CHECK`` reach the options of the
     pairs stage; the defaults add nothing to them (a core that predates them takes the same dict), the default ratio
     is the matcher's; a value that is not one names its variable."""
     from pyarchinit_photogrammetry.engine import native_match
 
-    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND", "PPG_NATIVE_DCT"):
+    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND", "PPG_NATIVE_GUIDED_CHECK",
+                 "PPG_NATIVE_DCT"):
         monkeypatch.delenv(name, raising=False)
     # the JPEG decoded whole unless PPG_NATIVE_DCT asks for the DCT scale
     assert native_match.dct_enabled() is False
@@ -504,7 +506,8 @@ def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch)
         assert native_match.dct_enabled() is enabled, value
     monkeypatch.delenv("PPG_NATIVE_DCT")
     defaults = native_match.guided_settings()
-    assert defaults == {"guided": True, "guided_max_ratio": native_match.GUIDED_RATIO, "guided_band": 1.0}
+    assert defaults == {"guided": True, "guided_max_ratio": native_match.GUIDED_RATIO, "guided_band": 1.0,
+                        "guided_check": True}
     assert native_match.MAX_RATIO == inspect.signature(_native.gpu_match).parameters["max_ratio"].default
     plain = native_match.pair_options(8000, defaults)
     assert plain == {"stage1_points": native_match.STAGE1_POINTS, "trust_inliers": native_match.TRUST_INLIERS,
@@ -513,10 +516,11 @@ def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch)
     monkeypatch.setenv("PPG_NATIVE_GUIDED", "0")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", " 0.7 ")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_BAND", "1.5")
+    monkeypatch.setenv("PPG_NATIVE_GUIDED_CHECK", "0")
     settings = native_match.guided_settings()
-    assert settings == {"guided": False, "guided_max_ratio": 0.7, "guided_band": 1.5}
+    assert settings == {"guided": False, "guided_max_ratio": 0.7, "guided_band": 1.5, "guided_check": False}
     assert native_match.pair_options(8000, settings) == {**plain, "guided": False, "guided_max_ratio": 0.7,
-                                                         "guided_band": 1.5}
+                                                         "guided_band": 1.5, "guided_check": False}
     for name, value in (("PPG_NATIVE_GUIDED_RATIO", "much"), ("PPG_NATIVE_GUIDED_RATIO", "1.2"),
                         ("PPG_NATIVE_GUIDED_BAND", "0"), ("PPG_NATIVE_GUIDED_BAND", "-2")):
         monkeypatch.setenv(name, value)
@@ -712,8 +716,8 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     # the settings of the run read from the environment, in the record (the fixture's DCT, the defaults of the
     # second stage)
     assert info["native_dct"] is False
-    assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"]) == \
-        (True, native_match.GUIDED_RATIO, 1.0)
+    assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"],
+            info["native_guided_check"]) == (True, native_match.GUIDED_RATIO, 1.0, True)
     for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",
                 "apply_masks", "guided_matching", "stationary_removed", "keypoint_limit", "tiepoint_limit", "added",
                 "gpu", "gpu_shares"):
@@ -1467,7 +1471,7 @@ def test_continuing_with_other_settings_matches_everything_again(scene_dir, tmp_
     assert len(_image_ids(work / "database.db")) == PHOTOS
 
 
-@pytest.mark.parametrize("change", ["ratio", "dct", "record_before_the_settings"])
+@pytest.mark.parametrize("change", ["ratio", "dct", "check", "record_before_the_settings"])
 def test_continuing_with_other_matching_settings_matches_everything_again(scene_dir, tmp_path, monkeypatch, change):
     """A native match and alignment of 24, 4 added, then ``reset=False`` with the stores made under other settings
     of the decoding or of the second stage - another ratio, the DCT scale, or a record written before those
@@ -1480,8 +1484,10 @@ def test_continuing_with_other_matching_settings_matches_everything_again(scene_
         monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", "0.7")
     elif change == "dct":
         monkeypatch.setenv("PPG_NATIVE_DCT", "1")
+    elif change == "check":  # stores made before the check of the second stage (or without it)
+        ch.meta["sfm"]["native_guided_check"] = False
     else:
-        for key in ("native_dct", "native_guided", "native_guided_ratio", "native_guided_band"):
+        for key in ("native_dct", "native_guided", "native_guided_ratio", "native_guided_band", "native_guided_check"):
             ch.meta["sfm"].pop(key, None)
     seen = []
     ch.match_photos(quality="high", engine="native", reset=False, progress=lambda _f, m: seen.append(m))
@@ -1490,6 +1496,7 @@ def test_continuing_with_other_matching_settings_matches_everything_again(scene_
     assert info["continued"] is False and info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
     assert info["native_dct"] is (change == "dct")
     assert info["native_guided_ratio"] == (0.7 if change == "ratio" else native_match.GUIDED_RATIO)
+    assert info["native_guided_check"] is True
 
 
 def test_a_full_disk_in_the_database_stops_both_engines_and_keeps_the_block(scene_dir, tmp_path, monkeypatch):

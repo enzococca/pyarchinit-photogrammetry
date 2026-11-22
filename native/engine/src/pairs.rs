@@ -34,7 +34,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::camera::Camera;
 use crate::geometry::two_view::{self, pair_seed, verify, Config, TwoView};
-use crate::gpu::{match_quality, select_matches, Matcher, DIM};
+use crate::gpu::{match_quality, passes, select_matches, Matcher, DIM};
 use crate::matching::{bests_cpu, dispatch, dot};
 use crate::sched::{self, Worker};
 use crate::store::{FeatureStore, FeatureView, MatchStore};
@@ -73,6 +73,12 @@ pub struct Options {
     /// The half-width of the band of the second stage, as a multiple of the verification's
     /// `max_error` (1.0: the band is the threshold of an inlier).
     pub guided_band: f64,
+    /// A match of the second stage must also pass the ratio test at `max_ratio` against the rival
+    /// each of its points had in the first stage, over its whole set ([`stage1_rivals`]): a
+    /// candidate alone in its band whose descriptor has a twin elsewhere in the photo (a repetitive
+    /// texture) is not matched along the line, where the verification cannot refuse it and it
+    /// becomes a point at the wrong depth.
+    pub guided_check: bool,
 }
 
 /// What the matching of a list of pairs gave: how many pairs were done, how many took each
@@ -316,6 +322,8 @@ struct Prepared {
     /// The indices of the points of the first stage, ascending: the `stage1_points` of the
     /// largest scale (the lowest index first among equal scales), or every point.
     stage1: Vec<u32>,
+    /// The place of each point in `stage1`, `u32::MAX` for a point out of the first stage.
+    at: Vec<u32>,
     /// Their descriptors, in that order; empty when every point is in the first stage, whose
     /// set is then the photo's own.
     subset: Vec<u8>,
@@ -346,6 +354,10 @@ impl Prepared {
             order.sort_unstable();
             order
         };
+        let mut at = vec![u32::MAX; n];
+        for (k, &i) in stage1.iter().enumerate() {
+            at[i as usize] = k as u32;
+        }
         let subset = if all_in_stage1 {
             Vec::new()
         } else {
@@ -366,7 +378,7 @@ impl Prepared {
             .collect();
         let grid_raw = Grid::new(&raw, cell);
         let grid_ideal = Grid::new(&ideal, cell);
-        Prepared { stage1, subset, all_in_stage1, raw, grid_raw, ideal, grid_ideal }
+        Prepared { stage1, at, subset, all_in_stage1, raw, grid_raw, ideal, grid_ideal }
     }
 
     /// The descriptors of the first stage of the photo `name` and their key on a device.
@@ -651,10 +663,16 @@ fn guide(stage1: &TwoView, cam_a: &Camera, cam_b: &Camera) -> Option<(Matrix3<f6
 
 /// The matches out of the bests (COLMAP's three tests, the ratio test at `max_ratio`), capped to
 /// `cap` with the smallest distances kept (the earlier match of two equal ones), in the order of
-/// the points of A, and their quality.
-fn selected(bests: &[[u32; 3]], n_a: usize, n_b: usize, o: &Options, max_ratio: f32, cap: usize)
-            -> (Vec<[u32; 2]>, Vec<f32>) {
+/// the points of A, and their quality. `rivals` (of the second stage, [`stage1_rivals`]): a match
+/// must also pass the ratio test at the first stage's `max_ratio` against the rival of each of its
+/// two points.
+fn selected(bests: &[[u32; 3]], n_a: usize, n_b: usize, o: &Options, max_ratio: f32, cap: usize,
+            rivals: Option<&[u32]>) -> (Vec<[u32; 2]>, Vec<f32>) {
     let mut matches = select_matches(bests, n_a, n_b, max_ratio, o.max_distance, o.cross_check);
+    if let Some(rivals) = rivals {
+        let stands_out = |k: usize| passes(bests[k][0], rivals[k], o.max_ratio, o.max_distance);
+        matches.retain(|&[i, j]| stands_out(i as usize) && stands_out(n_a + j as usize));
+    }
     if matches.len() > cap {
         // the distance of a match falls as the dot product of its descriptors rises
         let mut order: Vec<usize> = (0..matches.len()).collect();
@@ -665,6 +683,37 @@ fn selected(bests: &[[u32; 3]], n_a: usize, n_b: usize, o: &Options, max_ratio: 
     }
     let quality = match_quality(bests, &matches);
     (matches, quality)
+}
+
+/// The rival each point of the second stage had in the first (`bests2` in the layout of the
+/// kernels: the `n_a` points of A, then those of B; 0 for none): over the sets `stage1_a` and
+/// `stage1_b` of the first stage (`bests1`; the place of a point in them by `at_a` and `at_b`,
+/// `u32::MAX` out of them), the best when it is another point than the candidate of the band, else
+/// the second best. A candidate of the band is compared there only with the few points near its
+/// line, so a descriptor with a twin out of the band (a repetitive texture) passes the band's ratio
+/// test, and the mutual check too, and the verification cannot refuse it along the line: a point at
+/// the wrong depth. Over the whole photo, which the first stage scanned when it holds every point,
+/// the twin is its rival ([`selected`] tests the match against it). A point out of the first stage
+/// (the largest scales of a large photo only) has none.
+fn stage1_rivals(bests2: &[[u32; 3]], n_a: usize, bests1: &[[u32; 3]], stage1_a: &[u32], at_a: &[u32],
+                 stage1_b: &[u32], at_b: &[u32]) -> Vec<u32> {
+    let n_a1 = stage1_a.len();
+    bests2
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let (place, first_of, other) =
+                if i < n_a { (at_a.get(i), 0, stage1_b) } else { (at_b.get(i - n_a), n_a1, stage1_a) };
+            match (row[0], place.copied()) {
+                (0, _) | (_, None) | (_, Some(u32::MAX)) => 0,
+                (_, Some(k)) => match bests1.get(first_of + k as usize) {
+                    Some(&[best, index, second]) if best > 0 && other.get(index as usize) == Some(&row[1]) => second,
+                    Some(&[best, _, _]) => best,
+                    None => 0,
+                },
+            }
+        })
+        .collect()
 }
 
 /// A pair with nothing matched.
@@ -692,7 +741,7 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
     let (key_a, set_a) = pa.stage1_set(a, name_a);
     let (key_b, set_b) = pb.stage1_set(b, name_b);
     let bests1 = if set_a.is_empty() || set_b.is_empty() { Vec::new() } else { bests(key_a, set_a, key_b, set_b)? };
-    let (m1, q1) = selected(&bests1, set_a.len() / DIM, set_b.len() / DIM, o, o.max_ratio, usize::MAX);
+    let (m1, q1) = selected(&bests1, set_a.len() / DIM, set_b.len() / DIM, o, o.max_ratio, usize::MAX, None);
     let m1: Vec<[u32; 2]> = m1.iter().map(|m| [pa.stage1[m[0] as usize], pb.stage1[m[1] as usize]]).collect();
     let stage1 = verify(cam_a, kp_a, cam_b, kp_b, &m1, &q1, calibrated, &o.two_view, seed);
     let inliers = stage1.inliers.len();
@@ -703,7 +752,10 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
         if let Some((f, frame)) = guide(&stage1, cam_a, cam_b) {
             let band = o.two_view.ransac.max_error * o.guided_band;
             let bests2 = guided_bests(da, pa, db, pb, &f, frame, band);
-            let (matches, quality) = selected(&bests2, n_a, n_b, o, o.guided_max_ratio, o.max_num_matches);
+            let rivals = (o.guided_check && !bests1.is_empty())
+                .then(|| stage1_rivals(&bests2, n_a, &bests1, &pa.stage1, &pa.at, &pb.stage1, &pb.at));
+            let (matches, quality) =
+                selected(&bests2, n_a, n_b, o, o.guided_max_ratio, o.max_num_matches, rivals.as_deref());
             let two_view = verify(cam_a, kp_a, cam_b, kp_b, &matches, &quality, calibrated, &o.two_view, seed);
             return Ok(PairResult { matches, two_view, route: Route::Guided });
         }
@@ -714,7 +766,7 @@ fn match_prepared(a: &FeatureView, pa: &Prepared, b: &FeatureView, pb: &Prepared
     if (trusted && !o.guided) || inliers >= o.drop_inliers || preselected {
         let whole = pa.all_in_stage1 && pb.all_in_stage1;
         let bests_all = if whole { bests1 } else { bests(photo_key(name_a), da, photo_key(name_b), db)? };
-        let (matches, quality) = selected(&bests_all, n_a, n_b, o, o.max_ratio, o.max_num_matches);
+        let (matches, quality) = selected(&bests_all, n_a, n_b, o, o.max_ratio, o.max_num_matches, None);
         let two_view = if whole && matches == m1 {
             stage1
         } else {
@@ -1128,27 +1180,74 @@ mod tests {
         assert_eq!(got, [0, 2]);
     }
 
+    /// A band whose one candidate wins with no rival in it, while the first stage saw its rival
+    /// over the whole photo (a repetitive texture: a twin of the descriptor elsewhere): the match
+    /// fails the ratio test against that rival and goes; a match that stands out over the whole
+    /// photo stays. The same on the side of B. A point out of the first stage has no rival.
+    #[test]
+    fn a_guided_match_with_a_rival_the_first_stage_saw_is_refused() {
+        let o = Options { stage1_points: 10, trust_inliers: 40, drop_inliers: 8, max_ratio: 0.8, max_distance: 0.7,
+                          cross_check: true, max_num_matches: usize::MAX, two_view: two_view::Options::default(),
+                          guided: true, guided_max_ratio: 0.6, guided_band: 1.0, guided_check: true };
+        let s = |cos: f32| (cos * 512.0 * 512.0) as u32;
+        let every = |n: u32| -> (Vec<u32>, Vec<u32>) { ((0..n).collect(), (0..n).collect()) };
+        let none = Vec::<[u32; 2]>::new();
+        let pick = |bests: &[[u32; 3]], n_a: usize, n_b: usize, rivals: Option<&[u32]>| {
+            selected(bests, n_a, n_b, &o, o.guided_max_ratio, usize::MAX, rivals).0
+        };
+        // A: one point; B: b0 in its band (the false match), b1 its twin out of the band, b2 unrelated
+        let (stage1_a, at_a) = every(1);
+        let (stage1_b, at_b) = every(3);
+        let band = vec![[s(0.96), 0, 0], [s(0.96), 0, 0], [0, 0, 0], [0, 0, 0]];
+        assert_eq!(pick(&band, 1, 3, None), vec![[0, 0]]);
+        let whole = vec![[s(0.97), 1, s(0.96)], [s(0.96), 0, 0], [s(0.97), 0, 0], [s(0.3), 0, 0]];
+        let rivals = stage1_rivals(&band, 1, &whole, &stage1_a, &at_a, &stage1_b, &at_b);
+        assert_eq!(rivals, vec![s(0.97), 0, 0, 0]);
+        assert_eq!(pick(&band, 1, 3, Some(&rivals)), none);
+        // the same band, the match standing out over the whole photo (its own best there): kept
+        let whole = vec![[s(0.96), 0, s(0.5)], [s(0.96), 0, 0], [s(0.4), 0, 0], [s(0.3), 0, 0]];
+        let rivals = stage1_rivals(&band, 1, &whole, &stage1_a, &at_a, &stage1_b, &at_b);
+        assert_eq!(rivals, vec![s(0.5), 0, 0, 0]);
+        assert_eq!(pick(&band, 1, 3, Some(&rivals)), vec![[0, 0]]);
+        // B's side: b0 has a twin a1 in A out of the band; a0 -> b0 stands out over B, b0 -> a0 does not
+        let (stage1_a, at_a) = every(2);
+        let (stage1_b, at_b) = every(1);
+        let band = vec![[s(0.96), 0, 0], [0, 0, 0], [s(0.96), 0, 0]];
+        let whole = vec![[s(0.96), 0, 0], [s(0.97), 0, 0], [s(0.97), 1, s(0.96)]];
+        let rivals = stage1_rivals(&band, 2, &whole, &stage1_a, &at_a, &stage1_b, &at_b);
+        assert_eq!(rivals, vec![0, 0, s(0.97)]);
+        assert_eq!(pick(&band, 2, 1, None), vec![[0, 0]]);
+        assert_eq!(pick(&band, 2, 1, Some(&rivals)), none);
+        // points out of the first stage (the large photos: only their largest scales) have no rival
+        let (stage1_a, at_a) = (Vec::new(), vec![u32::MAX]);
+        let (stage1_b, at_b) = (vec![1u32], vec![u32::MAX, 0, u32::MAX]);
+        let band = vec![[s(0.96), 0, 0], [s(0.96), 0, 0], [0, 0, 0], [0, 0, 0]];
+        let rivals = stage1_rivals(&band, 1, &[[s(0.3), 0, 0]], &stage1_a, &at_a, &stage1_b, &at_b);
+        assert_eq!(rivals, vec![0, 0, 0, 0]);
+        assert_eq!(pick(&band, 1, 3, Some(&rivals)), vec![[0, 0]]);
+    }
+
     #[test]
     fn the_cap_keeps_the_largest_dot_products_in_the_order_of_a() {
         let o = Options { stage1_points: 10, trust_inliers: 40, drop_inliers: 8, max_ratio: 0.8, max_distance: 0.7,
                           cross_check: false, max_num_matches: 2, two_view: two_view::Options::default(),
-                          guided: true, guided_max_ratio: 0.8, guided_band: 1.0 };
+                          guided: true, guided_max_ratio: 0.8, guided_band: 1.0, guided_check: true };
         let s = |cos: f32| (cos * 512.0 * 512.0) as u32;
         // four descriptors of A matched to B: scores 0.95, 0.99, 0.95, 0.97; the cap of two
         // keeps the second and the fourth, in that order
         let bests = vec![[s(0.95), 0, s(0.5)], [s(0.99), 1, s(0.5)], [s(0.95), 2, s(0.5)], [s(0.97), 3, s(0.5)],
                          [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
-        let (matches, quality) = selected(&bests, 4, 4, &o, o.max_ratio, 2);
+        let (matches, quality) = selected(&bests, 4, 4, &o, o.max_ratio, 2, None);
         assert_eq!(matches, vec![[1, 1], [3, 3]]);
         assert_eq!(quality.len(), 2);
         // a tie at the cap: the earlier match stays
-        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, 3);
+        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, 3, None);
         assert_eq!(matches, vec![[0, 0], [1, 1], [3, 3]]);
-        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, usize::MAX);
+        let (matches, _) = selected(&bests, 4, 4, &o, o.max_ratio, usize::MAX, None);
         assert_eq!(matches.len(), 4);
         // the ratio given, not the options': at 0.1 none passes (their ratios of distances, the
         // angles of the best and the second best, are 0.14 to 0.31)
-        let (matches, _) = selected(&bests, 4, 4, &o, 0.1, usize::MAX);
+        let (matches, _) = selected(&bests, 4, 4, &o, 0.1, usize::MAX, None);
         assert!(matches.is_empty(), "{matches:?}");
     }
 
@@ -1278,6 +1377,15 @@ mod tests {
         let forward = skew(Vector3::new(3000.0, 2000.0, 1.0));
         time("grid, forward", &|| bests_along(&da, &points_a, &db, &points_b, &grid, &forward, 4.0));
         time("fan, forward", &|| bests_in_fan(&da, &points_a, &db, &points_b, &forward, 4.0).expect("an epipole"));
+        // the check against the rivals of the first stage, every point in it (bests of the same layout)
+        let stage1: Vec<u32> = (0..N as u32).collect();
+        let first = bests_in_fan(&da, &points_a, &db, &points_b, &f, 4.0).expect("a finite epipole");
+        time("fan and check", &|| {
+            let bests = bests_in_fan(&da, &points_a, &db, &points_b, &f, 4.0).expect("a finite epipole");
+            let rivals = stage1_rivals(&bests, N, &first, &stage1, &stage1, &stage1, &stage1);
+            std::hint::black_box(rivals);
+            bests
+        });
     }
 
     /// `[v]x`, the matrix of the cross product with `v`.

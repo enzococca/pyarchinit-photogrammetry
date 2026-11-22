@@ -452,13 +452,14 @@ pub(crate) fn native_preselect<'py>(py: Python<'py>, small_store: &str, cameras:
 /// Python side), ``max_ratio``, ``max_distance``, ``cross_check`` and ``max_num_matches`` (None keeps every
 /// match) have COLMAP's defaults, the second stage's ``guided`` (true), ``guided_max_ratio`` (``max_ratio``)
 /// and ``guided_band`` (1.0, a positive multiple of the verification's ``max_error``) keep the behaviour of
-/// the first versions - with the verification's under ``two_view_*`` and its RANSAC's under ``ransac_*``
-/// (the keys of :func:`two_view_defaults`); a key that is not one of them is a ValueError.
+/// the first versions, ``guided_check`` (true: a match of the second stage also passes the ratio test against
+/// the rivals the first stage saw) - with the verification's under ``two_view_*`` and its RANSAC's under
+/// ``ransac_*`` (the keys of :func:`two_view_defaults`); a key that is not one of them is a ValueError.
 fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
     let mut o = pairs::Options { stage1_points: 0, trust_inliers: 0, drop_inliers: 0, max_ratio: 0.8,
                                  max_distance: 0.7, cross_check: true, max_num_matches: MAX_NUM_MATCHES,
                                  two_view: two_view::Options::default(), guided: true, guided_max_ratio: 0.8,
-                                 guided_band: 1.0 };
+                                 guided_band: 1.0, guided_check: true };
     let mut guided_max_ratio: Option<f32> = None;
     const THRESHOLDS: [&str; 3] = ["stage1_points", "trust_inliers", "drop_inliers"];
     let mut given = [false; 3];
@@ -502,6 +503,10 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
             }
             "guided_max_ratio" => {
                 guided_max_ratio = Some(value.extract()?);
+                true
+            }
+            "guided_check" => {
+                o.guided_check = value.extract()?;
                 true
             }
             "guided_band" => {

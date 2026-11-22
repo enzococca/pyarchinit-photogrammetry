@@ -183,10 +183,14 @@ def guided_settings() -> dict:
     trusted pairs are matched along the epipolar lines; ``0`` sends them to brute force), ``guided_max_ratio``
     (``PPG_NATIVE_GUIDED_RATIO``, default :data:`GUIDED_RATIO`) and ``guided_band``
     (``PPG_NATIVE_GUIDED_BAND``, default 1.0: the half-width of the band, a multiple of the verification's
-    threshold). A value that is not one is a ValueError naming its variable."""
+    threshold) and ``guided_check`` (``PPG_NATIVE_GUIDED_CHECK``, default on: a match of the second stage must also
+    pass the first stage's ratio test against the rival its points had in the first stage, over the whole photo,
+    which refuses a candidate alone in its band whose descriptor has a twin elsewhere - a repetitive texture, a point
+    at the wrong depth; ``0`` for trials). A value that is not one is a ValueError naming its variable."""
     return {"guided": os.environ.get("PPG_NATIVE_GUIDED", "1").strip() != "0",
             "guided_max_ratio": _positive_env("PPG_NATIVE_GUIDED_RATIO", GUIDED_RATIO, upper=1.0),
-            "guided_band": _positive_env("PPG_NATIVE_GUIDED_BAND", 1.0)}
+            "guided_band": _positive_env("PPG_NATIVE_GUIDED_BAND", 1.0),
+            "guided_check": os.environ.get("PPG_NATIVE_GUIDED_CHECK", "1").strip() != "0"}
 
 
 def pair_options(tiepoint_limit: int, guided: dict) -> dict:
@@ -201,6 +205,8 @@ def pair_options(tiepoint_limit: int, guided: dict) -> dict:
         options["guided_max_ratio"] = float(guided["guided_max_ratio"])
     if guided["guided_band"] != 1.0:
         options["guided_band"] = float(guided["guided_band"])
+    if not guided["guided_check"]:
+        options["guided_check"] = False
     return options
 
 
@@ -385,14 +391,17 @@ def _stores_trusted(chunk: Chunk, stores: Path, root: Path, quality: str, keypoi
     record of the chunk says so (an earlier classic matching, or other settings, made the database from other
     points, and the stores would be trusted over it). The decoding (``dct``) and the second stage (``guided``,
     :func:`guided_settings`) count too; a record written before they were recorded had the DCT scale and the first
-    stage's ratio."""
+    stage's ratio, and one written before the check of the second stage had none (its stores are not continued:
+    their matches hold the points at the wrong depth the check refuses)."""
     info = chunk.meta.get("sfm") or {}
     made = (info.get("native_dct", True), info.get("native_guided", True),
-            info.get("native_guided_ratio", MAX_RATIO), info.get("native_guided_band", 1.0))
+            info.get("native_guided_ratio", MAX_RATIO), info.get("native_guided_band", 1.0),
+            info.get("native_guided_check", False))
     return (_stores_present(stores) and info.get("engine") == "native" and info.get("quality") == quality
             and info.get("keypoint_limit") == int(keypoint_limit) and info.get("apply_masks") == apply_masks
             and info.get("image_root") == str(root)
-            and made == (bool(dct), guided["guided"], guided["guided_max_ratio"], guided["guided_band"]))
+            and made == (bool(dct), guided["guided"], guided["guided_max_ratio"], guided["guided_band"],
+                         guided["guided_check"]))
 
 
 def _stage_stores(stores: Path, wd: Path) -> None:
@@ -790,7 +799,8 @@ def _record(run: _Run, *, features: str, mode: str, pairs: int, by_device: dict,
                              "preselection_size": run.small_size, "native_dct": run.dct,
                              "native_guided": run.guided["guided"],
                              "native_guided_ratio": run.guided["guided_max_ratio"],
-                             "native_guided_band": run.guided["guided_band"]}
+                             "native_guided_band": run.guided["guided_band"],
+                             "native_guided_check": run.guided["guided_check"]}
     if run.keep and old_info.get("gps_priors"):
         run.chunk.meta["sfm"]["gps_priors"] = old_info["gps_priors"]  # the priors already in the database: same axes
 

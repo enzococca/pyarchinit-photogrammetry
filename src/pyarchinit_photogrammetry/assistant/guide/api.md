@@ -170,7 +170,8 @@ caller gets the error the classic step gives, whichever engine runs, before any 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
 `dropped`), `preselection_size` and the settings read from the environment (`native_dct`,
-`native_guided`, `native_guided_ratio`, `native_guided_band`, below; a benchmark record keeps them); `gpu`
+`native_guided`, `native_guided_ratio`, `native_guided_band`, `native_guided_check`, below; a benchmark record
+keeps them); `gpu`
 and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs whose first stage each did (with a GPU the CPU threads take their first stage from it, so `cpu_pairs` counts the pairs of a GPU lost or of none). `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
@@ -178,13 +179,19 @@ Environment variables: `PPG_NATIVE_DCT=1` decodes a JPEG at the DCT scale its re
 chosen for the larger of its two reductions - the matching's and the preselection's - so that one
 decoding gives both (by default every JPEG is decoded whole and reduced as COLMAP reduces it: the DCT
 scale is a little faster but gives another raster and fewer tie points); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
-and the pairs to the GPUs when there is one (by default the CPU threads work beside them: on the pairs they do the second stage and the verification, with the first stage from the GPU). Three tune the second stage of a pair, the matching along
+and the pairs to the GPUs when there is one (by default the CPU threads work beside them: on the pairs they do the second stage and the verification, with the first stage from the GPU). Four tune the second stage of a pair, the matching along
 the epipolar lines of the model of the first: `PPG_NATIVE_GUIDED=0` matches the trusted pairs point
 against point instead (the first stage still decides which pairs are trusted, kept or dropped),
 `PPG_NATIVE_GUIDED_RATIO` (a number above 0, at most 1; by default 0.6: a point there is
 compared with fewer points than in the first stage) is the ratio test of the second, where a point is compared only with the points of its band, and
 `PPG_NATIVE_GUIDED_BAND` (above 0; by default 1.0) is the half-width of the band as a multiple of the
-verification's threshold. A value that is not one stops the step with an error naming the variable. A GPU lost in the middle of the step gives its work back
+verification's threshold, and `PPG_NATIVE_GUIDED_CHECK=0` (for trials; on by default) leaves out the
+check of the second stage: a match must also pass the first stage's ratio test (0.8) against the rival
+each of its points had in the first stage, over the whole photo (every point of a photo with at most
+8,000; its largest scales otherwise), so that a candidate alone in its band whose descriptor has a twin
+elsewhere - a repetitive texture, which the verification cannot refuse along the line and which becomes a
+tie point at the wrong depth - is not matched. Stores made without the check are not continued
+(`reset=False` matches every photo again). A value that is not one stops the step with an error naming the variable. A GPU lost in the middle of the step gives its work back
 to the others; when it was the last one, the CPU takes what is left, also with `PPG_NATIVE_CPU_SHARE=0`.
 A photo or a pair that fails on a device and then on the CPU too is given up (the photo without points, the pair dropped)
 with a line in the log. A photo whose reduction - or whose preselection image - is under 8 x 8 pixels
