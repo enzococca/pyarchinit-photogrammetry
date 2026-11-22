@@ -13,10 +13,11 @@
 //! 1. **With GNSS** (at least 3 placed photos with a position): first the rays alone, as without
 //!    GNSS (step 5), put on the positions by one robust similarity (Umeyama's, iteratively
 //!    reweighted with Huber 1 on the residual in sigmas) with, for two flights or more, a
-//!    translation per flight (the first held at zero); a position farther from its centre so
-//!    placed than `OUTLIER_SIGMAS` of its recorded accuracy (the horizontal axes together, or the
-//!    vertical) is left out of the solve of step 4. The directions of the positions of step 2 are
-//!    taken with those translations taken out.
+//!    translation per flight (the first held at zero). No position is left out here: the rays
+//!    alone drift, and a position far from this block is often a good one where the drift is
+//!    largest (only the `Similarity` result of step 2 names the positions farther than
+//!    `OUTLIER_SIGMAS` from it as outliers). The directions of the positions of step 2 are taken
+//!    with those translations taken out.
 //! 2. The averaged rotations live in a frame of their own, turned onto the frame of the positions
 //!    by the rotation `Q` that best takes the directions between the photos of the verified pairs
 //!    with parallax (the translation of the pair, put in the averaged frame) onto the directions
@@ -31,18 +32,18 @@
 //!    position), the selected tracks are triangulated from them with the rotations `Q R` and go
 //!    through `triangulate::filter` (the reprojection left out: the start is only as good as the
 //!    positions; the depth and the angle of the rays kept).
-//! 4. Centres, points and scales are solved together (`bundle::lm`) with every position but the
-//!    outliers as a residual `(C + b - g) / sigma` per axis under Huber 1 (in sigmas), `sigma` the
+//! 4. Centres, points and scales are solved together (`bundle::lm`) with every position as a
+//!    residual `(C + b - g) / sigma` per axis under Huber 1 (in sigmas), `sigma` the
 //!    recorded accuracy (estimated again from the residuals only in the rounds of adjustment that
 //!    follow, where the redundancy of each position is known: the residuals of a fit are smaller
 //!    than the noise), `b` the bias of the position's flight: one per flight when there are two
 //!    flights or more, the first held at zero. The positions hold the gauge. The rays keep GLOMAP's
 //!    scale: at this level the heights of nadir photos are weakly held (the depth along each ray is
 //!    free) and follow their positions; the reprojection of the rounds holds them. The biases
-//!    start at the translations of step 1. The positions left out are then checked against the
-//!    solved centres and biases: one within `OUTLIER_SIGMAS` comes back and the block is solved
-//!    once more; the positions still left out and those then farther than `OUTLIER_SIGMAS` are
-//!    the outliers (`gnss_outliers`).
+//!    start at the translations of step 1. The Huber loss bounds the pull of a gross fix; the
+//!    positions then farther than `OUTLIER_SIGMAS` of their recorded accuracy from the solved
+//!    centres and biases (the horizontal axes together, or the vertical) are the outliers
+//!    (`gnss_outliers`), and the block is solved once more without them.
 //! 5. **Without GNSS**: centres and points start at random (GLOMAP's start: uniform in a cube of
 //!    `RANDOM_EXTENT`, the scales at 1, from the generator of this file seeded with `SEED`), one
 //!    centre and the first scale held (GLOMAP holds the first scale), the scales above their
@@ -677,6 +678,72 @@ fn similarity(from: &[Vector3<f64>], to: &[Vector3<f64>], w: &[f64]) -> Option<(
     Some((s, r, mt - s * r * mf))
 }
 
+/// The photos whose fix disagrees with the fixes of more than half of its neighbours of the same
+/// flight in the view graph (two such neighbours with a fix at least): the fix `g_i` of photo `i`
+/// against `g_n + (C_i - C_n)` of each neighbour `n`, the displacement `C_i - C_n` that of the
+/// rays-only block put on the positions (`block`), whose drift over two neighbours is negligible;
+/// a disagreement is beyond `OUTLIER_SIGMAS` of the accuracies of the two fixes combined (the
+/// horizontal axes together, or the vertical), or of the robust scale of all the disagreements
+/// where the block's own error over an edge is the larger; a neighbour counts against a fix only
+/// when it agrees with most of its other neighbours (a part of the block the rays alone got wrong
+/// leaves its fixes in). A fix far off (a wrong position) disagrees with all its neighbours; a good fix next to
+/// it with that one only. Ascending.
+fn local_outliers(graph: &ViewGraph, fix_of: &[Option<usize>], g: &Gnss, block: &Positioned) -> Vec<usize> {
+    let n = fix_of.len();
+    // per edge of one flight between two photos with a fix: its photos and its disagreement in the
+    // accuracies of the two fixes combined, horizontal and vertical
+    let mut edges = Vec::new();
+    for e in &graph.edges {
+        let (a, b) = (e.a, e.b);
+        if a >= n || b >= n {
+            continue;
+        }
+        let (Some(ka), Some(kb), Some(ca), Some(cb)) = (fix_of[a], fix_of[b], block.centres[a], block.centres[b])
+        else {
+            continue;
+        };
+        // the translation between two flights is not known well enough yet to compare across it
+        if g.flight[ka] != g.flight[kb] {
+            continue;
+        }
+        let d: [f64; 3] = std::array::from_fn(|x| g.xyz[ka][x] - g.xyz[kb][x] - (ca[x] - cb[x]));
+        let s: [f64; 3] = std::array::from_fn(|x| g.sigma[ka][x].hypot(g.sigma[kb][x]));
+        edges.push((a, b, (d[0] / s[0]).hypot(d[1] / s[1]), (d[2] / s[2]).abs()));
+    }
+    // the rays-only block is only locally right: its error over an edge sets the scale of a
+    // disagreement when it is larger than the accuracy of the fixes (the robust scales of the
+    // horizontal norms, a Rayleigh median, and of the vertical values)
+    let mut h: Vec<f64> = edges.iter().map(|e| e.2).collect();
+    let mut v: Vec<f64> = edges.iter().map(|e| e.3).collect();
+    let (sh, sv) = (median(&mut h) / RAYLEIGH_MEDIAN, MAD_SCALE * median(&mut v));
+    let (lh, lv) = (OUTLIER_SIGMAS * sh.max(1.0), OUTLIER_SIGMAS * sv.max(1.0));
+    // per photo its neighbours and whether each disagrees with it
+    let mut links: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
+    for &(a, b, eh, ev) in &edges {
+        let disagree = eh > lh || ev > lv;
+        links[a].push((b, disagree));
+        links[b].push((a, disagree));
+    }
+    // a neighbour vouches against `i` when it disagrees with `i` and agrees with most of its other
+    // neighbours: where the rays-only block is itself broken, the neighbours disagree among them
+    // too and nothing is left out
+    let vouches = |nb: usize, i: usize| {
+        let others: Vec<bool> = links[nb].iter().filter(|(m, _)| *m != i).map(|(_, d)| *d).collect();
+        !others.is_empty() && 2 * others.iter().filter(|d| **d).count() < others.len()
+    };
+    (0..n)
+        .filter(|&i| {
+            let against = links[i].iter().filter(|&&(nb, d)| d && vouches(nb, i)).count();
+            links[i].len() >= 2 && 2 * against > links[i].len()
+        })
+        .collect()
+}
+
+/// The median of the norm of a standard normal vector of two components, and the factor of the
+/// median absolute value of a normal value to its standard deviation.
+const RAYLEIGH_MEDIAN: f64 = 1.177_410_022_515_474_7;
+const MAD_SCALE: f64 = 1.482_602_218_505_602;
+
 /// Whether the residual `e` of a position is farther than `OUTLIER_SIGMAS` of its recorded accuracy
 /// `sigma`, the horizontal axes together (the norm of their residuals in sigmas) or the vertical.
 fn is_outlier(e: &[f64; 3], sigma: &[f64; 3]) -> bool {
@@ -735,9 +802,14 @@ pub fn position(
     if on_positions.frame != Frame::Similarity {
         return Ok(on_positions);
     }
+    // no position is left out against the whole rays-only block (ruling R9): it drifts, and a
+    // position is far from it wherever the drift is largest, which is where the positions are
+    // needed; only a fix that disagrees with the fixes of most of its neighbours in the view graph
+    // is left out of the joint solve (`local_outliers`), and the joint solve finds the others
+    let local = local_outliers(graph, &fix_of, g, &on_positions);
     let all_fixes = fix_of.clone();
     let mut fix_of = fix_of;
-    for &i in &on_positions.gnss_outliers {
+    for &i in &local {
         fix_of[i] = None;
     }
     // the directions between the positions with the translations of their flights taken out
@@ -759,10 +831,21 @@ pub fn position(
     let world_from_cam: Vec<Option<Matrix3<f64>>> =
         rotations.world_from_cam.iter().map(|w| w.as_ref().map(|w| q * matrix(w))).collect();
     // the centres start where the similarity put the rays-only block; a photo it did not place,
-    // on its position
+    // or placed farther than `OUTLIER_SIGMAS` from its position (the flight's translation taken
+    // out), on its position: the rays alone drift and can be broken in places, and from there the
+    // joint solve, whose positions pull with a bounded force, would not bring them back (the
+    // positions so used have passed `local_outliers`)
     let start: Vec<Option<Vector3<f64>>> = (0..n)
         .map(|i| {
-            on_positions.centres[i].map(Vector3::from).or_else(|| fix_of[i].map(|k| Vector3::from(g.xyz[k])))
+            let fix = fix_of[i].map(|k| {
+                let b = bias_of(g.flight[k]);
+                (Vector3::new(g.xyz[k][0] - b[0], g.xyz[k][1] - b[1], g.xyz[k][2] - b[2]), g.sigma[k])
+            });
+            match (on_positions.centres[i].map(Vector3::from), fix) {
+                (Some(c), Some((x, sigma))) if is_outlier(&[c.x - x.x, c.y - x.y, c.z - x.z], &sigma) => Some(x),
+                (Some(c), _) => Some(c),
+                (None, f) => f.map(|(x, _)| x),
+            }
         })
         .collect();
 
@@ -837,32 +920,39 @@ pub fn position(
         m.biases[f - 1] = std::array::from_fn(|a| b[a] - reference[a]);
     }
     let mut cost = solve(&mut m, MAX_ITERATIONS, observe)?;
-    // the positions left out at the start checked again against the solved centres and biases: one
-    // that agrees with them comes back, and the block is solved once more
-    let mut back = false;
-    for i in 0..n {
-        let (Some(k), None, Some(_)) = (all_fixes[i], fix_of[i], m.block_of_photo[i]) else {
-            continue;
-        };
-        let Ok(flight) = flights.binary_search(&g.flight[k]) else {
-            continue;
-        };
+    // the positions farther than `OUTLIER_SIGMAS` from the solved centres and biases are the
+    // outliers; a fix left out by `local_outliers` that the solved block agrees with comes back (a
+    // photo the rays alone placed wrong looks like a wrong fix to its neighbours); the block is
+    // solved once more when anything changed
+    let mut far: Vec<usize> =
+        m.fixes.iter().filter(|f| is_outlier(&m.fix_residual(f), &f.sigma)).map(|f| f.photo).collect();
+    far.sort_unstable();
+    let mut back = Vec::new();
+    for &i in &local {
+        let (Some(k), Some(_)) = (all_fixes[i], m.block_of_photo[i]) else { continue };
+        let Ok(flight) = flights.binary_search(&g.flight[k]) else { continue };
         let fix = Fix { photo: i, flight, xyz: g.xyz[k], sigma: g.sigma[k] };
         if !is_outlier(&m.fix_residual(&fix), &fix.sigma) {
-            m.fixes.push(fix);
-            fix_of[i] = Some(k);
-            back = true;
+            back.push(fix);
         }
     }
-    if back {
+    let mut gnss_outliers: Vec<usize> =
+        local.iter().filter(|i| !back.iter().any(|f| f.photo == **i)).chain(&far).copied().collect();
+    gnss_outliers.sort_unstable();
+    if !far.is_empty() || !back.is_empty() {
+        m.fixes.retain(|f| far.binary_search(&f.photo).is_err());
+        for &i in &far {
+            fix_of[i] = None;
+        }
+        for f in back {
+            fix_of[f.photo] = all_fixes[f.photo];
+            m.fixes.push(f);
+        }
         if !observe() {
             return Err("cancelled".into());
         }
         cost = solve(&mut m, MAX_ITERATIONS, observe)?;
     }
-    let mut gnss_outliers: Vec<usize> = (0..n).filter(|&i| all_fixes[i].is_some() && fix_of[i].is_none()).collect();
-    gnss_outliers.extend(m.fixes.iter().filter(|f| is_outlier(&m.fix_residual(f), &f.sigma)).map(|f| f.photo));
-    gnss_outliers.sort_unstable();
     let largest = |axes: &[usize]| {
         m.fixes.iter().flat_map(|f| axes.iter().map(move |&a| f.sigma[a])).fold(0.0, f64::max)
     };
