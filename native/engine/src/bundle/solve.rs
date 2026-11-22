@@ -7,7 +7,7 @@
 //! are updated on their manifold by `exp(delta) R`; the points their inliers do not hold are
 //! re-solved on their own after every accepted step (`residuals::refine_unheld_points`).
 
-use super::lm::{solve_model_with_limits, BlockJacobian, Model, Report};
+use super::lm::{covariance_block, solve_model_with_limits, BlockJacobian, Model, Report};
 use super::problem::{Layout, Parameters, Problem};
 use super::residuals::{
     bar, control, gnss, observation_linearized, observation_values, refine_unheld_points, rs_prior, variables, Loss,
@@ -160,6 +160,54 @@ pub(crate) fn solve_with_limits(
     let mut model = BundleModel::new(pb, opts.loss);
     let report = solve_model_with_limits(&mut model, opts, observe, dense_max_columns, pcg_above)?;
     Ok(model.solution(report))
+}
+
+/// The covariance of the bias of each flight of the solution `sol` of `pb` (the flights of
+/// `Layout::flights`, sorted): the 3 x 3 blocks of the inverse of the normal matrix at the
+/// solution (`lm::covariance_block`, the robust curvature of `loss` on the tie points) times the
+/// a-posteriori variance factor, twice the cost over the redundancy (the residuals less the
+/// unknowns), which is also returned. Dense: for blocks of a few thousand photos.
+pub fn bias_covariance(
+    pb: &Problem,
+    sol: &Solution,
+    loss: Loss,
+) -> Result<(Vec<(i64, [[f64; 3]; 3])>, f64), String> {
+    pb.check()?;
+    let mut model = BundleModel::new(pb, loss);
+    let params = sol.parameters();
+    params.fits(pb, &model.lay)?;
+    model.params = params;
+    let start: Vec<usize> = model
+        .cam_size
+        .iter()
+        .scan(0, |at, &s| {
+            let c = *at;
+            *at += s;
+            Some(c)
+        })
+        .collect();
+    let flights = model.lay.flights.clone();
+    let cols: Vec<usize> = (0..flights.len())
+        .flat_map(|f| {
+            let c = start[model.bias_block + f];
+            c..c + 3
+        })
+        .collect();
+    let block = covariance_block(&model, &cols)?;
+    let rows = 2 * (pb.obs.len() + pb.mobs.len()) + 3 * (pb.gcps.len() + pb.gnss.len()) + pb.bars.len()
+        + if pb.rolling_shutter { 6 * pb.centres.len() } else { 0 };
+    let unknowns = model.cam_size.iter().sum::<usize>() + 3 * pb.points.len();
+    let factor = if rows > unknowns { 2.0 * sol.cost / (rows - unknowns) as f64 } else { f64::NAN };
+    let k = cols.len();
+    let out = flights
+        .iter()
+        .enumerate()
+        .map(|(f, &id)| {
+            let at = |a: usize, b: usize| factor * block[(3 * f + a) * k + 3 * f + b];
+            (id, std::array::from_fn(|a| std::array::from_fn(|b| at(a, b))))
+        })
+        .collect();
+    Ok((out, factor))
 }
 
 /// The bundle adjustment of a problem as a `Model`: the parameters it is at, the layout of their

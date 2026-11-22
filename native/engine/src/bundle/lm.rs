@@ -19,7 +19,10 @@ use rayon::prelude::*;
 
 use super::pcg::pcg_step;
 use super::residuals::{Loss, CURVATURE_FLOOR};
-use super::schur::{dense_step, split_sizes, sym3_inverse, well_conditioned, Reduced};
+use super::schur::{
+    cholesky_solve_columns, dense_step, dense_system, point_inverses, split_sizes, sym3_inverse, well_conditioned,
+    Context, Reduced,
+};
 use super::solve::{choose_linear_solver, LinearSolver, Options, Termination, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES};
 use super::sparse::SparseSystem;
 
@@ -956,6 +959,40 @@ pub fn solve_model<M: Model>(
     solve_model_with_limits(m, opts, observe, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES)
 }
 
+/// The block of the reduced columns `cols` of the inverse of the normal matrix `J^T W J` (the
+/// curvature of the robust loss as the steps use it, undamped) at the parameters of `m`: by the
+/// Schur complement, the same block of the inverse of the reduced system, which is formed dense
+/// and factorised once. Row-major, `cols.len()` x `cols.len()`; times the variance factor, the
+/// covariance of those unknowns. `Err` when the reduced system is not positive definite (a gauge
+/// left free) or a column is out of range. Points whose block is singular are held, as in a step.
+pub(crate) fn covariance_block<M: Model>(m: &M, cols: &[usize]) -> Result<Vec<f64>, String> {
+    let (shape, lin) = first_linearization(m)?;
+    let n = shape.n;
+    if let Some(c) = cols.iter().find(|&&c| c >= n) {
+        return Err(format!("column {c} of {n} reduced columns"));
+    }
+    let (g, _) = gradient_and_diagonal(&shape, &lin);
+    let held = vec![false; shape.n_point_cols];
+    let red = Reduced { shape: &shape, lin: &lin, held: &held };
+    let damping = vec![0.0; n + shape.n_point_cols];
+    let points = point_inverses(&red, &g, &damping);
+    let cx = Context { shape: &shape, lin: &lin, g: &g, damping: &damping, points: &points };
+    let (mut s, _) = dense_system(&cx);
+    let k = cols.len();
+    let mut rhs = vec![0.0; n * k];
+    for (j, &c) in cols.iter().enumerate() {
+        rhs[j * n + c] = 1.0;
+    }
+    cholesky_solve_columns(&mut s, &mut rhs, k)?;
+    let mut out = vec![0.0; k * k];
+    for i in 0..k {
+        for j in 0..k {
+            out[i * k + j] = rhs[j * n + cols[i]];
+        }
+    }
+    Ok(out)
+}
+
 /// `solve_model` with the limits of `Auto` as arguments (the tests lower them to small blocks).
 pub(crate) fn solve_model_with_limits<M: Model>(
     m: &mut M,
@@ -1196,6 +1233,30 @@ mod tests {
             out[c] = b[i];
         }
         out
+    }
+
+    #[test]
+    fn the_covariance_block_is_the_block_of_the_inverse_of_the_full_normal_equations() {
+        let toy = Toy::new();
+        let (shape, lin) = first_linearization(&toy).unwrap();
+        let singular: Vec<usize> = (0..4).map(|q| shape.n + shape.point_col[1] + q).collect();
+        let size = shape.n + shape.n_point_cols;
+        // the border (the last camera columns) and a column of the first camera block
+        let cols: Vec<usize> = std::iter::once(1).chain(shape.border_start..shape.n).collect();
+        let got = covariance_block(&toy, &cols).unwrap();
+        let k = cols.len();
+        for (j, &c) in cols.iter().enumerate() {
+            // the column `c` of the inverse: the step of the full equations for the gradient -e_c
+            let mut g = vec![0.0; size];
+            g[c] = -1.0;
+            let want = full_step(&shape, &lin, &g, &vec![0.0; size], &singular);
+            let scale = want.iter().fold(0.0, |a: f64, x| a.max(x.abs()));
+            for (i, &r) in cols.iter().enumerate() {
+                let (a, b) = (got[i * k + j], want[r]);
+                assert!((a - b).abs() <= 1e-9 * scale, "entry ({r}, {c}): {a} vs {b}");
+            }
+        }
+        assert!(covariance_block(&toy, &[shape.n]).is_err());
     }
 
     #[test]

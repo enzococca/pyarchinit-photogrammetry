@@ -656,13 +656,21 @@ pub(crate) fn border_columns<S: Slab>(cx: &Context, slab: &S, block: &mut [f64],
 /// triangle read) in place: the factor replaces `A`, the solution `b`. An error names the pivot
 /// that is not positive.
 pub(crate) fn cholesky_solve_in_place(matrix: &mut [f64], rhs: &mut [f64]) -> Result<(), String> {
-    let n = rhs.len();
+    cholesky_solve_columns(matrix, rhs, 1)
+}
+
+/// `cholesky_solve_in_place` for `columns` right-hand sides at once (`rhs` column-major, `n` x
+/// `columns`): one factorisation.
+pub(crate) fn cholesky_solve_columns(matrix: &mut [f64], rhs: &mut [f64], columns: usize) -> Result<(), String> {
+    let n = if columns == 0 { 0 } else { rhs.len() / columns };
     debug_assert_eq!(matrix.len(), n * n);
     if n == 0 {
         return Ok(());
     }
     let par = faer::get_global_parallelism();
-    let mut buffer = MemBuffer::new(factor::cholesky_in_place_scratch::<f64>(n, par, Default::default()));
+    let scratch = factor::cholesky_in_place_scratch::<f64>(n, par, Default::default())
+        .or(llt_solve::solve_in_place_scratch::<f64>(n, columns, par));
+    let mut buffer = MemBuffer::new(scratch);
     let stack = MemStack::new(&mut buffer);
     let a = MatMut::from_column_major_slice_mut(matrix, n, n);
     factor::cholesky_in_place(a, factor::LltRegularization::default(), par, stack, Default::default())
@@ -670,7 +678,7 @@ pub(crate) fn cholesky_solve_in_place(matrix: &mut [f64], rhs: &mut [f64]) -> Re
             format!("pivot {index} of the reduced system is not positive")
         })?;
     let l = MatRef::from_column_major_slice(matrix, n, n);
-    llt_solve::solve_in_place(l, MatMut::from_column_major_slice_mut(rhs, n, 1), par, stack);
+    llt_solve::solve_in_place(l, MatMut::from_column_major_slice_mut(rhs, n, columns), par, stack);
     Ok(())
 }
 
