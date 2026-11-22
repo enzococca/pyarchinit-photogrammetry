@@ -17,7 +17,7 @@
 
 use rayon::prelude::*;
 
-use super::pcg::pcg_step;
+use super::pcg::{pcg_step, pcg_step_with};
 use super::residuals::{Loss, CURVATURE_FLOOR};
 use super::schur::{
     cholesky_solve_columns, dense_step, dense_system, point_inverses, split_sizes, sym3_inverse, well_conditioned,
@@ -959,13 +959,34 @@ pub fn solve_model<M: Model>(
     solve_model_with_limits(m, opts, observe, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES)
 }
 
+/// Up to this many reduced columns `covariance_block` forms the reduced system dense: 6000 columns
+/// make a matrix of 288 MB, factorised in place (the scratch of the factorisation and the right-hand
+/// sides are a small part of it), well under a gigabyte. Above, each column comes from the
+/// conjugate gradients (`COVARIANCE_FORCING`, `COVARIANCE_PCG_ITERATIONS`): only a few columns are
+/// asked for.
+pub(crate) const COVARIANCE_DENSE_MAX_COLUMNS: usize = 6000;
+pub(crate) const COVARIANCE_FORCING: f64 = 1e-12;
+pub(crate) const COVARIANCE_PCG_ITERATIONS: usize = 5000;
+
 /// The block of the reduced columns `cols` of the inverse of the normal matrix `J^T W J` (the
 /// curvature of the robust loss as the steps use it, undamped) at the parameters of `m`: by the
-/// Schur complement, the same block of the inverse of the reduced system, which is formed dense
-/// and factorised once. Row-major, `cols.len()` x `cols.len()`; times the variance factor, the
-/// covariance of those unknowns. `Err` when the reduced system is not positive definite (a gauge
-/// left free) or a column is out of range. Points whose block is singular are held, as in a step.
+/// Schur complement, the same block of the inverse of the reduced system. Up to
+/// `COVARIANCE_DENSE_MAX_COLUMNS` reduced columns the system is formed dense and factorised once;
+/// above, each column `c` is the step of the conjugate gradients for the gradient `-e_c`.
+/// Row-major, `cols.len()` x `cols.len()`; times the variance factor, the covariance of those
+/// unknowns. `Err` when the reduced system is not positive definite (a gauge left free, a
+/// parameter the observations do not hold) or a column is out of range: there is no
+/// regularisation. Points whose block is singular are held, as in a step.
 pub(crate) fn covariance_block<M: Model>(m: &M, cols: &[usize]) -> Result<Vec<f64>, String> {
+    covariance_block_with_limit(m, cols, COVARIANCE_DENSE_MAX_COLUMNS)
+}
+
+/// `covariance_block` with the dense limit as an argument (the tests lower it).
+pub(crate) fn covariance_block_with_limit<M: Model>(
+    m: &M,
+    cols: &[usize],
+    dense_max_columns: usize,
+) -> Result<Vec<f64>, String> {
     let (shape, lin) = first_linearization(m)?;
     let n = shape.n;
     if let Some(c) = cols.iter().find(|&&c| c >= n) {
@@ -975,16 +996,30 @@ pub(crate) fn covariance_block<M: Model>(m: &M, cols: &[usize]) -> Result<Vec<f6
     let held = vec![false; shape.n_point_cols];
     let red = Reduced { shape: &shape, lin: &lin, held: &held };
     let damping = vec![0.0; n + shape.n_point_cols];
+    let k = cols.len();
+    let mut out = vec![0.0; k * k];
+    if n > dense_max_columns {
+        for (j, &c) in cols.iter().enumerate() {
+            let mut unit = vec![0.0; n + shape.n_point_cols];
+            unit[c] = -1.0;
+            let column = pcg_step_with(&red, &unit, &damping, COVARIANCE_FORCING, COVARIANCE_PCG_ITERATIONS)?;
+            if !column[..n].iter().all(|x| x.is_finite()) || !(column[c] > 0.0) {
+                return Err(format!("column {c}: the reduced system is not positive definite"));
+            }
+            for (i, &r) in cols.iter().enumerate() {
+                out[i * k + j] = column[r];
+            }
+        }
+        return Ok(out);
+    }
     let points = point_inverses(&red, &g, &damping);
     let cx = Context { shape: &shape, lin: &lin, g: &g, damping: &damping, points: &points };
     let (mut s, _) = dense_system(&cx);
-    let k = cols.len();
     let mut rhs = vec![0.0; n * k];
     for (j, &c) in cols.iter().enumerate() {
         rhs[j * n + c] = 1.0;
     }
     cholesky_solve_columns(&mut s, &mut rhs, k)?;
-    let mut out = vec![0.0; k * k];
     for i in 0..k {
         for j in 0..k {
             out[i * k + j] = rhs[j * n + cols[i]];
@@ -1257,6 +1292,23 @@ mod tests {
             }
         }
         assert!(covariance_block(&toy, &[shape.n]).is_err());
+        // above the dense limit (lowered here) the columns come from the conjugate gradients
+        let pcg = covariance_block_with_limit(&toy, &cols, 0).unwrap();
+        let scale = got.iter().fold(0.0, |a: f64, x| a.max(x.abs()));
+        for (a, b) in pcg.iter().zip(&got) {
+            assert!((a - b).abs() <= 1e-6 * scale, "{a} vs {b}");
+        }
+    }
+
+    /// A gauge left free (a column no residual holds): the covariance is refused, dense or not.
+    #[test]
+    fn a_covariance_of_a_singular_system_is_refused() {
+        let mut toy = Toy::new();
+        toy.cams.push(2); // a camera block no residual holds
+        let (shape, _) = first_linearization(&toy).unwrap();
+        let cols = [shape.n - 1];
+        assert!(covariance_block(&toy, &cols).is_err());
+        assert!(covariance_block_with_limit(&toy, &cols, 0).is_err());
     }
 
     #[test]
