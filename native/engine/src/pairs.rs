@@ -35,7 +35,7 @@ use nalgebra::{Matrix3, Vector3};
 use crate::camera::Camera;
 use crate::geometry::two_view::{self, pair_seed, verify, Config, TwoView};
 use crate::gpu::{match_quality, select_matches, Matcher, DIM};
-use crate::matching::bests_cpu;
+use crate::matching::{bests_cpu, dispatch, dot};
 use crate::sched::{self, Worker};
 use crate::store::{FeatureStore, FeatureView, MatchStore};
 pub use crate::store::{PairResult, Route};
@@ -136,12 +136,6 @@ pub fn photo_key(name: &str) -> u64 {
 /// scale): FNV-1a 64 of the name followed by a NUL byte and `stage1`.
 pub fn stage1_key(name: &str) -> u64 {
     fnv1a(name.bytes().chain(b"\0stage1".iter().copied()))
-}
-
-/// The integer dot product of two descriptors.
-#[inline]
-fn dot(x: &[u8; DIM], y: &[u8; DIM]) -> u32 {
-    x.iter().zip(y).map(|(&p, &q)| u32::from(p) * u32::from(q)).sum()
 }
 
 fn descriptor(set: &[u8], i: usize) -> &[u8; DIM] {
@@ -468,6 +462,12 @@ fn epipole(f: &Matrix3<f64>) -> Option<[f64; 2]> {
     (x.is_finite() && y.is_finite() && x.hypot(y) <= FAR_EPIPOLE).then_some([x, y])
 }
 
+crate::dispatched! {
+    /// [`bests_in_fan`] compiled for a kernel of the dot product.
+    fn fan(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+           -> Option<Vec<[u32; 3]>> = fan_body;
+}
+
 /// [`bests_along`] with the points of B in a fan around the epipole instead of the grid: every
 /// epipolar line passes through it, so a point at the distance `r` from it lies within `e` of a
 /// line only where its angle around the epipole is within `asin((e + s) / r)` of the line's, modulo
@@ -481,6 +481,13 @@ fn epipole(f: &Matrix3<f64>) -> Option<[f64; 2]> {
 /// epipole by more than `e` (a matrix far from rank 2).
 fn bests_in_fan(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
                 -> Option<Vec<[u32; 3]>> {
+    fan(dispatch(), da, points_a, db, points_b, f, e)
+}
+
+/// The body of [`bests_in_fan`], compiled once per kernel of the dot product.
+#[inline(always)]
+fn fan_body(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+            -> Option<Vec<[u32; 3]>> {
     use std::f64::consts::{FRAC_PI_2, PI};
     let [ex, ey] = epipole(f)?;
     let (n_a, n_b) = (points_a.len(), points_b.len());
