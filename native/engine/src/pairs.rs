@@ -142,16 +142,22 @@ fn cell_side(max_error: f64) -> f64 {
 }
 
 /// The points of a photo in a grid of square cells over their bounding box, so that the points
-/// along a line are found by the cells the band around it crosses.
+/// along a line are found by the cells the band around it crosses. The points are listed twice,
+/// cell by cell along the rows of cells and along the columns, so that the cells the band crosses
+/// in one column (or one row) of cells are one run of the list.
 struct Grid {
     x0: f64,
     y0: f64,
     cell: f64,
     cols: usize,
     rows: usize,
-    /// The first entry of each cell in `items`, and one past the last cell.
+    /// The first entry of each cell in `items`, the cells row after row (`row * cols + col`), and
+    /// one past the last cell.
     starts: Vec<u32>,
     items: Vec<u32>,
+    /// The same with the cells column after column (`col * rows + row`).
+    starts_by_column: Vec<u32>,
+    items_by_column: Vec<u32>,
 }
 
 impl Grid {
@@ -161,7 +167,17 @@ impl Grid {
     fn new(points: &[[f64; 2]], cell: f64) -> Grid {
         let finite: Vec<usize> = (0..points.len()).filter(|&i| points[i].iter().all(|v| v.is_finite())).collect();
         if finite.is_empty() {
-            return Grid { x0: 0.0, y0: 0.0, cell, cols: 0, rows: 0, starts: vec![0], items: Vec::new() };
+            return Grid {
+                x0: 0.0,
+                y0: 0.0,
+                cell,
+                cols: 0,
+                rows: 0,
+                starts: vec![0],
+                items: Vec::new(),
+                starts_by_column: vec![0],
+                items_by_column: Vec::new(),
+            };
         }
         let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for &i in &finite {
@@ -175,82 +191,111 @@ impl Grid {
         let cell = cell.max(((x1 - x0) * (y1 - y0) / MOST_CELLS).sqrt());
         let cols = ((x1 - x0) / cell).floor() as usize + 1;
         let rows = ((y1 - y0) / cell).floor() as usize + 1;
-        let at = |p: [f64; 2]| {
+        let place = |p: [f64; 2]| {
             let col = (((p[0] - x0) / cell).floor() as usize).min(cols - 1);
             let row = (((p[1] - y0) / cell).floor() as usize).min(rows - 1);
-            row * cols + col
+            (row, col)
         };
-        let mut starts = vec![0u32; cols * rows + 1];
-        for &i in &finite {
-            starts[at(points[i]) + 1] += 1;
-        }
-        for k in 0..cols * rows {
-            starts[k + 1] += starts[k];
-        }
-        let mut next = starts.clone();
-        let mut items = vec![0u32; finite.len()];
-        for &i in &finite {
-            let k = at(points[i]);
-            items[next[k] as usize] = i as u32;
-            next[k] += 1;
-        }
-        Grid { x0, y0, cell, cols, rows, starts, items }
-    }
-
-    /// The cells from `lo` to `hi` along an axis that starts at `origin` and has `count` cells;
-    /// `None` when the span misses the grid.
-    fn span(&self, lo: f64, hi: f64, origin: f64, count: usize) -> Option<(usize, usize)> {
-        let first = ((lo - origin) / self.cell).floor();
-        let last = ((hi - origin) / self.cell).floor();
-        if !(first.is_finite() && last.is_finite()) || last < 0.0 || first >= count as f64 {
-            return None;
-        }
-        Some((first.max(0.0) as usize, (last as usize).min(count - 1)))
+        // a counting sort of the points by cell, the cells numbered by `index`
+        let sorted = |index: &dyn Fn(usize, usize) -> usize| {
+            let mut starts = vec![0u32; cols * rows + 1];
+            for &i in &finite {
+                let (row, col) = place(points[i]);
+                starts[index(row, col) + 1] += 1;
+            }
+            for k in 0..cols * rows {
+                starts[k + 1] += starts[k];
+            }
+            let mut next = starts.clone();
+            let mut items = vec![0u32; finite.len()];
+            for &i in &finite {
+                let (row, col) = place(points[i]);
+                let k = index(row, col);
+                items[next[k] as usize] = i as u32;
+                next[k] += 1;
+            }
+            (starts, items)
+        };
+        let (starts, items) = sorted(&|row, col| row * cols + col);
+        let (starts_by_column, items_by_column) = sorted(&|row, col| col * rows + row);
+        Grid { x0, y0, cell, cols, rows, starts, items, starts_by_column, items_by_column }
     }
 
     /// Every point within `e` of the line `l` (`a x + b y + c = 0` with `a^2 + b^2 = 1`), each
-    /// once, in the order of the cells the band crosses: `visit` gets its index.
+    /// once: `visit` gets its index. The line is walked along the axis it is nearer to, over the
+    /// columns (or rows) of cells where its band meets the box of the grid (`walk`); in each, the
+    /// cells the band crosses are one run of the list sorted that way, whose points are tested
+    /// exactly.
     fn along(&self, l: [f64; 3], e: f64, points: &[[f64; 2]], mut visit: impl FnMut(u32)) {
         if self.items.is_empty() {
             return;
         }
         let [a, b, c] = l;
-        let mut scan = |cell: usize| {
-            for &i in &self.items[self.starts[cell] as usize..self.starts[cell + 1] as usize] {
+        let mut scan = |run: &[u32]| {
+            for &i in run {
                 let p = points[i as usize];
                 if (a * p[0] + b * p[1] + c).abs() <= e {
                     visit(i);
                 }
             }
         };
+        let inverse = 1.0 / self.cell;
         if a.abs() <= b.abs() {
-            // nearer to horizontal: the rows the band crosses in each column of cells
-            let slack = e / b.abs();
-            for col in 0..self.cols {
-                let x_lo = self.x0 + col as f64 * self.cell;
-                let x_hi = x_lo + self.cell;
-                let (y1, y2) = (-(a * x_lo + c) / b, -(a * x_hi + c) / b);
-                let Some((r_lo, r_hi)) = self.span(y1.min(y2) - slack, y1.max(y2) + slack, self.y0, self.rows) else {
-                    continue;
-                };
-                for row in r_lo..=r_hi {
-                    scan(row * self.cols + col);
-                }
-            }
+            // nearer to horizontal: y = -(a x + c) / b, the rows the band crosses in each column
+            let (slope, offset) = (-a / b, -c / b);
+            let q = (slope * self.x0 + offset - self.y0) * inverse;
+            let slack = e / b.abs() * inverse + CELL_MARGIN;
+            let (starts, items) = (&self.starts_by_column, &self.items_by_column);
+            walk(slope, q, slack, self.cols, self.rows, |col, first, last| {
+                let base = col * self.rows;
+                scan(&items[starts[base + first] as usize..starts[base + last + 1] as usize]);
+            });
         } else {
-            let slack = e / a.abs();
-            for row in 0..self.rows {
-                let y_lo = self.y0 + row as f64 * self.cell;
-                let y_hi = y_lo + self.cell;
-                let (x1, x2) = (-(b * y_lo + c) / a, -(b * y_hi + c) / a);
-                let Some((c_lo, c_hi)) = self.span(x1.min(x2) - slack, x1.max(x2) + slack, self.x0, self.cols) else {
-                    continue;
-                };
-                for col in c_lo..=c_hi {
-                    scan(row * self.cols + col);
-                }
-            }
+            let (slope, offset) = (-b / a, -c / a);
+            let q = (slope * self.y0 + offset - self.x0) * inverse;
+            let slack = e / a.abs() * inverse + CELL_MARGIN;
+            walk(slope, q, slack, self.rows, self.cols, |row, first, last| {
+                let base = row * self.cols;
+                scan(&self.items[self.starts[base + first] as usize..self.starts[base + last + 1] as usize]);
+            });
         }
+    }
+}
+
+/// The margin, in cells, added to the half-width of a band when its cells are chosen: the cells
+/// it adds are tested point by point like the others, and it keeps a point at the very edge of
+/// the band from being lost to the roundoff of the walk.
+const CELL_MARGIN: f64 = 1e-9;
+
+/// The walk of a band over a grid, in units of cells: along the major axis (`major` cells), the
+/// line is `v = slope u + q` on the minor axis (`minor` cells), and its band `slack` wide on
+/// either side. The cells of the major axis where the band meets `[0, minor]` (the line clipped
+/// to the box, one cell of margin on either side) are visited in order: `run(j, first, last)` for
+/// the cells `first..=last` of the minor axis the band crosses in the cell `j` of the major one.
+fn walk(slope: f64, q: f64, slack: f64, major: usize, minor: usize, mut run: impl FnMut(usize, usize, usize)) {
+    let height = minor as f64;
+    let (first, last) = if slope == 0.0 {
+        if q + slack < 0.0 || q - slack >= height {
+            return;
+        }
+        (0, major - 1)
+    } else {
+        let (u, w) = ((-slack - q) / slope, (height + slack - q) / slope);
+        let (low, high) = (u.min(w).floor() - 1.0, u.max(w).floor() + 1.0);
+        if !(low.is_finite() && high.is_finite()) || high < 0.0 || low >= major as f64 {
+            return;
+        }
+        (low.max(0.0) as usize, (high as usize).min(major - 1))
+    };
+    let mut v0 = slope * first as f64 + q;
+    for j in first..=last {
+        let v1 = slope * (j + 1) as f64 + q;
+        let (low, high) = (v0.min(v1) - slack, v0.max(v1) + slack);
+        v0 = v1;
+        if high < 0.0 || low >= height {
+            continue;
+        }
+        run(j, low.max(0.0).floor() as usize, high.min(height - 1.0).floor() as usize);
     }
 }
 
@@ -810,5 +855,72 @@ mod tests {
         assert_eq!(matches, vec![[0, 0], [1, 1], [3, 3]]);
         let (matches, _) = selected(&bests, 4, 4, &o, usize::MAX);
         assert_eq!(matches.len(), 4);
+    }
+
+    /// Points spread over a photo of 6000 x 4000 pixels, a few far outside it, and lines at every
+    /// angle, through it, along its edges and past it.
+    fn random_points_and_lines(seed: u64, n_points: usize, n_lines: usize) -> (Vec<[f64; 2]>, Vec<[f64; 3]>) {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut points: Vec<[f64; 2]> = (0..n_points).map(|_| [6000.0 * next(), 4000.0 * next()]).collect();
+        for k in 0..n_points / 500 {
+            points[k * 499] = [-3000.0 + 12000.0 * next(), -2000.0 + 8000.0 * next()];
+        }
+        let lines = (0..n_lines)
+            .map(|_| {
+                let angle = std::f64::consts::PI * next();
+                let (a, b) = (angle.cos(), angle.sin());
+                // through a point of a box larger than the photo, so that some lines miss it
+                let (x, y) = (-2000.0 + 10000.0 * next(), -2000.0 + 8000.0 * next());
+                [a, b, -(a * x + b * y)]
+            })
+            .collect();
+        (points, lines)
+    }
+
+    #[test]
+    fn the_band_walk_finds_what_a_scan_of_every_point_finds() {
+        for (seed, cell, e) in [(1u64, 16.0, 4.0), (2, 8.0, 1.0), (3, 40.0, 10.0)] {
+            let (points, mut lines) = random_points_and_lines(seed, 5000, 300);
+            // and the axes, exactly horizontal and vertical, on and between the cells
+            lines.extend([[0.0, 1.0, -1000.0], [1.0, 0.0, -2048.0], [0.0, -1.0, 16.0], [-1.0, 0.0, 5999.5]]);
+            let grid = Grid::new(&points, cell);
+            for l in lines {
+                let mut got = Vec::new();
+                grid.along(l, e, &points, |i| got.push(i));
+                let count = got.len();
+                got.sort_unstable();
+                got.dedup();
+                assert_eq!(got.len(), count, "line {l:?}: a point twice");
+                let want: Vec<u32> = (0..points.len() as u32)
+                    .filter(|&i| (l[0] * points[i as usize][0] + l[1] * points[i as usize][1] + l[2]).abs() <= e)
+                    .collect();
+                assert_eq!(got, want, "seed {seed}, line {l:?}");
+            }
+        }
+    }
+
+    /// A timing probe, not a check (`cargo test --release -p ppg_engine --lib band_walk -- --ignored
+    /// --nocapture`): the band walk of 25,000 lines over 25,000 points of a 6000 x 4000 photo with
+    /// the cells and band of COLMAP's 4 px.
+    #[test]
+    #[ignore]
+    fn timing_of_the_band_walk() {
+        let (points, lines) = random_points_and_lines(9, 25000, 25000);
+        let grid = Grid::new(&points, cell_side(4.0));
+        let mut best = f64::INFINITY;
+        let mut found = 0;
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            found = 0;
+            for &l in &lines {
+                grid.along(l, 4.0, &points, |_| found += 1);
+            }
+            best = best.min(start.elapsed().as_secs_f64());
+        }
+        println!("band walk: {:.1} ms for {} lines, {found} points found", best * 1e3, lines.len());
     }
 }
