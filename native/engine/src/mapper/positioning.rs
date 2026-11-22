@@ -21,13 +21,16 @@
 //! 2. The averaged rotations live in a frame of their own, turned onto the frame of the positions
 //!    by the rotation `Q` that best takes the directions between the photos of the verified pairs
 //!    with parallax (the translation of the pair, put in the averaged frame) onto the directions
-//!    between their positions, over the pairs whose baseline is at least `BASELINE_SIGMAS` times
-//!    the accuracy of the two positions along it: Horn's closed form in iteratively reweighted
-//!    least squares with the Huber weights of `FRAME_HUBER_DEG` on the angle. With fewer than
-//!    `MIN_FRAME_PAIRS` such pairs, directions that span little more than a line (`MIN_SPREAD`),
-//!    or a median angle left above `MAX_FRAME_RESIDUAL_DEG` (baselines whose directions are the
-//!    noise of the positions), the baselines cannot orient the block: the result is the block of
-//!    step 1 on the positions (`Frame::Similarity`).
+//!    between their positions: Horn's closed form in iteratively reweighted least squares with the
+//!    Huber weights of `FRAME_HUBER_DEG` on the angle (ruling R11). When the positions spread
+//!    little across the block (twice the square root of the second eigenvalue of the covariance of
+//!    their horizontal coordinates below `POSITION_SPREAD_SIGMAS` times the median of their
+//!    recorded horizontal accuracy), with fewer than `MIN_FRAME_PAIRS` pairs, directions that span
+//!    little more than a line (`MIN_SPREAD`), or a median angle left above
+//!    `MAX_FRAME_RESIDUAL_DEG` (baselines whose directions are the noise of the positions), the
+//!    positions cannot orient the block: the result is the block of step 1 on the positions
+//!    (`Frame::Similarity`). No baseline is measured on the block of the rays alone: on a ring
+//!    that drifts it shrinks.
 //! 3. The centres start where the similarity of step 1 put them (a photo it did not place, on its
 //!    position), the selected tracks are triangulated from them with the rotations `Q R` and go
 //!    through `triangulate::filter` (the reprojection left out: the start is only as good as the
@@ -52,7 +55,7 @@
 //! Everything runs in a fixed order and the solver sums in a fixed order: two runs give the same
 //! bits.
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
 
 use super::graph::{check_cameras, ViewGraph};
 use super::input::Input;
@@ -73,9 +76,10 @@ pub const MIN_VIEWS: usize = 3;
 /// with `SEED` (GLOMAP's seed).
 pub const RANDOM_EXTENT: f64 = 100.0;
 pub const SEED: u64 = 1;
-/// A pair orients the frame when its baseline between the positions is at least this many times
-/// `sqrt(sa^2 + sb^2)`, the accuracies of its two positions along the baseline.
-pub const BASELINE_SIGMAS: f64 = 4.0;
+/// The positions orient the frame when twice the square root of the second eigenvalue of the
+/// covariance of their horizontal coordinates is at least this many times the median of their
+/// recorded horizontal accuracy.
+pub const POSITION_SPREAD_SIGMAS: f64 = 10.0;
 /// The fewest pairs that orient the frame, and the smallest ratio of the second singular value of
 /// the scatter of their directions to the first.
 pub const MIN_FRAME_PAIRS: usize = 10;
@@ -579,8 +583,29 @@ fn turn_onto_positions(
     rotations: &Rotations,
     fix_of: &[Option<usize>],
     g: &Gnss,
-    placed: &[Option<[f64; 3]>],
 ) -> Option<(Matrix3<f64>, f64)> {
+    // the positions orient the block when they spread across it, not only along it: twice the
+    // square root of the second eigenvalue of the covariance of their horizontal coordinates at
+    // least `POSITION_SPREAD_SIGMAS` times the median of their recorded horizontal accuracy
+    let used: Vec<usize> = fix_of.iter().flatten().copied().collect();
+    if used.len() < 3 {
+        return None;
+    }
+    let m = used.len() as f64;
+    let mean = used.iter().map(|&k| Vector2::new(g.xyz[k][0], g.xyz[k][1])).sum::<Vector2<f64>>() / m;
+    let cov: Matrix2<f64> = used
+        .iter()
+        .map(|&k| {
+            let d = Vector2::new(g.xyz[k][0], g.xyz[k][1]) - mean;
+            d * d.transpose()
+        })
+        .sum::<Matrix2<f64>>()
+        / m;
+    let second = cov.symmetric_eigen().eigenvalues.min().max(0.0);
+    let mut sigma_h: Vec<f64> = used.iter().map(|&k| g.sigma[k][0].max(g.sigma[k][1])).collect();
+    if !(2.0 * second.sqrt() >= POSITION_SPREAD_SIGMAS * median(&mut sigma_h)) {
+        return None;
+    }
     let mut pairs: Vec<(Vector3<f64>, Vector3<f64>)> = Vec::new();
     for (k, e) in graph.edges.iter().enumerate() {
         if !e.parallax || rotations.dropped.binary_search(&k).is_ok() {
@@ -596,21 +621,10 @@ fn turn_onto_positions(
         let d = -(matrix(wb) * Vector3::from(e.translation));
         let baseline = Vector3::from(g.xyz[*fb]) - Vector3::from(g.xyz[*fa]);
         let length = baseline.norm();
-        // the length tested is the one of the block of the rays put on the positions: the noise of
-        // the positions lengthens their own baselines and would let short pairs through
-        let (Some(Some(pa)), Some(Some(pb))) = (placed.get(e.a), placed.get(e.b)) else {
-            continue;
-        };
-        let block_length = (Vector3::from(*pb) - Vector3::from(*pa)).norm();
         if !(d.norm() > 0.0 && length > 0.0) {
             continue;
         }
-        let u = baseline / length;
-        let along = |s: &[f64; 3]| (0..3).map(|a| (u[a] * s[a]).powi(2)).sum::<f64>();
-        if block_length < BASELINE_SIGMAS * (along(&g.sigma[*fa]) + along(&g.sigma[*fb])).sqrt() {
-            continue;
-        }
-        pairs.push((d.normalize(), u));
+        pairs.push((d.normalize(), baseline / length));
     }
     if pairs.len() < MIN_FRAME_PAIRS {
         return None;
@@ -821,7 +835,7 @@ pub fn position(
             xyz[a] -= b[a];
         }
     }
-    let Some((q, residual_deg)) = turn_onto_positions(graph, rotations, &fix_of, &corrected, &on_positions.centres)
+    let Some((q, residual_deg)) = turn_onto_positions(graph, rotations, &fix_of, &corrected)
     else {
         return Ok(on_positions);
     };
