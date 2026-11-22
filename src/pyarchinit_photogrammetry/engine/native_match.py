@@ -212,6 +212,21 @@ def _kernels():
     return k
 
 
+def core_unavailable() -> str | None:
+    """Why the native core cannot do the matching on this computer, or None: missing, switched off
+    (``PPG_NATIVE=0``) or below the API of the native matching - the reasons of :func:`cannot_run` that are of the
+    installation, not of the request (``auto`` says them in the log)."""
+    if not _native.enabled():
+        return "the native core is switched off (PPG_NATIVE=0)"
+    if _native.native_match_kernels() is None:
+        api = _native.api()  # None without the core
+        if api is None:
+            return "the native core (ppg_core) is not installed"
+        return (f"the native core {_native.version()} (API {api}) has no native matching: API "
+                f"{_native.NATIVE_MATCH_API} is needed")
+    return None
+
+
 def cannot_run(chunk: Chunk, matcher: str, reset: bool) -> str | None:
     """Why the native step cannot do the matching of ``chunk``, or None when nothing keeps it: the native core
     missing, switched off (``PPG_NATIVE=0``) or below API 13; a learned ``matcher``; rigs of 360-degree photos;
@@ -221,14 +236,9 @@ def cannot_run(chunk: Chunk, matcher: str, reset: bool) -> str | None:
     the step says so itself, whichever engine runs it."""
     from . import nodes, panorama
 
-    if not _native.enabled():
-        return "the native core is switched off (PPG_NATIVE=0)"
-    if _native.native_match_kernels() is None:
-        api = _native.api()  # None without the core
-        if api is None:
-            return "the native core (ppg_core) is not installed"
-        return (f"the native core {_native.version()} (API {api}) has no native matching: API "
-                f"{_native.NATIVE_MATCH_API} is needed")
+    reason = core_unavailable()
+    if reason is not None:
+        return reason
     if matcher != "sift":
         return f"learned matcher '{matcher}': the native engine matches SIFT points only"
     try:

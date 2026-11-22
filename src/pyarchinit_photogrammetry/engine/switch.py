@@ -87,15 +87,16 @@ def fall_back(choice: Choice, reason: str) -> Choice:
     return Choice(choice.requested, "classic", reason)
 
 
-def decline(choice: Choice, reason: str) -> Choice:
+def decline(choice: Choice, reason: str, notice: bool = False) -> Choice:
     """The choice of a step whose request the native engine does not take, for ``reason`` (the native core missing or
     switched off, a learned matcher, rigs...): under ``native`` a fallback (:func:`fall_back`: the reason recorded and
     one WARNING line); under ``auto`` the classic engine is the program's choice, as it is for a step not yet in
-    :data:`AUTO_NATIVE_STEPS` - no fallback in the record and no line in the log above DEBUG. The choice given is not
-    changed."""
+    :data:`AUTO_NATIVE_STEPS` - no fallback in the record, and one INFO line when ``notice`` (a reason of the
+    installation: the native core missing, switched off or too old, which the user can mend), else a DEBUG line. The
+    choice given is not changed."""
     if choice.requested != "auto":
         return fall_back(choice, reason)
-    log.debug("engine 'auto': classic used (%s)", reason)
+    log.log(logging.INFO if notice else logging.DEBUG, "engine 'auto': classic used (%s)", reason)
     return Choice(choice.requested, "classic", None)
 
 

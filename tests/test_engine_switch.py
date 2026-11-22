@@ -47,6 +47,7 @@ def idle_engine(monkeypatch):
 
     monkeypatch.setattr(native_match, "match_photos", match_photos)
     monkeypatch.setattr(native_match, "cannot_run", lambda chunk, matcher, reset: ran.reason)
+    monkeypatch.setattr(native_match, "core_unavailable", lambda: None)  # the reasons of a request, not of the core
 
     def align_cameras(chunk, **kwargs):
         ran.append("align_cameras")
@@ -366,7 +367,8 @@ def test_the_matching_runs_the_native_step_or_falls_back(monkeypatch, idle_engin
     than a cancel or a full disk, gives the classic step the same arguments and the record keeps the reason; a cancel
     and a full disk come out as they are, nothing recorded. ``auto`` runs the native step as ``native`` does (the
     matching passed its gate), except that a request the native engine does not take goes to the classic step as the
-    program's choice, without a reason or a line in the log; ``classic`` never asks the native step."""
+    program's choice, without a reason - and without a line in the log, but for one INFO line when the native core is
+    missing, switched off or too old; ``classic`` never asks the native step."""
     import errno
 
     from pyarchinit_photogrammetry.core.progress import Cancelled
@@ -447,11 +449,21 @@ def test_the_matching_runs_the_native_step_or_falls_back(monkeypatch, idle_engin
     assert chunk.meta["engine"]["match_photos"] == {"requested": "auto", "used": "classic", "fallback": None}
     assert not caplog.records
     assert len(native_calls) == 8 and idle_engine == ["match_photos"] * 5
+    # the native core missing, switched off or too old: the same choice, said in one INFO line (the user can mend it)
+    core = "the native core (ppg_core) is not installed"
+    reason["value"] = core
+    monkeypatch.setattr(native_match, "core_unavailable", lambda: core)
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        chunk.match_photos()
+    assert chunk.meta["engine"]["match_photos"] == {"requested": "auto", "used": "classic", "fallback": None}
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [("INFO", f"engine 'auto': classic used ({core})")]
+    assert len(native_calls) == 8 and idle_engine == ["match_photos"] * 6
     # classic never asks the native step
     reason["value"] = None
     chunk.match_photos(engine="classic")
     assert chunk.meta["engine"]["match_photos"] == {"requested": "classic", "used": "classic", "fallback": None}
-    assert len(native_calls) == 8 and idle_engine == ["match_photos"] * 6
+    assert len(native_calls) == 8 and idle_engine == ["match_photos"] * 7
 
 
 def test_the_engine_is_the_last_argument_and_by_keyword_only():
