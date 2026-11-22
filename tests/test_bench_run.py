@@ -113,6 +113,8 @@ import pyarchinit_photogrammetry as ppg
 doc = ppg.Document()
 doc.add_chunk("Chunk 1")
 doc.save(work / "project.ppg")
+for step in set(job.get("after") or []) & {"match_photos", "align_cameras"}:  # the steps it ran
+    (work / f"project.after-{step}.ppg").write_bytes((work / "project.ppg").read_bytes())
 write([entry("match_photos"), entry("align_cameras")],
       {"quality": "/leak/y" if mode == "leaks" else "high", "pycolmap": "0.0", "mapper": "incremental"},
       {"cameras": len(job["photos"]), "aligned": len(job["photos"])})
@@ -170,7 +172,7 @@ def stub_chunk(calls: list, saves: list, gps: bool = False, scalebars: bool = Fa
             return report if step == "update_transform" else None
         return run
 
-    for step in steps.ALL_STEPS:
+    for step in steps.ALL_STEPS + ("optimize_cameras",):
         setattr(chunk, step, method(step))
     return chunk
 
@@ -456,7 +458,10 @@ def test_the_chain_of_all_is_the_one_of_ppg_process():
     assert steps.ALL_STEPS[:len(steps.ALIGN_STEPS)] == steps.ALIGN_STEPS
     # match: the matching alone (the time gate of the native matching on a large set, without the mapper); the
     # markers before it, when the job names targets, as in the two other chains
-    assert steps.CHAINS == {"align": steps.ALIGN_STEPS, "all": steps.ALL_STEPS, "match": steps.MATCH_STEPS}
+    # optimize: the chain of align and the optimization of the cameras after it, with the defaults of ppg optimize
+    assert steps.CHAINS == {"align": steps.ALIGN_STEPS, "all": steps.ALL_STEPS, "match": steps.MATCH_STEPS,
+                            "optimize": steps.ALIGN_STEPS + ("optimize_cameras",)}
+    assert steps.CHAINS["optimize"][-1] == "optimize_cameras" and steps.ARGUMENTS["optimize_cameras"] == {}
     assert steps.MATCH_STEPS == ("detect_markers", "match_photos") == steps.ALIGN_STEPS[:2]
     # the engines ``run`` chooses from (--engine), the first its default: those of the switch, whose default is auto
     assert steps.ENGINES == switch.ENGINES == ("auto", "classic", "native") and steps.ENGINES[0] == "auto"
@@ -476,7 +481,8 @@ def test_the_arguments_of_the_steps_are_the_defaults_of_today():
     assert process["quality"].default == steps.ARGUMENTS["match_photos"]["quality"]
     assert process["dense_quality"].default == steps.ARGUMENTS["build_depth_maps"]["quality"]
     assert process["surface"].default.default == steps.ARGUMENTS["build_model"]["surface"]  # a typer option
-    assert set(steps.ARGUMENTS) == set(steps.ALL_STEPS) - {"detect_markers", "import_reference"}
+    assert set(steps.ARGUMENTS) == set(steps.ALL_STEPS + ("optimize_cameras",)) - {"detect_markers",
+                                                                                    "import_reference"}
     # the three settings of the matcher are read from the signature of the native matcher, never written out; today
     # they are 0.8, 0.7 and True (_native.py): a change there is a change of what the bench measures
     params = inspect.signature(_native.gpu_match).parameters
@@ -622,6 +628,141 @@ def test_the_verified_pairs_are_noted_after_the_matching_from_the_database_of_th
     result = steps.Result(tmp_path / "result.json")
     assert steps.run_chain(stub_chunk(calls, [], data_dir=data_dir), job, result) is True
     assert result.data["results"] == {"verified_pairs": 2, "cameras": 1, "aligned": 1}
+
+
+def a_marker(label: str, code: int | None = None):
+    return types.SimpleNamespace(label=label, code=code, checkpoint=False)
+
+
+def test_the_check_markers_of_the_job_are_set_right_after_the_reference(tmp_path, monkeypatch):
+    """``check: [labels]``: those markers (by label, or by code as the reference file names them) become check
+    points right after ``import_reference``, so the georeferencing and the optimization leave them out."""
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    calls, seen = [], {}
+    chunk = stub_chunk(calls, [], report=REPORT)
+    chunk.markers = [a_marker("target 1", 1), a_marker("target 2", 2), a_marker("C")]
+    real = steps.call
+
+    def call(chunk_, step, job):
+        if step == "update_transform":
+            seen.update({m.label: m.checkpoint for m in chunk_.markers})
+        return real(chunk_, step, job)
+
+    monkeypatch.setattr(steps, "call", call)
+    job = {"steps": "align", "targets": None, "reference": "/data/gcp.csv", "crs": None, "check": ["1", "C"]}
+    assert steps.run_chain(chunk, job, steps.Result(tmp_path / "result.json")) is True
+    assert seen == {"target 1": True, "target 2": False, "C": True}
+    # a label the chunk does not have is an error of the step of the reference: the check would be missing
+    chunk.markers = [a_marker("target 1", 1)]
+    result = steps.Result(tmp_path / "missing.json")
+    assert steps.run_chain(chunk, {**job, "check": ["7"]}, result) is False
+    assert result.data["error"].startswith("import_reference: ValueError")
+
+
+def test_the_hook_after_a_step_adds_its_numbers_to_the_results(tmp_path, monkeypatch):
+    """A job key ``after: {step: callable}`` (in-process): the callable gets the document right after that step
+    and its numbers land in the results; an error in it is an error of the step."""
+    from pyarchinit_photogrammetry.markers import gcp
+
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {})
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    calls, order = [], []
+    chunk = stub_chunk(calls, [], report=REPORT)
+    chunk.markers = []
+
+    def shape(doc):
+        order.append([c[0] for c in calls])
+        return {"truth_target_shape": 0.001, "truth_targets": 12}
+
+    job = {"steps": "optimize", "targets": None, "reference": "/data/gcp.csv", "crs": None,
+           "after": {"update_transform": shape}}
+    result = steps.Result(tmp_path / "result.json")
+    assert steps.run_chain(chunk, job, result) is True
+    assert order == [["match_photos", "align_cameras", "import_reference", "update_transform"]]
+    assert calls[-1] == ("optimize_cameras", (), {})  # the defaults of ppg optimize, no engine of the switch
+    assert result.data["results"]["truth_target_shape"] == 0.001 and result.data["results"]["truth_targets"] == 12
+    job["after"] = {"align_cameras": lambda doc: {"label": "a word"}}
+    result = steps.Result(tmp_path / "word.json")
+    assert steps.run_chain(stub_chunk([], [], report=REPORT), job, result) is False
+    assert result.data["error"].startswith("align_cameras: TypeError")
+
+
+def test_the_errors_after_the_optimization_are_noted(tmp_path, monkeypatch):
+    """After ``optimize_cameras`` the results gain ``optimized_control_rmse`` and ``optimized_check_rmse``: the
+    errors of the markers the chunk reports then, as :func:`steps.georeferencing_results` reads them."""
+    from pyarchinit_photogrammetry.markers import gcp
+
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {})
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    rows = [{"label": "a", "type": "control", "error": 0.003}, {"label": "b", "type": "control", "error": 0.004},
+            {"label": "c", "type": "check", "error": 0.006}, {"label": "d", "type": "check", "error": None}]
+    monkeypatch.setattr(gcp, "marker_errors", lambda chunk: rows)
+    chunk = stub_chunk([], [], report=REPORT)
+    chunk.markers = []
+    job = {"steps": "optimize", "targets": None, "reference": "/data/gcp.csv", "crs": None}
+    result = steps.Result(tmp_path / "result.json")
+    assert steps.run_chain(chunk, job, result) is True
+    res = result.data["results"]
+    assert res["optimized_control_rmse"] == pytest.approx(np.sqrt((0.003 ** 2 + 0.004 ** 2) / 2))
+    assert res["optimized_check_rmse"] == pytest.approx(0.006)
+    assert res["control_rmse"] == 0.002  # the georeferencing before it stays
+
+
+def test_check_and_after_reach_the_child_and_the_hook_runs_on_the_project_of_its_step(tmp_path, stand_in):
+    """``runner.run(check_points=..., after=...)``: the check labels go to the child in the job; the hooks stay in
+    this process (never written to the job): the job names their steps, the child keeps the project as it was right
+    after each of them, and the hook runs on that project when the run ended, its numbers in the results."""
+    photos = noise_photos(tmp_path / "photos")
+    seen = []
+
+    def hook(doc):
+        seen.append(doc)
+        return {"truth_target_shape": 0.002}
+
+    r = the_record(tmp_path / "o", runner.run(photos, tmp_path / "o", name="t", keep=True, check_points=("1", "3"),
+                                              after={"align_cameras": hook}))
+    job = json.loads((tmp_path / "o" / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["check"] == ["1", "3"] and job["after"] == ["align_cameras"]
+    assert r["results"]["truth_target_shape"] == 0.002 and r["valid"] is True
+    assert len(seen) == 1 and len(seen[0].chunks) == 1
+    # a hook whose step left no project (the child did not reach it) is an error of the results
+    r = the_record(tmp_path / "n", runner.run(photos, tmp_path / "n", name="t", after={"update_transform": hook}))
+    assert r["results"]["error"].startswith("extra_results: ") and r["valid"] is False
+
+
+def test_the_weak_ring_is_a_set_of_the_cli_and_its_options_are_checked(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.testing import synthetic
+
+    pytest.importorskip("psutil")
+    monkeypatch.setattr(runner, "run", lambda *a, **k: pytest.fail("the runner must not start"))
+    monkeypatch.setattr(synthetic, "write_weak_ring_dataset", lambda *a, **k: pytest.fail("nothing is rendered"))
+    invoke = lambda *args: CliRunner().invoke(cli.app, ["bench", "synthetic", *args])  # noqa: E731
+    result = invoke("weak-ring", str(tmp_path / "a"), "--mapper", "bogus")
+    assert result.exit_code == 2 and "--mapper" in result.output
+    result = invoke("weak-ring", str(tmp_path / "a"), "--steps", "all")
+    assert result.exit_code == 2 and "--steps" in result.output
+    result = invoke("trench", str(tmp_path / "a"), "--mapper", "bogus")
+    assert result.exit_code == 2
+    calls = []
+    monkeypatch.setattr(runner, "run", lambda *a, **k: calls.append((a, k)) or [])
+
+    def write(out_dir, **kwargs):
+        (Path(out_dir) / "photos").mkdir(parents=True)
+        (Path(out_dir) / "photos" / "WRING_0000.jpg").write_bytes(b"")
+        return types.SimpleNamespace(crs="EPSG:3004", targets={}, cameras=[{"label": "WRING_0000"}], diameter=60.0)
+
+    monkeypatch.setattr(synthetic, "write_weak_ring_dataset", write)
+    result = invoke("weak-ring", str(tmp_path / "a"), "--steps", "optimize", "--mapper", "global", "--repeat", "1")
+    assert result.exit_code == 0, result.output
+    (photos, out, name), kwargs = calls[-1]
+    assert name == "synthetic-weak-ring" and photos == tmp_path / "a" / "synthetic-weak-ring-set" / "photos"
+    assert kwargs["steps"] == "optimize" and kwargs["mapper"] == "global" and kwargs["repeat"] == 1
+    assert kwargs["targets"] == steps.DEFAULT_TARGETS and kwargs["crs"] == "EPSG:3004"
+    assert kwargs["reference"] == tmp_path / "a" / "synthetic-weak-ring-set" / "gcp.csv"
+    assert kwargs["check_points"] == ("1", "3", "5", "7", "9", "11")
+    assert list(kwargs["after"]) == ["update_transform"] and callable(kwargs["extra_results"])
 
 
 def test_an_error_after_a_step_is_recorded_like_an_error_of_the_step(tmp_path, monkeypatch):

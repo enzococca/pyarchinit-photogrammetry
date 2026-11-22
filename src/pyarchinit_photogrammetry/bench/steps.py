@@ -2,13 +2,15 @@
 
     python -m pyarchinit_photogrammetry.bench.steps <job.json>
 
-The job names the local photos, the work folder, the chain (``align``, ``all`` or ``match``, :data:`CHAINS`), the
+The job names the local photos, the work folder, the chain (``align``, ``all``, ``match`` or ``optimize``,
+:data:`CHAINS`), the
 mapper of the alignment (one of :data:`MAPPERS`), the engine of the matching (one of :data:`ENGINES`; the alignment
 and the depth maps run classic whatever the job asks: the bench measures the matching) and, when the set has them,
-the targets to detect and the reference to import. The child makes a project in the work folder, adds the photos and
-runs public methods of :class:`..core.chunk.Chunk` only, in the order ``ppg process`` runs them (:data:`ALL_STEPS`; a
-test keeps the two equal) with the defaults of today written out (:data:`ARGUMENTS`), so that a record says what
-ran. It rewrites ``result.json`` when a step starts and when it ends,
+the targets to detect, the reference to import and the labels of its markers that are check points (``check``), and
+the steps after which the project is kept as it was (``after``: :func:`snapshot_hooks`). The child makes a project
+in the work folder, adds the photos and runs public methods of :class:`..core.chunk.Chunk` only, in the order
+``ppg process`` runs them (:data:`ALL_STEPS`; a test keeps the two equal) with the defaults of today written out
+(:data:`ARGUMENTS`), so that a record says what ran. It rewrites ``result.json`` when a step starts and when it ends,
 so that a child that dies leaves the step it died in: the seconds of each step as the child measures them around it,
 the higher of its resident memory at the start and at the end (the parent's samples can only raise it), the stages and
 the engine the chunk recorded, the counts of the photo cache when the step has them; a step that fails is listed with
@@ -17,9 +19,11 @@ results (numbers only) follow the steps.
 """
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -54,15 +58,18 @@ MAPPERS = ("auto", "incremental", "global")
 _REPLACE_TRIES = 5
 ALL_STEPS = ALIGN_STEPS + ("build_depth_maps", "build_point_cloud", "build_model", "build_texture", "build_dem",
                            "build_orthomosaic")
-CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS, "match": MATCH_STEPS}
+# the steps of ``optimize``: the chain of align and the optimization of the cameras after it (the weak ring measures
+# the control and check errors after it, ``optimized_control_rmse`` and ``optimized_check_rmse``)
+OPTIMIZE_STEPS = ALIGN_STEPS + ("optimize_cameras",)
+CHAINS = {"align": ALIGN_STEPS, "all": ALL_STEPS, "match": MATCH_STEPS, "optimize": OPTIMIZE_STEPS}
 # the arguments of the steps beside what the job gives (the targets, the reference, the mapper, the engine): the
 # defaults of ppg process and of the methods of Chunk today, written out so that a record says what ran even after a
-# default changes (a test compares them with the signatures)
+# default changes (a test compares them with the signatures); optimize_cameras with the defaults of ppg optimize
 ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000,
                               "pair_selection": "auto"},
              "align_cameras": {}, "update_transform": {}, "build_depth_maps": {"quality": "medium"},
              "build_point_cloud": {}, "build_model": {"surface": "arbitrary"}, "build_texture": {}, "build_dem": {},
-             "build_orthomosaic": {}}
+             "build_orthomosaic": {}, "optimize_cameras": {}}
 # the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. "engine", "features" and
 # "routes" are the native matching's (its record names the engine, where the features were found and the routes the
 # pairs took; the classic record names no engine and no routes): facts of the run, not settings, for the table
@@ -73,6 +80,8 @@ SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", 
                 "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band")
 MATCH_SETTINGS = ("max_ratio", "max_distance", "cross_check")
 PROJECT = "project.ppg"
+# the project as it was right after a step the job names in ``after`` (:func:`snapshot_hooks`), in the work folder
+SNAPSHOT = "project.after-{step}.ppg"
 RESULT = "result.json"
 CHUNK_LABEL = "Chunk 1"
 
@@ -171,6 +180,56 @@ def georeferencing_results(chunk, report: dict) -> dict:
     return results
 
 
+def optimization_results(chunk) -> dict:
+    """``optimized_control_rmse`` and ``optimized_check_rmse`` after ``optimize_cameras``: the errors of the control
+    and check markers the chunk reports then (:func:`..markers.gcp.marker_errors`), as
+    :func:`georeferencing_results` reads them from the report of ``update_transform``; each left out when no marker
+    of its kind has an error."""
+    from ..markers import gcp
+
+    rows = gcp.marker_errors(chunk)
+    results = {}
+    for kind in ("control", "check"):
+        errors = [r["error"] for r in rows if r["type"] == kind and r["error"] is not None]
+        if errors:
+            results[f"optimized_{kind}_rmse"] = float(np.sqrt(np.mean(np.square(errors))))
+    return results
+
+
+def set_check(chunk, labels) -> None:
+    """The markers of ``labels`` made check points (the others keep their flag): each found by its label, else by
+    its code, as the reference file names it (:func:`..markers.gcp.import_reference`). A ValueError when one is not
+    in the chunk: the run would measure without that check point."""
+    from ..markers import gcp
+
+    for label in labels or ():
+        marker = gcp._find_marker(chunk, str(label))
+        if marker is None:
+            raise ValueError(f"no marker {label} for the check points")
+        marker.checkpoint = True
+
+
+def numbers(values, source: str) -> dict:
+    """``values`` (a dict a hook gave) when every value is a number, else a TypeError naming the key and
+    ``source``."""
+    values = dict(values)
+    for key, value in values.items():
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"{source} gave {key!r} that is not a number")
+    return values
+
+
+def snapshot_hooks(work: Path, names) -> dict:
+    """The hooks of the child for the steps ``names`` a job lists in ``after``: each keeps the saved project as it is
+    right after its step (:data:`SNAPSHOT` in ``work``) and adds nothing to the results. The parent's own hooks
+    (:func:`.runner.run`, ``after``: never written to the job) run on those projects when the run ends."""
+    def keep(step: str, doc) -> dict:
+        shutil.copyfile(work / PROJECT, work / SNAPSHOT.format(step=step))
+        return {}
+
+    return {str(step): functools.partial(keep, str(step)) for step in names or ()}
+
+
 def _rss_mb() -> float:
     """The resident memory of this process, in MiB (written ``mb``, as the memory of the machine is ``gb``)."""
     import psutil
@@ -247,6 +306,8 @@ class Result:
         elif step == "update_transform":
             self.data["results"].update(georeferencing_results(chunk, value))
             self.data["settings"]["georeferencing"] = value.get("method")
+        elif step == "optimize_cameras":
+            self.data["results"].update(optimization_results(chunk))
         self.save()
 
 
@@ -285,14 +346,21 @@ def call(chunk, step: str, job: dict):
 
 def run_chain(chunk, job: dict, result: Result) -> bool:
     """The chain of the job on ``chunk``, each step written to ``result`` as it starts and ends and the project saved
-    after it; False at the first step that raises (its error in the result), True when the chain ran to its end."""
+    after it; False at the first step that raises (its error in the result), True when the chain ran to its end.
+    Right after ``import_reference`` the markers of ``job["check"]`` become check points (:func:`set_check`; a
+    label the chunk lacks is an error of that step). ``job["after"]`` maps a step to a callable that gets the
+    document once the step is noted and saved and returns numbers for the results (in-process; in the child the
+    hooks of :func:`snapshot_hooks`); what goes wrong in it is an error of the step."""
     imported = False
+    hooks = job.get("after") or {}
     for step in CHAINS[job["steps"]]:
         if not wanted(step, job, chunk, imported):
             continue
         entry, clock = result.start(step)
         try:
             value = call(chunk, step, job)
+            if step == "import_reference":
+                set_check(chunk, job.get("check"))
         except BaseException as exc:
             result.end(entry, clock, chunk, error=exc)
             return False
@@ -301,6 +369,9 @@ def run_chain(chunk, job: dict, result: Result) -> bool:
         try:
             result.note(step, chunk, value)
             chunk.document.save()
+            if step in hooks:
+                result.data["results"].update(numbers(hooks[step](chunk.document), f"the hook after {step}"))
+                result.save()
         except Exception as exc:  # the step is done, its record is not: said like an error of the step
             result.failed(entry, exc)
             return False
@@ -327,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         result.save()
         return 1
     result = Result(work / RESULT)
+    job["after"] = snapshot_hooks(work, job.get("after"))  # names of steps in the job: the hooks of the child
     try:
         doc = Document()
         chunk = doc.add_chunk(CHUNK_LABEL)

@@ -23,7 +23,9 @@ bench_app = typer.Typer(help="The bench: a version of the program measured on a 
                              "child process, their memory, their results, one record per run -, on the synthetic sets "
                              "with the errors against their truth, and the table of a folder of records")
 
-SETS = ("trench", "ring")
+SETS = ("trench", "ring", "weak-ring")
+# the chains --steps chooses from for the weak ring, the first its default (the other sets have their own chain)
+WEAK_RING_STEPS = ("align", "optimize")
 STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the photos carry a GPS position), all "
               "(the default targets detected first; then depth maps, dense cloud, model, texture, DEM, orthophoto) "
               "or match (the matching alone, without the mapper: the time of the native matching against the "
@@ -68,7 +70,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
 
 
 @bench_app.command("synthetic")
-def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
+def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-ring"),
                     out: Path = typer.Argument(..., help="the folder of the set (OUT/synthetic-<set>-set, which must "
                                                          "not exist yet), of the work folders and, without "
                                                          "--records, of the records"),
@@ -77,6 +79,11 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
                                                                     "runs: the project of a kept run is what ppg "
                                                                     "bench adjust and ppg bench pairs take"),
                     engine: str = typer.Option("auto", "--engine", help=ENGINE_HELP),
+                    mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
+                    steps: Optional[str] = typer.Option(None, "--steps", help="weak-ring only: align (the default) or "
+                                                                              "optimize (align, then the optimization "
+                                                                              "of the cameras with the defaults of "
+                                                                              "ppg optimize)"),
                     records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
     """A synthetic set written in a folder of its own under OUT and run as synthetic-trench or synthetic-ring, the
     errors against the truth of the set among the results (the keys that start with truth_). The set stays after
@@ -89,28 +96,49 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
     ring: 72 photos around a mound, a GPS position in the EXIF of each, the steps of align with its targets detected,
     georeferenced by the positions of the photos; truth_target_rmse (over truth_targets targets found),
     truth_camera_rmse, truth_camera_height_mean (estimated minus true) and truth_camera_height_rmse against the true
-    targets and poses of the scene."""
+    targets and poses of the scene.
+
+    weak-ring: 80 nadir photos along one closed circular strip 60 m across, flown once, noisy GPS in the EXIF without
+    its accuracy, 12 targets under the strip; its targets detected and its gcp.csv imported, the odd codes check
+    points. truth_target_shape (and _rmse): the largest (the RMS) residual of the triangulated targets after one
+    similarity, over the diameter, measured right after the georeferencing and before any optimization; with
+    --steps optimize also optimized_control_rmse and optimized_check_rmse; the errors of the ring at the end."""
     from . import runner, truth
     from . import steps as child
     from ..testing import synthetic
 
     if which not in SETS:
-        raise typer.BadParameter(f"{' or '.join(SETS)}, not {which!r}")
+        raise typer.BadParameter(f"{_choices(SETS)}, not {which!r}")
     _engine(engine)
+    if mapper not in child.MAPPERS:
+        raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
+    if steps is not None and which != "weak-ring":
+        raise typer.BadParameter(f"the chain of {which} is its own: --steps is for weak-ring", param_hint="--steps")
+    if steps is not None and steps not in WEAK_RING_STEPS:
+        raise typer.BadParameter(f"{_choices(WEAK_RING_STEPS)}, not {steps!r}", param_hint="--steps")
     out = Path(out)
     name = f"synthetic-{which}"
     set_dir = _check(_set_folder, out, name, records)
-    steps = "all" if which == "trench" else "align"
-    _, records_folder = _check(runner.check, out, name, steps, repeat, records, engine=engine)
+    chain = {"trench": "all", "ring": "align"}.get(which) or steps or WEAK_RING_STEPS[0]
+    _, records_folder = _check(runner.check, out, name, chain, repeat, records, mapper=mapper, engine=engine)
     if which == "trench":
         scene = synthetic.write_dataset(set_dir)
         kwargs = dict(reference=set_dir / "gcp.csv", crs=scene.crs, extra_results=truth.trench_truth)
-    else:
+    elif which == "ring":
         scene = synthetic.write_ring_dataset(set_dir)
         kwargs = dict(extra_results=lambda doc: truth.ring_truth(doc, scene))
+    else:
+        scene = synthetic.write_weak_ring_dataset(set_dir)
+        # the shape right after the georeferencing (before any optimization), the errors of the ring at the end
+        kwargs = dict(reference=set_dir / "gcp.csv", crs=scene.crs,
+                      check_points=tuple(str(c) for c in truth.WEAK_RING_CHECK),
+                      after={"update_transform": lambda doc: truth.ring_shape(doc, scene)},
+                      extra_results=lambda doc: truth.ring_truth(doc, scene))
+    if mapper != child.MAPPERS[0]:
+        kwargs["mapper"] = mapper
     typer.echo(f"the set is written: {len(scene.cameras)} photos")
     # the synthetic sets are stamped with the targets ppg process detects by default (testing.synthetic._stamp_target)
-    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=steps, repeat=repeat, keep=keep,
+    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=chain, repeat=repeat, keep=keep,
               records=records, targets=child.DEFAULT_TARGETS, engine=engine, **kwargs))
 
 

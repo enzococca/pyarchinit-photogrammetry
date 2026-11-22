@@ -406,9 +406,9 @@ def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_reco
         assert result.exit_code == 1 and f"error: {exc}" in result.output
 
 
-def test_synthetic_takes_trench_or_ring(tmp_path):
+def test_synthetic_takes_trench_ring_or_weak_ring(tmp_path):
     result = invoke(["synthetic", "bogus", str(tmp_path)])
-    assert result.exit_code == 2 and "trench or ring" in result.output
+    assert result.exit_code == 2 and "trench, ring or weak-ring" in result.output
 
 
 def a_writer(prefix: str):

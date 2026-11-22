@@ -62,6 +62,8 @@ class _Plan:
     targets: str | None
     reference: Path | None
     crs: str | None
+    check: tuple[str, ...] = ()
+    after: dict | None = None
 
 
 def photo_cache_mb(env: dict) -> int | None:
@@ -79,7 +81,7 @@ def photo_cache_mb(env: dict) -> int | None:
 def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 1, keep: bool = False,
         records: Path | None = None, *, mapper: str = "auto", engine: str = "auto",
         extra_results: Callable | None = None, targets: str | None = None, reference: Path | None = None,
-        crs: str | None = None, seed: int | None = None) -> list[Path]:
+        crs: str | None = None, seed: int | None = None, check_points=(), after: dict | None = None) -> list[Path]:
     """``repeat`` runs of the chain ``steps`` (``align``, ``all`` or ``match``, :data:`.steps.CHAINS`) on the photos
     of the folder ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run
     failed: then it stays with the child's log, said in the log by its name), the records written to ``records``
@@ -110,9 +112,14 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     environment is not passed on to the child: the engine of a run is the job's. ``extra_results``,
     called with the finished project (a :class:`..core.document.Document`) after the last step of a run that did not
     fail, returns a dict of numbers merged into the results; an exception in it, or a value that is not a number, is
-    kept as ``results["error"]`` and makes the record not valid, the times stay. A KeyboardInterrupt while the child
-    runs terminates it and its children, writes the record with the error ``cancelled``, removes the work folder
-    unless ``keep`` and is raised again."""
+    kept as ``results["error"]`` and makes the record not valid, the times stay. ``check_points``: the labels (or
+    codes, as the reference names them) of the markers the child makes check points right after
+    ``import_reference``, in the job under ``check``. ``after``: ``{step: callable}``, hooks of this process, never
+    written to the job: the job names their steps, the child keeps the project as it was right after each
+    (:func:`.steps.snapshot_hooks`) and, when the run did not fail, each hook gets that project (a Document) and
+    returns numbers merged into the results before those of ``extra_results``, with the same rules. A
+    KeyboardInterrupt while the child runs terminates it and its children, writes the record with the error
+    ``cancelled``, removes the work folder unless ``keep`` and is raised again."""
     from ..engine import sfm
 
     photos = Path(photos).resolve()
@@ -142,7 +149,8 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     plan = _Plan(name=name, steps=steps, mapper=mapper, engine=engine, local=local, out=out, records=records,
                  keep=keep, env=env, disk=disk, set=set_, settings=settings, private=private,
                  names=tuple(p.name for p in files), extra_results=extra_results, targets=targets,
-                 reference=reference, crs=crs)
+                 reference=reference, crs=crs, check=tuple(str(c) for c in check_points or ()),
+                 after=dict(after or {}))
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
 
 
@@ -235,7 +243,8 @@ def _one_run(plan: _Plan, index: int, run_in: Callable | None = None) -> Path:
 def _run_in(plan: _Plan, index: int, work: Path) -> Path:
     job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "mapper": plan.mapper,
            "engine": plan.engine, "targets": plan.targets,
-           "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs}
+           "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs,
+           "check": list(plan.check) or None, "after": list(plan.after or ()) or None}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
     rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}
@@ -252,7 +261,7 @@ def _run_in(plan: _Plan, index: int, work: Path) -> Path:
         _finish(rec, work, plan, index, cancelled=True, warnings=warnings)
         raise
     warnings = _collect(rec, work, peaks, plan, ended=time.time(), code=proc.returncode)
-    if rec["error"] is None and plan.extra_results is not None:
+    if rec["error"] is None and (plan.extra_results is not None or plan.after):
         _extra(rec, work, plan)
     return _finish(rec, work, plan, index, warnings=warnings)
 
@@ -366,14 +375,18 @@ def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: f
 
 
 def _extra(rec: dict, work: Path, plan: _Plan) -> None:
-    """The numbers ``extra_results`` gives for the finished project merged into the results; what goes wrong in it
-    is the error of the results."""
+    """The numbers the hooks of ``after`` give for the project as it was right after their steps, then those
+    ``extra_results`` gives for the finished project, merged into the results; what goes wrong in them (a step whose
+    project the child did not keep among them) is the error of the results."""
     try:
-        extra = dict(plan.extra_results(Document.open(work / child.PROJECT)))
-        for key, value in extra.items():
-            if not isinstance(value, (int, float)):
-                raise TypeError(f"extra_results gave {key!r} that is not a number")
-        rec["results"].update(extra)
+        for step, hook in (plan.after or {}).items():
+            snapshot = work / child.SNAPSHOT.format(step=step)
+            if not snapshot.is_file():
+                raise ValueError(f"no project after {step}: the step did not run")
+            rec["results"].update(child.numbers(hook(Document.open(snapshot)), f"the hook after {step}"))
+        if plan.extra_results is not None:
+            rec["results"].update(child.numbers(plan.extra_results(Document.open(work / child.PROJECT)),
+                                                "extra_results"))
     except Exception as exc:
         rec["results"]["error"] = record.scrub(f"extra_results: {record.describe(exc)}", plan.private, plan.names)
 
