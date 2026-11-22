@@ -102,6 +102,22 @@ the pairs, the robust similarity with a translation per flight, the solver and t
 the random start are this package's own. GLOMAP is distributed under the BSD 3-clause license
 below (after COLMAP's).
 
+The rounds of adjustment of the native mapper - native/engine/src/mapper/rounds.rs - follow the
+order of COLMAP's global mapper (src/colmap/sfm/global_mapper.cc, IterativeBundleAdjustment and
+IterativeRetriangulateAndRefine): the positioned tracks filtered at 10 times the normalised
+reprojection threshold, the threshold of the filter after each adjustment 3, 2, then 1 times it,
+every track triangulated again with the poses held, filtered at the plain threshold, adjusted once
+more and filtered again; the robust loss on the reprojection errors and its scale are those of
+pycolmap's options of that mapper. The adjustment with the positions of the photos and the biases
+of the flights, the intrinsics freed in turn, the accuracy of the positions estimated again with
+the redundancy of each (variance components after Foerstner, the trace of Hutchinson) and the
+filter between the rounds that takes observations back are this package's own. The model on disk
+- native/engine/src/mapper/model_io.rs - is written in COLMAP's binary format as
+src/colmap/scene/reconstruction_io_binary.cc writes it (rigs.bin, cameras.bin, frames.bin,
+images.bin and points3D.bin, their fields and their order), with a rig per camera and a frame per
+image as src/colmap/scene/reconstruction_io_utils.cc makes them for a model without rigs; no file
+of COLMAP is compiled into the extension.
+
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.
 
 ================================================================================
@@ -181,7 +197,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ================================================================================
 
 COLMAP's license (its file COPYING.txt) follows; it applies to
-native/engine/src/geometry/solvers.rs as explained above.
+native/engine/src/geometry/solvers.rs, ransac.rs, two_view.rs, native/engine/src/mapper/
+triangulate.rs, rounds.rs and model_io.rs as explained above.
 
 --------------------------------------------------------------------------------
 

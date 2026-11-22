@@ -4,15 +4,25 @@
 //! view graph of the pairs with their relative poses and the focal lengths found from the
 //! fundamental matrices (`graph`), the rotations of the photos averaged from the relative
 //! rotations of its edges (`rotation`), the tracks joined from the matches and the longest of them
-//! chosen over every photo (`tracks`), and the points triangulated from them with the filter of
-//! their observations (`triangulate`).
+//! chosen over every photo (`tracks`), the points triangulated from them with the filter of
+//! their observations (`triangulate`), the global positioning of the photos and the points with
+//! the positions of the photos inside it (`positioning`), the rounds of adjustment (`rounds`), the
+//! model in COLMAP's binary format (`model_io`), and the `Mapper` that runs every stage in its
+//! order. `synthetic` makes the ring of `ppg-bench map`.
 
 pub mod graph;
 pub mod input;
+pub mod model_io;
 pub mod positioning;
 pub mod rotation;
+pub mod rounds;
+pub mod synthetic;
 pub mod tracks;
 pub mod triangulate;
+
+mod run;
+
+pub use run::{Mapper, MapperReport};
 
 /// The options of the whole mapper. The defaults are the figures of the plan; the ones that come
 /// from pycolmap are passed by Python in place of them.
@@ -49,6 +59,25 @@ pub struct Options {
     /// (`positioning`), in the units of the residual (a difference of unit directions, about an
     /// angle in radians): GLOMAP's `GlobalPositionerOptions::thres_loss_function`, 0.1.
     pub positioning_huber: f64,
+    /// The rounds of adjustment (`rounds`): COLMAP's global mapper runs its bundle adjustment
+    /// `ba_num_iterations` times, 3 in pycolmap 4.2.1.
+    pub rounds: usize,
+    /// The scale of the robust loss on the reprojection errors of the rounds, in pixels:
+    /// pycolmap's `GlobalPipelineOptions().mapper.bundle_adjustment.ceres.loss_function_scale`,
+    /// 1.0 in pycolmap 4.2.1.
+    pub ba_loss_scale_px: f64,
+    /// The loss of the rounds is Cauchy's when true, Huber's when false: pycolmap's
+    /// `GlobalPipelineOptions().mapper.bundle_adjustment.ceres.loss_function_type`, `HUBER` in
+    /// pycolmap 4.2.1.
+    pub ba_loss_cauchy: bool,
+    /// After the rounds, every track is triangulated and one last adjustment runs with all of them
+    /// (COLMAP's retriangulation in its global mapper); false only for the trials of the plan
+    /// (`PPG_NATIVE_FINAL_ALL_TRACKS=0`).
+    pub final_all_tracks: bool,
+    /// One flag per camera of the input: its sensor is OPENCV (the camera of the mapper being
+    /// RADIAL for a square sensor), so that the last round frees its principal point and decentring
+    /// terms on a block held by the positions. Empty: none but the cameras whose model is OPENCV.
+    pub opencv_sensor: Vec<bool>,
 }
 
 impl Default for Options {
@@ -62,6 +91,11 @@ impl Default for Options {
             max_normalized_reprojection: 0.01,
             min_triangulation_deg: 1.0,
             positioning_huber: 0.1,
+            rounds: 3,
+            ba_loss_scale_px: 1.0,
+            ba_loss_cauchy: false,
+            final_all_tracks: true,
+            opencv_sensor: Vec::new(),
         }
     }
 }
