@@ -111,6 +111,26 @@ def refused(exc: BaseException) -> bool:
     return getattr(exc, REFUSED, False) is True
 
 
+def _refuse(exc: BaseException) -> BaseException:
+    """``exc`` marked as the native step refusing the request (:func:`refused`), for ``raise _refuse(exc)``."""
+    setattr(exc, REFUSED, True)
+    return exc
+
+
+def _reference_pairs_or_refuse(chunk: Chunk, names: dict[int, str], reference: str, neighbours: int,
+                               pairs: set | None) -> list | None:
+    """The pairs of the ``reference`` preselection (``source``, ``estimated``, ``sequential``) as the classic step
+    finds them; with none, and no other pairs (``pairs``: those of the generic preselection), the RuntimeError the
+    classic step raises - the positions of the photos or an alignment missing -, marked as a refusal."""
+    finder = {"source": sfm._reference_pairs, "estimated": sfm._estimated_pairs,
+              "sequential": sfm._sequential_pairs}[reference]
+    found = finder(chunk, names, neighbours)
+    if not found and not pairs:
+        raise _refuse(RuntimeError(f"the {reference} preselection needs "
+                                   + ("camera reference positions" if reference == "source" else "an alignment")))
+    return found
+
+
 def disk_full(exc: BaseException) -> bool:
     """Whether ``exc`` says that the disk is full: an ``OSError`` of ENOSPC, or the error of the core, of pycolmap
     or of sqlite whose text says so (:data:`DISK_FULL_TEXTS`, and :data:`WINDOWS_DISK_FULL_TEXTS` on Windows). No
@@ -641,17 +661,12 @@ def _select_pairs(run: _Run, stages: timing.Stages, progress: Progress, generic:
             pairs, parts = set(found), ["generic"]
             chosen |= set(found)
     if reference:
-        finder = {"source": sfm._reference_pairs, "estimated": sfm._estimated_pairs,
-                  "sequential": sfm._sequential_pairs}[reference]
         with stages.stage("preselection"):
-            found = finder(run.chunk, run.names, max(int(neighbours), 1))
+                found = _reference_pairs_or_refuse(run.chunk, run.names, reference, max(int(neighbours), 1), pairs)
         if found:
             pairs = (pairs or set()) | set(found)
             chosen |= set(found)
             parts.append(reference)
-        elif not pairs:
-            raise RuntimeError(f"the {reference} preselection needs "
-                               + ("camera reference positions" if reference == "source" else "an alignment"))
     mode = "+".join(parts) if pairs else "exhaustive"
     if pairs is None:  # exhaustive: every pair in full, as the classic step matches it
         pairs = {(a, b) for i, a in enumerate(run.everyone) for b in run.everyone[i + 1:]}
@@ -797,9 +812,13 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
                         "switched on: %s", exc)
         work = sfm._sfm_dir(chunk)
         root, names = sfm.image_root_and_names(chunk)
-    except (ValueError, RuntimeError) as exc:
-        setattr(exc, REFUSED, True)
-        raise
+        nearest = max(int(neighbours), 1)  # what the classic step takes, and refuses (ValueError, TypeError)
+        if reference and not (generic if generic is not None else len(names) > sfm.EXHAUSTIVE_UP_TO):
+            # without the generic preselection a reference one that finds no pairs is refused before any point is
+            # detected (the classic step refuses it after its points)
+            _reference_pairs_or_refuse(chunk, names, reference, nearest, None)
+    except (ValueError, TypeError, RuntimeError) as exc:
+        raise _refuse(exc)
     _remove_leftovers(work)
     sfm._interrupted_names_back(work / "database.db")  # the names a classic matching that died in COLMAP left aliased
     if panorama.rig_configs(chunk, names):

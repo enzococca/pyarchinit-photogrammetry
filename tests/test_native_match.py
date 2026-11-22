@@ -1822,9 +1822,9 @@ def test_the_verified_pairs_of_two_databases_compare_whatever_their_image_ids(tm
 @pytest.mark.parametrize("engine", ["native", None], ids=["native", "auto"])
 def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives_it(scene_dir, tmp_path, monkeypatch,
                                                                                      caplog, engine):
-    """An argument the matching does not take (masks, a preselection), a chunk that is not in a project or has no
-    enabled photo: the native step refuses it with the error the classic step gives - the same type and text - and the
-    caller gets it, with ``native`` as with ``auto``: no fallback to the classic engine, no line saying that the
+    """An argument the matching does not take (masks, a preselection, a number of neighbours), a preselection that
+    finds no pairs (positions or an alignment missing), a chunk that is not in a project or has no enabled photo: the native step refuses it with the error the classic step gives - the same type and text - and the
+    caller gets it, before any point is detected, with ``native`` as with ``auto``: no fallback to the classic engine, no line saying that the
     native matching failed, no record of an engine. The seconds of the refused step are kept as the classic step
     keeps them (the type of the error under ``failed``)."""
     import pyarchinit_photogrammetry as ppg
@@ -1849,7 +1849,14 @@ def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives
              (empty, {}, RuntimeError, "the chunk has no enabled photos"),
              (ch, {"apply_masks": "nonsense"}, ValueError, "apply_masks: one of none, keypoints, tiepoints"),
              (ch, {"pair_selection": "nonsense"}, ValueError, "unknown pair selection 'nonsense'"),
-             (ch, {"generic": False, "reference": "nonsense"}, ValueError, "unknown reference preselection")]
+             (ch, {"generic": False, "reference": "nonsense"}, ValueError, "unknown reference preselection"),
+             # photos without positions (the trench has no GPS) and no alignment: no pairs to match
+             (ch, {"generic": False, "reference": "source"}, RuntimeError,
+              "the source preselection needs camera reference positions"),
+             (ch, {"generic": False, "reference": "estimated"}, RuntimeError,
+              "the estimated preselection needs an alignment"),
+             (ch, {"generic": False, "reference": "sequential", "neighbours": "many"}, ValueError,
+              "invalid literal for int()")]
     for chunk, kwargs, kind, text in cases:
         with pytest.raises(kind) as classic_said:
             chunk.match_photos(quality="high", engine="classic", **kwargs)
@@ -1863,6 +1870,9 @@ def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives
         assert classic_ran == []  # refused by the native step itself
         assert not [r for r in caplog.records if "classic used" in r.getMessage()]
         assert "engine" not in chunk.meta
+        # refused before any work: no point detected by the native step
+        assert chunk.meta["timings"]["match_photos"]["stages"] == {}
+        assert not (chunk.document is not None and (chunk.data_dir / "sfm" / "native").exists())
     assert ch.meta["timings"]["match_photos"]["failed"] == "ValueError"
 
 
