@@ -286,7 +286,8 @@ const CELL_MARGIN: f64 = 1e-9;
 /// the cells `first..=last` of the minor axis the band crosses in the cell `j` of the major one.
 fn walk(slope: f64, q: f64, slack: f64, major: usize, minor: usize, mut run: impl FnMut(usize, usize, usize)) {
     let height = minor as f64;
-    let (first, last) = if slope == 0.0 {
+    // a slope this small is a line along the major axis: dividing by it would overflow
+    let (first, last) = if slope.abs() < 1e-12 {
         if q + slack < 0.0 || q - slack >= height {
             return;
         }

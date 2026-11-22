@@ -336,14 +336,19 @@ def _stores_present(stores: Path) -> bool:
 
 
 def _stores_trusted(chunk: Chunk, stores: Path, root: Path, quality: str, keypoint_limit: int,
-                    apply_masks: str) -> bool:
+                    apply_masks: str, dct: bool, guided: dict) -> bool:
     """Whether the stores in ``stores`` are those of a native matching of these photos with these settings: the
     record of the chunk says so (an earlier classic matching, or other settings, made the database from other
-    points, and the stores would be trusted over it)."""
+    points, and the stores would be trusted over it). The decoding (``dct``) and the second stage (``guided``,
+    :func:`guided_settings`) count too; a record written before they were recorded had the DCT scale and the first
+    stage's ratio."""
     info = chunk.meta.get("sfm") or {}
+    made = (info.get("native_dct", True), info.get("native_guided", True),
+            info.get("native_guided_ratio", MAX_RATIO), info.get("native_guided_band", 1.0))
     return (_stores_present(stores) and info.get("engine") == "native" and info.get("quality") == quality
             and info.get("keypoint_limit") == int(keypoint_limit) and info.get("apply_masks") == apply_masks
-            and info.get("image_root") == str(root))
+            and info.get("image_root") == str(root)
+            and made == (bool(dct), guided["guided"], guided["guided_max_ratio"], guided["guided_band"]))
 
 
 def _stage_stores(stores: Path, wd: Path) -> None:
@@ -498,7 +503,7 @@ def _continuation(run: _Run, *, reset: bool, quality: str, keypoint_limit: int, 
     native matching whose stores are not trusted)."""
     if reset or not sfm._continuable(run.chunk, run.db_path, run.root, run.names, "sift"):
         return None
-    if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks)
+    if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks, run.dct, run.guided)
             and set(run.k.store_names(str(run.stores / FEATURES))) <= set(run.everyone)):
         return "stores"
     if _photos_without_descriptors(run.db_path):

@@ -1464,6 +1464,31 @@ def test_continuing_with_other_settings_matches_everything_again(scene_dir, tmp_
     assert len(_image_ids(work / "database.db")) == PHOTOS
 
 
+@pytest.mark.parametrize("change", ["ratio", "dct", "record_before_the_settings"])
+def test_continuing_with_other_matching_settings_matches_everything_again(scene_dir, tmp_path, monkeypatch, change):
+    """A native match and alignment of 24, 4 added, then ``reset=False`` with the stores made under other settings
+    of the decoding or of the second stage - another ratio, the DCT scale, or a record written before those
+    settings were recorded (the DCT scale and the first stage's ratio were the program's then): the stores are not
+    trusted, every photo again, and the record says the settings that made all of them."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    ch, work, photos = _native_block(scene_dir, tmp_path)
+    if change == "ratio":
+        monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", "0.7")
+    elif change == "dct":
+        monkeypatch.setenv("PPG_NATIVE_DCT", "1")
+    else:
+        for key in ("native_dct", "native_guided", "native_guided_ratio", "native_guided_band"):
+            ch.meta["sfm"].pop(key, None)
+    seen = []
+    ch.match_photos(quality="high", engine="native", reset=False, progress=lambda _f, m: seen.append(m))
+    assert any("every photo again" in m for m in seen)
+    info = ch.meta["sfm"]
+    assert info["continued"] is False and info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
+    assert info["native_dct"] is (change == "dct")
+    assert info["native_guided_ratio"] == (0.7 if change == "ratio" else native_match.GUIDED_RATIO)
+
+
 def test_a_full_disk_in_the_database_stops_both_engines_and_keeps_the_block(scene_dir, tmp_path, monkeypatch):
     """A native match and alignment of 24, 4 added; the export to COLMAP's database failing as a full disk fails
     there - pycolmap's RuntimeError and sqlite's OperationalError, with the words sqlite gives a full disk -: the
