@@ -397,6 +397,57 @@ fn a_good_pair_goes_guided_and_finds_the_true_matches() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A repeated texture: for some true correspondences the point of B is moved off the epipolar line
+/// of its point of A, and a copy of its descriptor is put on that line at another place (a twin at
+/// the wrong depth). In the band the twin is the only candidate and the verification cannot refuse
+/// it (it lies on the line): without the check of the second stage it is matched; with the check
+/// the first stage, which holds every point here, saw the moved point as its equal rival over the
+/// whole photo, and none of the twins is matched, while the true matches stay.
+#[test]
+fn a_twin_on_the_epipolar_line_is_refused_by_the_check() {
+    let dir = folder("guided-twins");
+    let mut scene = pair_scene(11, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let f = scene.fundamental();
+    let mut twins: Vec<[u32; 2]> = Vec::new();
+    let mut moved: HashSet<u32> = HashSet::new();
+    for &[ia, ib] in scene.truth.iter().step_by(25) {
+        let [xa, ya, ..] = scene.a.keypoints[ia as usize];
+        let [xb, yb, scale, angle] = scene.b.keypoints[ib as usize];
+        let l = f * Vector3::new(f64::from(xa), f64::from(ya), 1.0);
+        let norm = (l.x * l.x + l.y * l.y).sqrt();
+        let (nx, ny) = (l.x / norm, l.y / norm); // the normal of the line; along it: (-ny, nx)
+        let d = nx * f64::from(xb) + ny * f64::from(yb) + l.z / norm; // the true point's distance from the line
+        let (tx, ty) = (f64::from(xb) - d * nx - 150.0 * ny, f64::from(yb) - d * ny + 150.0 * nx);
+        let (ox, oy) = (f64::from(xb) + 200.0 * nx, f64::from(yb) + 200.0 * ny);
+        if !inside(tx, ty) || !inside(ox, oy) {
+            continue;
+        }
+        scene.b.keypoints[ib as usize] = [ox as f32, oy as f32, scale, angle];
+        let copy: Vec<u8> = scene.b.descriptors[ib as usize * DIM..(ib as usize + 1) * DIM].to_vec();
+        scene.b.keypoints.push([tx as f32, ty as f32, scale, angle]);
+        scene.b.descriptors.extend(copy);
+        twins.push([ia, scene.b.keypoints.len() as u32 - 1]);
+        moved.insert(ia);
+    }
+    assert!(twins.len() >= 60, "{} twins", twins.len());
+    let (_store, a, b) = views(&dir, &scene);
+    let cam = camera();
+    let o = options(8000); // every point in the first stage
+    let unchecked = Options { guided_check: false, ..o };
+    let off = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, false, &unchecked, &mut cpu).unwrap();
+    let on = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, false, &o, &mut cpu).unwrap();
+    assert_eq!((off.route, on.route), (Route::Guided, Route::Guided));
+    // without the check most twins are matched, and kept by the verification (they lie on the line)
+    let twins_off = found(&twins, &off.matches);
+    assert!(twins_off * 100 >= twins.len() * 80, "{twins_off} of {} twins matched without the check", twins.len());
+    assert!(found(&twins, &off.two_view.inliers) * 100 >= twins.len() * 80);
+    // with it none, and the true matches of the points not touched stay
+    assert_eq!(found(&twins, &on.matches), 0);
+    let kept: Vec<[u32; 2]> = scene.truth.iter().copied().filter(|m| !moved.contains(&m[0])).collect();
+    assert!(found(&kept, &on.two_view.inliers) * 100 >= kept.len() * 95);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn the_guided_options_reach_the_second_stage() {
     let dir = folder("guided-options");
