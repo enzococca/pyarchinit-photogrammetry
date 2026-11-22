@@ -147,6 +147,11 @@ struct Pair {
 
 impl Pair {
     fn new(seed: u64, kind: Kind, noise: f64) -> Pair {
+        Pair::sized(seed, kind, noise, N_MATCHES)
+    }
+
+    /// As `new`, with `n_matches` matches in place of `N_MATCHES`.
+    fn sized(seed: u64, kind: Kind, noise: f64, n_matches: usize) -> Pair {
         let mut random = Random(seed.wrapping_mul(7919).wrapping_add(17));
         let r = rotation(&random.direction(), random.uniform_in(0.1, 0.3));
         let t = if kind == Kind::Rotation {
@@ -156,10 +161,10 @@ impl Pair {
             Vector3::new(sideways, random.uniform_in(-0.3, 0.3), random.uniform_in(-0.3, 0.3)).normalize()
                 * random.uniform_in(0.5, 1.2)
         };
-        let n_outliers = (OUTLIER_SHARE * N_MATCHES as f64) as usize;
-        let n_inliers = N_MATCHES - n_outliers;
+        let n_outliers = (OUTLIER_SHARE * n_matches as f64) as usize;
+        let n_inliers = n_matches - n_outliers;
         let (mut x1, mut x2) = (Vec::new(), Vec::new());
-        while x1.len() < N_MATCHES {
+        while x1.len() < n_matches {
             let x = random.uniform_in(-1.5, 1.5);
             let y = random.uniform_in(-1.1, 1.1);
             let z = match kind {
@@ -192,8 +197,8 @@ impl Pair {
                 epipolar
             }
         };
-        let mut truth = vec![true; N_MATCHES];
-        for i in n_inliers..N_MATCHES {
+        let mut truth = vec![true; n_matches];
+        for i in n_inliers..n_matches {
             truth[i] = false;
             loop {
                 let b = [random.uniform_in(0.0, WIDTH), random.uniform_in(0.0, HEIGHT)];
@@ -210,14 +215,14 @@ impl Pair {
         }
         // the second photo's key points shuffled, the matches in a random order; the quality is
         // the ratio of the two best distances, lower for the true matches on the whole
-        let mut place: Vec<usize> = (0..N_MATCHES).collect();
+        let mut place: Vec<usize> = (0..n_matches).collect();
         random.shuffle(&mut place);
-        let mut kp2 = vec![[0.0f32; 4]; N_MATCHES];
+        let mut kp2 = vec![[0.0f32; 4]; n_matches];
         for (i, &j) in place.iter().enumerate() {
             kp2[j] = [x2[i][0] as f32, x2[i][1] as f32, 1.0, 0.0];
         }
         let kp1: Vec<[f32; 4]> = x1.iter().map(|p| [p[0] as f32, p[1] as f32, 1.0, 0.0]).collect();
-        let mut order: Vec<usize> = (0..N_MATCHES).collect();
+        let mut order: Vec<usize> = (0..n_matches).collect();
         random.shuffle(&mut order);
         let matches: Vec<[u32; 2]> = order.iter().map(|&i| [i as u32, place[i] as u32]).collect();
         let quality: Vec<f32> = order
@@ -547,4 +552,42 @@ fn the_defaults_are_pycolmaps_of_the_installed_version() {
     assert!(o.detect_watermark);
     assert!(o.use_sampson_refinement);
     assert!(!o.compute_relative_pose);
+}
+
+/// A timing probe, not a check (`cargo test --release -p ppg_engine --test two_view -- --ignored
+/// --nocapture`): `verify` on synthetic pairs of 8000 matches, 30 % of them outliers, calibrated
+/// (E, F and H) and uncalibrated (F and H), the best of a few runs each; it prints the times and a
+/// fingerprint of the inliers (their count and an FNV-1a hash), so that two builds can be compared
+/// for speed and for the same results.
+#[test]
+#[ignore]
+fn timing_of_verify_on_eight_thousand_matches() {
+    use std::time::Instant;
+    let o = two_view::Options::default();
+    let mut total = [0.0f64; 2];
+    for seed in 1..=4u64 {
+        let pair = Pair::sized(seed, Kind::General, 0.5, 8000);
+        for (k, calibrated) in [true, false].into_iter().enumerate() {
+            let mut best = f64::INFINITY;
+            let mut result = None;
+            for _ in 0..3 {
+                let start = Instant::now();
+                let v = pair.verify(calibrated, &o, seed);
+                best = best.min(start.elapsed().as_secs_f64());
+                result = Some(v);
+            }
+            let v = result.expect("three runs");
+            let mut hash: u64 = 0xcbf29ce484222325;
+            for m in &v.inliers {
+                for byte in m.iter().flat_map(|i| i.to_le_bytes()) {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+            }
+            total[k] += best;
+            println!("scene {seed} calibrated {calibrated}: {:.1} ms, {:?}, {} inliers, hash {hash:016x}",
+                     best * 1e3, v.config, v.inliers.len());
+        }
+    }
+    println!("total: calibrated {:.1} ms, uncalibrated {:.1} ms", total[0] * 1e3, total[1] * 1e3);
 }

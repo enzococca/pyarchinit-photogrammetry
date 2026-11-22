@@ -30,7 +30,8 @@ REASONS = (r"slow disk link: \d+ Mb/s", r"slow disk: \d+ MB/s", r"online-only ph
 FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
-            "features", "routes", "max_ratio", "max_distance", "cross_check", "pycolmap", "photo_cache_mb",
+            "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band",
+            "max_ratio", "max_distance", "cross_check", "pycolmap", "photo_cache_mb",
             "georeferencing", "targets", "mapper_requested", "engine_requested", "ransac_seed"]
 CLASSIC = {"requested": "classic", "used": "classic", "fallback": None}
 

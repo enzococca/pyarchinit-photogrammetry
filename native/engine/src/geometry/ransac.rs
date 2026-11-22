@@ -50,10 +50,13 @@ pub trait Model: Clone {
     const MIN_SAMPLES: usize;
     /// The fewest inliers the local estimator takes.
     const MIN_LOCAL: usize;
-    /// The models of a minimal sample (`MIN_SAMPLES` correspondences): none when it is degenerate.
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Self>;
-    /// The models of the inliers of a model (at least `MIN_LOCAL` correspondences).
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Self>;
+    /// The models of a minimal sample (`MIN_SAMPLES` correspondences), appended to `out` (which
+    /// the estimation empties and reuses, so that no hypothesis allocates): none when it is
+    /// degenerate.
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Self>);
+    /// The models of the inliers of a model (at least `MIN_LOCAL` correspondences), appended to
+    /// `out`.
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Self>);
     /// The squared residual of a correspondence under the model (infinite when it is degenerate).
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64;
 }
@@ -68,17 +71,17 @@ impl Model for Translation {
     const MIN_SAMPLES: usize = 1;
     const MIN_LOCAL: usize = 1;
 
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Translation> {
-        Self::from_inliers(x1, x2)
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Translation>) {
+        Self::from_inliers(x1, x2, out)
     }
 
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Translation> {
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Translation>) {
         if x1.is_empty() {
-            return Vec::new();
+            return;
         }
         let n = x1.len() as f64;
         let (dx, dy) = x1.iter().zip(x2).fold((0.0, 0.0), |(sx, sy), (a, b)| (sx + b[0] - a[0], sy + b[1] - a[1]));
-        vec![Translation([dx / n, dy / n])]
+        out.push(Translation([dx / n, dy / n]));
     }
 
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -108,6 +111,38 @@ impl Support {
             }
         }
         support
+    }
+
+    /// The support of `model` over the correspondences, its squared residuals written to `out`
+    /// (one per correspondence); `None`, with `out` left partly written, as soon as the
+    /// correspondences not yet measured could no longer bring it to as many inliers as `bound`
+    /// has: such a model cannot be better than `bound` (`better_than`), and is not measured to
+    /// the end. A model that can is measured in full, so the support is the one `evaluate` gives.
+    fn measure<M: Model>(model: &M, x1: &[[f64; 2]], x2: &[[f64; 2]], max_residual: f64, bound: &Support,
+                         out: &mut [f64]) -> Option<Support> {
+        // in blocks: the residuals of a block first (a loop without a branch out, which the
+        // compiler can interleave), then its count, in the same order as one at a time
+        const BLOCK: usize = 32;
+        let n = x1.len();
+        let mut support = Support { num_inliers: 0, residual_sum: 0.0 };
+        let mut measured = 0;
+        for ((block, b1), b2) in out.chunks_mut(BLOCK).zip(x1.chunks(BLOCK)).zip(x2.chunks(BLOCK)) {
+            for ((r, &a), &b) in block.iter_mut().zip(b1).zip(b2) {
+                *r = model.residual_sq(a, b);
+            }
+            // without a branch (an inlier or not is a coin toss under a wrong model, which the
+            // branch predictor cannot learn); adding 0.0 leaves the sum as it is
+            for &r in block.iter() {
+                let inlier = r <= max_residual;
+                support.num_inliers += usize::from(inlier);
+                support.residual_sum += if inlier { r } else { 0.0 };
+            }
+            measured += block.len();
+            if support.num_inliers + (n - measured) < bound.num_inliers {
+                return None;
+            }
+        }
+        Some(support)
     }
 
     /// COLMAP's `Compare`: `self` is a better support than `other`.
@@ -276,16 +311,16 @@ pub fn lo_ransac<M: Model>(x1: &[[f64; 2]], x2: &[[f64; 2]], o: &Options, sampli
     let mut sample = Vec::with_capacity(M::MIN_SAMPLES);
     let mut s1 = vec![[0.0; 2]; M::MIN_SAMPLES];
     let mut s2 = vec![[0.0; 2]; M::MIN_SAMPLES];
-    let mut best: Option<(M, Support, Vec<f64>)> = None;
+    // the best model, its support and its residuals; `residuals` is the scratch the next model is
+    // measured into, swapped with `best_residuals` when that model is better (nothing allocated
+    // per hypothesis)
+    let mut best: Option<M> = None;
     let mut best_support = Support::none();
+    let mut best_residuals = vec![0.0; n];
     let mut residuals = vec![0.0; n];
+    let (mut models, mut locals) = (Vec::new(), Vec::new());
     let (mut i1, mut i2) = (Vec::with_capacity(n), Vec::with_capacity(n));
     let mut trials = 0;
-    let residuals_of = |m: &M, out: &mut Vec<f64>| {
-        for ((r, &a), &b) in out.iter_mut().zip(x1).zip(x2) {
-            *r = m.residual_sq(a, b);
-        }
-    };
     'trials: for trial in 0..max_trials {
         trials = trial + 1;
         match sampling {
@@ -299,30 +334,34 @@ pub fn lo_ransac<M: Model>(x1: &[[f64; 2]], x2: &[[f64; 2]], o: &Options, sampli
             s1[k] = x1[i];
             s2[k] = x2[i];
         }
-        for model in M::from_sample(&s1, &s2) {
-            residuals_of(&model, &mut residuals);
-            let support = Support::evaluate(&residuals, max_residual);
-            if support.better_than(&best_support) {
+        models.clear();
+        M::from_sample(&s1, &s2, &mut models);
+        for model in models.drain(..) {
+            let measured = Support::measure(&model, x1, x2, max_residual, &best_support, &mut residuals);
+            if let Some(support) = measured.filter(|support| support.better_than(&best_support)) {
                 best_support = support;
-                best = Some((model, support, residuals.clone()));
+                best = Some(model);
+                std::mem::swap(&mut best_residuals, &mut residuals);
                 if support.num_inliers > M::MIN_SAMPLES && support.num_inliers >= M::MIN_LOCAL {
                     for _ in 0..10 {
                         let before = best_support.num_inliers;
                         i1.clear();
                         i2.clear();
-                        let current = &best.as_ref().expect("a best model").2;
-                        for (i, &r) in current.iter().enumerate() {
+                        for (i, &r) in best_residuals.iter().enumerate() {
                             if r <= max_residual {
                                 i1.push(x1[i]);
                                 i2.push(x2[i]);
                             }
                         }
-                        for local in M::from_inliers(&i1, &i2) {
-                            residuals_of(&local, &mut residuals);
-                            let local_support = Support::evaluate(&residuals, max_residual);
-                            if local_support.better_than(&best_support) {
+                        locals.clear();
+                        M::from_inliers(&i1, &i2, &mut locals);
+                        for local in locals.drain(..) {
+                            let measured =
+                                Support::measure(&local, x1, x2, max_residual, &best_support, &mut residuals);
+                            if let Some(local_support) = measured.filter(|s| s.better_than(&best_support)) {
                                 best_support = local_support;
-                                best = Some((local, local_support, residuals.clone()));
+                                best = Some(local);
+                                std::mem::swap(&mut best_residuals, &mut residuals);
                             }
                         }
                         if best_support.num_inliers <= before {
@@ -338,12 +377,12 @@ pub fn lo_ransac<M: Model>(x1: &[[f64; 2]], x2: &[[f64; 2]], o: &Options, sampli
             }
         }
     }
-    let (model, support, residuals) = best?;
-    if support.num_inliers < M::MIN_SAMPLES {
+    let model = best?;
+    if best_support.num_inliers < M::MIN_SAMPLES {
         return None;
     }
-    let inlier_mask = residuals.iter().map(|&r| r <= max_residual).collect();
-    Some(Report { model, support, inlier_mask, num_trials: trials })
+    let inlier_mask = best_residuals.iter().map(|&r| r <= max_residual).collect();
+    Some(Report { model, support: best_support, inlier_mask, num_trials: trials })
 }
 
 #[cfg(test)]
@@ -409,5 +448,26 @@ mod tests {
         distinct(&mut random, 4, 5, &mut out);
         out.sort_unstable();
         assert_eq!(out, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_model_is_measured_to_the_end_unless_it_cannot_be_better() {
+        // a shift of one: the points 0..100 move by 1, then by 50 (outliers of the model)
+        let x1: Vec<[f64; 2]> = (0..100).map(|i| [i as f64, 0.0]).collect();
+        let x2: Vec<[f64; 2]> = (0..100).map(|i| [i as f64 + if i < 60 { 1.0 } else { 50.0 }, 0.0]).collect();
+        let model = Translation([1.0, 0.0]);
+        let mut out = vec![0.0; 100];
+        let all: Vec<f64> = x1.iter().zip(&x2).map(|(&a, &b)| model.residual_sq(a, b)).collect();
+        let want = Support::evaluate(&all, 4.0);
+        assert_eq!(want.num_inliers, 60);
+        // a bound it can reach, or equal: measured in full, the same support and residuals
+        for bound in [Support::none(), Support { num_inliers: 60, residual_sum: 0.0 }] {
+            let got = Support::measure(&model, &x1, &x2, 4.0, &bound, &mut out).expect("measured");
+            assert_eq!(got, want);
+            assert_eq!(out, all);
+        }
+        // a bound it cannot reach: given up
+        let bound = Support { num_inliers: 61, residual_sum: 0.0 };
+        assert!(Support::measure(&model, &x1, &x2, 4.0, &bound, &mut out).is_none());
     }
 }

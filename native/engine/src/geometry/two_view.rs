@@ -20,7 +20,7 @@
 
 use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
-use super::linalg::{dynamic, jacobi_svd};
+use super::linalg::{columns, singular_values};
 use super::ransac::{self, lo_ransac, Model, Report, Sampling, Translation};
 use super::refine::{refine_essential, refine_fundamental, refine_homography};
 use super::solvers::{
@@ -150,12 +150,12 @@ impl Model for Essential {
     const MIN_SAMPLES: usize = 5;
     const MIN_LOCAL: usize = 5;
 
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Essential> {
-        essential_n_point(x1, x2).into_iter().map(Essential).collect()
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Essential>) {
+        out.extend(essential_n_point(x1, x2).into_iter().map(Essential));
     }
 
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Essential> {
-        essential_n_point(x1, x2).into_iter().map(Essential).collect()
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Essential>) {
+        out.extend(essential_n_point(x1, x2).into_iter().map(Essential));
     }
 
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -172,15 +172,14 @@ impl Model for Fundamental {
     const MIN_SAMPLES: usize = 7;
     const MIN_LOCAL: usize = 8;
 
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Fundamental> {
-        match (x1.try_into(), x2.try_into()) {
-            (Ok(a), Ok(b)) => fundamental_seven_point(a, b).into_iter().map(Fundamental).collect(),
-            _ => Vec::new(),
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Fundamental>) {
+        if let (Ok(a), Ok(b)) = (x1.try_into(), x2.try_into()) {
+            out.extend(fundamental_seven_point(a, b).into_iter().map(Fundamental));
         }
     }
 
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Fundamental> {
-        fundamental_eight_point(x1, x2).into_iter().map(Fundamental).collect()
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Fundamental>) {
+        out.extend(fundamental_eight_point(x1, x2).map(Fundamental));
     }
 
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -196,12 +195,12 @@ impl Model for Homography {
     const MIN_SAMPLES: usize = 4;
     const MIN_LOCAL: usize = 4;
 
-    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Homography> {
-        homography_dlt(x1, x2).into_iter().map(Homography).collect()
+    fn from_sample(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Homography>) {
+        out.extend(homography_dlt(x1, x2).map(Homography));
     }
 
-    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Vec<Homography> {
-        homography_dlt(x1, x2).into_iter().map(Homography).collect()
+    fn from_inliers(x1: &[[f64; 2]], x2: &[[f64; 2]], out: &mut Vec<Homography>) {
+        out.extend(homography_dlt(x1, x2).map(Homography));
     }
 
     fn residual_sq(&self, a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -438,7 +437,7 @@ fn decompose_homography(h: &Matrix3<f64>, k1: &Matrix3<f64>, k2: &Matrix3<f64>)
                         -> Vec<(Matrix3<f64>, Vector3<f64>, Vector3<f64>)> {
     let k2_inverse = k2.try_inverse().unwrap_or_else(Matrix3::identity);
     let mut hn = k2_inverse * h * k1;
-    let middle = jacobi_svd(&dynamic(&hn)).s[1];
+    let middle = singular_values(&columns(&hn))[1];
     if middle > 0.0 {
         hn /= middle;
     }

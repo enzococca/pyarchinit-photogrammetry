@@ -26,8 +26,9 @@
 //!   `solve` alone, the block made before the clock starts).
 //! - `ppg-bench features DIR [--limit 2016] [--max-features 8192] [--device N | --cpu]`: the
 //!   features step of the native engine (`features::extract_all`) on the JPEG, PNG and TIFF files
-//!   of the folder `DIR` (not of its subfolders), each reduced to `limit` on its long side (0 for
-//!   none) with at most `max-features` points, into a store under the temporary folder of the
+//!   of the folder `DIR` (not of its subfolders), each decoded whole and reduced to `limit` on its
+//!   long side (0 for none), as the program does by default (`PPG_NATIVE_DCT`), with at most
+//!   `max-features` points, into a store under the temporary folder of the
 //!   system, removed after; it prints `device` (the name of the adapter, or `cpu`), `photos` (the
 //!   files found), `done`, `unreadable` and `unsupported` (counts), `points_per_photo` (the mean
 //!   over the photos done), `seconds` (the wall time of the step), `photos_per_second`, the
@@ -74,8 +75,8 @@ const DEFAULT_PRESELECT_POINTS: usize = 1024;
 const DEFAULT_LIMIT: usize = 2016;
 const DEFAULT_MAX_FEATURES: usize = 8192;
 
-/// The reader threads of `features`: a choice, not a measured figure (the decoding of a JPEG at
-/// a DCT scale takes a fraction of the SIFT; a few readers keep a GPU fed).
+/// The reader threads of `features`: a choice, not a measured figure (the decoding of a JPEG
+/// takes a fraction of the SIFT; a few readers keep a GPU fed).
 const READERS: usize = 4;
 
 /// The files `features` takes for photos, by extension (either case).
@@ -454,7 +455,7 @@ fn time_features(dir: &Path, limit: usize, max_features: usize, on: Extractor) -
     let _ = fs::remove_dir_all(&store_dir);
     let store = FeatureStore::create(&store_dir).map_err(|e| e.to_string())?;
     let sift = gpu_sift::Options { max_features, ..gpu_sift::Options::default() };
-    let options = FeatureOptions { sift, dct: true, readers: READERS, cpu_threads };
+    let options = FeatureOptions { sift, dct: false, readers: READERS, cpu_threads };
     // what is timed is the whole step - decoding, extraction and writing together, as a project
     // pays it - from the jobs to the last file of the store
     let start = Instant::now();

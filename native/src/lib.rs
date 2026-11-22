@@ -28,8 +28,9 @@ use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift,
 
 /// Version of the functions offered here: raised when one is added or changes meaning (9: crx2rnx,
 /// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate,
-/// 13: the native matching - native_features, native_preselect, native_match_pairs, the stores).
-const API: u32 = 13;
+/// 13: the native matching - native_features, native_preselect, native_match_pairs, the stores,
+/// 14: the options of its second stage - guided, guided_max_ratio, guided_band).
+const API: u32 = 14;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {

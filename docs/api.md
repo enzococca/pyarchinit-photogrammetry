@@ -144,7 +144,7 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
 `auto` stays the classic engine until the native matching has passed its gate) does the step with the
-native engine of the core (`engine.native_match`, `ppg_core` API 13): its own SIFT (following VLFeat's,
+native engine of the core (`engine.native_match`, `ppg_core` API 14): its own SIFT (following VLFeat's,
 as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
@@ -154,7 +154,7 @@ arguments are those of the classic step; `guided_matching` is ignored (the nativ
 follows the epipolar lines).
 
 When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
-than API 13, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
+than API 14, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
 not know - or fails half way, the classic step runs with the same arguments, a line in the log says
 why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. A cancel
 and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it
@@ -162,14 +162,22 @@ and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whi
 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
-`dropped`) and `preselection_size`; `gpu` and the keys of `gpu_shares` name the adapters as the
-classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs each did. `meta["timings"]["match_photos"]` has the stages `features`,
+`dropped`), `preselection_size` and the settings read from the environment (`native_dct`,
+`native_guided`, `native_guided_ratio`, `native_guided_band`, below; a benchmark record keeps them); `gpu`
+and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs each did. `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
-Two environment variables: `PPG_NATIVE_DCT=0` decodes every JPEG whole (by default a JPEG is decoded
-at the DCT scale its reduction allows, chosen for the larger of its two reductions - the matching's
-and the preselection's - so that one decoding gives both); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
-and the pairs to the GPUs when there is one. A GPU lost in the middle of the step gives its work back
+Environment variables: `PPG_NATIVE_DCT=1` decodes a JPEG at the DCT scale its reduction allows,
+chosen for the larger of its two reductions - the matching's and the preselection's - so that one
+decoding gives both (by default every JPEG is decoded whole and reduced as COLMAP reduces it: the DCT
+scale is a little faster but gives another raster and fewer tie points); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
+and the pairs to the GPUs when there is one. Three tune the second stage of a pair, the matching along
+the epipolar lines of the model of the first: `PPG_NATIVE_GUIDED=0` matches the trusted pairs point
+against point instead (the first stage still decides which pairs are trusted, kept or dropped),
+`PPG_NATIVE_GUIDED_RATIO` (a number above 0, at most 1; by default 0.6: a point there is
+compared with fewer points than in the first stage) is the ratio test of the second, where a point is compared only with the points of its band, and
+`PPG_NATIVE_GUIDED_BAND` (above 0; by default 1.0) is the half-width of the band as a multiple of the
+verification's threshold. A value that is not one stops the step with an error naming the variable. A GPU lost in the middle of the step gives its work back
 to the others; when it was the last one, the CPU takes what is left, also with `PPG_NATIVE_CPU_SHARE=0`.
 A photo or a pair that fails on a device and then on the CPU too is given up (the photo without points, the pair dropped)
 with a line in the log. A photo whose reduction - or whose preselection image - is under 8 x 8 pixels

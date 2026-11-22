@@ -14,15 +14,17 @@
 //!
 //! The null vectors and the decompositions come from the singular value decomposition of
 //! `linalg` (one-sided Jacobi rotations, accurate to roundoff on every matrix; the module doc
-//! says why nalgebra's is not used). A tall least-squares system is reduced first to the R of
-//! nalgebra's QR decomposition, which has the same right singular vectors and came out exact to
-//! roundoff.
+//! says why nalgebra's is not used), on fixed-size matrices on the stack. A tall least-squares
+//! system is reduced first to the R of its QR decomposition (Givens rotations, one row at a time,
+//! so that the rows are never stored), which has the same right singular vectors. The minimal
+//! solvers allocate nothing on the heap for their linear algebra: they run once per RANSAC
+//! hypothesis.
 
 use std::ops::{Add, Mul, Sub};
 
-use nalgebra::{DMatrix, Matrix3, SMatrix, SVector, Vector3, LU, QR};
+use nalgebra::{Matrix3, SMatrix, SVector, Vector3, LU};
 
-use super::linalg::{dynamic, jacobi_svd, normalise, unit};
+use super::linalg::{columns, jacobi_svd, singular_values_of, unit, Similarity};
 
 /// A singular value below this fraction of the largest counts as zero: the system has lost rank,
 /// the configuration is degenerate. Exact degeneracy computes to about 1e-16 of the largest; a
@@ -70,8 +72,7 @@ fn five_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Vec<Matrix3<f64>>> {
     }
     // E = x X + y Y + z Z + W over the null space of the epipolar constraints, W the vector of
     // the smallest singular value (COLMAP's order)
-    let rows: Vec<[f64; 9]> = x1.iter().zip(x2).map(|(&a, &b)| epipolar_row(a, b)).collect();
-    let basis = null_space(&rows, 4)?;
+    let basis = null_space::<4>(x1.iter().zip(x2).map(|(&a, &b)| epipolar_row(a, b)))?;
     let [e_w, e_z, e_y, e_x] = [0, 1, 2, 3].map(|i| as_matrix(&basis[i]));
     // the ten cubic constraints, reduced so that each monomial of the left block is written in
     // the ten monomials of the right block (the Gauss-Jordan elimination, here an LU solve)
@@ -151,9 +152,8 @@ fn seven_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Vec<Matrix3<f64>>> {
     if !(finite(x1) && finite(x2)) {
         return None;
     }
-    let (n1, n2) = (normalise(x1)?, normalise(x2)?);
-    let rows: Vec<[f64; 9]> = n1.points.iter().zip(&n2.points).map(|(&a, &b)| epipolar_row(a, b)).collect();
-    let basis = null_space(&rows, 2)?;
+    let (n1, n2) = (Similarity::of(x1)?, Similarity::of(x2)?);
+    let basis = null_space::<2>(x1.iter().zip(x2).map(|(&a, &b)| epipolar_row(n1.apply(a), n2.apply(b))))?;
     let (f_a, f_b) = (as_matrix(&basis[0]), as_matrix(&basis[1]));
     let d = f_b - f_a;
     // det(F_a + lambda D) is a cubic in lambda, read from its values at 0, 1, -1 and 2
@@ -165,7 +165,7 @@ fn seven_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Vec<Matrix3<f64>>> {
     let c1 = odd - c3;
     let solutions = real_roots(&[p0, c1, c2, c3])
         .into_iter()
-        .filter_map(|lambda| unit(&(n2.matrix.transpose() * (f_a + d * lambda) * n1.matrix)))
+        .filter_map(|lambda| unit(&(n2.matrix().transpose() * (f_a + d * lambda) * n1.matrix())))
         .collect();
     Some(solutions)
 }
@@ -181,10 +181,10 @@ pub fn fundamental_eight_point(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Matri
     if x1.len() < 8 || x1.len() != x2.len() || !(finite(x1) && finite(x2)) {
         return None;
     }
-    let (n1, n2) = (normalise(x1)?, normalise(x2)?);
-    let rows: Vec<[f64; 9]> = n1.points.iter().zip(&n2.points).map(|(&a, &b)| epipolar_row(a, b)).collect();
-    let f = rank_two(&as_matrix(&null_space(&rows, 1)?[0]));
-    unit(&(n2.matrix.transpose() * f * n1.matrix))
+    let (n1, n2) = (Similarity::of(x1)?, Similarity::of(x2)?);
+    let [null] = null_space::<1>(x1.iter().zip(x2).map(|(&a, &b)| epipolar_row(n1.apply(a), n2.apply(b))))?;
+    let f = rank_two(&as_matrix(&null));
+    unit(&(n2.matrix().transpose() * f * n1.matrix()))
 }
 
 /// The homography of four correspondences: `homography_dlt` on the minimal sample.
@@ -202,11 +202,10 @@ pub fn homography_dlt(x1: &[[f64; 2]], x2: &[[f64; 2]]) -> Option<Matrix3<f64>> 
     if x1.len() < 4 || x1.len() != x2.len() || !(finite(x1) && finite(x2)) {
         return None;
     }
-    let (n1, n2) = (normalise(x1)?, normalise(x2)?);
-    let rows: Vec<[f64; 9]> =
-        n1.points.iter().zip(&n2.points).flat_map(|(&a, &b)| homography_rows(a, b)).collect();
-    let h = as_matrix(&null_space(&rows, 1)?[0]);
-    unit(&(n2.inverse * h * n1.matrix))
+    let (n1, n2) = (Similarity::of(x1)?, Similarity::of(x2)?);
+    let [null] = null_space::<1>(x1.iter().zip(x2).flat_map(|(&a, &b)| homography_rows(n1.apply(a), n2.apply(b))))?;
+    let h = as_matrix(&null);
+    unit(&(n2.inverse() * h * n1.matrix()))
 }
 
 /// COLMAP's `ComputeSquaredSampsonError`: the square of `b^T F a` over the squared norm of its
@@ -237,7 +236,9 @@ pub fn transfer_sq(h: &Matrix3<f64>, a: [f64; 2], b: [f64; 2]) -> f64 {
     if p.z == 0.0 {
         return f64::INFINITY;
     }
-    let (dx, dy) = (b[0] - p.x / p.z, b[1] - p.y / p.z);
+    // one division, not two: RANSAC measures every correspondence under thousands of hypotheses
+    let w = 1.0 / p.z;
+    let (dx, dy) = (b[0] - p.x * w, b[1] - p.y * w);
     dx * dx + dy * dy
 }
 
@@ -259,9 +260,11 @@ pub fn pose_from_essential(
         return None;
     }
     let (r1, r2, t) = decompose_essential(e)?;
+    // the poses with -t are counted on the points triangulated with t (`points_in_front_both`)
+    let (c1, c1_opposite) = points_in_front_both(&r1, &t, x1, x2);
+    let (c2, c2_opposite) = points_in_front_both(&r2, &t, x1, x2);
     let mut best: Option<(Matrix3<f64>, Vector3<f64>, usize)> = None;
-    for (r, t) in [(r1, t), (r2, t), (r1, -t), (r2, -t)] {
-        let count = points_in_front(&r, &t, x1, x2);
+    for (r, t, count) in [(r1, t, c1), (r2, t, c2), (r1, -t, c1_opposite), (r2, -t, c2_opposite)] {
         if best.is_none_or(|(_, _, n)| count >= n) {
             best = Some((r, t, count));
         }
@@ -277,8 +280,27 @@ pub fn points_in_front(r: &Matrix3<f64>, t: &Vector3<f64>, x1: &[[f64; 2]], x2: 
     x1.iter().zip(x2).filter(|(&a, &b)| in_front(r, t, a, b)).count()
 }
 
+/// `points_in_front` under `(r, t)` and under `(r, -t)`, from one triangulation of each
+/// correspondence: negating `t` negates the last column of the linear system of `triangulate`,
+/// which the Jacobi rotations carry through exactly (every dot product with that column, and so
+/// every rotation, changes sign), so the point it gives is exactly the opposite one and both its
+/// depths change sign; the counts are those `points_in_front` gives for each pose.
+fn points_in_front_both(r: &Matrix3<f64>, t: &Vector3<f64>, x1: &[[f64; 2]], x2: &[[f64; 2]]) -> (usize, usize) {
+    let max_depth = 1000.0 * t.norm();
+    let ahead = |d1: f64, d2: f64| d1 > f64::EPSILON && d1 < max_depth && d2 > f64::EPSILON && d2 < max_depth;
+    let (mut plus, mut minus) = (0, 0);
+    for (&a, &b) in x1.iter().zip(x2) {
+        if let Some(p) = triangulate(r, t, a, b) {
+            let (depth1, depth2) = (p.z, (r * p + t).z);
+            plus += usize::from(ahead(depth1, depth2));
+            minus += usize::from(ahead(-depth1, -depth2));
+        }
+    }
+    (plus, minus)
+}
+
 fn decompose_essential(e: &Matrix3<f64>) -> Option<(Matrix3<f64>, Matrix3<f64>, Vector3<f64>)> {
-    let svd = jacobi_svd(&dynamic(e));
+    let svd = jacobi_svd(&columns(e));
     let s = &svd.s;
     // a matrix of rank below two (the zero matrix among them) has no pose
     if !(s[0] > 0.0 && s[1] > RANK_TOLERANCE * s[0]) {
@@ -286,9 +308,9 @@ fn decompose_essential(e: &Matrix3<f64>) -> Option<(Matrix3<f64>, Matrix3<f64>, 
     }
     // U and V in SO(3): the first two columns from the decomposition, the third their cross
     // product (COLMAP makes the determinants positive by negating U or V as a whole)
-    let column = |m: &DMatrix<f64>, k: usize, scale: f64| Vector3::new(m[(0, k)], m[(1, k)], m[(2, k)]) / scale;
-    let (u1, u2) = (column(&svd.av, 0, s[0]), column(&svd.av, 1, s[1]));
-    let (v1, v2) = (column(&svd.v, 0, 1.0), column(&svd.v, 1, 1.0));
+    let column = |c: &[f64; 3], scale: f64| Vector3::new(c[0], c[1], c[2]) / scale;
+    let (u1, u2) = (column(&svd.av[0], s[0]), column(&svd.av[1], s[1]));
+    let (v1, v2) = (column(&svd.v[0], 1.0), column(&svd.v[1], 1.0));
     let t = u1.cross(&u2).normalize();
     let u = Matrix3::from_columns(&[u1, u2, t]);
     let v_t = Matrix3::from_columns(&[v1, v2, v1.cross(&v2)]).transpose();
@@ -318,8 +340,8 @@ fn triangulate(r: &Matrix3<f64>, t: &Vector3<f64>, a: [f64; 2], b: [f64; 2]) -> 
         [b[0] * r[(2, 0)] - r[(0, 0)], b[0] * r[(2, 1)] - r[(0, 1)], b[0] * r[(2, 2)] - r[(0, 2)], b[0] * t.z - t.x],
         [b[1] * r[(2, 0)] - r[(1, 0)], b[1] * r[(2, 1)] - r[(1, 1)], b[1] * r[(2, 2)] - r[(1, 2)], b[1] * t.z - t.y],
     ];
-    let svd = jacobi_svd(&DMatrix::from_fn(4, 4, |i, j| rows[i][j]));
-    let x = svd.v.column(3);
+    let a: [[f64; 4]; 4] = std::array::from_fn(|j| std::array::from_fn(|i| rows[i][j]));
+    let x = jacobi_svd(&a).v[3];
     (x[3] != 0.0).then(|| Vector3::new(x[0] / x[3], x[1] / x[3], x[2] / x[3]))
 }
 
@@ -341,35 +363,133 @@ fn homography_rows(a: [f64; 2], b: [f64; 2]) -> [[f64; 9]; 2] {
 }
 
 /// The 3 x 3 matrix whose row-major entries are the nine components of `v`.
-fn as_matrix(v: &SVector<f64, 9>) -> Matrix3<f64> {
-    Matrix3::from_row_slice(v.as_slice())
+fn as_matrix(v: &[f64; 9]) -> Matrix3<f64> {
+    Matrix3::from_row_slice(v)
 }
 
 /// A basis of the null space of the linear system `A f = 0` whose rows are given, of the dimension
-/// `dim` a configuration in general position leaves: the right singular vectors of the `dim`
-/// smallest singular values, the smallest first. `None` when the next singular value is below
-/// `RANK_TOLERANCE` times the largest (A has lost rank: the configuration is degenerate) or when
-/// the decomposition fails.
-fn null_space(rows: &[[f64; 9]], dim: usize) -> Option<Vec<SVector<f64, 9>>> {
+/// `D` a configuration in general position leaves: the right singular vectors of the `D` smallest
+/// singular values, the smallest first. `None` when the next singular value is below
+/// `RANK_TOLERANCE` times the largest (A has lost rank: the configuration is degenerate).
+///
+/// A minimal sample has `9 - D` rows, and its `D` smallest singular values are zero: the basis is
+/// then any orthonormal basis of the null space, taken from the Householder QR decomposition of
+/// `A^T` (the last `D` columns of its Q), and the rank is told by the singular values of the rows
+/// alone (no right singular vector accumulated), which is a fraction of the cost of the full
+/// decomposition run on every hypothesis of a RANSAC.
+fn null_space<const D: usize>(rows: impl IntoIterator<Item = [f64; 9]>) -> Option<[[f64; 9]; D]> {
     // at least nine rows (the rest zero), so that every right singular vector is computed; a
     // taller system is reduced to the R of its QR decomposition, with the same right singular
-    // vectors
-    let n = rows.len().max(9);
-    let mut a = DMatrix::from_fn(n, 9, |i, j| rows.get(i).map_or(0.0, |row| row[j]));
-    if n > 9 {
-        a = QR::new(a).r();
+    // vectors: the first nine rows are kept as they are, a tenth turns them into R and every row
+    // after is absorbed into it
+    let mut a = [[0.0; 9]; 9];
+    let mut count = 0;
+    for row in rows {
+        if count < 9 {
+            a[count] = row;
+        } else {
+            if count == 9 {
+                let first = a;
+                a = [[0.0; 9]; 9];
+                for row in first {
+                    absorb(&mut a, row);
+                }
+            }
+            absorb(&mut a, row);
+        }
+        count += 1;
     }
-    let svd = jacobi_svd(&a);
-    if !(svd.s[0] > 0.0 && svd.s[8 - dim] > RANK_TOLERANCE * svd.s[0]) {
+    if count + D == 9 && count > 0 {
+        return minimal_null_space(&a[..count]);
+    }
+    // the decomposition takes the columns of the matrix whose rows `a` holds
+    let columns: [[f64; 9]; 9] = std::array::from_fn(|j| std::array::from_fn(|i| a[i][j]));
+    let svd = jacobi_svd(&columns);
+    if !(svd.s[0] > 0.0 && svd.s[8 - D] > RANK_TOLERANCE * svd.s[0]) {
         return None;
     }
-    Some((9 - dim..9).rev().map(|k| SVector::from_iterator(svd.v.column(k).iter().copied())).collect())
+    Some(std::array::from_fn(|k| svd.v[8 - k]))
+}
+
+/// The null space of the `9 - D` rows (a minimal sample, see `null_space`): `None` when their
+/// smallest singular value is below `RANK_TOLERANCE` times the largest.
+fn minimal_null_space<const D: usize>(rows: &[[f64; 9]]) -> Option<[[f64; 9]; D]> {
+    let m = rows.len();
+    let mut columns = [[0.0; 9]; 9];
+    columns[..m].copy_from_slice(rows);
+    let mut values = [0.0; 9];
+    singular_values_of(&mut columns[..m], &mut values[..m]);
+    if !(values[0] > 0.0 && values[m - 1] > RANK_TOLERANCE * values[0]) {
+        return None;
+    }
+    // Householder: A^T = H_0 H_1 ... H_{m-1} R, each H_k = I - beta_k v_k v_k^T acting on the
+    // entries from k on; the null space of A is spanned by the columns m..9 of Q = H_0 ... H_{m-1}
+    let mut at = [[0.0; 9]; 9];
+    at[..m].copy_from_slice(rows);
+    let mut reflectors = [([0.0; 9], 0.0); 9];
+    for k in 0..m {
+        let norm = at[k][k..].iter().map(|x| x * x).sum::<f64>().sqrt();
+        if !(norm > 0.0) {
+            continue;
+        }
+        let alpha = if at[k][k] > 0.0 { -norm } else { norm };
+        let mut v = [0.0; 9];
+        v[k..].copy_from_slice(&at[k][k..]);
+        v[k] -= alpha;
+        let length = v[k..].iter().map(|x| x * x).sum::<f64>();
+        if !(length > 0.0) {
+            continue;
+        }
+        let beta = 2.0 / length;
+        for column in at.iter_mut().take(m).skip(k) {
+            let projection = beta * (k..9).map(|i| v[i] * column[i]).sum::<f64>();
+            for i in k..9 {
+                column[i] -= projection * v[i];
+            }
+        }
+        reflectors[k] = (v, beta);
+    }
+    let basis = std::array::from_fn(|n| {
+        let mut e = [0.0; 9];
+        e[8 - n] = 1.0;
+        for (v, beta) in reflectors[..m].iter().rev() {
+            let projection = beta * (0..9).map(|i| v[i] * e[i]).sum::<f64>();
+            for i in 0..9 {
+                e[i] -= projection * v[i];
+            }
+        }
+        e
+    });
+    Some(basis)
+}
+
+/// The row `w` absorbed into the upper triangular `r` (rows) by Givens rotations: `r` becomes the
+/// R of the QR decomposition of its rows and `w` (the orthogonal factor is not kept).
+fn absorb(r: &mut [[f64; 9]; 9], mut w: [f64; 9]) {
+    for k in 0..9 {
+        if w[k] == 0.0 {
+            continue;
+        }
+        let (x, y) = (r[k][k], w[k]);
+        let h = (x * x + y * y).sqrt();
+        if !(h > 0.0 && h.is_finite()) {
+            continue;
+        }
+        let (c, s) = (x / h, y / h);
+        r[k][k] = h;
+        w[k] = 0.0;
+        for j in k + 1..9 {
+            let (p, q) = (r[k][j], w[j]);
+            r[k][j] = c * p + s * q;
+            w[j] = c * q - s * p;
+        }
+    }
 }
 
 /// The matrix of rank two closest to `f`: its smallest singular value zeroed.
 fn rank_two(f: &Matrix3<f64>) -> Matrix3<f64> {
-    let svd = jacobi_svd(&dynamic(f));
-    Matrix3::from_fn(|i, j| svd.av[(i, 0)] * svd.v[(j, 0)] + svd.av[(i, 1)] * svd.v[(j, 1)])
+    let svd = jacobi_svd(&columns(f));
+    Matrix3::from_fn(|i, j| svd.av[0][i] * svd.v[0][j] + svd.av[1][i] * svd.v[1][j])
 }
 
 /// Exponents of x, y and z of the 20 monomials of degree up to three, in the order of the
@@ -760,5 +880,56 @@ mod tests {
         let roots = real_roots(&[-21.0, 4.0, 1.0]);
         assert_eq!(roots.len(), 2);
         assert!((roots[0] + 7.0).abs() < 1e-14 && (roots[1] - 3.0).abs() < 1e-14, "{roots:?}");
+    }
+
+    #[test]
+    fn both_signs_of_the_translation_are_counted_as_each_alone() {
+        // random poses and correspondences, some in front, some behind, some far away
+        let mut random = Lcg(17);
+        for _ in 0..20 {
+            let axis = Vector3::new(random.symmetric(), random.symmetric(), random.symmetric()).normalize();
+            let k = Matrix3::new(0.0, -axis.z, axis.y, axis.z, 0.0, -axis.x, -axis.y, axis.x, 0.0);
+            let angle = 0.3 * random.symmetric();
+            let r = Matrix3::identity() + k * angle.sin() + k * k * (1.0 - angle.cos());
+            let t = Vector3::new(random.symmetric(), random.symmetric(), random.symmetric());
+            let x1: Vec<[f64; 2]> = (0..50).map(|_| [random.symmetric(), random.symmetric()]).collect();
+            let x2: Vec<[f64; 2]> = (0..50).map(|_| [random.symmetric(), random.symmetric()]).collect();
+            let both = points_in_front_both(&r, &t, &x1, &x2);
+            assert_eq!(both, (points_in_front(&r, &t, &x1, &x2), points_in_front(&r, &(-t), &x1, &x2)));
+        }
+    }
+
+    #[test]
+    fn the_null_space_of_a_minimal_sample_is_orthonormal_and_null() {
+        let mut random = Lcg(23);
+        for m in [5usize, 7, 8] {
+            let rows: Vec<[f64; 9]> = (0..m).map(|_| std::array::from_fn(|_| random.symmetric())).collect();
+            let check = |basis: &[[f64; 9]]| {
+                for (i, v) in basis.iter().enumerate() {
+                    for row in &rows {
+                        let residual: f64 = row.iter().zip(v).map(|(a, b)| a * b).sum();
+                        assert!(residual.abs() < 1e-14, "{m} rows: |A v| = {residual}");
+                    }
+                    for (j, w) in basis.iter().enumerate() {
+                        let d: f64 = v.iter().zip(w).map(|(a, b)| a * b).sum();
+                        let want = if i == j { 1.0 } else { 0.0 };
+                        assert!((d - want).abs() < 1e-14, "{m} rows: v{i} . v{j} = {d}");
+                    }
+                }
+            };
+            match m {
+                5 => check(&null_space::<4>(rows.iter().copied()).unwrap()),
+                7 => check(&null_space::<2>(rows.iter().copied()).unwrap()),
+                _ => check(&null_space::<1>(rows.iter().copied()).unwrap()),
+            }
+            // a row repeated: the rank is lost and there is no null space of that dimension
+            let mut repeated = rows.clone();
+            repeated[m - 1] = repeated[0];
+            match m {
+                5 => assert!(null_space::<4>(repeated).is_none()),
+                7 => assert!(null_space::<2>(repeated).is_none()),
+                _ => assert!(null_space::<1>(repeated).is_none()),
+            }
+        }
     }
 }

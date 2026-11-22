@@ -31,8 +31,13 @@ database. The export keeps the ids of the photos, cameras, rigs and frames of th
 continues from them.
 
 The thresholds of the two-stage matching live here (:data:`STAGE1_POINTS`, :data:`TRUST_INLIERS`,
-:data:`DROP_INLIERS`) and go to the core with the options; ``PPG_NATIVE_DCT=0`` decodes every JPEG whole (no DCT
-scaling), ``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one. The database is read with
+:data:`DROP_INLIERS`) and go to the core with the options; every JPEG is decoded whole and reduced as COLMAP reduces
+it, ``PPG_NATIVE_DCT=1`` decodes it at the DCT scale its reduction allows instead (faster, fewer tie points),
+``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one. The second stage is tuned at
+run time (:func:`guided_settings`): ``PPG_NATIVE_GUIDED=0`` sends the trusted pairs to brute force instead,
+``PPG_NATIVE_GUIDED_RATIO`` sets its ratio test (default :data:`GUIDED_RATIO`) and
+``PPG_NATIVE_GUIDED_BAND`` the half-width of its band as a multiple of the verification's threshold (default 1.0);
+the record of the step (``chunk.meta["sfm"]``) says the values used. The database is read with
 :func:`.sfm.read_only_uri` and photos are named as :func:`.sfm.image_root_and_names` names them (POSIX relative
 paths, blanks allowed): the stores key them by name and never make a file name of one.
 """
@@ -42,6 +47,7 @@ import errno
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -66,6 +72,13 @@ log = logging.getLogger(__name__)
 STAGE1_POINTS = 8000
 TRUST_INLIERS = 40
 DROP_INLIERS = 8
+# the ratio test of the matching (COLMAP's default, the core's `max_ratio` unless given)
+MAX_RATIO = 0.8
+# the ratio test of the second stage (PPG_NATIVE_GUIDED_RATIO): a point there is compared only with the points of its
+# band, so the test of the first stage lets through matches a ratio over all the points would refuse. Chosen on
+# Sultan 57 (2026-11-22, three runs each, photos decoded whole): 0.8 gave 30,050 tie points a photo at 1.23 px,
+# 0.7 29,530 at 1.03 px, 0.6 28,360 at 0.996 px - the classic matching's 28,700 at 0.996 px
+GUIDED_RATIO = 0.6
 
 STORES = "native"  # <sfm>/native/{features,small,matches}
 TMP = "native.tmp"  # where a fresh matching works, moved into place when it has finished
@@ -106,13 +119,57 @@ def as_disk_full(exc: BaseException) -> OSError:
 
 
 def dct_enabled() -> bool:
-    """``PPG_NATIVE_DCT`` (default on): a JPEG decoded at the DCT scale its reduction allows."""
-    return os.environ.get("PPG_NATIVE_DCT", "1").strip() != "0"
+    """``PPG_NATIVE_DCT`` (default off): a JPEG decoded at the DCT scale its reduction allows, not whole. Off by
+    default: the reduced DCT gives another raster than COLMAP's reduction of the whole photo, and fewer tie points
+    per photo, for a small saving of time in the features stage."""
+    return os.environ.get("PPG_NATIVE_DCT", "0").strip() not in ("", "0")
 
 
 def cpu_share_enabled() -> bool:
     """``PPG_NATIVE_CPU_SHARE`` (default on): the CPU takes pairs beside the GPUs."""
     return os.environ.get("PPG_NATIVE_CPU_SHARE", "1").strip() != "0"
+
+
+def _positive_env(name: str, default: float, upper: float | None = None) -> float:
+    """The number in the environment variable ``name`` (``default`` when it is not set or blank): a ValueError
+    naming it when it is not a number above 0 (and at most ``upper``)."""
+    text = os.environ.get(name, "").strip()
+    if not text:
+        return default
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"{name} must be a number, not {text!r}") from None
+    if not (value > 0 and math.isfinite(value)) or (upper is not None and value > upper):
+        bound = f" and at most {upper}" if upper is not None else ""
+        raise ValueError(f"{name} must be above 0{bound}, not {text!r}")
+    return value
+
+
+def guided_settings() -> dict:
+    """The settings of the second stage from the environment: ``guided`` (``PPG_NATIVE_GUIDED``, default on: the
+    trusted pairs are matched along the epipolar lines; ``0`` sends them to brute force), ``guided_max_ratio``
+    (``PPG_NATIVE_GUIDED_RATIO``, default :data:`GUIDED_RATIO`) and ``guided_band``
+    (``PPG_NATIVE_GUIDED_BAND``, default 1.0: the half-width of the band, a multiple of the verification's
+    threshold). A value that is not one is a ValueError naming its variable."""
+    return {"guided": os.environ.get("PPG_NATIVE_GUIDED", "1").strip() != "0",
+            "guided_max_ratio": _positive_env("PPG_NATIVE_GUIDED_RATIO", GUIDED_RATIO, upper=1.0),
+            "guided_band": _positive_env("PPG_NATIVE_GUIDED_BAND", 1.0)}
+
+
+def pair_options(tiepoint_limit: int, guided: dict) -> dict:
+    """The options of the pairs stage for the core: the thresholds of the routes, the cap of the matches from the
+    tie point limit and the settings of the second stage (:func:`guided_settings`); those that keep the core's
+    defaults are left out (the core's ratio of the second stage is the first stage's, :data:`MAX_RATIO`)."""
+    options = {"stage1_points": STAGE1_POINTS, "trust_inliers": TRUST_INLIERS, "drop_inliers": DROP_INLIERS,
+               "max_num_matches": max(int(tiepoint_limit) * 4, 8192)}
+    if not guided["guided"]:
+        options["guided"] = False
+    if guided["guided_max_ratio"] != MAX_RATIO:
+        options["guided_max_ratio"] = float(guided["guided_max_ratio"])
+    if guided["guided_band"] != 1.0:
+        options["guided_band"] = float(guided["guided_band"])
+    return options
 
 
 def _kernels():
@@ -279,14 +336,19 @@ def _stores_present(stores: Path) -> bool:
 
 
 def _stores_trusted(chunk: Chunk, stores: Path, root: Path, quality: str, keypoint_limit: int,
-                    apply_masks: str) -> bool:
+                    apply_masks: str, dct: bool, guided: dict) -> bool:
     """Whether the stores in ``stores`` are those of a native matching of these photos with these settings: the
     record of the chunk says so (an earlier classic matching, or other settings, made the database from other
-    points, and the stores would be trusted over it)."""
+    points, and the stores would be trusted over it). The decoding (``dct``) and the second stage (``guided``,
+    :func:`guided_settings`) count too; a record written before they were recorded had the DCT scale and the first
+    stage's ratio."""
     info = chunk.meta.get("sfm") or {}
+    made = (info.get("native_dct", True), info.get("native_guided", True),
+            info.get("native_guided_ratio", MAX_RATIO), info.get("native_guided_band", 1.0))
     return (_stores_present(stores) and info.get("engine") == "native" and info.get("quality") == quality
             and info.get("keypoint_limit") == int(keypoint_limit) and info.get("apply_masks") == apply_masks
-            and info.get("image_root") == str(root))
+            and info.get("image_root") == str(root)
+            and made == (bool(dct), guided["guided"], guided["guided_max_ratio"], guided["guided_band"]))
 
 
 def _stage_stores(stores: Path, wd: Path) -> None:
@@ -358,8 +420,9 @@ class _Run:
     downscale: int
     devices: list[int] = field(default_factory=list)
     gpu_names: str | None = None
-    dct: bool = True
+    dct: bool = False
     cpu_share: bool = True
+    guided: dict = field(default_factory=lambda: {"guided": True, "guided_max_ratio": GUIDED_RATIO, "guided_band": 1.0})
     masks: Path | None = None
     keep: bool = False
     done: set[str] = field(default_factory=set)
@@ -440,7 +503,7 @@ def _continuation(run: _Run, *, reset: bool, quality: str, keypoint_limit: int, 
     native matching whose stores are not trusted)."""
     if reset or not sfm._continuable(run.chunk, run.db_path, run.root, run.names, "sift"):
         return None
-    if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks)
+    if (_stores_trusted(run.chunk, run.stores, run.root, quality, keypoint_limit, apply_masks, run.dct, run.guided)
             and set(run.k.store_names(str(run.stores / FEATURES))) <= set(run.everyone)):
         return "stores"
     if _photos_without_descriptors(run.db_path):
@@ -593,8 +656,7 @@ def _match_pairs(run: _Run, progress: Progress, pair_list: list, cams: dict, mod
     progress(0.55, f"{PROGRESS_PAIRS} ({mode}, {len(pair_list):,} pairs)"
              + (f" on {run.gpu_names} and the CPU" if run.devices and run.cpu_share
                 else f" on {run.gpu_names}" if run.devices else ""))
-    options = {"stage1_points": STAGE1_POINTS, "trust_inliers": TRUST_INLIERS, "drop_inliers": DROP_INLIERS,
-               "max_num_matches": max(int(tiepoint_limit) * 4, 8192)}
+    options = pair_options(tiepoint_limit, run.guided)
     sub = progress.sub(0.55, 0.35)
     matched = run.k.match_pairs(str(run.features_dir), str(run.matches_dir), pair_list, cams, run.devices, options,
                                 _relay(sub, PROGRESS_PAIRS, "pairs"), run.cpu_share)
@@ -684,7 +746,10 @@ def _record(run: _Run, *, features: str, mode: str, pairs: int, by_device: dict,
                              "gpu": ", ".join(gpu_shares) if gpu_shares else None,
                              "gpu_pairs": sum(gpu_shares.values()), "gpu_shares": gpu_shares or None,
                              "cpu_pairs": by_device.get("CPU", 0), "routes": routes,
-                             "preselection_size": run.small_size}
+                             "preselection_size": run.small_size, "native_dct": run.dct,
+                             "native_guided": run.guided["guided"],
+                             "native_guided_ratio": run.guided["guided_max_ratio"],
+                             "native_guided_band": run.guided["guided_band"]}
     if run.keep and old_info.get("gps_priors"):
         run.chunk.meta["sfm"]["gps_priors"] = old_info["gps_priors"]  # the priors already in the database: same axes
 
@@ -721,7 +786,7 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
         raise RuntimeError(RIGS_REASON)
     run = _Run(k, chunk, work, root, names, QUALITY_DOWNSCALE.get(quality, 2))
     run.devices, run.gpu_names = _gpu_devices(gpu)
-    run.dct, run.cpu_share = dct_enabled(), cpu_share_enabled()
+    run.dct, run.cpu_share, run.guided = dct_enabled(), cpu_share_enabled(), guided_settings()
     if generic is None:
         generic = len(names) > sfm.EXHAUSTIVE_UP_TO  # every pair is cheap enough up to there
     old_info = chunk.meta.get("sfm") or {}

@@ -450,12 +450,16 @@ pub(crate) fn native_preselect<'py>(py: Python<'py>, small_store: &str, cameras:
 /// The options of the matching of the pairs from a flat dict: the fields of `pairs::Options` by their
 /// names - ``stage1_points``, ``trust_inliers`` and ``drop_inliers`` must be given (their home is the
 /// Python side), ``max_ratio``, ``max_distance``, ``cross_check`` and ``max_num_matches`` (None keeps every
-/// match) have COLMAP's defaults - with the verification's under ``two_view_*`` and its RANSAC's under
-/// ``ransac_*`` (the keys of :func:`two_view_defaults`); a key that is not one of them is a ValueError.
+/// match) have COLMAP's defaults, the second stage's ``guided`` (true), ``guided_max_ratio`` (``max_ratio``)
+/// and ``guided_band`` (1.0, a positive multiple of the verification's ``max_error``) keep the behaviour of
+/// the first versions - with the verification's under ``two_view_*`` and its RANSAC's under ``ransac_*``
+/// (the keys of :func:`two_view_defaults`); a key that is not one of them is a ValueError.
 fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
     let mut o = pairs::Options { stage1_points: 0, trust_inliers: 0, drop_inliers: 0, max_ratio: 0.8,
                                  max_distance: 0.7, cross_check: true, max_num_matches: MAX_NUM_MATCHES,
-                                 two_view: two_view::Options::default() };
+                                 two_view: two_view::Options::default(), guided: true, guided_max_ratio: 0.8,
+                                 guided_band: 1.0 };
+    let mut guided_max_ratio: Option<f32> = None;
     const THRESHOLDS: [&str; 3] = ["stage1_points", "trust_inliers", "drop_inliers"];
     let mut given = [false; 3];
     for (key, value) in d.iter() {
@@ -492,6 +496,21 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
                 o.max_num_matches = value.extract::<Option<usize>>()?.unwrap_or(usize::MAX);
                 true
             }
+            "guided" => {
+                o.guided = value.extract()?;
+                true
+            }
+            "guided_max_ratio" => {
+                guided_max_ratio = Some(value.extract()?);
+                true
+            }
+            "guided_band" => {
+                o.guided_band = value.extract()?;
+                if !(o.guided_band > 0.0 && o.guided_band.is_finite()) {
+                    return Err(PyValueError::new_err(format!("guided_band must be positive, not {}", o.guided_band)));
+                }
+                true
+            }
             k if k.starts_with("ransac_") => set_two_view_option(&mut o.two_view, k, &value)?,
             k => match k.strip_prefix("two_view_") {
                 Some(rest) => set_two_view_option(&mut o.two_view, rest, &value)?,
@@ -502,6 +521,7 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
             return Err(PyValueError::new_err(format!("unknown matching option {key:?}")));
         }
     }
+    o.guided_max_ratio = guided_max_ratio.unwrap_or(o.max_ratio);
     let missing: Vec<&str> = THRESHOLDS.iter().zip(given).filter(|&(_, g)| !g).map(|(n, _)| *n).collect();
     if !missing.is_empty() {
         return Err(PyValueError::new_err(format!("the matching options must give {}", missing.join(", "))));
@@ -517,7 +537,8 @@ fn pairs_options(d: &Bound<'_, PyDict>) -> PyResult<pairs::Options> {
 /// (``cpu_share`` false leaves the pairs to the GPUs alone, when there is one). ``cameras`` as in
 /// :func:`native_preselect`, ``options`` the flat dict of the fields of `pairs::Options` (``stage1_points``,
 /// ``trust_inliers``, ``drop_inliers`` given; ``max_ratio``, ``max_distance``, ``cross_check``,
-/// ``max_num_matches`` COLMAP's unless given; the verification's under ``two_view_*`` and ``ransac_*``).
+/// ``max_num_matches`` COLMAP's unless given; ``guided``, ``guided_max_ratio``, ``guided_band`` of the second
+/// stage; the verification's under ``two_view_*`` and ``ransac_*``).
 /// Returns ``done``, ``guided``, ``brute_force``, ``dropped`` (the pairs by route), ``by_device`` (the pairs
 /// whose first stage each device did, by its name, ``CPU`` for the threads) and ``log``.
 /// ``progress(done, total, message)`` counts the pairs: at the start, then at most every ``min_interval``

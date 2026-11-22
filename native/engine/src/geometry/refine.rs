@@ -8,7 +8,7 @@
 
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 
-use super::linalg::{dynamic, jacobi_svd, normalise, unit};
+use super::linalg::{columns, jacobi_svd, normalise, unit};
 use super::ransac::{Model, Report, Support};
 use super::solvers::pose_from_essential;
 use super::two_view::{Essential, Fundamental, Homography};
@@ -155,24 +155,27 @@ fn tangent_basis(t: &Vector3<f64>) -> (Vector3<f64>, Vector3<f64>) {
 
 /// The essential matrix as a pose: the rotation moved on SO(3), the unit translation on its
 /// sphere (five parameters, COLMAP's `RefineRelativePose`); the residual is the Sampson error in
-/// normalised coordinates.
+/// normalised coordinates. The essential matrix of the pose is computed once with it, not for
+/// every correspondence.
 #[derive(Clone)]
 struct EssentialPose {
     r: Matrix3<f64>,
     t: Vector3<f64>,
     b1: Vector3<f64>,
     b2: Vector3<f64>,
+    e: Matrix3<f64>,
 }
 
 impl EssentialPose {
     fn new(r: Matrix3<f64>, t: Vector3<f64>) -> EssentialPose {
         let t = t.normalize();
         let (b1, b2) = tangent_basis(&t);
-        EssentialPose { r, t, b1, b2 }
+        let e = Matrix3::new(0.0, -t.z, t.y, t.z, 0.0, -t.x, -t.y, t.x, 0.0) * r;
+        EssentialPose { r, t, b1, b2, e }
     }
 
     fn essential(&self) -> Matrix3<f64> {
-        Matrix3::new(0.0, -self.t.z, self.t.y, self.t.z, 0.0, -self.t.x, -self.t.y, self.t.x, 0.0) * self.r
+        self.e
     }
 }
 
@@ -186,17 +189,19 @@ impl Refinable for EssentialPose {
     }
 
     fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]) {
-        out[0] = sampson_signed(&self.essential(), a, b);
+        out[0] = sampson_signed(&self.e, a, b);
     }
 }
 
 /// The fundamental matrix as `U diag(1, s, 0) V^T`, `U` and `V` rotations moved on SO(3) and `s`
 /// free (seven parameters, the rank kept at two); the residual is the Sampson error in pixels.
+/// The matrix they compose is computed once with them, not for every correspondence.
 #[derive(Clone)]
 struct FundamentalFactors {
     u: Matrix3<f64>,
     v: Matrix3<f64>,
     s: f64,
+    f: Matrix3<f64>,
 }
 
 impl FundamentalFactors {
@@ -205,21 +210,26 @@ impl FundamentalFactors {
         if !f.iter().all(|v| v.is_finite()) {
             return None;
         }
-        let svd = jacobi_svd(&dynamic(f));
+        let svd = jacobi_svd(&columns(f));
         let s = &svd.s;
         if !(s[0] > 0.0 && s[1] > 1e-10 * s[0]) {
             return None;
         }
-        let column = |m: &DMatrix<f64>, k: usize, scale: f64| Vector3::new(m[(0, k)], m[(1, k)], m[(2, k)]) / scale;
-        let (u1, u2) = (column(&svd.av, 0, s[0]), column(&svd.av, 1, s[1]));
-        let (v1, v2) = (column(&svd.v, 0, 1.0), column(&svd.v, 1, 1.0));
+        let column = |c: &[f64; 3], scale: f64| Vector3::new(c[0], c[1], c[2]) / scale;
+        let (u1, u2) = (column(&svd.av[0], s[0]), column(&svd.av[1], s[1]));
+        let (v1, v2) = (column(&svd.v[0], 1.0), column(&svd.v[1], 1.0));
         let u = Matrix3::from_columns(&[u1, u2, u1.cross(&u2)]);
         let v = Matrix3::from_columns(&[v1, v2, v1.cross(&v2)]);
-        Some(FundamentalFactors { u, v, s: s[1] / s[0] })
+        Some(FundamentalFactors::new(u, v, s[1] / s[0]))
+    }
+
+    fn new(u: Matrix3<f64>, v: Matrix3<f64>, s: f64) -> FundamentalFactors {
+        let f = u * Matrix3::from_diagonal(&Vector3::new(1.0, s, 0.0)) * v.transpose();
+        FundamentalFactors { u, v, s, f }
     }
 
     fn fundamental(&self) -> Matrix3<f64> {
-        self.u * Matrix3::from_diagonal(&Vector3::new(1.0, self.s, 0.0)) * self.v.transpose()
+        self.f
     }
 }
 
@@ -228,15 +238,15 @@ impl Refinable for FundamentalFactors {
     const RESIDUALS: usize = 1;
 
     fn perturbed(&self, d: &[f64]) -> FundamentalFactors {
-        FundamentalFactors {
-            u: exp_so3(&Vector3::new(d[0], d[1], d[2])) * self.u,
-            v: exp_so3(&Vector3::new(d[3], d[4], d[5])) * self.v,
-            s: self.s + d[6],
-        }
+        FundamentalFactors::new(
+            exp_so3(&Vector3::new(d[0], d[1], d[2])) * self.u,
+            exp_so3(&Vector3::new(d[3], d[4], d[5])) * self.v,
+            self.s + d[6],
+        )
     }
 
     fn residuals(&self, a: [f64; 2], b: [f64; 2], out: &mut [f64]) {
-        out[0] = sampson_signed(&self.fundamental(), a, b);
+        out[0] = sampson_signed(&self.f, a, b);
     }
 }
 
