@@ -356,9 +356,11 @@ def write_ring_dataset(out_dir: str | Path, n: int = 72, diameter: float = 60.0,
 # ppg bench synthetic weak-ring). "shape": the largest residual of the triangulated targets after one similarity
 # fitted on all of them, before any optimization, over the diameter (bench.truth.ring_shape; spec 8.4: within 0.5 %).
 # "control_m" and "check_m": 1.25 times the better median, of COLMAP's incremental and global mappers (three runs
-# each), of the control and check errors after the optimization of the cameras, rounded up to the millimetre - not
-# measured yet: 1 m stands in until the classic mappers are run on the full ring.
-WEAK_RING_GATE = {"shape": 0.005, "control_m": 1.0, "check_m": 1.0}
+# each), of the control and check errors after the optimization of the cameras, rounded up to the millimetre.
+# Measured on 2026-11-22 (ppg bench synthetic weak-ring --steps optimize, --mapper incremental and --mapper global):
+# the incremental mapper is the better one, medians 0.000950 m (control) and 0.010209 m (check); the global mapper
+# placed no photo in any run and fell back to the incremental one (medians 0.000972 m and 0.010848 m).
+WEAK_RING_GATE = {"shape": 0.005, "control_m": 0.002, "check_m": 0.013}
 
 
 def write_weak_ring_dataset(out_dir: str | Path, n: int = 80, diameter: float = 60.0, height: float = 15.0,
