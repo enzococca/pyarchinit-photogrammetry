@@ -1816,3 +1816,75 @@ def test_the_verified_pairs_of_two_databases_compare_whatever_their_image_ids(tm
     by_name = database(tmp_path / "native.db", {"IMG_0002.jpg": 1, "IMG_0003.jpg": 2})
     by_thread = database(tmp_path / "classic.db", {"IMG_0003.jpg": 1, "IMG_0002.jpg": 2})
     assert _verified_pairs(by_name) == _verified_pairs(by_thread) == {("IMG_0002.jpg", "IMG_0003.jpg"): (2, 40)}
+
+
+# ------------------------------------------------------------------------------------------- what the step refuses
+@pytest.mark.parametrize("engine", ["native"])
+def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives_it(scene_dir, tmp_path, monkeypatch,
+                                                                                     caplog, engine):
+    """An argument the matching does not take (masks, a preselection), a chunk that is not in a project or has no
+    enabled photo: the native step refuses it with the error the classic step gives - the same type and text - and the
+    caller gets it: no fallback to the classic engine, no line saying that the
+    native matching failed, no record of an engine. The seconds of the refused step are kept as the classic step
+    keeps them (the type of the error under ``failed``)."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.engine import sfm
+
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    classic_ran = []
+    real_classic = sfm.match_photos
+
+    def classic(chunk, **kwargs):
+        classic_ran.append(kwargs)
+        return real_classic(chunk, **kwargs)
+
+    monkeypatch.setattr(sfm, "match_photos", classic)
+    (tmp_path / "with").mkdir()
+    _, ch = _project(scene_dir, tmp_path / "with", photos=_photos(scene_dir)[:3])
+    doc = ppg.Document()
+    empty = doc.add_chunk("vuoto")
+    doc.save(tmp_path / "empty.ppg")
+    cases = [(Chunk(key=0, label="x"), {}, RuntimeError, "chunk is not attached to a document"),
+             (empty, {}, RuntimeError, "the chunk has no enabled photos"),
+             (ch, {"apply_masks": "nonsense"}, ValueError, "apply_masks: one of none, keypoints, tiepoints"),
+             (ch, {"pair_selection": "nonsense"}, ValueError, "unknown pair selection 'nonsense'"),
+             (ch, {"generic": False, "reference": "nonsense"}, ValueError, "unknown reference preselection")]
+    for chunk, kwargs, kind, text in cases:
+        with pytest.raises(kind) as classic_said:
+            chunk.match_photos(quality="high", engine="classic", **kwargs)
+        assert text in str(classic_said.value)
+        classic_ran.clear()
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            with pytest.raises(kind) as said:
+                chunk.match_photos(quality="high", engine=engine, **kwargs)
+        assert type(said.value) is type(classic_said.value) and str(said.value) == str(classic_said.value)
+        assert classic_ran == []  # refused by the native step itself
+        assert not [r for r in caplog.records if "classic used" in r.getMessage()]
+        assert "engine" not in chunk.meta
+    assert ch.meta["timings"]["match_photos"]["failed"] == "ValueError"
+
+
+def test_a_camera_without_its_sensor_is_not_a_reason_to_refuse(scene_dir, tmp_path):
+    """``cannot_run`` answers for any chunk: a camera whose sensor is not in the chunk (a chunk put together by a
+    script) is not the native engine's to refuse, and asking does not fail (it failed on the key)."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:3])
+    ch.cameras[0].sensor_key = max(ch.sensors) + 7
+    assert native_match.cannot_run(ch, "sift", True) is None
+
+
+def test_a_native_matching_removes_the_learned_points_of_the_database_it_replaces(scene_dir, tmp_path):
+    """The learned key points of a classic matching (``sfm/learned``) go with its database: a native matching that
+    writes a new database removes them, as a classic SIFT matching does."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:4])
+    learned = ch.data_dir / "sfm" / "learned" / "disk"
+    learned.mkdir(parents=True)
+    (learned / "points.npz").write_bytes(b"x")
+    native_match.match_photos(ch, quality="high")
+    assert ch.meta["sfm"]["engine"] == "native"
+    assert not (ch.data_dir / "sfm" / "learned").exists()

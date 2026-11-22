@@ -100,6 +100,17 @@ WINDOWS_DISK_FULL_TEXTS = ("(os error 39)", "(os error 112)")
 EXPORT_EVERY = 500  # the pairs between two reports of the export and of the import (and their cancel points)
 
 
+# the mark of an error of the request (an argument, the chunk: :func:`refused`), set on the error itself
+REFUSED = "_ppg_native_refused"
+
+
+def refused(exc: BaseException) -> bool:
+    """Whether ``exc`` is the native step refusing the request - an argument the matching does not take, a chunk that
+    is not in a project or has no enabled photo - with the error the classic step gives for it (the same type and
+    text): an error of the caller, which reaches the caller whichever engine runs, never a reason to fall back."""
+    return getattr(exc, REFUSED, False) is True
+
+
 def disk_full(exc: BaseException) -> bool:
     """Whether ``exc`` says that the disk is full: an ``OSError`` of ENOSPC, or the error of the core, of pycolmap
     or of sqlite whose text says so (:data:`DISK_FULL_TEXTS`, and :data:`WINDOWS_DISK_FULL_TEXTS` on Windows). No
@@ -207,7 +218,9 @@ def cannot_run(chunk: Chunk, matcher: str, reset: bool) -> str | None:
     if panorama.rig_configs(chunk, names):
         return RIGS_REASON
     for skey in sorted({c.sensor_key for c in chunk.cameras if c.enabled}):
-        sensor = chunk.sensors[skey]
+        sensor = chunk.sensors.get(skey)
+        if sensor is None:  # a camera without its sensor: not the engine's to refuse, the step says what it does
+            continue
         model = sfm.mapping_camera(sensor)[0]
         if not _native.supports(model):
             return f"camera model {model} of sensor '{sensor.label}': the native engine does not know it"
@@ -711,6 +724,8 @@ def _commit(run: _Run, progress: Progress, exclude_stationary: bool, old_info: d
                 log.warning("the stores of the native matching could not be put back yet (%s)", exc)
         raise
     shutil.rmtree(old, ignore_errors=True)
+    if not run.keep:  # the learned key points of a classic database (``learned/``) went with it
+        shutil.rmtree(run.work / "learned", ignore_errors=True)
     (run.stores / COMMIT).unlink(missing_ok=True)
     shutil.rmtree(run.stores / SMALL, ignore_errors=True)
     return removed
@@ -769,20 +784,24 @@ def _match_photos(chunk: Chunk, stages: timing.Stages, *, quality: str, keypoint
 
     k = _kernels()
     progress = as_progress(progress)
-    if apply_masks not in sfm.MASK_MODES:
-        raise ValueError(f"apply_masks: one of {', '.join(sfm.MASK_MODES)}")
-    generic, reference = sfm._preselection(pair_selection, generic, reference)
-    if guided_matching:
-        log.info(GUIDED_LINE)
-    try:  # the matching needs no system: what the alignment would refuse is only said here
-        gcp.preflight(chunk)
-    except Exception as exc:  # noqa: BLE001 - whatever it is: the references may still be switched off before it
-        log.warning("the alignment will not place the chunk by the positions of the photos while they are switched on: "
-                    "%s", exc)
-    work = sfm._sfm_dir(chunk)
+    try:  # the request checked as the classic step checks it: what it refuses reaches the caller (refused)
+        if apply_masks not in sfm.MASK_MODES:
+            raise ValueError(f"apply_masks: one of {', '.join(sfm.MASK_MODES)}")
+        generic, reference = sfm._preselection(pair_selection, generic, reference)
+        if guided_matching:
+            log.info(GUIDED_LINE)
+        try:  # the matching needs no system: what the alignment would refuse is only said here
+            gcp.preflight(chunk)
+        except Exception as exc:  # noqa: BLE001 - whatever it is: the references may still be switched off before it
+            log.warning("the alignment will not place the chunk by the positions of the photos while they are "
+                        "switched on: %s", exc)
+        work = sfm._sfm_dir(chunk)
+        root, names = sfm.image_root_and_names(chunk)
+    except (ValueError, RuntimeError) as exc:
+        setattr(exc, REFUSED, True)
+        raise
     _remove_leftovers(work)
     sfm._interrupted_names_back(work / "database.db")  # the names a classic matching that died in COLMAP left aliased
-    root, names = sfm.image_root_and_names(chunk)
     if panorama.rig_configs(chunk, names):
         raise RuntimeError(RIGS_REASON)
     run = _Run(k, chunk, work, root, names, QUALITY_DOWNSCALE.get(quality, 2))

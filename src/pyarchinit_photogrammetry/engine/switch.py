@@ -6,8 +6,9 @@ the choice of the program. The native engine does the matching (:data:`NATIVE_ST
 none of the other steps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
 reason in the record of the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints. ``auto`` is
 the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate. A
-method whose engine cannot do the step after all (the native core missing, a failure half way) falls back the same
-way (:func:`fall_back`).
+method whose engine cannot do the step after all (a failure half way) falls back the same way (:func:`fall_back`);
+a request the native engine does not take (the native core missing, a learned matcher...) is a fallback under
+``native`` and, under ``auto``, the program's choice of the classic engine (:func:`decline`).
 
 The word comes from the argument, else from the ``PPG_ENGINE`` environment variable, else it is ``auto``.
 """
@@ -83,6 +84,18 @@ def fall_back(choice: Choice, reason: str) -> Choice:
     choice given is not changed."""
     log.warning("engine '%s' asked, classic used (%s)", choice.requested, reason)
     return Choice(choice.requested, "classic", reason)
+
+
+def decline(choice: Choice, reason: str) -> Choice:
+    """The choice of a step whose request the native engine does not take, for ``reason`` (the native core missing or
+    switched off, a learned matcher, rigs...): under ``native`` a fallback (:func:`fall_back`: the reason recorded and
+    one WARNING line); under ``auto`` the classic engine is the program's choice, as it is for a step not yet in
+    :data:`AUTO_NATIVE_STEPS` - no fallback in the record and no line in the log above DEBUG. The choice given is not
+    changed."""
+    if choice.requested != "auto":
+        return fall_back(choice, reason)
+    log.debug("engine 'auto': classic used (%s)", reason)
+    return Choice(choice.requested, "classic", None)
 
 
 def classic_only(step: str, choice: Choice) -> None:
