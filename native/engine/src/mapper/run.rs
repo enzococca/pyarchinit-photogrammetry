@@ -47,7 +47,8 @@ fn name(stage: Stage) -> &'static str {
 /// an outlier; after the rounds the photos placed, the points and observations of the model, the
 /// share of the observations of the triangulated tracks the last filter kept, the median
 /// reprojection error in pixels, the accuracy of the positions estimated again, the bias of each
-/// flight, the reports of the rounds and their notes.
+/// flight and the posterior standard deviation of each axis of the biases that were adjusted (the
+/// reference flight has none), the reports of the rounds and their notes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MapperReport {
     pub photos: usize,
@@ -73,6 +74,7 @@ pub struct MapperReport {
     pub sigma_h: Option<f64>,
     pub sigma_v: Option<f64>,
     pub bias: Vec<(i64, [f64; 3])>,
+    pub bias_sd: Vec<(i64, [f64; 3])>,
     pub rounds: Vec<RoundReport>,
     pub notes: Vec<String>,
 }
@@ -307,6 +309,7 @@ impl Mapper {
             gnss_sigma: gnss.map(|g| g.sigma.clone()).unwrap_or_default(),
             sigma_estimate: None,
             bias: p.bias.clone(),
+            bias_covariance: Vec::new(),
             last_filter: (0, 0),
             notes: Vec::new(),
         };
@@ -340,6 +343,8 @@ impl Mapper {
                 r.sigma_h = state.sigma_estimate.as_ref().map(|e| e.sigma_h);
                 r.sigma_v = state.sigma_estimate.as_ref().map(|e| e.sigma_v);
                 r.bias.clone_from(&state.bias);
+                let sd = |c: &[[f64; 3]; 3]| std::array::from_fn(|a| c[a][a].sqrt());
+                r.bias_sd = state.bias_covariance.iter().map(|(f, c)| (*f, sd(c))).collect();
                 r.rounds = reports;
                 r.notes.clone_from(&state.notes);
                 self.state = Some(state);

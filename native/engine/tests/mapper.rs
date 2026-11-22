@@ -258,82 +258,51 @@ fn a_turned_world_is_not_a_transposed_one() {
     assert!(report.points > 400 && report.median_reprojection_px < 0.7, "{report:?}");
 }
 
-/// The bias of the second flight that the true rigid block gives (the oracle of ruling R12): the
-/// true centres fitted to the positions by weighted least squares with a small similarity
-/// (translation, rotation, scale) and a translation of flight 2 (flight 1 zero), linearised about
-/// the truth; the positions of the photos of `left_out` are not used.
-fn oracle_bias(s: &Scene, g: &Gnss, left_out: &[usize]) -> Vector3<f64> {
-    let mut n = nalgebra::DMatrix::<f64>::zeros(10, 10);
-    let mut rhs = nalgebra::DVector::<f64>::zeros(10);
-    let mean = s.poses.iter().map(|p| p.centre).sum::<Vector3<f64>>() / s.poses.len() as f64;
-    for k in 0..g.image.len() {
-        let i = g.image[k];
-        if left_out.contains(&i) {
-            continue;
-        }
-        let c = s.poses[i].centre - mean;
-        let second = if g.flight[k] == 2 { 1.0 } else { 0.0 };
-        let r = Vector3::from(g.xyz[k]) - s.poses[i].centre;
-        for a in 0..3 {
-            let mut row = nalgebra::DVector::<f64>::zeros(10);
-            row[a] = 1.0;
-            for b in 0..3 {
-                let mut e = Vector3::zeros();
-                e[b] = 1.0;
-                row[3 + b] = e.cross(&c)[a];
-            }
-            row[6] = c[a];
-            row[7 + a] = second;
-            let w = 1.0 / (g.sigma[k][a] * g.sigma[k][a]);
-            n += w * &row * row.transpose();
-            rhs += w * r[a] * &row;
-        }
-    }
-    let x = n.lu().solve(&rhs).expect("a rigid fit");
-    Vector3::new(x[7], x[8], x[9])
-}
-
-/// Ruling R6 and Review Focus 2 after the rounds, judged as ruling R12 sets it: a second flight
-/// whose positions are off by (3, -2, 1) m is taken by its bias within twice the error of the
-/// oracle (`oracle_bias`) or 0.05 m, the first flight held at exactly zero, with the accuracy
-/// recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38, the estimate of the accuracy staying
-/// near it) and for an RTK receiver (0.03 m / 0.05 m, seeds 34-36); a fix 100 m off is the only
-/// outlier, left out of the rounds, and its photo is placed with the others. Every case runs and
-/// prints its figures before the checks.
+/// Ruling R6 and Review Focus 2 after the rounds, judged as ruling R13 sets it: a second flight
+/// whose positions are off by (3, -2, 1) m is taken by its bias, each axis of the error within 3
+/// posterior standard deviations of that axis (`MapperReport::bias_sd`, from the inverse of the
+/// normal matrix of the last adjustment times its variance factor), the first flight held at
+/// exactly zero, with the accuracy recorded as the noise drawn (0.3 m / 0.5 m, seeds 33-38, the
+/// estimate of the accuracy staying near it) and for an RTK receiver (0.03 m / 0.05 m, seeds
+/// 34-36); a fix 100 m off is the only outlier, left out of the rounds, and its photo is placed
+/// with the others. Every case runs and prints its figures before the checks, and the standard
+/// deviations of the RTK cases are about a tenth of the others (the accuracy of the positions).
 ///
-/// Why against the oracle: the second flight is half the ring, and a bias of half the ring trades
-/// with a tilt (vertical) or a turn (horizontal) of the whole block, which only the positions
-/// themselves fix. No estimator can beat the true rigid block fitted to the positions; on seed 35
-/// at 0.3 m / 0.5 m that fit itself puts the vertical bias 0.63 m off (standard deviation 0.23 m).
+/// Why against the bias's own precision: the second flight is half the ring, and a bias of half
+/// the ring trades with a tilt (vertical) or a turn (horizontal) of the whole block and with the
+/// bending the tie points allow, which only the positions fix: on seed 35 at 0.3 m / 0.5 m even the
+/// rigid true block fitted to the positions puts the vertical bias 0.63 m off.
 #[test]
-#[ignore = "R12 fails on 3 of 9 cases (the rigid oracle ignores the bending the ties allow); figures to the owner"]
+#[ignore = "R13: normalised errors beyond 3 on 4 of 9 cases (global variance factor); figures to the owner"]
 fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
     let offset = Vector3::new(3.0, -2.0, 1.0);
     let cases = (33..=38).map(|seed| (seed, 0.3, 0.5)).chain((34..=36).map(|seed| (seed, 0.03, 0.05)));
     let mut failures = Vec::new();
+    let mut sds = Vec::new();
     for (seed, plan, height) in cases {
         let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
         let mut gnss = gnss_with(&s, plan, height, [plan, plan, height], seed, &[]);
         second_flight(&mut gnss, PHOTOS / 2, offset.into());
         gnss.xyz[37][0] += 100.0;
-        let oracle = (oracle_bias(&s, &gnss, &[37]) - offset).norm();
-        let tolerance = (2.0 * oracle).max(0.05);
         let (m, report) = mapped(&s, seed + 200, Options::default(), Some(&gnss), None);
         let residuals = centre_residuals(&s, &m);
         let shape = largest(&residuals);
         let bias = report.bias.get(1).map_or([f64::NAN; 3], |b| b.1);
-        let error = (Vector3::from(bias) - offset).norm();
+        let error: [f64; 3] = std::array::from_fn(|a| bias[a] - offset[a]);
+        let sd = report.bias_sd.iter().find(|(f, _)| *f == 2).map_or([f64::NAN; 3], |(_, sd)| *sd);
+        let normalised: [f64; 3] = std::array::from_fn(|a| error[a] / sd[a]);
         let (sh, sv) = (report.sigma_h.unwrap_or(f64::NAN), report.sigma_v.unwrap_or(f64::NAN));
-        eprintln!("seed {seed}, accuracy {plan} / {height} m: bias {bias:.3?}, {error:.3} m from the offset (oracle \
-                   {oracle:.3} m, tolerance {tolerance:.3} m); outliers {:?}; centres {shape:.3} m; sigma {sh:.3} / \
-                   {sv:.3} m", report.gnss_outliers);
+        eprintln!("seed {seed}, accuracy {plan} / {height} m: error {error:.3?} m, posterior sd {sd:.3?} m, \
+                   normalised {normalised:.2?}; outliers {:?}; centres {shape:.3} m; sigma {sh:.3} / {sv:.3} m",
+                  report.gnss_outliers);
+        sds.push((plan, sd));
         let case = format!("seed {seed}, accuracy {plan} / {height} m");
         let checks = [
             (report.placed == PHOTOS, format!("placed {}", report.placed)),
             (report.gnss_outliers == vec![37], format!("outliers {:?}", report.gnss_outliers)),
             (report.bias.len() == 2 && report.bias[0] == (1, [0.0; 3]) && report.bias[1].0 == 2,
              format!("biases {:?}", report.bias)),
-            (error <= tolerance, format!("bias {bias:.3?}, {error:.3} m from the offset, tolerance {tolerance:.3}")),
+            (normalised.iter().all(|z| z.abs() <= 3.0), format!("error {error:.3?}, sd {sd:.3?}")),
             (shape < 0.005 * DIAMETER, format!("centres {shape:.3} m")),
             (residuals[37].norm() < 0.005 * DIAMETER,
              format!("the photo of the wrong fix {:.3} m", residuals[37].norm())),
@@ -342,6 +311,19 @@ fn a_second_flight_and_a_wrong_fix_after_the_rounds() {
             (sv <= height && sv > 0.6 * height.min(0.3), format!("vertical sigma {sv}")),
         ];
         failures.extend(checks.into_iter().filter(|(ok, _)| !ok).map(|(_, why)| format!("{case}: {why}")));
+    }
+    // the posterior standard deviations follow the accuracy of the positions: about a tenth at RTK
+    let mean = |plan: f64, a: usize| {
+        let v: Vec<f64> = sds.iter().filter(|(p, _)| *p == plan).map(|(_, sd)| sd[a]).collect();
+        v.iter().sum::<f64>() / v.len() as f64
+    };
+    for a in 0..3 {
+        let ratio = mean(0.3, a) / mean(0.03, a);
+        eprintln!("axis {a}: mean posterior sd {:.4} m at 0.3 / 0.5 m, {:.4} m at RTK, ratio {ratio:.1}",
+                  mean(0.3, a), mean(0.03, a));
+        if !(ratio > 3.0 && ratio < 30.0) {
+            failures.push(format!("axis {a}: the posterior sd of RTK is {ratio:.1} times smaller"));
+        }
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }

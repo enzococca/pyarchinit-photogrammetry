@@ -143,8 +143,10 @@ pub struct SigmaEstimate {
 /// (`None` for none) and a flag per observation of the tracks (kept by the last filter); the frame
 /// of the positioning, the positions with the photos whose position is an outlier (ascending), the
 /// sigmas used for each position, the estimate of their accuracy, the bias of each flight (sorted,
-/// as the positioning gives them); the observations of the tracks with a point that the last filter
-/// saw and those it kept; notes of the rounds.
+/// as the positioning gives them) and, after the rounds, the posterior covariance of the biases of
+/// the last adjustment (`bundle::bias_covariance`; the reference flight has none); the
+/// observations of the tracks with a point that the last filter saw and those it kept; notes of
+/// the rounds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct State {
     pub world_from_cam: Vec<Option<[[f64; 3]; 3]>>,
@@ -161,6 +163,7 @@ pub struct State {
     pub gnss_sigma: Vec<[f64; 3]>,
     pub sigma_estimate: Option<SigmaEstimate>,
     pub bias: Vec<(i64, [f64; 3])>,
+    pub bias_covariance: Vec<(i64, [[f64; 3]; 3])>,
     pub last_filter: (usize, usize),
     pub notes: Vec<String>,
 }
@@ -378,9 +381,16 @@ fn write_back(state: &mut State, b: &Built, sol: &Solution) {
     }
 }
 
+fn loss_of(o: &Options) -> Loss {
+    if o.ba_loss_cauchy {
+        Loss::Cauchy(o.ba_loss_scale_px)
+    } else {
+        Loss::Huber(o.ba_loss_scale_px)
+    }
+}
+
 fn adjust(pb: &Problem, o: &Options, observe: &mut dyn FnMut() -> bool) -> Result<Solution, String> {
-    let loss = if o.ba_loss_cauchy { Loss::Cauchy(o.ba_loss_scale_px) } else { Loss::Huber(o.ba_loss_scale_px) };
-    let opts = bundle::Options { loss, ..bundle::Options::default() };
+    let opts = bundle::Options { loss: loss_of(o), ..bundle::Options::default() };
     bundle::solve(pb, &opts, &mut |_, _| observe())
 }
 
@@ -582,6 +592,11 @@ fn intrinsics(state: &State, round: usize, rounds: usize, positions: bool) -> (V
     (free, names)
 }
 
+/// Whether round `round` is the last adjustment (no adjustment with every track after it).
+fn last_adjustment(o: &Options, round: usize) -> bool {
+    !o.final_all_tracks && round == o.rounds
+}
+
 /// One adjustment of the state with the intrinsics `free` (and, for round 1 on positions, the
 /// accuracy of the positions estimated again and a second solve with it): the costs and the
 /// observations adjusted.
@@ -592,11 +607,15 @@ fn adjust_state(
     free: &[Vec<usize>],
     all_tracks: bool,
     estimate: bool,
+    covariance: bool,
     observe: &mut dyn FnMut() -> bool,
 ) -> Result<(f64, f64, usize), String> {
     let b = build(state, input, free, all_tracks);
     let sol = adjust(&b.pb, o, observe)?;
     write_back(state, &b, &sol);
+    if covariance && b.pb.gnss_bias {
+        state.bias_covariance = bundle::bias_covariance(&b.pb, &sol, loss_of(o))?.0;
+    }
     let (cost_initial, mut cost) = (sol.cost_initial, sol.cost);
     if estimate && !b.positions.is_empty() {
         if let Some([fh, fv, rh, rv]) = estimate_sigmas(&b, &sol, o, observe)? {
@@ -675,7 +694,7 @@ pub fn refine(
         }
         let (free, names) = intrinsics(state, round, rounds, positions);
         let (cost_initial, cost, observations) =
-            adjust_state(state, input, o, &free, false, round == 1, observe)?;
+            adjust_state(state, input, o, &free, false, round == 1, last_adjustment(o, round), observe)?;
         if !observe() {
             return Err("cancelled".into());
         }
@@ -717,7 +736,8 @@ pub fn refine(
         let every: Vec<usize> = (0..state.tracks.len()).filter(|&t| placed_views(t) >= 3).collect();
         triangulate_missing(state, input, &every);
         filter(state, input, o, 1.0)?;
-        let (cost_initial, cost, observations) = adjust_state(state, input, o, &last_free, true, false, observe)?;
+        let (cost_initial, cost, observations) =
+            adjust_state(state, input, o, &last_free, true, false, true, observe)?;
         if !observe() {
             return Err("cancelled".into());
         }
