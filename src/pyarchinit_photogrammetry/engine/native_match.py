@@ -672,7 +672,7 @@ def _select_pairs(run: _Run, stages: timing.Stages, progress: Progress, generic:
             chosen |= set(found)
     if reference:
         with stages.stage("preselection"):
-                found = _reference_pairs_or_refuse(run.chunk, run.names, reference, max(int(neighbours), 1), pairs)
+            found = _reference_pairs_or_refuse(run.chunk, run.names, reference, max(int(neighbours), 1), pairs)
         if found:
             pairs = (pairs or set()) | set(found)
             chosen |= set(found)
