@@ -70,7 +70,18 @@ length of the model set to the estimate), with the residual of Sweeney et al. 20
 singular values; and the relative poses estimated again from the inliers of every verified pair
 (glomap/estimators/relpose_estimation.cc, with PoseLib's epipolar threshold of 1 pixel). The
 least squares and the robust estimation are this package's own; no file of GLOMAP is compiled
-into the extension. GLOMAP is distributed under the BSD 3-clause license below (after COLMAP's).
+into the extension. The rotation averaging - native/engine/src/mapper/rotation.rs - is arranged as
+GLOMAP's (glomap/estimators/global_rotation_averaging.h and .cc, glomap/math/tree.cc,
+glomap/processors/relpose_filter.cc and the order of glomap/controllers/global_mapper.cc): the
+rotations started from the maximum spanning tree of the pairs, the tangent-space errors of the
+relative rotations with the update R exp(-w), the rounds of L1 regression and the iteratively
+reweighted least squares with the Geman-McClure weights of scale 5 degrees, their numbers of
+iterations and convergence thresholds, the pairs that disagree by more than 10 degrees dropped and
+the largest connected part averaged a second time. The L1 solver (the alternating direction method
+of Boyd et al. 2011), the inverse Jacobians of the linearisation, the line search, the loops of
+three photos that order the spanning tree and the moving of a photo to the rotation most of its
+pairs agree on are this package's own. GLOMAP is distributed under the BSD 3-clause license below
+(after COLMAP's).
 
 RTKLIB's license (vendor/rtklib/license.txt) follows, then VLFeat's, then COLMAP's, then GLOMAP's.
 
@@ -191,8 +202,8 @@ affect the resulting COLMAP license.
 
 ================================================================================
 
-GLOMAP's license (its file LICENSE) follows; it applies to native/engine/src/mapper/graph.rs as
-explained above.
+GLOMAP's license (its file LICENSE) follows; it applies to native/engine/src/mapper/graph.rs and
+native/engine/src/mapper/rotation.rs as explained above.
 
 --------------------------------------------------------------------------------
 

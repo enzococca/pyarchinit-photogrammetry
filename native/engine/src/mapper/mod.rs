@@ -2,10 +2,12 @@
 //! Structure-from-Motion Revisited", as GLOMAP): the arrays it starts from (`input`: the key
 //! points and the inlier matches of the verified pairs, as COLMAP's database holds them) and the
 //! view graph of the pairs with their relative poses and the focal lengths found from the
-//! fundamental matrices (`graph`).
+//! fundamental matrices (`graph`), and the rotations of the photos averaged from the relative
+//! rotations of its edges (`rotation`).
 
 pub mod graph;
 pub mod input;
+pub mod rotation;
 
 /// The options of the whole mapper. The defaults are the figures of the plan; the ones that come
 /// from pycolmap are passed by Python in place of them.
@@ -23,10 +25,20 @@ pub struct Options {
     pub min_pair_parallax_deg: f64,
     /// The largest number of trials of the LO-RANSAC of a relative pose.
     pub max_relpose_trials: usize,
+    /// An edge whose relative rotation differs from the one of the averaged rotations of its photos
+    /// by more than this, in degrees, is dropped by the rotation averaging (GLOMAP's
+    /// `max_rotation_error`).
+    pub max_rotation_error_deg: f64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { min_inliers: 15, max_epipolar_error_px: 1.0, min_pair_parallax_deg: 1.0, max_relpose_trials: 10000 }
+        Options {
+            min_inliers: 15,
+            max_epipolar_error_px: 1.0,
+            min_pair_parallax_deg: 1.0,
+            max_relpose_trials: 10000,
+            max_rotation_error_deg: 10.0,
+        }
     }
 }
