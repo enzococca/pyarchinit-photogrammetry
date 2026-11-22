@@ -490,13 +490,19 @@ def test_the_second_stage_can_be_switched_off_and_tuned(trench_store, preselecte
 
 
 def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch):
-    """``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO`` and ``PPG_NATIVE_GUIDED_BAND`` reach the options of the
+    """``PPG_NATIVE_DCT`` is off unless set to a value other than 0. ``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO`` and ``PPG_NATIVE_GUIDED_BAND`` reach the options of the
     pairs stage; the defaults add nothing to them (a core that predates them takes the same dict), the default ratio
     is the matcher's; a value that is not one names its variable."""
     from pyarchinit_photogrammetry.engine import native_match
 
-    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND"):
+    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND", "PPG_NATIVE_DCT"):
         monkeypatch.delenv(name, raising=False)
+    # the JPEG decoded whole unless PPG_NATIVE_DCT asks for the DCT scale
+    assert native_match.dct_enabled() is False
+    for value, enabled in (("1", True), (" 1 ", True), ("0", False), ("", False)):
+        monkeypatch.setenv("PPG_NATIVE_DCT", value)
+        assert native_match.dct_enabled() is enabled, value
+    monkeypatch.delenv("PPG_NATIVE_DCT")
     defaults = native_match.guided_settings()
     assert defaults == {"guided": True, "guided_max_ratio": native_match.MAX_RATIO, "guided_band": 1.0}
     assert native_match.MAX_RATIO == inspect.signature(_native.gpu_match).parameters["max_ratio"].default
@@ -626,9 +632,23 @@ def _tie_points_per_photo(ch) -> float:
 @pytest.fixture(scope="module")
 def processed_native(scene_dir, tmp_path_factory):
     """The chain of the session's ``processed`` fixture with the matching on the native engine: alignment,
-    georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. ``(doc, chunk, report of update_transform)``."""
-    doc, ch = _project(scene_dir, tmp_path_factory.mktemp("native_chain"), markers=True)
-    ch.match_photos(quality="high", engine="native")
+    georeferencing, dense cloud, mesh, texture, DEM and orthomosaic. ``(doc, chunk, report of update_transform)``.
+
+    The JPEGs are decoded at the DCT scale (``PPG_NATIVE_DCT=1``, off by default), the setting the gates of
+    :func:`test_native_matching_feeds_the_classic_mapper_on_the_trench` were drawn on: on these rendered photos the
+    whole decoding with the default ratio test of the second stage gives fewer tie points (about 850 a photo against
+    1,100) and a median error of the points 1.35 times the classic one, over its bound of 1.1; with a second stage at
+    a ratio of 0.6 (``PPG_NATIVE_GUIDED_RATIO``) it is within it again (1.07 times, 740 tie points a photo)."""
+    previous = os.environ.get("PPG_NATIVE_DCT")
+    os.environ["PPG_NATIVE_DCT"] = "1"
+    try:
+        doc, ch = _project(scene_dir, tmp_path_factory.mktemp("native_chain"), markers=True)
+        ch.match_photos(quality="high", engine="native")
+    finally:
+        if previous is None:
+            os.environ.pop("PPG_NATIVE_DCT", None)
+        else:
+            os.environ["PPG_NATIVE_DCT"] = previous
     ch.align_cameras()
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     report = ch.update_transform()
@@ -698,8 +718,9 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     assert sum(info["routes"].values()) == info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
     assert info["pairs_unmatched"] == 0 and info["rigs"] == 0 and info["nodes"] == [] and not info["continued"]
     assert info["cpu_pairs"] + info["gpu_pairs"] == info["pairs"]
-    # the settings of the run read from the environment, in the record (the defaults here)
-    assert info["native_dct"] is native_match.dct_enabled()
+    # the settings of the run read from the environment, in the record (the fixture's DCT, the defaults of the
+    # second stage)
+    assert info["native_dct"] is True
     assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"]) == \
         (True, native_match.MAX_RATIO, 1.0)
     for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",

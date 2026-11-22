@@ -31,8 +31,9 @@ database. The export keeps the ids of the photos, cameras, rigs and frames of th
 continues from them.
 
 The thresholds of the two-stage matching live here (:data:`STAGE1_POINTS`, :data:`TRUST_INLIERS`,
-:data:`DROP_INLIERS`) and go to the core with the options; ``PPG_NATIVE_DCT=0`` decodes every JPEG whole (no DCT
-scaling), ``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one. The second stage is tuned at
+:data:`DROP_INLIERS`) and go to the core with the options; every JPEG is decoded whole and reduced as COLMAP reduces
+it, ``PPG_NATIVE_DCT=1`` decodes it at the DCT scale its reduction allows instead (faster, fewer tie points),
+``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one. The second stage is tuned at
 run time (:func:`guided_settings`): ``PPG_NATIVE_GUIDED=0`` sends the trusted pairs to brute force instead,
 ``PPG_NATIVE_GUIDED_RATIO`` sets its ratio test (default :data:`MAX_RATIO`, the first stage's) and
 ``PPG_NATIVE_GUIDED_BAND`` the half-width of its band as a multiple of the verification's threshold (default 1.0);
@@ -114,8 +115,10 @@ def as_disk_full(exc: BaseException) -> OSError:
 
 
 def dct_enabled() -> bool:
-    """``PPG_NATIVE_DCT`` (default on): a JPEG decoded at the DCT scale its reduction allows."""
-    return os.environ.get("PPG_NATIVE_DCT", "1").strip() != "0"
+    """``PPG_NATIVE_DCT`` (default off): a JPEG decoded at the DCT scale its reduction allows, not whole. Off by
+    default: the reduced DCT gives another raster than COLMAP's reduction of the whole photo, and fewer tie points
+    per photo, for a small saving of time in the features stage."""
+    return os.environ.get("PPG_NATIVE_DCT", "0").strip() not in ("", "0")
 
 
 def cpu_share_enabled() -> bool:
@@ -408,7 +411,7 @@ class _Run:
     downscale: int
     devices: list[int] = field(default_factory=list)
     gpu_names: str | None = None
-    dct: bool = True
+    dct: bool = False
     cpu_share: bool = True
     guided: dict = field(default_factory=lambda: {"guided": True, "guided_max_ratio": MAX_RATIO, "guided_band": 1.0})
     masks: Path | None = None

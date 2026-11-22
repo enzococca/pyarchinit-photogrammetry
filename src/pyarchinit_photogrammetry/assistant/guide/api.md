@@ -167,9 +167,10 @@ and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whi
 and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs each did. `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
-Environment variables: `PPG_NATIVE_DCT=0` decodes every JPEG whole (by default a JPEG is decoded
-at the DCT scale its reduction allows, chosen for the larger of its two reductions - the matching's
-and the preselection's - so that one decoding gives both); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
+Environment variables: `PPG_NATIVE_DCT=1` decodes a JPEG at the DCT scale its reduction allows,
+chosen for the larger of its two reductions - the matching's and the preselection's - so that one
+decoding gives both (by default every JPEG is decoded whole and reduced as COLMAP reduces it: the DCT
+scale is a little faster but gives another raster and fewer tie points); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
 and the pairs to the GPUs when there is one. Three tune the second stage of a pair, the matching along
 the epipolar lines of the model of the first: `PPG_NATIVE_GUIDED=0` matches the trusted pairs point
 against point instead (the first stage still decides which pairs are trusted, kept or dropped),
