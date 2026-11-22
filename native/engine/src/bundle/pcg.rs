@@ -343,7 +343,7 @@ fn conjugate_gradients(
 
 /// One step of the damped normal equations, as `schur::dense_step`, with the reduced system
 /// solved by the conjugate gradients stopped by `forcing` or `max_iterations`.
-fn pcg_step_with(
+pub(crate) fn pcg_step_with(
     red: &Reduced,
     g: &[f64],
     damping: &[f64],

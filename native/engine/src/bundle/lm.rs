@@ -88,12 +88,16 @@ pub trait Model: Sync {
     fn residuals(&self, k: usize, out: &mut BlockJacobian) {
         self.linearize(k, out);
     }
-    /// Moves the parameters by a step of the camera blocks and of the point blocks.
+    /// Moves the parameters by a step of the camera blocks and of the point blocks. A coordinate
+    /// with a lower bound must take its step by plain addition (`x + delta`): the projection on the
+    /// floor is computed so that this sum is not below it.
     fn apply(&mut self, delta_cameras: &[f64], delta_points: &[f64]);
     /// The parameters, to put them back after a rejected step.
     fn save(&self) -> Vec<f64>;
     fn restore(&mut self, saved: &[f64]);
     /// Point-block coordinates with a floor, `(coordinate, floor)`: a step is projected on them.
+    /// The coordinates are those of `point_coordinate`, below the number of point coordinates, the
+    /// floors finite (checked before the adjustment starts); `apply` adds the step to them plainly.
     fn lower_bounds(&self) -> &[(usize, f64)] {
         &[]
     }
@@ -199,6 +203,8 @@ pub(crate) struct Shape {
     pub border_res: Vec<usize>,
     /// Chunks of the evaluation: first residual block of each, and the end.
     pub chunks: Vec<usize>,
+    /// The point block of each point coordinate, when the model has lower bounds (empty without).
+    pub coordinate_block: Vec<usize>,
 }
 
 /// A residual block: its first row and their number, its first Jacobian entry, the width of its
@@ -459,8 +465,20 @@ pub(crate) fn first_linearization<M: Model>(m: &M) -> Result<(Shape, Lin), Strin
             point: if point[k] == usize::MAX { u32::MAX } else { point[k] as u32 },
         });
     }
+    for &(i, floor) in m.lower_bounds() {
+        if i >= n_point_cols || !floor.is_finite() {
+            return Err(format!("lower bound {floor} on point coordinate {i} of {n_point_cols}"));
+        }
+    }
+    // the point block of each coordinate, for the floors
+    let coordinate_block: Vec<usize> = if m.lower_bounds().is_empty() {
+        Vec::new()
+    } else {
+        (0..n_point).flat_map(|p| std::iter::repeat_n(p, point_size[p])).collect()
+    };
     let max_point = point_size.iter().copied().max().unwrap_or(0);
     let shape = Shape {
+        coordinate_block,
         camera_res: Lists::new(n_cam, &camera_pairs),
         point_res: Lists::new(n_point, &point_pairs),
         cam_size,
@@ -828,15 +846,13 @@ fn hold_on_floors<M: Model>(m: &M, shape: &Shape, lin: &mut Lin, g: &mut [f64], 
     if bounds.is_empty() {
         return held;
     }
-    let owner: Vec<usize> =
-        (0..shape.point_size.len()).flat_map(|p| std::iter::repeat_n(p, shape.point_size[p])).collect();
     for &(i, floor) in bounds {
         let col = shape.n + i;
         if m.point_coordinate(i) <= floor && g[col] > 0.0 {
             held[i] = true;
             g[col] = 0.0;
             d[col] = 0.0;
-            let p = owner[i];
+            let p = shape.coordinate_block[i];
             let q = i - shape.point_col[p];
             for &k in shape.point_res.of(p) {
                 let pos = shape.width(k) - shape.point_size[p];
@@ -995,7 +1011,9 @@ pub(crate) fn solve_model_with_limits<M: Model>(
                 m.apply(&delta[..shape.n], &delta[shape.n..]);
                 let trial = linearize(m, &shape, false);
                 let decrease = lin.cost - trial.cost;
-                // what the quadratic model promised: 0.5 delta^T (damping delta - g)
+                // what the quadratic model promised: 0.5 delta^T (damping delta - g); for a step
+                // clipped on a floor only an approximation, which only scales the damping (the step
+                // is accepted on the true cost)
                 let model_decrease =
                     0.5 * delta.iter().zip(&damping).zip(&g).map(|((d, m), gk)| d * (m * d - gk)).sum::<f64>();
                 let step_norm = delta.iter().map(|x| x * x).sum::<f64>().sqrt();
@@ -1049,4 +1067,163 @@ pub(crate) fn solve_model_with_limits<M: Model>(
         termination: termination.expect("the loop ends with a termination"),
         linear_solver,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bundle::pcg::pcg_step_with;
+    use crate::bundle::schur::cholesky_solve_in_place;
+
+    /// A linear toy: two camera blocks before the border and two in it, point blocks of 2, 4 and 5
+    /// coordinates (the second seen by a single block of two rows: singular, held), residual blocks
+    /// coupling several camera blocks with a point block, camera blocks without a point, the
+    /// border alone; entries from a fixed generator, some blocks under Huber.
+    struct Toy {
+        cams: Vec<usize>,
+        points: Vec<usize>,
+        blocks: Vec<(Vec<usize>, Option<usize>, Vec<f64>, Vec<f64>, Loss)>,
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        }
+    }
+
+    impl Toy {
+        fn new() -> Toy {
+            let cams = vec![3, 4, 3, 2];
+            let points = vec![2, 4, 5, 2, 5, 4];
+            let mut rng = Lcg(7);
+            let mut blocks = Vec::new();
+            let mut add = |cams_of: Vec<usize>, point: Option<usize>, rows: usize, loss: Loss, rng: &mut Lcg| {
+                let width: usize = cams_of.iter().map(|&c| cams[c]).sum::<usize>() + point.map_or(0, |p| points[p]);
+                let jac = (0..rows * width).map(|_| rng.next()).collect();
+                let res = (0..rows).map(|_| 3.0 * rng.next()).collect();
+                blocks.push((cams_of, point, jac, res, loss));
+            };
+            for p in [0, 2, 3, 4, 5] {
+                let rows = points[p] + 1;
+                // each point seen through both cameras before the border, alone and with the border
+                add(vec![0, 2], Some(p), rows, Loss::None, &mut rng);
+                add(vec![1, 3], Some(p), rows, Loss::Huber(1.0), &mut rng);
+                add(vec![0, 1], Some(p), rows, Loss::None, &mut rng);
+                add(vec![2], Some(p), rows, Loss::Cauchy(2.0), &mut rng);
+            }
+            // the singular point block: two rows of one residual block
+            add(vec![0, 1, 2], Some(1), 2, Loss::None, &mut rng);
+            // camera blocks without a point, the border alone
+            add(vec![0, 1], None, 5, Loss::None, &mut rng);
+            add(vec![2, 3], None, 4, Loss::None, &mut rng);
+            add(vec![3], None, 3, Loss::None, &mut rng);
+            Toy { cams, points, blocks }
+        }
+    }
+
+    impl Model for Toy {
+        fn camera_blocks(&self) -> &[usize] {
+            &self.cams
+        }
+
+        fn point_blocks(&self) -> &[usize] {
+            &self.points
+        }
+
+        fn residual_blocks(&self) -> usize {
+            self.blocks.len()
+        }
+
+        fn linearize(&self, k: usize, out: &mut BlockJacobian) {
+            let (cams, point, jac, res, loss) = &self.blocks[k];
+            out.cameras.extend_from_slice(cams);
+            out.point = *point;
+            out.jacobian.extend_from_slice(jac);
+            out.residuals.extend_from_slice(res);
+            out.loss = *loss;
+        }
+
+        fn apply(&mut self, _: &[f64], _: &[f64]) {}
+
+        fn save(&self) -> Vec<f64> {
+            Vec::new()
+        }
+
+        fn restore(&mut self, _: &[f64]) {}
+
+        fn border_blocks(&self) -> usize {
+            2
+        }
+    }
+
+    /// The step of the full normal equations `(J^T W J + diag(damping)) delta = -g`, the columns of
+    /// `held` left out (their step zero).
+    fn full_step(shape: &Shape, lin: &Lin, g: &[f64], damping: &[f64], held: &[usize]) -> Vec<f64> {
+        let size = shape.n + shape.n_point_cols;
+        let mut h = vec![0.0; size * size];
+        for k in 0..shape.blocks.len() {
+            let mut cols = Vec::new();
+            for (c, _) in shape.cameras_of(k) {
+                cols.extend(shape.cam_col[c]..shape.cam_col[c] + shape.cam_size[c]);
+            }
+            if let Some((p, _, s)) = shape.point_of(k) {
+                cols.extend(shape.n + shape.point_col[p]..shape.n + shape.point_col[p] + s);
+            }
+            for (row, jr) in shape.jac_rows(lin, k) {
+                let w = lin.weights[row];
+                for (a, &ca) in cols.iter().enumerate() {
+                    for (b, &cb) in cols.iter().enumerate() {
+                        h[cb * size + ca] += w * jr[a] * jr[b];
+                    }
+                }
+            }
+        }
+        let free: Vec<usize> = (0..size).filter(|c| !held.contains(c)).collect();
+        let m = free.len();
+        let mut a = vec![0.0; m * m];
+        let mut b: Vec<f64> = free.iter().map(|&c| -g[c]).collect();
+        for (i, &ci) in free.iter().enumerate() {
+            for (j, &cj) in free.iter().enumerate() {
+                a[j * m + i] = h[cj * size + ci] + if ci == cj { damping[ci] } else { 0.0 };
+            }
+        }
+        cholesky_solve_in_place(&mut a, &mut b).unwrap();
+        let mut out = vec![0.0; size];
+        for (i, &c) in free.iter().enumerate() {
+            out[c] = b[i];
+        }
+        out
+    }
+
+    #[test]
+    fn variable_point_blocks_with_several_cameras_and_a_border_give_the_step_of_the_full_equations() {
+        let toy = Toy::new();
+        let (shape, lin) = first_linearization(&toy).unwrap();
+        assert_eq!((shape.n, shape.border_block, shape.border_start), (12, 2, 7));
+        assert!(lin.loss.iter().any(|l| *l != Loss::None));
+        let (g, d) = gradient_and_diagonal(&shape, &lin);
+        let held = vec![false; shape.n_point_cols];
+        let red = Reduced { shape: &shape, lin: &lin, held: &held };
+        let singular: Vec<usize> = (0..4).map(|q| shape.n + shape.point_col[1] + q).collect();
+        for lambda in [1e-4, 1e-2, 1.0] {
+            let damping: Vec<f64> = d.iter().map(|x| lambda * x.max(1e-6)).collect();
+            let want = full_step(&shape, &lin, &g, &damping, &singular);
+            let scale = want.iter().fold(0.0, |a: f64, x| a.max(x.abs()));
+            assert!(scale > 1e-3);
+            let dense = dense_step(&red, &g, &damping).unwrap();
+            let sparse = SparseSystem::new(&shape).unwrap().step(&red, &g, &damping).unwrap();
+            let pcg = pcg_step_with(&red, &g, &damping, 0.0, 2000).unwrap();
+            for (name, got, tolerance) in [("dense", &dense, 1e-9), ("sparse", &sparse, 1e-9), ("pcg", &pcg, 1e-7)] {
+                for &c in &singular {
+                    assert_eq!(got[c], 0.0, "{name}: the singular block moved (lambda {lambda})");
+                }
+                for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert!((a - b).abs() <= tolerance * scale, "{name}, lambda {lambda}: column {k}: {a} vs {b}");
+                }
+            }
+        }
+    }
 }

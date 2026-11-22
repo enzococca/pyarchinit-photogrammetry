@@ -103,6 +103,10 @@ fn angle_between(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> f64 {
     0.5 * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
+/// The bundle adjustment after the refactor on the solution recorded before it. The block runs
+/// under `Loss::None`, its border only the free intrinsics of its one camera (no flight bias, no
+/// rolling shutter): the robust path and the fuller border are covered by milestone 1's tests
+/// (`tests/bundle.rs`, the unit tests of the solvers) and by the toy model of `lm::tests`.
 #[test]
 fn the_refactor_keeps_the_solution() {
     let text = std::fs::read_to_string(record_path()).expect("the recorded solution");
@@ -418,4 +422,17 @@ fn a_loss_per_residual_block() {
     // pull from -4: (x + 4) - 2 = 0
     assert!((m.x + 2.0).abs() < 1e-6, "x = {}", m.x);
     assert!(report.cost < initial);
+}
+
+/// A floor on a coordinate the model does not have is refused before the adjustment starts.
+#[test]
+fn a_lower_bound_outside_the_point_blocks_is_refused() {
+    let mut m = RayLine::new();
+    let n = 5 * m.points.len();
+    m.bounds.push((n, FLOOR));
+    let error = solve_model(&mut m, &Options::default(), &mut |_, _| true).unwrap_err();
+    assert!(error.contains("lower bound"), "{error}");
+    let mut m = RayLine::new();
+    m.bounds.push((0, f64::NAN));
+    assert!(solve_model(&mut m, &Options::default(), &mut |_, _| true).is_err());
 }
