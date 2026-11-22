@@ -33,7 +33,8 @@ continues from them.
 The thresholds of the two-stage matching live here (:data:`STAGE1_POINTS`, :data:`TRUST_INLIERS`,
 :data:`DROP_INLIERS`) and go to the core with the options; every JPEG is decoded whole and reduced as COLMAP reduces
 it, ``PPG_NATIVE_DCT=1`` decodes it at the DCT scale its reduction allows instead (faster, fewer tie points),
-``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one. The second stage is tuned at
+``PPG_NATIVE_CPU_SHARE=0`` leaves the pairs to the GPUs when there is one (by default the CPU threads do the second
+stage and the verification of pairs beside them, their first stage from the GPU). The second stage is tuned at
 run time (:func:`guided_settings`): ``PPG_NATIVE_GUIDED=0`` sends the trusted pairs to brute force instead,
 ``PPG_NATIVE_GUIDED_RATIO`` sets its ratio test (default :data:`GUIDED_RATIO`) and
 ``PPG_NATIVE_GUIDED_BAND`` the half-width of its band as a multiple of the verification's threshold (default 1.0);

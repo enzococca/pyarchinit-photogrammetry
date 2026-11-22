@@ -1029,7 +1029,10 @@ def test_a_lost_gpu_gives_the_same_matches(scene_dir, tmp_path, monkeypatch, gpu
     cpu_only.match_photos(quality="high", engine="native", gpu="off")
     info, plain = with_gpu.meta["sfm"], cpu_only.meta["sfm"]
     assert info["features"] == "cpu" and plain["features"] == "cpu"
-    assert info["gpu_pairs"] == 2 and info["gpu"] and info["gpu_shares"] and sum(info["gpu_shares"].values()) == 2
+    # The device is shared: a CPU worker's request can make it lost between the stage 1 and a brute force of
+    # the GPU worker's pair, which then goes back to the queue - so one or two pairs end on the GPU.
+    assert 1 <= info["gpu_pairs"] <= 2 and info["gpu"] and info["gpu_shares"]
+    assert sum(info["gpu_shares"].values()) == info["gpu_pairs"]
     assert plain["gpu_pairs"] == 0 and plain["gpu"] is None and plain["cpu_pairs"] == plain["pairs"]
     assert info["gpu_pairs"] + info["cpu_pairs"] == info["pairs"] == plain["pairs"]
     assert info["routes"] == plain["routes"]

@@ -167,7 +167,7 @@ com'era.
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
 `dropped`), `preselection_size` e le impostazioni lette dall'ambiente (`native_dct`, `native_guided`,
 `native_guided_ratio`, `native_guided_band`, sotto; un record di benchmark le conserva); `gpu` e le chiavi
-di `gpu_shares` nominano gli adattatori come il record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie fatte da ciascuno. `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
+di `gpu_shares` nominano gli adattatori come il record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie di cui ciascuno ha fatto la prima fase (con una GPU i thread della CPU prendono da lei la loro prima fase, così `cpu_pairs` conta le coppie di una GPU persa o di nessuna). `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
 `pairs` ed `export`.
 
 Variabili d'ambiente: `PPG_NATIVE_DCT=1` decodifica un JPEG alla scala DCT che la sua riduzione
@@ -175,7 +175,7 @@ permette, scelta per la maggiore delle sue due riduzioni - quella del matching e
 preselezione - così una sola decodifica dà entrambe (di norma ogni JPEG viene decodificato per intero e
 ridotto come lo riduce COLMAP: la scala DCT è un po' più veloce ma dà un'altra immagine e meno punti di
 legame);
-`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una. Tre regolano la seconda
+`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una (di norma i thread della CPU lavorano accanto a loro: sulle coppie fanno la seconda fase e la verifica, con la prima fase dalla GPU). Tre regolano la seconda
 fase di una coppia, il matching lungo le linee epipolari del modello della prima: `PPG_NATIVE_GUIDED=0`
 confronta invece ogni punto con ogni punto nelle coppie affidabili (la prima fase decide ancora quali
 coppie sono affidabili, tenute o scartate), `PPG_NATIVE_GUIDED_RATIO` (un numero sopra 0, al massimo 1; di

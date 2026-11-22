@@ -25,7 +25,9 @@
 //! seeded by the pair.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 
 use nalgebra::{Matrix3, Vector3};
@@ -33,7 +35,7 @@ use nalgebra::{Matrix3, Vector3};
 use crate::camera::Camera;
 use crate::geometry::two_view::{self, pair_seed, verify, Config, TwoView};
 use crate::gpu::{match_quality, select_matches, Matcher, DIM};
-use crate::matching::bests_cpu;
+use crate::matching::{bests_cpu, dispatch, dot};
 use crate::sched::{self, Worker};
 use crate::store::{FeatureStore, FeatureView, MatchStore};
 pub use crate::store::{PairResult, Route};
@@ -91,8 +93,9 @@ pub struct PairsReport {
 pub type Bests<'a> = dyn FnMut(u64, &[u8], u64, &[u8]) -> Result<Vec<[u32; 3]>, String> + 'a;
 
 /// A device that does the first stage (and brute force) of the pairs of a worker: a GPU
-/// ([`Matcher`]), or a fake in a test. An error retires the worker; its pair goes back to the
-/// queue for the others.
+/// ([`Matcher`]), or a fake in a test, shared by every worker. An error marks the device lost for
+/// every worker: its own GPU worker is retired (its pair goes back to the queue for the others), a
+/// CPU worker does that call on the CPU.
 pub trait Device: Send {
     /// What the log and the report call the device.
     fn name(&self) -> String;
@@ -134,12 +137,6 @@ pub fn photo_key(name: &str) -> u64 {
 /// scale): FNV-1a 64 of the name followed by a NUL byte and `stage1`.
 pub fn stage1_key(name: &str) -> u64 {
     fnv1a(name.bytes().chain(b"\0stage1".iter().copied()))
-}
-
-/// The integer dot product of two descriptors.
-#[inline]
-fn dot(x: &[u8; DIM], y: &[u8; DIM]) -> u32 {
-    x.iter().zip(y).map(|(&p, &q)| u32::from(p) * u32::from(q)).sum()
 }
 
 fn descriptor(set: &[u8], i: usize) -> &[u8; DIM] {
@@ -437,6 +434,177 @@ fn guided_bests(da: &[u8], pa: &Prepared, db: &[u8], pb: &Prepared, f: &Matrix3<
         Frame::Ideal => (&pa.ideal, &pb.ideal, &pb.grid_ideal),
         Frame::Raw => (&pa.raw, &pb.raw, &pb.grid_raw),
     };
+    bests_in_fan(da, points_a, db, points_b, f, e).unwrap_or_else(|| bests_along(da, points_a, db, points_b, grid_b, f, e))
+}
+
+/// The rings of a fan grow by this factor: a point of a ring is tested against the angle of the
+/// band at the inner radius of its ring, at most this much wider than at its own.
+const RING_GROWTH: f64 = 1.25;
+
+/// An epipole farther than this, in pixels, is taken as at infinity: the lines are walked over the
+/// grid instead.
+const FAR_EPIPOLE: f64 = 1e9;
+
+/// `angle` modulo a half turn, in `[0, pi)`.
+fn half_turn(angle: f64) -> f64 {
+    let a = angle.rem_euclid(std::f64::consts::PI);
+    if a < std::f64::consts::PI { a } else { 0.0 }
+}
+
+/// The epipole of B under `f` (`x_b^T F x_a = 0`), in the pixels of its frame: the point every
+/// line `F x_a` passes through, the left null vector of `F` (the largest cross product of two of
+/// its columns); none when it is at infinity, farther than `FAR_EPIPOLE`, or not a number.
+fn epipole(f: &Matrix3<f64>) -> Option<[f64; 2]> {
+    let (c0, c1, c2) = (f.column(0).into_owned(), f.column(1).into_owned(), f.column(2).into_owned());
+    let v = [c0.cross(&c1), c0.cross(&c2), c1.cross(&c2)]
+        .into_iter()
+        .max_by(|x, y| x.norm_squared().total_cmp(&y.norm_squared()))?;
+    let (x, y) = (v.x / v.z, v.y / v.z);
+    (x.is_finite() && y.is_finite() && x.hypot(y) <= FAR_EPIPOLE).then_some([x, y])
+}
+
+crate::dispatched! {
+    /// [`bests_in_fan`] compiled for a kernel of the dot product.
+    fn fan(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+           -> Option<Vec<[u32; 3]>> = fan_body;
+}
+
+/// [`bests_along`] with the points of B in a fan around the epipole instead of the grid: every
+/// epipolar line passes through it, so a point at the distance `r` from it lies within `e` of a
+/// line only where its angle around the epipole is within `asin((e + s) / r)` of the line's, modulo
+/// a half turn (`s` the most any line misses the epipole by, the roundoff of a rank-2 `F`). The
+/// points are kept in rings of radii growing by `RING_GROWTH`, sorted by angle within each, their
+/// coordinates and descriptors copied in that order; the lines are taken by angle, so that in each
+/// ring the window of a line follows the one before (two indices moving forward) and its points
+/// are a run of memory. Each point of a window is tested exactly as the grid tests it, so the
+/// points compared are the same and so are the bests (the rule of [`Best`] does not depend on the
+/// order). None - the grid then - for an epipole at infinity or a guide whose lines miss its
+/// epipole by more than `e` (a matrix far from rank 2).
+fn bests_in_fan(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+                -> Option<Vec<[u32; 3]>> {
+    fan(dispatch(), da, points_a, db, points_b, f, e)
+}
+
+/// The body of [`bests_in_fan`], compiled once per kernel of the dot product.
+#[inline(always)]
+fn fan_body(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+            -> Option<Vec<[u32; 3]>> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let [ex, ey] = epipole(f)?;
+    let (n_a, n_b) = (points_a.len(), points_b.len());
+    // the lines of A by angle, and the most one of them misses the epipole by
+    let mut lines: Vec<(f64, u32, [f64; 3])> = Vec::with_capacity(n_a);
+    let mut miss = 0.0f64;
+    for (i, p) in points_a.iter().enumerate() {
+        let l = f * Vector3::new(p[0], p[1], 1.0);
+        let norm = (l.x * l.x + l.y * l.y).sqrt();
+        if norm > 0.0 && norm.is_finite() && p.iter().all(|v| v.is_finite()) {
+            let line = [l.x / norm, l.y / norm, l.z / norm];
+            let s = (line[0] * ex + line[1] * ey + line[2]).abs();
+            if !(s <= e) {
+                return None;
+            }
+            miss = miss.max(s);
+            lines.push((half_turn(line[1].atan2(line[0]) - FRAC_PI_2), i as u32, line));
+        }
+    }
+    lines.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    // the points of B by ring and angle; the coordinates' size bounds the roundoff of the angles
+    let mut scale = ex.abs().max(ey.abs());
+    let finite: Vec<u32> = (0..n_b as u32).filter(|&j| points_b[j as usize].iter().all(|v| v.is_finite())).collect();
+    for &j in &finite {
+        let [x, y] = points_b[j as usize];
+        scale = scale.max(x.abs()).max(y.abs());
+    }
+    let reach = (e + miss) * (1.0 + 1e-9) + 1e-9 * (1.0 + scale);
+    let inner = 2.0 * reach;
+    let mut keyed: Vec<(u32, f64, f64, u32)> = finite
+        .iter()
+        .map(|&j| {
+            let [x, y] = points_b[j as usize];
+            let (dx, dy) = (x - ex, y - ey);
+            let r = dx.hypot(dy);
+            let ring = if r < inner { 0 } else { 1 + ((r / inner).ln() / RING_GROWTH.ln()).floor() as u32 };
+            (ring, half_turn(dy.atan2(dx)), r, j)
+        })
+        .collect();
+    keyed.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)).then(x.3.cmp(&y.3)));
+    let m = keyed.len();
+    let mut xy: Vec<[f64; 2]> = Vec::with_capacity(m);
+    let mut angle: Vec<f64> = Vec::with_capacity(m);
+    let mut index: Vec<u32> = Vec::with_capacity(m);
+    let mut desc: Vec<u8> = Vec::with_capacity(m * DIM);
+    // each ring: its run, and the half-width of its windows (none: every point of the ring)
+    let mut rings: Vec<(usize, usize, Option<f64>)> = Vec::new();
+    let mut k = 0;
+    while k < m {
+        let ring = keyed[k].0;
+        let start = k;
+        let mut r_min = f64::INFINITY;
+        while k < m && keyed[k].0 == ring {
+            let (_, a, r, j) = keyed[k];
+            xy.push(points_b[j as usize]);
+            angle.push(a);
+            index.push(j);
+            desc.extend_from_slice(descriptor(db, j as usize));
+            r_min = r_min.min(r);
+            k += 1;
+        }
+        let sine = reach / r_min;
+        let half = (ring > 0 && sine < 0.999).then(|| sine.asin());
+        rings.push((start, k, half));
+    }
+    let mut cols = vec![Best::NONE; m];
+    let mut rows = vec![Best::NONE.out(); n_a];
+    // the windows of each ring as indices into its run repeated three times, shifted by a half turn
+    // each: a window [angle + pi - half, angle + pi + half] lies in (pi / 2, 5 pi / 2)
+    let mut windows: Vec<(usize, usize)> = vec![(0, 0); rings.len()];
+    for &(psi, i, [a, b, c]) in &lines {
+        let qa = descriptor(da, i as usize);
+        let mut row = Best::NONE;
+        let mut test = |k: usize, row: &mut Best| {
+            let [x, y] = xy[k];
+            if (a * x + b * y + c).abs() <= e {
+                let score = dot(qa, desc[k * DIM..(k + 1) * DIM].try_into().expect("a descriptor of DIM bytes"));
+                row.see(score, index[k]);
+                cols[k].see(score, i);
+            }
+        };
+        for (&(start, end, half), window) in rings.iter().zip(windows.iter_mut()) {
+            let n = end - start;
+            let Some(half) = half else {
+                for k in start..end {
+                    test(k, &mut row);
+                }
+                continue;
+            };
+            let value = |v: usize| angle[start + v % n] + PI * (v / n) as f64;
+            let (low, high) = (psi + PI - half, psi + PI + half);
+            let (lo, hi) = window;
+            while *lo < 3 * n && value(*lo) < low {
+                *lo += 1;
+            }
+            *hi = (*hi).max(*lo);
+            while *hi < 3 * n && value(*hi) <= high {
+                *hi += 1;
+            }
+            for v in *lo..*hi {
+                test(start + v % n, &mut row);
+            }
+        }
+        rows[i as usize] = row.out();
+    }
+    let mut out = rows;
+    out.resize(n_a + n_b, Best::NONE.out());
+    for (k, best) in cols.into_iter().enumerate() {
+        out[n_a + index[k] as usize] = best.out();
+    }
+    Some(out)
+}
+
+/// [`guided_bests`] on the points of A and B in one frame, those of B in their grid.
+fn bests_along(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], grid_b: &Grid,
+               f: &Matrix3<f64>, e: f64) -> Vec<[u32; 3]> {
     let (n_a, n_b) = (points_a.len(), points_b.len());
     let mut out = Vec::with_capacity(n_a + n_b);
     let mut cols = vec![Best::NONE; n_b];
@@ -575,6 +743,20 @@ pub fn match_pair(a: &FeatureView, b: &FeatureView, name_a: &str, name_b: &str, 
     match_prepared(a, &pa, b, &pb, name_a, name_b, cam_a, cam_b, calibrated, preselected, o, bests)
 }
 
+/// A device of a run shared by every worker: its own GPU worker and the CPU workers, which take
+/// their first stage (and brute force) from it and keep the second stage and the verification on
+/// their threads, so that the GPU serves the pairs of every core instead of the one thread of its
+/// worker. The first error (or panic) of the device marks it lost: its own worker is retired as
+/// before, the CPU workers do the bests on the CPU from then on.
+struct SharedDevice<'a> {
+    /// Its name in the report and the log (two devices of one name told apart, `#2`).
+    name: String,
+    device: Mutex<Box<dyn Device + 'a>>,
+    lost: AtomicBool,
+    /// The pairs whose first stage it was asked for, for the test hook.
+    asked: AtomicUsize,
+}
+
 /// What the workers of a run share.
 struct Context<'a> {
     /// The pairs, sorted by name.
@@ -585,24 +767,93 @@ struct Context<'a> {
     out: &'a MatchStore,
     o: &'a Options,
     cell: f64,
+    devices: Vec<SharedDevice<'a>>,
+    /// The CPU workers made so far: each starts its search for a free device at its own.
+    cpu_workers: AtomicUsize,
+    /// `sched::fail_after`: a device is lost at its N-th pair, whichever worker asked.
+    fail_after: Option<usize>,
+    /// The devices lost under a CPU worker (the retired GPU workers are in the log of `sched`).
+    log: Mutex<Vec<String>>,
     /// Set when a result could not be put into the match store: a pair failing then is the
     /// store's fault (a full disk), never given up as dropped.
     store_failed: AtomicBool,
 }
 
-/// A worker doing whole pairs: the first stage on its device (or the CPU twin without one), the
-/// second on its thread, the result into the store. The photos it prepared last stay with it.
-struct PairWorker<'a> {
-    ctx: &'a Context<'a>,
-    device: Option<Box<dyn Device + 'a>>,
-    /// The device's place in the report: its index among the devices, or one past them for the
-    /// CPU.
-    slot: usize,
+impl Context<'_> {
+    /// The bests of `device` for the first stage (`first`, which the test hook counts) or brute
+    /// force of a pair; an error, or a panic, marks the device lost.
+    /// `Err(None)` when it was lost before the call.
+    fn on_device(&self, device: &SharedDevice<'_>, first: bool, key_a: u64, a: &[u8], key_b: u64, b: &[u8])
+                 -> Result<Vec<[u32; 3]>, Option<String>> {
+        let mut guard = device.device.lock().unwrap_or_else(PoisonError::into_inner);
+        if device.lost.load(Ordering::SeqCst) {
+            return Err(None);
+        }
+        let asked = if first { device.asked.fetch_add(1, Ordering::SeqCst) + 1 } else { 0 };
+        let result = if first && self.fail_after == Some(asked) {
+            Err(sched::FAIL_AFTER_VAR.to_owned())
+        } else {
+            match catch_unwind(AssertUnwindSafe(|| guard.bests(key_a, a, key_b, b))) {
+                Ok(result) => result,
+                Err(_) => Err("the device panicked".to_owned()),
+            }
+        };
+        if result.is_err() {
+            device.lost.store(true, Ordering::SeqCst);
+        }
+        result.map_err(Some)
+    }
+
+    /// The bests of a pair for a worker, and the slot of the device that gave them: a GPU worker
+    /// (`own`) asks its device, whose error is the worker's; a CPU worker (`own` None) asks the
+    /// first free device from its `start`, or waits for one, and does them on the CPU when every
+    /// device is lost (a device lost under it is logged, and the CPU does that call).
+    #[allow(clippy::too_many_arguments)]
+    fn bests(&self, own: Option<usize>, start: usize, first: bool, key_a: u64, a: &[u8], key_b: u64, b: &[u8])
+             -> Result<(usize, Vec<[u32; 3]>), String> {
+        if let Some(k) = own {
+            let device = &self.devices[k];
+            return self.on_device(device, first, key_a, a, key_b, b)
+                .map(|bests| (k, bests))
+                .map_err(|problem| problem.unwrap_or_else(|| format!("{} was lost on another worker", device.name)));
+        }
+        let n = self.devices.len();
+        loop {
+            let alive: Vec<usize> =
+                (0..n).map(|k| (start + k) % n).filter(|&k| !self.devices[k].lost.load(Ordering::SeqCst)).collect();
+            let Some(&preferred) = alive.first() else { break };
+            // a free device first, else the worker's own turn waits for its device
+            let k = alive.iter().copied().find(|&k| !self.devices[k].lost.load(Ordering::SeqCst)
+                                                      && self.devices[k].device.try_lock().is_ok())
+                .unwrap_or(preferred);
+            match self.on_device(&self.devices[k], first, key_a, a, key_b, b) {
+                Ok(bests) => return Ok((k, bests)),
+                Err(None) => {}
+                Err(Some(problem)) => {
+                    let line = format!("{}: {problem}; the CPU workers do their first stage on the CPU or on the \
+                                        other GPUs", self.devices[k].name);
+                    self.log.lock().unwrap_or_else(PoisonError::into_inner).push(line);
+                }
+            }
+        }
+        Ok((n, bests_cpu(a, b)))
+    }
+}
+
+/// A worker doing whole pairs: the first stage on its device (a GPU worker), or on the free GPU of
+/// the run (a CPU worker; the CPU twin without one), the second on its thread, the result into
+/// the store. The photos it prepared last stay with it.
+struct PairWorker<'c, 'a> {
+    ctx: &'c Context<'a>,
+    /// The index of its device among the devices of the run, `None` for a CPU worker.
+    own: Option<usize>,
+    /// Where a CPU worker starts looking for a free device.
+    start: usize,
     /// The photos prepared, the one used last at the end.
     cache: Vec<(String, FeatureView, Prepared)>,
 }
 
-impl PairWorker<'_> {
+impl PairWorker<'_, '_> {
     /// The photo `name` prepared (mapped and prepared now when it is not in the cache, the
     /// photo used least recently forgotten when the cache is full) and moved to the end.
     fn prepare(&mut self, name: &str) -> Result<(), String> {
@@ -619,11 +870,17 @@ impl PairWorker<'_> {
         self.cache.push((name.to_owned(), view, prepared));
         Ok(())
     }
+
+    /// Its place in the report when no device was asked: its device's, or one past the devices
+    /// for the CPU.
+    fn slot(&self) -> usize {
+        self.own.unwrap_or(self.ctx.devices.len())
+    }
 }
 
-impl Worker<usize, (Route, usize)> for PairWorker<'_> {
+impl Worker<usize, (Route, usize)> for PairWorker<'_, '_> {
     fn name(&self) -> String {
-        self.device.as_ref().map_or_else(|| "CPU".to_owned(), |d| d.name())
+        self.own.map_or_else(|| "CPU".to_owned(), |k| self.ctx.devices[k].name.clone())
     }
 
     fn run(&mut self, unit: &usize) -> Result<(Route, usize), String> {
@@ -637,13 +894,17 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
         let (ia, ib) = (at(&self.cache, name_a), at(&self.cache, name_b));
         let (cam_a, cam_b) = (&ctx.cams[name_a], &ctx.cams[name_b]);
         let calibrated = ctx.calibrated.contains(name_a) && ctx.calibrated.contains(name_b);
+        // the device of the first stage, the pair's place in the report
+        let mut stage1_slot = None;
         let result = {
             let (_, va, pa) = &self.cache[ia];
             let (_, vb, pb) = &self.cache[ib];
-            let device = &mut self.device;
-            let mut bests = |key_a: u64, a: &[u8], key_b: u64, b: &[u8]| match device {
-                Some(d) => d.bests(key_a, a, key_b, b),
-                None => Ok(bests_cpu(a, b)),
+            let (own, start) = (self.own, self.start);
+            let mut bests = |key_a: u64, a: &[u8], key_b: u64, b: &[u8]| {
+                let first = stage1_slot.is_none();
+                let (slot, bests) = ctx.bests(own, start, first, key_a, a, key_b, b)?;
+                stage1_slot.get_or_insert(slot);
+                Ok(bests)
             };
             match_prepared(va, pa, vb, pb, name_a, name_b, cam_a, cam_b, calibrated, *preselected, ctx.o, &mut bests)?
         };
@@ -651,14 +912,14 @@ impl Worker<usize, (Route, usize)> for PairWorker<'_> {
             ctx.store_failed.store(true, Ordering::SeqCst);
             return Err(format!("the match store: {e}"));
         }
-        Ok((result.route, self.slot))
+        Ok((result.route, stage1_slot.unwrap_or_else(|| self.slot())))
     }
 
     /// A pair that failed on another worker and then on the CPU (a photo whose features cannot be
     /// mapped any more, or a defect on that pair): dropped, unless the match store failed - the
     /// step's error, not the pair's.
     fn give_up(&mut self, _unit: &usize, _why: &str) -> Option<(Route, usize)> {
-        (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot))
+        (!self.ctx.store_failed.load(Ordering::SeqCst)).then_some((Route::Dropped, self.slot()))
     }
 }
 
@@ -704,26 +965,33 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
     let mut sorted = pairs.to_vec();
     sorted.sort();
     let cell = cell_side(o.two_view.ransac.max_error);
-    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell, store_failed: AtomicBool::new(false) };
     let mut names: Vec<String> = Vec::with_capacity(devices.len());
     for device in &devices {
         let name = device.name();
         let twins = names.iter().filter(|n| **n == name || n.starts_with(&format!("{name} #"))).count();
         names.push(if twins == 0 { name } else { format!("{name} #{}", twins + 1) });
     }
-    let cpu_slot = names.len();
-    let gpus: Vec<Box<dyn Worker<usize, (Route, usize)> + '_>> = devices
+    let shared: Vec<SharedDevice<'_>> = devices
         .into_iter()
-        .enumerate()
-        .map(|(slot, device)| {
-            Box::new(PairWorker { ctx: &ctx, device: Some(device), slot, cache: Vec::new() })
+        .zip(&names)
+        .map(|(device, name)| SharedDevice { name: name.clone(), device: Mutex::new(device),
+                                             lost: AtomicBool::new(false), asked: AtomicUsize::new(0) })
+        .collect();
+    let ctx = Context { pairs: sorted, features, cams, calibrated, out, o, cell, devices: shared,
+                        cpu_workers: AtomicUsize::new(0), fail_after: sched::fail_after(), log: Mutex::new(Vec::new()),
+                        store_failed: AtomicBool::new(false) };
+    let cpu_slot = names.len();
+    let gpus: Vec<Box<dyn Worker<usize, (Route, usize)> + '_>> = (0..names.len())
+        .map(|k| {
+            Box::new(PairWorker { ctx: &ctx, own: Some(k), start: k, cache: Vec::new() })
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
         })
         .collect();
     let cpu: Option<sched::Factory<'_, usize, (Route, usize)>> = {
         let ctx = &ctx;
         Some(Box::new(move || {
-            Box::new(PairWorker { ctx, device: None, slot: cpu_slot, cache: Vec::new() })
+            let start = ctx.cpu_workers.fetch_add(1, Ordering::SeqCst);
+            Box::new(PairWorker { ctx, own: None, start, cache: Vec::new() })
                 as Box<dyn Worker<usize, (Route, usize)> + '_>
         }))
     };
@@ -731,9 +999,14 @@ pub fn match_on<'a>(pairs: &[(String, String, bool)], features: &FeatureStore, c
     let standby = thread::available_parallelism().map_or(1, |n| n.get());
     let run = sched::run_with_standby(units, gpus, cpu, cpu_threads, standby, cancel, progress);
     let flushed = out.flush().map_err(|e| format!("the match store: {e}"));
+    let lost = std::mem::take(&mut *ctx.log.lock().unwrap_or_else(PoisonError::into_inner));
     let run = match run {
-        Ok(run) => run,
+        Ok(mut run) => {
+            run.log.extend(lost);
+            run
+        }
         Err((reason, mut log)) => {
+            log.extend(lost);
             log.extend(flushed.err());
             return Err(failed(reason, log));
         }
@@ -944,5 +1217,133 @@ mod tests {
             best = best.min(start.elapsed().as_secs_f64());
         }
         println!("band walk: {:.1} ms for {} lines, {found} points found", best * 1e3, lines.len());
+    }
+
+    /// `n` descriptors as SIFT's bytes (the squares of uniform values scaled to a norm of 512),
+    /// out of the generator of `random_points_and_lines`.
+    fn random_descriptors(seed: u64, n: usize) -> Vec<u8> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut out = Vec::with_capacity(n * DIM);
+        for _ in 0..n {
+            let values: Vec<f64> = (0..DIM).map(|_| next().powi(2)).collect();
+            let norm = values.iter().map(|v| v * v).sum::<f64>().sqrt();
+            out.extend(values.iter().map(|v| (v / norm * 512.0).round().clamp(0.0, 255.0) as u8));
+        }
+        out
+    }
+
+    /// The fundamental matrix of two photos taken side by side: `[e]x` with the epipole `e` far
+    /// to the left of a 6000 x 4000 photo, so that every line crosses the photo nearly level.
+    fn side_by_side() -> Matrix3<f64> {
+        skew(Vector3::new(-40000.0, 1500.0, 1.0))
+    }
+
+    /// A timing probe, not a check (`cargo test --release -p ppg_engine --lib guided_stage -- --ignored
+    /// --nocapture`): the bests of the second stage of a pair of 30,000 points each over a 6000 x 4000
+    /// photo, the band of COLMAP's 4 px, on one thread.
+    #[test]
+    #[ignore]
+    fn timing_of_the_guided_stage() {
+        const N: usize = 30000;
+        let (points_a, _) = random_points_and_lines(11, N, 0);
+        let (points_b, _) = random_points_and_lines(12, N, 0);
+        let (da, db) = (random_descriptors(13, N), random_descriptors(14, N));
+        let grid = Grid::new(&points_b, cell_side(4.0));
+        let f = side_by_side();
+        let mut candidates = 0usize;
+        for p in &points_a {
+            let l = f * Vector3::new(p[0], p[1], 1.0);
+            let norm = (l.x * l.x + l.y * l.y).sqrt();
+            grid.along([l.x / norm, l.y / norm, l.z / norm], 4.0, &points_b, |_| candidates += 1);
+        }
+        let time = |what: &str, run: &dyn Fn() -> Vec<[u32; 3]>| {
+            let mut best = f64::INFINITY;
+            let mut sum = 0u64;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let bests = run();
+                best = best.min(start.elapsed().as_secs_f64());
+                sum = bests.iter().map(|b| u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2])).sum();
+            }
+            println!("guided stage, {what}: {:.1} ms for {N} x {N} points, {candidates} candidates ({:.1} ns each), \
+                      checksum {sum}", best * 1e3, best * 1e9 / candidates as f64);
+        };
+        time("grid", &|| bests_along(&da, &points_a, &db, &points_b, &grid, &f, 4.0));
+        time("fan", &|| bests_in_fan(&da, &points_a, &db, &points_b, &f, 4.0).expect("a finite epipole"));
+        // the epipole in the middle of the photo (a camera moving forward)
+        let forward = skew(Vector3::new(3000.0, 2000.0, 1.0));
+        time("grid, forward", &|| bests_along(&da, &points_a, &db, &points_b, &grid, &forward, 4.0));
+        time("fan, forward", &|| bests_in_fan(&da, &points_a, &db, &points_b, &forward, 4.0).expect("an epipole"));
+    }
+
+    /// `[v]x`, the matrix of the cross product with `v`.
+    fn skew(v: Vector3<f64>) -> Matrix3<f64> {
+        Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
+    }
+
+    #[test]
+    fn the_fan_compares_the_points_the_grid_compares() {
+        let (mut points_a, _) = random_points_and_lines(31, 3000, 0);
+        let (mut points_b, _) = random_points_and_lines(32, 3000, 0);
+        points_a[7] = [f64::NAN, 10.0];
+        points_b[11] = [5.0, f64::INFINITY];
+        let mut da = random_descriptors(33, 3000);
+        let mut db = random_descriptors(34, 3000);
+        // ties in both directions: copies of a descriptor of A in B, of B in A
+        for (from, to) in [(5usize, 600usize), (5, 1200), (40, 41)] {
+            let copy: Vec<u8> = da[from * DIM..(from + 1) * DIM].to_vec();
+            db[to * DIM..(to + 1) * DIM].copy_from_slice(&copy);
+            let copy: Vec<u8> = db[from * DIM..(from + 1) * DIM].to_vec();
+            da[to * DIM..(to + 1) * DIM].copy_from_slice(&copy);
+        }
+        let mut state = 35u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let epipoles = [[3000.0, 2000.0, 1.0], [6100.0, -50.0, 1.0], [-40000.0, 1500.0, 1.0], [2.0e7, 3.0e6, 1.0],
+                        [1.0, 1.0, 1e-3], [17.0, 3999.0, 1.0]];
+        for (case, ep) in epipoles.into_iter().enumerate() {
+            // a homography near the identity in pixels: the lines cross the photo at every angle
+            let size = Matrix3::new(0.2, 0.2, 400.0, 0.2, 0.2, 400.0, 2e-5, 2e-5, 0.2);
+            let h = Matrix3::identity() + Matrix3::from_fn(|_, _| next()).component_mul(&size);
+            let f = skew(Vector3::from(ep)) * h;
+            let found = epipole(&f).expect("a finite epipole");
+            let want = [ep[0] / ep[2], ep[1] / ep[2]];
+            assert!((found[0] - want[0]).abs() <= 1e-6 * (1.0 + want[0].abs()), "case {case}: {found:?}");
+            for (cell, e) in [(16.0, 4.0), (8.0, 1.0), (48.0, 12.0)] {
+                let grid = Grid::new(&points_b, cell);
+                let fan = bests_in_fan(&da, &points_a, &db, &points_b, &f, e).expect("a fan");
+                let walk = bests_along(&da, &points_a, &db, &points_b, &grid, &f, e);
+                assert_eq!(fan.len(), walk.len());
+                let seen = walk.iter().filter(|b| b[0] > 0).count();
+                assert!(seen > 100, "case {case}, e {e}: {seen} points compared");
+                for (k, (x, y)) in fan.iter().zip(&walk).enumerate() {
+                    assert_eq!(x, y, "case {case}, e {e}: entry {k}");
+                }
+            }
+        }
+        // an epipole at infinity, and a matrix of rank 3 whose lines miss any epipole: the grid
+        let at_infinity = skew(Vector3::new(1.0, 0.2, 0.0)) * Matrix3::identity();
+        assert!(epipole(&at_infinity).is_none());
+        // the lines through (3000, 2000) moved by 10^5 / their norm, 28 px or more
+        let mut rank3 = skew(Vector3::new(3000.0, 2000.0, 1.0));
+        rank3[(2, 2)] = 1e5;
+        assert!(epipole(&rank3).is_some());
+        assert!(bests_in_fan(&da, &points_a, &db, &points_b, &rank3, 4.0).is_none());
+        // a matrix of rank 3 whose lines miss by less than the band: a wider window, the same bests
+        let grid = Grid::new(&points_b, 16.0);
+        for _ in 0..3 {
+            let near = skew(Vector3::new(3000.0, 2000.0, 1.0)) + Matrix3::from_fn(|_, _| 1e-4 * next());
+            if let Some(fan) = bests_in_fan(&da, &points_a, &db, &points_b, &near, 4.0) {
+                assert!(fan == bests_along(&da, &points_a, &db, &points_b, &grid, &near, 4.0));
+            }
+        }
+        let side = side_by_side();
+        assert!(bests_in_fan(&da, &points_a, &db, &points_b, &side, 4.0).is_some());
     }
 }

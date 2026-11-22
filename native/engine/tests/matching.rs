@@ -206,3 +206,38 @@ fn gpu_small_and_large_tiles_equal_the_cpu_twin() {
         }
     }
 }
+
+/// A timing probe, not a check (`cargo test --release -p ppg_engine --test matching first_stage --
+/// --ignored --nocapture`): the bests of a first stage of 8000 x 8000 descriptors and of a brute
+/// force of 25,000 x 25,000 on the CPU twin (one thread, and every thread of rayon) and on the
+/// best GPU (the descriptors cached on it, as the pairs of a photo find them).
+#[test]
+#[ignore]
+fn timing_of_the_first_stage() {
+    let mut random = Lcg(21);
+    let time = |what: &str, runs: usize, f: &mut dyn FnMut() -> Vec<[u32; 3]>| {
+        let mut best = f64::INFINITY;
+        let mut sum = 0u64;
+        for _ in 0..runs {
+            let start = std::time::Instant::now();
+            let bests = f();
+            best = best.min(start.elapsed().as_secs_f64());
+            sum = bests.iter().map(|b| u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2])).sum();
+        }
+        println!("{what}: {:.1} ms, checksum {sum}", best * 1e3);
+    };
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().expect("a pool of one thread");
+    for n in [8000usize, 25000] {
+        let (a, b) = (descriptors(n, &mut random), descriptors(n, &mut random));
+        if n <= 8000 {
+            time(&format!("CPU twin, one thread, {n} x {n}"), 2, &mut || one.install(|| matching::bests_cpu(&a, &b)));
+        }
+        time(&format!("CPU twin, every thread, {n} x {n}"), 2, &mut || matching::bests_cpu(&a, &b));
+        let Ok(mut matcher) = Matcher::new(None) else {
+            println!("no GPU");
+            continue;
+        };
+        matcher.bests(1, &a, 2, &b).expect("the first run");
+        time(&format!("GPU {}, {n} x {n}", matcher.info.name), 5, &mut || matcher.bests(1, &a, 2, &b).unwrap());
+    }
+}
