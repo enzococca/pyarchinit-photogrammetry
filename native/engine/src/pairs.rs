@@ -439,7 +439,159 @@ fn guided_bests(da: &[u8], pa: &Prepared, db: &[u8], pb: &Prepared, f: &Matrix3<
         Frame::Ideal => (&pa.ideal, &pb.ideal, &pb.grid_ideal),
         Frame::Raw => (&pa.raw, &pb.raw, &pb.grid_raw),
     };
-    bests_along(da, points_a, db, points_b, grid_b, f, e)
+    bests_in_fan(da, points_a, db, points_b, f, e).unwrap_or_else(|| bests_along(da, points_a, db, points_b, grid_b, f, e))
+}
+
+/// The rings of a fan grow by this factor: a point of a ring is tested against the angle of the
+/// band at the inner radius of its ring, at most this much wider than at its own.
+const RING_GROWTH: f64 = 1.25;
+
+/// An epipole farther than this, in pixels, is taken as at infinity: the lines are walked over the
+/// grid instead.
+const FAR_EPIPOLE: f64 = 1e9;
+
+/// `angle` modulo a half turn, in `[0, pi)`.
+fn half_turn(angle: f64) -> f64 {
+    let a = angle.rem_euclid(std::f64::consts::PI);
+    if a < std::f64::consts::PI { a } else { 0.0 }
+}
+
+/// The epipole of B under `f` (`x_b^T F x_a = 0`), in the pixels of its frame: the point every
+/// line `F x_a` passes through, the left null vector of `F` (the largest cross product of two of
+/// its columns); none when it is at infinity, farther than `FAR_EPIPOLE`, or not a number.
+fn epipole(f: &Matrix3<f64>) -> Option<[f64; 2]> {
+    let (c0, c1, c2) = (f.column(0).into_owned(), f.column(1).into_owned(), f.column(2).into_owned());
+    let v = [c0.cross(&c1), c0.cross(&c2), c1.cross(&c2)]
+        .into_iter()
+        .max_by(|x, y| x.norm_squared().total_cmp(&y.norm_squared()))?;
+    let (x, y) = (v.x / v.z, v.y / v.z);
+    (x.is_finite() && y.is_finite() && x.hypot(y) <= FAR_EPIPOLE).then_some([x, y])
+}
+
+/// [`bests_along`] with the points of B in a fan around the epipole instead of the grid: every
+/// epipolar line passes through it, so a point at the distance `r` from it lies within `e` of a
+/// line only where its angle around the epipole is within `asin((e + s) / r)` of the line's, modulo
+/// a half turn (`s` the most any line misses the epipole by, the roundoff of a rank-2 `F`). The
+/// points are kept in rings of radii growing by `RING_GROWTH`, sorted by angle within each, their
+/// coordinates and descriptors copied in that order; the lines are taken by angle, so that in each
+/// ring the window of a line follows the one before (two indices moving forward) and its points
+/// are a run of memory. Each point of a window is tested exactly as the grid tests it, so the
+/// points compared are the same and so are the bests (the rule of [`Best`] does not depend on the
+/// order). None - the grid then - for an epipole at infinity or a guide whose lines miss its
+/// epipole by more than `e` (a matrix far from rank 2).
+fn bests_in_fan(da: &[u8], points_a: &[[f64; 2]], db: &[u8], points_b: &[[f64; 2]], f: &Matrix3<f64>, e: f64)
+                -> Option<Vec<[u32; 3]>> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let [ex, ey] = epipole(f)?;
+    let (n_a, n_b) = (points_a.len(), points_b.len());
+    // the lines of A by angle, and the most one of them misses the epipole by
+    let mut lines: Vec<(f64, u32, [f64; 3])> = Vec::with_capacity(n_a);
+    let mut miss = 0.0f64;
+    for (i, p) in points_a.iter().enumerate() {
+        let l = f * Vector3::new(p[0], p[1], 1.0);
+        let norm = (l.x * l.x + l.y * l.y).sqrt();
+        if norm > 0.0 && norm.is_finite() && p.iter().all(|v| v.is_finite()) {
+            let line = [l.x / norm, l.y / norm, l.z / norm];
+            let s = (line[0] * ex + line[1] * ey + line[2]).abs();
+            if !(s <= e) {
+                return None;
+            }
+            miss = miss.max(s);
+            lines.push((half_turn(line[1].atan2(line[0]) - FRAC_PI_2), i as u32, line));
+        }
+    }
+    lines.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+    // the points of B by ring and angle; the coordinates' size bounds the roundoff of the angles
+    let mut scale = ex.abs().max(ey.abs());
+    let finite: Vec<u32> = (0..n_b as u32).filter(|&j| points_b[j as usize].iter().all(|v| v.is_finite())).collect();
+    for &j in &finite {
+        let [x, y] = points_b[j as usize];
+        scale = scale.max(x.abs()).max(y.abs());
+    }
+    let reach = (e + miss) * (1.0 + 1e-9) + 1e-9 * (1.0 + scale);
+    let inner = 2.0 * reach;
+    let mut keyed: Vec<(u32, f64, f64, u32)> = finite
+        .iter()
+        .map(|&j| {
+            let [x, y] = points_b[j as usize];
+            let (dx, dy) = (x - ex, y - ey);
+            let r = dx.hypot(dy);
+            let ring = if r < inner { 0 } else { 1 + ((r / inner).ln() / RING_GROWTH.ln()).floor() as u32 };
+            (ring, half_turn(dy.atan2(dx)), r, j)
+        })
+        .collect();
+    keyed.sort_unstable_by(|x, y| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1)).then(x.3.cmp(&y.3)));
+    let m = keyed.len();
+    let mut xy: Vec<[f64; 2]> = Vec::with_capacity(m);
+    let mut angle: Vec<f64> = Vec::with_capacity(m);
+    let mut index: Vec<u32> = Vec::with_capacity(m);
+    let mut desc: Vec<u8> = Vec::with_capacity(m * DIM);
+    // each ring: its run, and the half-width of its windows (none: every point of the ring)
+    let mut rings: Vec<(usize, usize, Option<f64>)> = Vec::new();
+    let mut k = 0;
+    while k < m {
+        let ring = keyed[k].0;
+        let start = k;
+        let mut r_min = f64::INFINITY;
+        while k < m && keyed[k].0 == ring {
+            let (_, a, r, j) = keyed[k];
+            xy.push(points_b[j as usize]);
+            angle.push(a);
+            index.push(j);
+            desc.extend_from_slice(descriptor(db, j as usize));
+            r_min = r_min.min(r);
+            k += 1;
+        }
+        let sine = reach / r_min;
+        let half = (ring > 0 && sine < 0.999).then(|| sine.asin());
+        rings.push((start, k, half));
+    }
+    let mut cols = vec![Best::NONE; m];
+    let mut rows = vec![Best::NONE.out(); n_a];
+    // the windows of each ring as indices into its run repeated three times, shifted by a half turn
+    // each: a window [angle + pi - half, angle + pi + half] lies in (pi / 2, 5 pi / 2)
+    let mut windows: Vec<(usize, usize)> = vec![(0, 0); rings.len()];
+    for &(psi, i, [a, b, c]) in &lines {
+        let qa = descriptor(da, i as usize);
+        let mut row = Best::NONE;
+        let mut test = |k: usize, row: &mut Best| {
+            let [x, y] = xy[k];
+            if (a * x + b * y + c).abs() <= e {
+                let score = dot(qa, desc[k * DIM..(k + 1) * DIM].try_into().expect("a descriptor of DIM bytes"));
+                row.see(score, index[k]);
+                cols[k].see(score, i);
+            }
+        };
+        for (&(start, end, half), window) in rings.iter().zip(windows.iter_mut()) {
+            let n = end - start;
+            let Some(half) = half else {
+                for k in start..end {
+                    test(k, &mut row);
+                }
+                continue;
+            };
+            let value = |v: usize| angle[start + v % n] + PI * (v / n) as f64;
+            let (low, high) = (psi + PI - half, psi + PI + half);
+            let (lo, hi) = window;
+            while *lo < 3 * n && value(*lo) < low {
+                *lo += 1;
+            }
+            *hi = (*hi).max(*lo);
+            while *hi < 3 * n && value(*hi) <= high {
+                *hi += 1;
+            }
+            for v in *lo..*hi {
+                test(start + v % n, &mut row);
+            }
+        }
+        rows[i as usize] = row.out();
+    }
+    let mut out = rows;
+    out.resize(n_a + n_b, Best::NONE.out());
+    for (k, best) in cols.into_iter().enumerate() {
+        out[n_a + index[k] as usize] = best.out();
+    }
+    Some(out)
 }
 
 /// [`guided_bests`] on the points of A and B in one frame, those of B in their grid.
@@ -1079,8 +1231,7 @@ mod tests {
     /// The fundamental matrix of two photos taken side by side: `[e]x` with the epipole `e` far
     /// to the left of a 6000 x 4000 photo, so that every line crosses the photo nearly level.
     fn side_by_side() -> Matrix3<f64> {
-        let e = Vector3::new(-40000.0, 1500.0, 1.0);
-        Matrix3::new(0.0, -e.z, e.y, e.z, 0.0, -e.x, -e.y, e.x, 0.0)
+        skew(Vector3::new(-40000.0, 1500.0, 1.0))
     }
 
     /// A timing probe, not a check (`cargo test --release -p ppg_engine --lib guided_stage -- --ignored
@@ -1101,15 +1252,90 @@ mod tests {
             let norm = (l.x * l.x + l.y * l.y).sqrt();
             grid.along([l.x / norm, l.y / norm, l.z / norm], 4.0, &points_b, |_| candidates += 1);
         }
-        let mut best = f64::INFINITY;
-        let mut sum = 0u64;
-        for _ in 0..3 {
-            let start = std::time::Instant::now();
-            let bests = bests_along(&da, &points_a, &db, &points_b, &grid, &f, 4.0);
-            best = best.min(start.elapsed().as_secs_f64());
-            sum = bests.iter().map(|b| u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2])).sum();
+        let time = |what: &str, run: &dyn Fn() -> Vec<[u32; 3]>| {
+            let mut best = f64::INFINITY;
+            let mut sum = 0u64;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let bests = run();
+                best = best.min(start.elapsed().as_secs_f64());
+                sum = bests.iter().map(|b| u64::from(b[0]) + u64::from(b[1]) + u64::from(b[2])).sum();
+            }
+            println!("guided stage, {what}: {:.1} ms for {N} x {N} points, {candidates} candidates ({:.1} ns each), \
+                      checksum {sum}", best * 1e3, best * 1e9 / candidates as f64);
+        };
+        time("grid", &|| bests_along(&da, &points_a, &db, &points_b, &grid, &f, 4.0));
+        time("fan", &|| bests_in_fan(&da, &points_a, &db, &points_b, &f, 4.0).expect("a finite epipole"));
+        // the epipole in the middle of the photo (a camera moving forward)
+        let forward = skew(Vector3::new(3000.0, 2000.0, 1.0));
+        time("grid, forward", &|| bests_along(&da, &points_a, &db, &points_b, &grid, &forward, 4.0));
+        time("fan, forward", &|| bests_in_fan(&da, &points_a, &db, &points_b, &forward, 4.0).expect("an epipole"));
+    }
+
+    /// `[v]x`, the matrix of the cross product with `v`.
+    fn skew(v: Vector3<f64>) -> Matrix3<f64> {
+        Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
+    }
+
+    #[test]
+    fn the_fan_compares_the_points_the_grid_compares() {
+        let (mut points_a, _) = random_points_and_lines(31, 3000, 0);
+        let (mut points_b, _) = random_points_and_lines(32, 3000, 0);
+        points_a[7] = [f64::NAN, 10.0];
+        points_b[11] = [5.0, f64::INFINITY];
+        let mut da = random_descriptors(33, 3000);
+        let mut db = random_descriptors(34, 3000);
+        // ties in both directions: copies of a descriptor of A in B, of B in A
+        for (from, to) in [(5usize, 600usize), (5, 1200), (40, 41)] {
+            let copy: Vec<u8> = da[from * DIM..(from + 1) * DIM].to_vec();
+            db[to * DIM..(to + 1) * DIM].copy_from_slice(&copy);
+            let copy: Vec<u8> = db[from * DIM..(from + 1) * DIM].to_vec();
+            da[to * DIM..(to + 1) * DIM].copy_from_slice(&copy);
         }
-        println!("guided stage: {:.1} ms for {N} x {N} points, {candidates} candidates ({:.1} ns each), checksum {sum}",
-                 best * 1e3, best * 1e9 / candidates as f64);
+        let mut state = 35u64;
+        let mut next = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let epipoles = [[3000.0, 2000.0, 1.0], [6100.0, -50.0, 1.0], [-40000.0, 1500.0, 1.0], [2.0e7, 3.0e6, 1.0],
+                        [1.0, 1.0, 1e-3], [17.0, 3999.0, 1.0]];
+        for (case, ep) in epipoles.into_iter().enumerate() {
+            // a homography near the identity in pixels: the lines cross the photo at every angle
+            let size = Matrix3::new(0.2, 0.2, 400.0, 0.2, 0.2, 400.0, 2e-5, 2e-5, 0.2);
+            let h = Matrix3::identity() + Matrix3::from_fn(|_, _| next()).component_mul(&size);
+            let f = skew(Vector3::from(ep)) * h;
+            let found = epipole(&f).expect("a finite epipole");
+            let want = [ep[0] / ep[2], ep[1] / ep[2]];
+            assert!((found[0] - want[0]).abs() <= 1e-6 * (1.0 + want[0].abs()), "case {case}: {found:?}");
+            for (cell, e) in [(16.0, 4.0), (8.0, 1.0), (48.0, 12.0)] {
+                let grid = Grid::new(&points_b, cell);
+                let fan = bests_in_fan(&da, &points_a, &db, &points_b, &f, e).expect("a fan");
+                let walk = bests_along(&da, &points_a, &db, &points_b, &grid, &f, e);
+                assert_eq!(fan.len(), walk.len());
+                let seen = walk.iter().filter(|b| b[0] > 0).count();
+                assert!(seen > 100, "case {case}, e {e}: {seen} points compared");
+                for (k, (x, y)) in fan.iter().zip(&walk).enumerate() {
+                    assert_eq!(x, y, "case {case}, e {e}: entry {k}");
+                }
+            }
+        }
+        // an epipole at infinity, and a matrix of rank 3 whose lines miss any epipole: the grid
+        let at_infinity = skew(Vector3::new(1.0, 0.2, 0.0)) * Matrix3::identity();
+        assert!(epipole(&at_infinity).is_none());
+        // the lines through (3000, 2000) moved by 10^5 / their norm, 28 px or more
+        let mut rank3 = skew(Vector3::new(3000.0, 2000.0, 1.0));
+        rank3[(2, 2)] = 1e5;
+        assert!(epipole(&rank3).is_some());
+        assert!(bests_in_fan(&da, &points_a, &db, &points_b, &rank3, 4.0).is_none());
+        // a matrix of rank 3 whose lines miss by less than the band: a wider window, the same bests
+        let grid = Grid::new(&points_b, 16.0);
+        for _ in 0..3 {
+            let near = skew(Vector3::new(3000.0, 2000.0, 1.0)) + Matrix3::from_fn(|_, _| 1e-4 * next());
+            if let Some(fan) = bests_in_fan(&da, &points_a, &db, &points_b, &near, 4.0) {
+                assert!(fan == bests_along(&da, &points_a, &db, &points_b, &grid, &near, 4.0));
+            }
+        }
+        let side = side_by_side();
+        assert!(bests_in_fan(&da, &points_a, &db, &points_b, &side, 4.0).is_some());
     }
 }
