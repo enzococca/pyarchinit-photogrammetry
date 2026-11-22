@@ -1,20 +1,26 @@
 //! Conjugate gradients on the reduced camera system, which is never formed (Agarwal, Snavely,
 //! Seitz and Szeliski 2010, "Bundle adjustment in the large"): a product `S x` is
 //! `B x - E C^-1 E^T x`, computed from the Jacobian blocks of the observations in parallel passes
-//! over the rows, the points, the photos and the markers, every sum folded in a fixed order. The
-//! preconditioner is the block-Jacobi of `S`: the diagonal blocks of the photos and of the
-//! markers and the border block, assembled with the assemblers of `schur` and factorised dense.
+//! over the rows (in fixed chunks of residual blocks, each summed into its own vector) and the
+//! point blocks, every sum folded in a fixed order. The preconditioner is the block-Jacobi of `S`:
+//! the diagonal blocks of the camera blocks (the photos and the markers of the bundle adjustment)
+//! and the border block, assembled with the assemblers of `schur` and factorised dense.
 //! The iteration stops when the decrease of the quadratic model stagnates (the Q-criterion of
 //! Nash and Sofer as Ceres applies it, with the forcing `PCG_FORCING`), on an exact solution, or
 //! after `PCG_MAX_ITERATIONS`.
 
 use rayon::prelude::*;
 
-use super::problem::{Layout, Problem};
-use super::residuals::{Evaluated, Structure, OFF_CENTRE, OFF_INTR, OFF_POINT};
+use super::lm::Shape;
 use super::schur::{
-    back_substitute, border_columns, marker_column, photo_column, point_blocks, Block, Context, Reduced,
+    back_substitute, border_columns, camera_column, point_inverses, split_sizes, Block, Context, Reduced,
 };
+
+/// The chunks of residual blocks a product sums apart (a vector of the reduced system each),
+/// whatever the number of threads, folded in their order.
+const PRODUCT_CHUNKS: usize = 64;
+/// Columns per task of the fold.
+const FOLD_CHUNK: usize = 256;
 
 /// The most conjugate-gradient iterations of one step (Ceres's default).
 pub(crate) const PCG_MAX_ITERATIONS: usize = 500;
@@ -98,38 +104,30 @@ impl DiagonalBlock {
     }
 }
 
-/// The diagonal blocks of the reduced system (the photos, the markers, the border), factorised,
-/// and its right-hand side.
+/// The diagonal blocks of the reduced system (the camera blocks before the border, the border),
+/// factorised, and its right-hand side.
 fn preconditioner(cx: &Context) -> (Vec<DiagonalBlock>, Vec<f64>) {
-    let (pb, red) = (cx.pb, cx.red);
-    let n = red.size;
+    let sh = cx.shape;
+    let n = sh.n;
     let assemble = |start: usize, len: usize, fill: &dyn Fn(&mut [f64], &mut [f64])| {
         let (mut block, mut rhs) = (vec![0.0; len * len], vec![0.0; len]);
         fill(&mut block, &mut rhs);
         (DiagonalBlock::new(start, len, block), rhs)
     };
-    let photos: Vec<(DiagonalBlock, Vec<f64>)> = (0..pb.centres.len())
+    let cameras: Vec<(DiagonalBlock, Vec<f64>)> = (0..sh.border_block)
         .into_par_iter()
-        .map(|i| {
-            let (start, len) = (red.photo_start[i], red.photo_len[i]);
+        .map(|c| {
+            let (start, len) = (sh.cam_col[c], sh.cam_size[c]);
             let slab = Block { start, len };
-            assemble(start, len, &|block, rhs| photo_column(cx, i, &slab, block, rhs))
+            assemble(start, len, &|block, rhs| camera_column(cx, c, &slab, block, rhs))
         })
         .collect();
-    let markers: Vec<(DiagonalBlock, Vec<f64>)> = (0..pb.markers.len())
-        .into_par_iter()
-        .map(|m| {
-            let start = red.marker_start + 3 * m;
-            let slab = Block { start, len: 3 };
-            assemble(start, 3, &|block, rhs| marker_column(cx, m, &slab, block, rhs))
-        })
-        .collect();
-    let (start, len) = (red.border_start, n - red.border_start);
+    let (start, len) = (sh.border_start, n - sh.border_start);
     let slab = Block { start, len };
     let border = assemble(start, len, &|block, rhs| border_columns(cx, &slab, block, rhs));
-    let mut blocks = Vec::with_capacity(photos.len() + markers.len() + 1);
+    let mut blocks = Vec::with_capacity(cameras.len() + 1);
     let mut b = vec![0.0; n];
-    for (block, rhs) in photos.into_iter().chain(markers).chain(std::iter::once(border)) {
+    for (block, rhs) in cameras.into_iter().chain(std::iter::once(border)) {
         if block.len > 0 {
             b[block.start..block.start + block.len].copy_from_slice(&rhs);
             blocks.push(block);
@@ -138,207 +136,149 @@ fn preconditioner(cx: &Context) -> (Vec<DiagonalBlock>, Vec<f64>) {
     (blocks, b)
 }
 
-/// What a product keeps between two: the camera part of every tie row (`u`) and of every marker
-/// row (`um`) at the vector, the Schur term of every point (`y = V^-1 W^T x`), the sums of the
-/// photos (their block and the intrinsics of their camera) and of the markers.
+/// What a product keeps between two: the camera part of every row at the vector (`u`), the
+/// Schur term of every point block (`y = V^-1 W^T x`), the partial sums of the chunks of residual
+/// blocks.
 struct Scratch {
     u: Vec<f64>,
-    um: Vec<f64>,
-    y: Vec<[f64; 3]>,
-    photos: Vec<([f64; 12], [f64; 12])>,
-    markers: Vec<[f64; 3]>,
+    y: Vec<f64>,
+    partials: Vec<Vec<f64>>,
 }
 
 impl Scratch {
-    fn new(pb: &Problem) -> Scratch {
-        Scratch {
-            u: vec![0.0; 2 * pb.obs.len()],
-            um: vec![0.0; 2 * pb.mobs.len()],
-            y: vec![[0.0; 3]; pb.points.len()],
-            photos: vec![([0.0; 12], [0.0; 12]); pb.centres.len()],
-            markers: vec![[0.0; 3]; pb.markers.len()],
-        }
+    fn new(red: &Reduced) -> Scratch {
+        let (rows, n) = (red.lin.residuals.len(), red.shape.n);
+        let partials = vec![vec![0.0; n]; PRODUCT_CHUNKS];
+        Scratch { u: vec![0.0; rows], y: vec![0.0; red.shape.n_point_cols], partials }
     }
 }
 
-/// `J_cam . x` of the Jacobian row `jr` of the photo `i`: its block of the reduced system and
-/// the free intrinsics of its camera.
-#[inline]
-fn camera_part(cx: &Context, i: usize, jr: &[f64], x: &[f64]) -> f64 {
-    let mut jc = [0.0; 12];
-    let c = cx.camera_entries(i, jr, &mut jc);
-    let s = cx.red.photo_start[i];
-    let mut t = 0.0;
-    for a in 0..c {
-        t += jc[a] * x[s + a];
+/// A buffer of one entry per row split by chunk of residual blocks: the first block of each
+/// chunk, its end, its rows.
+fn split_rows<'a>(sh: &Shape, buffer: &'a mut [f64]) -> Vec<(usize, usize, &'a mut [f64])> {
+    let mut pieces = Vec::with_capacity(sh.chunks.len());
+    let mut rest = buffer;
+    for w in sh.chunks.windows(2) {
+        let (head, tail) = rest.split_at_mut(sh.row_start[w[1]] - sh.row_start[w[0]]);
+        pieces.push((w[0], w[1], head));
+        rest = tail;
     }
-    let (k_c, intr) = cx.intrinsics(i);
-    for q in 0..k_c {
-        t += jr[OFF_INTR + q] * x[intr + q];
+    pieces
+}
+
+/// `y_p = V^-1 sum_k J_p^T W u_k` of the point block `p` (of `P` coordinates when it is not 0),
+/// zero when it is held; `v` a scratch of its size.
+#[inline(always)]
+fn schur_term<const P: usize>(cx: &Context, u: &[f64], p: usize, yp: &mut [f64], v: &mut [f64]) {
+    let (sh, lin) = (cx.shape, cx.lin);
+    yp.fill(0.0);
+    let ps = if P > 0 { P } else { yp.len() };
+    let Some((vinv, _)) = cx.point(p, ps) else { return };
+    let v = &mut v[..ps];
+    v.fill(0.0);
+    for &k in sh.point_res.of(p) {
+        let ppos = sh.width(k) - ps;
+        for (row, jr) in sh.jac_rows(lin, k) {
+            let wu = lin.weights[row] * u[row];
+            let jp = &jr[ppos..ppos + ps];
+            for q in 0..ps {
+                v[q] += jp[q] * wu;
+            }
+        }
     }
-    t
+    for a in 0..ps {
+        let mut t = 0.0;
+        for b in 0..ps {
+            t += vinv[a * ps + b] * v[b];
+        }
+        yp[a] = t;
+    }
 }
 
 /// `out = (S + damping) x`, `S` the reduced system, without forming it: the rows at `x`, the
-/// Schur term of each point, then the sums of the photos, of the markers and of the border.
+/// Schur term of each point block, then the weighted rows less their point part summed on their
+/// camera blocks.
 fn product(cx: &Context, scratch: &mut Scratch, x: &[f64], out: &mut [f64]) {
-    let (pb, lay, st, ev, red) = (cx.pb, cx.lay, cx.st, cx.ev, cx.red);
-    let Scratch { u, um, y, photos, markers } = scratch;
-    u.par_chunks_mut(2).enumerate().for_each(|(j, pair)| {
-        let i = pb.obs[j].image;
-        for (k, slot) in pair.iter_mut().enumerate() {
-            *slot = camera_part(cx, i, ev.obs_row(st, 2 * j + k), x);
-        }
-    });
-    um.par_chunks_mut(2).enumerate().for_each(|(j, pair)| {
-        let o = &pb.mobs[j];
-        let m0 = red.marker_start + 3 * o.point;
-        for (k, slot) in pair.iter_mut().enumerate() {
-            let jr = ev.mobs_row(st, 2 * j + k);
-            let marker = jr[OFF_POINT] * x[m0] + jr[OFF_POINT + 1] * x[m0 + 1] + jr[OFF_POINT + 2] * x[m0 + 2];
-            *slot = camera_part(cx, o.image, jr, x) + marker;
-        }
-    });
-    y.par_iter_mut().enumerate().for_each(|(p, yp)| {
-        let pt = &cx.points[p];
-        *yp = [0.0; 3];
-        if pt.held {
-            return;
-        }
-        let mut v = [0.0; 3];
-        for &j in st.point_obs.of(p) {
-            for row in 2 * j..2 * j + 2 {
-                let (jr, wu) = (ev.obs_row(st, row), ev.weights[row] * u[row]);
-                for k in 0..3 {
-                    v[k] += jr[OFF_POINT + k] * wu;
-                }
-            }
-        }
-        for k in 0..3 {
-            yp[k] = pt.vinv[3 * k] * v[0] + pt.vinv[3 * k + 1] * v[1] + pt.vinv[3 * k + 2] * v[2];
-        }
-    });
-    photos.par_iter_mut().enumerate().for_each(|(i, (own, intr))| {
-        *own = [0.0; 12];
-        *intr = [0.0; 12];
-        let (s_i, c_i) = (red.photo_start[i], red.photo_len[i]);
-        let (k_c, _) = cx.intrinsics(i);
-        for a in 0..c_i {
-            own[a] = cx.damping[red.layout_col[s_i + a]] * x[s_i + a];
-        }
-        let mut jc = [0.0; 12];
-        for &j in st.image_obs.of(i) {
-            let yp = &y[pb.obs[j].point];
-            for row in 2 * j..2 * j + 2 {
-                let jr = ev.obs_row(st, row);
-                let point = jr[OFF_POINT] * yp[0] + jr[OFF_POINT + 1] * yp[1] + jr[OFF_POINT + 2] * yp[2];
-                let t = ev.weights[row] * (u[row] - point);
-                cx.camera_entries(i, jr, &mut jc);
-                for a in 0..c_i {
-                    own[a] += jc[a] * t;
-                }
-                for q in 0..k_c {
-                    intr[q] += jr[OFF_INTR + q] * t;
-                }
-            }
-        }
-        for &j in st.image_mobs.of(i) {
-            for row in 2 * j..2 * j + 2 {
-                let (jr, t) = (ev.mobs_row(st, row), um[row]);
-                cx.camera_entries(i, jr, &mut jc);
-                for a in 0..c_i {
-                    own[a] += jc[a] * t;
-                }
-                for q in 0..k_c {
-                    intr[q] += jr[OFF_INTR + q] * t;
-                }
-            }
-        }
-        if lay.image_col[i].is_some() {
-            for &j in st.image_gnss.of(i) {
-                let bias = lay.flight_index(pb.gnss[j].3).map(|f| red.bias_start + 3 * f);
-                for k in 0..3 {
-                    let jc = ev.gnss_jac[j][k];
-                    let mut t = jc * x[s_i + OFF_CENTRE + k];
-                    if let Some(b0) = bias {
-                        t += ev.gnss_jac[j][3 + k] * x[b0 + k];
+    let (sh, lin) = (cx.shape, cx.lin);
+    let Scratch { u, y, partials } = scratch;
+    // the camera part of every row, chunk by chunk of residual blocks
+    let pieces: Vec<(usize, usize, &mut [f64])> = split_rows(sh, u);
+    pieces.into_par_iter().for_each(|(first, end, u)| {
+        let row0 = sh.row_start[first];
+        u.fill(0.0);
+        for k in first..end {
+            let cams = sh.cam_slice(k);
+            for (row, jr) in sh.jac_rows(lin, k) {
+                let mut v = 0.0;
+                for &(c, pos) in cams {
+                    let (s, pos) = (sh.cam_col[c as usize], pos as usize);
+                    for a in 0..sh.cam_size[c as usize] {
+                        v += jr[pos + a] * x[s + a];
                     }
-                    own[OFF_CENTRE + k] += jc * t;
                 }
-            }
-        }
-        if pb.rolling_shutter {
-            let off = c_i - 6;
-            for k in 0..6 {
-                let jr = ev.rs_jac[i][k];
-                own[off + k] += jr * jr * x[s_i + off + k];
+                u[row - row0] = v;
             }
         }
     });
-    markers.par_iter_mut().enumerate().for_each(|(m, out)| {
-        let s_m = red.marker_start + 3 * m;
-        for k in 0..3 {
-            out[k] = cx.damping[lay.marker_col + 3 * m + k] * x[s_m + k];
-        }
-        for &j in st.marker_mobs.of(m) {
-            for row in 2 * j..2 * j + 2 {
-                let (jr, t) = (ev.mobs_row(st, row), um[row]);
-                for k in 0..3 {
-                    out[k] += jr[OFF_POINT + k] * t;
+    let u = &*u;
+    // the Schur term of every point block
+    let largest = sh.max_point;
+    let slices = split_sizes(y, sh.point_size.iter().copied());
+    slices.into_par_iter().enumerate().for_each_init(
+        || vec![0.0; largest],
+        |v, (p, yp)| {
+            if yp.len() == 3 {
+                schur_term::<3>(cx, u, p, yp, v);
+            } else {
+                schur_term::<0>(cx, u, p, yp, v);
+            }
+        },
+    );
+    let y = &*y;
+    // every row weighted, less its point part, scattered on its camera blocks: in fixed chunks of
+    // residual blocks, each into its own vector, walking the Jacobian in its order
+    let n = sh.n;
+    let per = sh.blocks.len().div_ceil(PRODUCT_CHUNKS).max(1);
+    partials.par_iter_mut().enumerate().for_each(|(chunk, partial)| {
+        partial.fill(0.0);
+        let first = (chunk * per).min(sh.blocks.len());
+        let end = ((chunk + 1) * per).min(sh.blocks.len());
+        for k in first..end {
+            let cams = sh.cam_slice(k);
+            let point = sh.point_of(k);
+            for (row, jr) in sh.jac_rows(lin, k) {
+                let mut v = u[row];
+                if let Some((p, ppos, ps)) = point {
+                    let c0 = sh.point_col[p];
+                    for q in 0..ps {
+                        v -= jr[ppos + q] * y[c0 + q];
+                    }
                 }
-            }
-        }
-        for &j in st.marker_gcps.of(m) {
-            for k in 0..3 {
-                let jv = ev.gcp_jac[j][k];
-                out[k] += jv * jv * x[s_m + k];
-            }
-        }
-        for &end in st.marker_bars.of(m) {
-            let (j, mine) = (end / 2, 3 * (end % 2));
-            let other = if end % 2 == 0 { pb.bars[j].1 } else { pb.bars[j].0 };
-            let s_o = red.marker_start + 3 * other;
-            let jm = &ev.bar_jac[j][mine..mine + 3];
-            let jo = &ev.bar_jac[j][3 - mine..6 - mine];
-            let mut t = 0.0;
-            for k in 0..3 {
-                t += jm[k] * x[s_m + k] + jo[k] * x[s_o + k];
-            }
-            for k in 0..3 {
-                out[k] += jm[k] * t;
+                let tr = lin.weights[row] * v;
+                for &(c, pos) in cams {
+                    let (s, pos, size) = (sh.cam_col[c as usize], pos as usize, sh.cam_size[c as usize]);
+                    let (out, jc) = (&mut partial[s..s + size], &jr[pos..pos + size]);
+                    for a in 0..size {
+                        out[a] += jc[a] * tr;
+                    }
+                }
             }
         }
     });
-    // the vector: the photos, the markers, then the border folded in the order of the photos
-    for (i, (own, _)) in photos.iter().enumerate() {
-        let (s_i, c_i) = (red.photo_start[i], red.photo_len[i]);
-        out[s_i..s_i + c_i].copy_from_slice(&own[..c_i]);
-    }
-    for (m, sums) in markers.iter().enumerate() {
-        let s_m = red.marker_start + 3 * m;
-        out[s_m..s_m + 3].copy_from_slice(sums);
-    }
-    for col in red.border_start..red.size {
-        out[col] = cx.damping[red.layout_col[col]] * x[col];
-    }
-    for (i, (_, intr)) in photos.iter().enumerate() {
-        let (k_c, intr0) = cx.intrinsics(i);
-        for q in 0..k_c {
-            out[intr0 + q] += intr[q];
-        }
-    }
-    for (j, (i, _, _, flight)) in pb.gnss.iter().enumerate() {
-        if let Some(b0) = lay.flight_index(*flight).map(|f| red.bias_start + 3 * f) {
-            for k in 0..3 {
-                let jb = ev.gnss_jac[j][3 + k];
-                let mut t = jb * x[b0 + k];
-                if lay.image_col[*i].is_some() {
-                    t += ev.gnss_jac[j][k] * x[red.photo_start[*i] + OFF_CENTRE + k];
-                }
-                out[b0 + k] += jb * t;
+    // the damping, then the chunks folded in their order, column by column
+    let partials = &*partials;
+    out.par_chunks_mut(FOLD_CHUNK).enumerate().for_each(|(i, out)| {
+        let start = i * FOLD_CHUNK;
+        for (a, o) in out.iter_mut().enumerate() {
+            let col = start + a;
+            let mut v = cx.damping[col] * x[col];
+            for partial in partials {
+                v += partial[col];
             }
+            *o = v;
         }
-    }
+    });
+    debug_assert_eq!(out.len(), n);
 }
 
 /// The preconditioned conjugate gradients on `apply` (the damped reduced system) from zero,
@@ -404,27 +344,22 @@ fn conjugate_gradients(
 /// One step of the damped normal equations, as `schur::dense_step`, with the reduced system
 /// solved by the conjugate gradients stopped by `forcing` or `max_iterations`.
 fn pcg_step_with(
-    pb: &Problem,
-    lay: &Layout,
-    st: &Structure,
     red: &Reduced,
-    ev: &Evaluated,
     g: &[f64],
     damping: &[f64],
     forcing: f64,
     max_iterations: usize,
 ) -> Result<Vec<f64>, String> {
-    let points = point_blocks(pb, lay, st, ev, g, damping);
-    let cx = Context { pb, lay, st, red, ev, g, damping, points: &points };
-    let mut delta = vec![0.0; lay.size];
-    if red.size > 0 {
+    let points = point_inverses(red, g, damping);
+    let cx = Context { shape: red.shape, lin: red.lin, g, damping, points: &points };
+    let n = red.shape.n;
+    let mut delta = vec![0.0; n + red.shape.n_point_cols];
+    if n > 0 {
         let (blocks, b) = preconditioner(&cx);
-        let mut scratch = Scratch::new(pb);
+        let mut scratch = Scratch::new(red);
         let apply = |p: &[f64], q: &mut [f64]| product(&cx, &mut scratch, p, q);
         let x = conjugate_gradients(apply, &blocks, &b, forcing, max_iterations)?;
-        for (col, &lc) in red.layout_col.iter().enumerate() {
-            delta[lc] = x[col];
-        }
+        delta[..n].copy_from_slice(&x);
     }
     back_substitute(&cx, &mut delta);
     Ok(delta)
@@ -432,24 +367,17 @@ fn pcg_step_with(
 
 /// One step of the damped normal equations, as `schur::dense_step`: the reduced system solved
 /// by the preconditioned conjugate gradients without being formed, the points back-substituted.
-pub(crate) fn pcg_step(
-    pb: &Problem,
-    lay: &Layout,
-    st: &Structure,
-    red: &Reduced,
-    ev: &Evaluated,
-    g: &[f64],
-    damping: &[f64],
-) -> Result<Vec<f64>, String> {
-    pcg_step_with(pb, lay, st, red, ev, g, damping, PCG_FORCING, PCG_MAX_ITERATIONS)
+pub(crate) fn pcg_step(red: &Reduced, g: &[f64], damping: &[f64]) -> Result<Vec<f64>, String> {
+    pcg_step_with(red, g, damping, PCG_FORCING, PCG_MAX_ITERATIONS)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle::residuals::{evaluate_blocks, gradient_and_diagonal, Loss};
+    use crate::bundle::residuals::Loss;
     use crate::bundle::schur::tests::{moved, small_block};
     use crate::bundle::schur::{dense_step, dense_system};
+    use crate::bundle::solve::testing::system;
 
     #[test]
     fn the_small_cholesky_solves_and_refuses_what_is_not_positive_definite() {
@@ -469,26 +397,15 @@ mod tests {
         assert_eq!(z, vec![0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 2.0]);
     }
 
-    /// The reduced system of the small block at its moved parameters, with every residual.
-    fn system(loss: Loss, lambda: f64) -> (Problem, Layout, Structure, Reduced, Evaluated, Vec<f64>, Vec<f64>) {
-        let pb = small_block();
-        let lay = Layout::new(&pb);
-        let st = Structure::new(&pb);
-        let red = Reduced::new(&pb, &lay);
-        let ev = evaluate_blocks(&pb, &lay, &st, &moved(&pb), loss, true);
-        let (g, d) = gradient_and_diagonal(&pb, &lay, &st, &ev);
-        let damping: Vec<f64> = d.iter().map(|x| lambda * x.max(1e-6)).collect();
-        (pb, lay, st, red, ev, g, damping)
-    }
-
     #[test]
     fn the_product_and_the_preconditioner_are_those_of_the_dense_system() {
         for (loss, lambda) in [(Loss::None, 1e-4), (Loss::Huber(0.5), 1e-2), (Loss::Cauchy(0.3), 1.0)] {
-            let (pb, lay, st, red, ev, g, damping) = system(loss, lambda);
-            let points = point_blocks(&pb, &lay, &st, &ev, &g, &damping);
-            let (lay, st, red, ev) = (&lay, &st, &red, &ev);
-            let cx = Context { pb: &pb, lay, st, red, ev, g: &g, damping: &damping, points: &points };
-            let n = red.size;
+            let pb = small_block();
+            let sys = system(&pb, moved(&pb), loss);
+            let (red, damping) = (sys.reduced(), sys.damping(lambda));
+            let points = point_inverses(&red, &sys.g, &damping);
+            let cx = Context { shape: &sys.shape, lin: &sys.lin, g: &sys.g, damping: &damping, points: &points };
+            let n = sys.shape.n;
             assert_eq!(n, 48);
             let (s, b) = dense_system(&cx);
             // the dense assembly writes the lower triangle and the whole diagonal blocks
@@ -508,7 +425,7 @@ mod tests {
                     }
                 }
             }
-            let mut scratch = Scratch::new(&pb);
+            let mut scratch = Scratch::new(&red);
             let mut out = vec![0.0; n];
             for seed in 0..3 {
                 let x: Vec<f64> = (0..n).map(|k| ((k * 7 + seed * 13) % 11) as f64 - 5.0).collect();
@@ -525,26 +442,29 @@ mod tests {
     #[test]
     fn the_conjugate_gradients_run_to_the_end_give_the_dense_step() {
         for (loss, lambda) in [(Loss::None, 1e-4), (Loss::Huber(0.5), 1e-2), (Loss::Cauchy(0.3), 1.0)] {
-            let (pb, lay, st, red, ev, g, damping) = system(loss, lambda);
-            let dense = dense_step(&pb, &lay, &st, &red, &ev, &g, &damping).unwrap();
+            let pb = small_block();
+            let sys = system(&pb, moved(&pb), loss);
+            let (red, g, damping) = (sys.reduced(), &sys.g, sys.damping(lambda));
+            let dense = dense_step(&red, g, &damping).unwrap();
             let scale = dense.iter().fold(0.0, |a: f64, x| a.max(x.abs()));
             // no forcing: the iteration runs until the residual is exactly zero or the limit; the
             // block mixes focal lengths, metres and radians, and 1e-6 of the step is what the
             // conjugate gradients reach in double precision on such a system (measured 1e-7)
-            let pcg = pcg_step_with(&pb, &lay, &st, &red, &ev, &g, &damping, 0.0, 2000).unwrap();
+            let pcg = pcg_step_with(&red, g, &damping, 0.0, 2000).unwrap();
             for (k, (got, want)) in pcg.iter().zip(&dense).enumerate() {
                 assert!((got - want).abs() <= 1e-6 * scale, "column {k}: {got} vs {want} ({loss:?})");
             }
             // with the forcing of the solver the step is rough, but it is a descent direction
-            let rough = pcg_step(&pb, &lay, &st, &red, &ev, &g, &damping).unwrap();
-            let descent: f64 = rough.iter().zip(&g).map(|(d, gk)| d * gk).sum();
+            let rough = pcg_step(&red, g, &damping).unwrap();
+            let descent: f64 = rough.iter().zip(g).map(|(d, gk)| d * gk).sum();
             assert!(descent < 0.0, "{loss:?}: g . delta = {descent}");
             assert!(rough.iter().all(|x| x.is_finite()));
         }
         // an indefinite system (a negative damping) is refused
-        let (pb, lay, st, red, ev, g, damping) = system(Loss::None, 1e-4);
-        let negative: Vec<f64> = damping.iter().map(|x| -1e6 * x).collect();
-        let error = pcg_step(&pb, &lay, &st, &red, &ev, &g, &negative).unwrap_err();
+        let pb = small_block();
+        let sys = system(&pb, moved(&pb), Loss::None);
+        let negative: Vec<f64> = sys.damping(1e-4).iter().map(|x| -1e6 * x).collect();
+        let error = pcg_step(&sys.reduced(), &sys.g, &negative).unwrap_err();
         assert_eq!(error, "the reduced system is not positive definite");
     }
 }
