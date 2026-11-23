@@ -2946,6 +2946,7 @@
   "I punti sono allineati: non danno un piano": "The points are on a line: they give no plane",
   "Troppo pochi punti, o un'area troppo stretta, per un piano": "Too few points, or too narrow an area, for a plane",
   "I punti dell'area non stanno su un piano": "The points of the area are not on a plane",
+  "I prospetti dei muri tracciati in pianta seguono solo un orientamento che lascia la verticale com'è (una rotazione in pianta, uno spostamento, una scala): toglili prima, e traccia di nuovo i muri dopo l'orientamento": "The elevations of walls traced on the plan follow only an orientation that keeps the vertical as it is (a turn on the plan, a shift, a scale): remove them first, and trace the walls again after the orientation",
   "Il chunk è in coordinate locali: scegli dove vanno l'origine, l'asse x e il piano orizzontale. Tutto quello che è nelle sue coordinate lo segue; DEM e ortofoto vanno ricostruiti.": "The chunk is in local coordinates: choose where the origin, the x axis and the horizontal plane go. Everything in its coordinates follows it; DEM and orthophoto must be rebuilt.",
   "Tre punti": "Three points",
   "Piano adattato": "Fitted plane",

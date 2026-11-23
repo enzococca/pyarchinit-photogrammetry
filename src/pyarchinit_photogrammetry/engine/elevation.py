@@ -9,7 +9,9 @@ choice, blending, colour correction), the DEM is the depth ``d`` of the surface:
 wall over its plane (a bulge, a lean), of a well over its cylinder.
 
 ``depth=(dmin, dmax)`` keeps only the surface within that band around the plane: what stands in
-front of ``dmax`` (scaffolding, a section left in front of the wall) is passed through.
+front of ``dmax`` (scaffolding, a section left in front of the wall) is passed through. The line of a
+wall ends where two parts of it are equally near (the inside of a corner): there the band is as wide
+as the frame goes at that ``u`` (:meth:`FrameSurface.band`).
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ import numpy as np
 from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
-from .wall_path import DEFAULT_RADIUS, WallPath, _interp
+from .wall_path import DEFAULT_FRONT, DEFAULT_RADIUS, WallPath, _interp
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
@@ -248,7 +250,10 @@ def with_heights(plane: Plane) -> Plane:
 
 
 def heights_measured(frame) -> bool:
-    """Whether ``v`` of the frame is the height (world Z) of the point."""
+    """Whether ``v`` of the frame is the height (world Z) of the point: an upright plane anchored on Z = 0, the
+    line of a wall always."""
+    if frame.kind == "path":
+        return True
     return bool(frame.kind == "plane" and frame.v_axis[2] >= VERTICAL_TOLERANCE and abs(frame.origin[2]) < 1e-6)
 
 
@@ -551,8 +556,13 @@ def cylinder_axis(chunk: Chunk, circle: Cylinder, method: str = "vertical", poin
 # ---------------------------------------------------------------- the surface of a frame
 class FrameSurface:
     """Depth ``d`` of the cells of a frame: rays from ``dmax`` towards the surface (the model),
-    the first hit kept when it lies above ``dmin``. Grid: ``origin`` (u0, v1 top-left), ``shape``,
-    ``resolution`` - the interface of the surfaces of :mod:`.ortho`."""
+    the first hit kept when it lies above ``dmin``. A frame that says how far it goes at each ``u``
+    (``max_depth_at`` and ``min_depth_at``: the line of a wall, :class:`WallPath`) narrows the band there
+    (:meth:`band`): the rays start where the frame ends, and nothing is kept behind it. Grid: ``origin``
+    (u0, v1 top-left), ``shape``, ``resolution`` - the interface of the surfaces of :mod:`.ortho`.
+
+    Without ``bounds`` the grid covers the model in the depth band; on the line of a wall, ``u`` from one end
+    of the trace to the other and ``v`` over the vertices of the model in the band between them."""
 
     def __init__(self, chunk: Chunk, raycaster, frame, resolution: float, lock: threading.Lock,
                  depth: tuple[float, float] | None = None, bounds=None):
@@ -564,17 +574,24 @@ class FrameSurface:
             from ..io.mesh_ply import read_mesh
 
             verts = frame.coords(chunk.to_world(read_mesh(chunk.product_path("model")).xyz))
+            verts = verts[np.isfinite(verts[:, 2])]  # the line of a wall answers NaN for the points off the frame
         if not np.isfinite(hi):
-            hi = float(np.nanmax(verts[:, 2])) + 0.05 if verts is not None and len(verts) else 1.0
+            hi = float(verts[:, 2].max()) + 0.05 if verts is not None and len(verts) else 1.0
         if not np.isfinite(lo):
-            lo = float(np.nanmin(verts[:, 2])) - 0.05 if verts is not None and len(verts) else -1.0
+            lo = float(verts[:, 2].min()) - 0.05 if verts is not None and len(verts) else -1.0
         hi = min(hi, frame.max_depth())
         self.dmin, self.dmax = float(lo), float(hi)
         if bounds is None:
             band = verts[(verts[:, 2] >= lo) & (verts[:, 2] <= hi)]
+            ends = None
+            if frame.kind == "path":  # from one end of the trace to the other
+                ends = (float(frame.u_of(0.0)), float(frame.u_of(frame.length)))
+                band = band[(band[:, 0] >= ends[0]) & (band[:, 0] <= ends[1])]
             if not len(band):
                 raise ValueError("no part of the model lies in the depth band of the frame")
             bounds = (band[:, 0].min(), band[:, 1].min(), band[:, 0].max(), band[:, 1].max())
+            if ends is not None:
+                bounds = (ends[0], bounds[1], ends[1], bounds[3])
         u0, v0, u1, v1 = (float(b) for b in bounds)
         self.bounds = (u0, v0, u1, v1)
         self.origin = (np.floor(u0 / resolution) * resolution, np.ceil(v1 / resolution) * resolution)
@@ -592,18 +609,49 @@ class FrameSurface:
         u, v = self.cell_uv(r0, c0, th, tw)
         return self.depth_at(u.ravel(), v.ravel()).reshape(th, tw)
 
+    def band(self, u) -> tuple[np.ndarray, np.ndarray]:
+        """The depth band at each ``u``, ``(lo, hi)`` as arrays: ``dmin`` and ``dmax``, narrowed to how far the
+        frame goes there when it says so (``min_depth_at`` and ``max_depth_at``: the line of a wall). Where
+        ``hi`` is not over ``lo`` the frame leaves no band."""
+        u = np.asarray(u, np.float64)
+        lo, hi = np.full(u.shape, self.dmin), np.full(u.shape, self.dmax)
+        if hasattr(self.frame, "max_depth_at"):
+            lo, hi = np.maximum(lo, self.frame.min_depth_at(u)), np.minimum(hi, self.frame.max_depth_at(u))
+        return lo, hi
+
     def depth_at(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """Depth ``d`` of the surface at frame points ``(u, v)`` (NaN where no surface in the band)."""
-        start = self.frame.point(u, v, np.full(len(u), self.dmax))
+        """Depth ``d`` of the surface at frame points ``(u, v)`` (NaN where no surface in the band, and where
+        the frame leaves no band)."""
+        u, v = np.asarray(u, np.float64), np.asarray(v, np.float64)
+        lo, hi = self.band(u)
+        d = np.full(len(u), np.nan)
+        cast = np.nonzero((hi > lo) & np.isfinite(v))[0]  # a u the frame has no place for has no band either
+        if not len(cast):
+            return d
+        u, v, lo, hi = u[cast], v[cast], lo[cast], hi[cast]
+        start = self.frame.point(u, v, hi)
         direction = -self.frame.view(u, v)
         start_int = start @ self._inv[:3, :3].T + self._inv[:3, 3]
         dir_int = direction @ self._inv[:3, :3].T
         dir_int /= np.linalg.norm(dir_int, axis=1, keepdims=True)
         with self.lock:
             t = self.raycaster.hit_distance(start_int, dir_int) * self.chunk.scale  # world units
-        d = self.dmax - t
-        d[~np.isfinite(t) | (d < self.dmin)] = np.nan
+        found = hi - t
+        found[~np.isfinite(t) | (found < lo)] = np.nan
+        d[cast] = found
         return d
+
+
+def frame_tile(frame, resolution: float) -> int:
+    """The side in cells of the tiles an elevation on ``frame`` is painted in. A tile is seen from one direction,
+    that of its middle: 512 cells on a plane; on a cylinder as many as turn by 0.15 radians; on the line of a
+    wall 0.3 of its smallest fillet, 64 at least (smaller tiles would be mostly the margin the mosaic makes
+    around each of them), and 512 where no corner turns it."""
+    if frame.kind == "cylinder":
+        return max(32, min(512, int(0.15 * frame.radius / resolution)))
+    if frame.kind == "path" and np.isfinite(frame.min_radius):
+        return max(64, min(512, int(0.3 * frame.min_radius / resolution)))
+    return 512
 
 
 WALL_COLUMN_DEG = 1.0
@@ -644,10 +692,193 @@ def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     return [[float(a), float(b)] for a, b in zip(edges, u)]
 
 
+FACE_COLUMN = 0.01  # m between the columns the face of a wall is measured in
+FACE_TOLERANCE = 0.05  # m: roughness of the face under this adds no length to the wall
+FACE_CURVE = 0.25  # m: a bow of the face tighter than this radius is its roughness, not a wall that curves
+FACE_PAIR = 0.0005  # m in u: how far a pair left out of the map may be from the line between those kept
+FACE_CORNER = 0.0001  # m on the face: the columns either side of a corner of the face are halved down to this
+FACE_HALVINGS = 12  # at most: a column of FACE_COLUMN is then 2.4 micrometres wide
+HEIGHT_STEP = 0.05  # m: the heights of a wall read on the model are rounded outward to this
+
+
+def _face_points(frame: WallPath, s: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """The plan points of the face at the lengths ``s`` of the line, ``d`` the depth of the surface there (NaN
+    without one: the depth between the nearest columns with a surface on either side, that of the last one past
+    it); offsets from the first vertex of the frame."""
+    ok = np.isfinite(d)
+    return frame.point(s, 0.0, np.interp(s, s[ok], d[ok]))[:, :2] - frame.vertices[0]
+
+
+def _kept(points: np.ndarray, tolerance: float) -> np.ndarray:
+    """The indices of the points of a polyline (N, 2) that its simplification within ``tolerance`` keeps."""
+    from shapely.geometry import LineString
+
+    kept = np.asarray(LineString(points).simplify(tolerance, preserve_topology=False).coords)
+    if len(kept) < 2:
+        return np.array([0, len(points) - 1])
+    out, j = [], 0
+    for x, y in kept:  # the points kept are points of the line, in its order
+        j += int(np.argmax((points[j:, 0] == x) & (points[j:, 1] == y)))
+        out.append(j)
+        j = min(j + 1, len(points) - 1)
+    return np.array(out)
+
+
+def _thinned(x: np.ndarray, y: np.ndarray, tolerance: float) -> np.ndarray:
+    """Which pairs of ``y(x)`` (``x`` increasing) to keep so that no pair left out is more than ``tolerance``
+    (in ``y``) from the straight line between its kept neighbours; the two ends are kept."""
+    keep = np.zeros(len(x), bool)
+    keep[[0, -1]] = True
+    todo = [(0, len(x) - 1)]
+    while todo:
+        a, b = todo.pop()
+        if b - a < 2:
+            continue
+        off = np.abs(y[a + 1:b] - (y[a] + (y[b] - y[a]) * (x[a + 1:b] - x[a]) / (x[b] - x[a])))
+        k = int(off.argmax())
+        if off[k] > tolerance:
+            keep[a + 1 + k] = True
+            todo += [(a, a + 1 + k), (a + 1 + k, b)]
+    return keep
+
+
+def _bow_length(bow: float, chord: float, t: np.ndarray) -> np.ndarray:
+    """The length from its start to the abscissa ``t`` of the parabola ``bow * t * (chord - t)`` over a chord."""
+    if abs(bow) * chord < 1e-9:
+        return np.asarray(t, np.float64)
+
+    def primitive(w):  # of sqrt(1 + w^2)
+        return (w * np.sqrt(1.0 + w * w) + np.arcsinh(w)) / 2.0
+
+    return (primitive(bow * chord) - primitive(bow * (chord - 2.0 * np.asarray(t, np.float64)))) / (2.0 * bow)
+
+
+def _along_face(points: np.ndarray, kept: np.ndarray) -> np.ndarray:
+    """The distance along the face line of each face point (N, 2). The face line goes through the points
+    ``kept`` (indices, those the simplification leaves); between two of them it is not their chord but the chord
+    bowed as the face points between them are - the parabola through the two ends nearest to them, by least
+    squares: the roughness of the face, on one side and on the other, bows nothing and adds no length, a wall
+    that curves keeps its own (its chords alone would make 6 m of a wall of 3 m radius 2 cm shorter). A bow
+    tighter than a radius of :data:`FACE_CURVE` is a bump of the face, not its curve: the chord is kept. Each
+    point is taken at its foot on the chord of its piece."""
+    u, run = np.zeros(len(points)), 0.0
+    for a, b in zip(kept[:-1], kept[1:]):
+        chord = points[b] - points[a]
+        length = float(np.hypot(*chord))
+        if not length > 0.0:
+            u[a:b + 1] = run
+            continue
+        q = points[a:b + 1] - points[a]
+        t = np.clip(q @ chord / length, 0.0, length)
+        off = (q[:, 0] * chord[1] - q[:, 1] * chord[0]) / length  # of each point from the chord, signed
+        base = t * (length - t)
+        bow = float(off @ base) / max(float(base @ base), 1e-300)
+        limit = 4.0 * FACE_TOLERANCE / length ** 2  # the simplification left nothing further from the chord
+        bow = min(max(bow, -limit), limit) if abs(bow) <= 0.5 / FACE_CURVE else 0.0
+        u[a:b + 1] = run + _bow_length(bow, length, t)
+        run += float(_bow_length(bow, length, np.array(length)))
+    return u
+
+
+def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
+    """The ``u_map`` of the line of a wall (:class:`WallPath`) that makes ``u`` the length on the face of the wall:
+    ``[s, u]`` pairs over the ``u`` of the bounds of ``surface``, a surface on the line **without** a map (``u`` is
+    then the length ``s`` along the line).
+
+    The depth of the face in every column of :data:`FACE_COLUMN` along the line is the median of the surface over
+    the heights of the bounds (``samples`` of them at most: a drainpipe or a bush in front does not pull the
+    column); a column without surface - a hole in the model, the trace prolonged past the wall - takes the depth
+    interpolated between the nearest columns with one on either side, past the last of them the depth of that
+    one: there the face is the line of the frame carried on, and ``u`` does not jump. The face points are the
+    points of the line moved by that depth along its normal; the face line goes through those of them that
+    their simplification within :data:`FACE_TOLERANCE` keeps (the roughness of the masonry adds no length, a
+    corner stays), bowed between them as the face is (:func:`_along_face`: a curved wall keeps its length), and
+    ``u`` is the distance along it of each face point, each taken on the piece of the face line it lies on, 0
+    at ``s`` = 0.
+
+    In front of a corner the strip fans out and a centimetre of the line is several of the face (two at a right
+    angle, four at 120 degrees): where the face points are more than half as far apart again as
+    :data:`FACE_COLUMN` the columns are halved, and either side of each corner of the face line down to
+    :data:`FACE_CORNER` on the face, so that the corner is not cut and the length past it is not short
+    (:data:`FACE_HALVINGS` times at most). The pairs are thinned while a straight line between those kept stays
+    within :data:`FACE_PAIR`.
+
+    ``ValueError`` without any surface in the band, for a frame that is not the line of a wall or has its map."""
+    frame = surface.frame
+    if frame.kind != "path":
+        raise ValueError("the length on the face is measured on the path of a wall")
+    if frame.u_map is not None:
+        raise ValueError("the length on the face is measured on the path without its u map")
+    s0, v0, s1, v1 = surface.bounds
+    rows = max(2, min(int(samples), int(np.ceil((v1 - v0) / surface.resolution))))
+    heights = v0 + (np.arange(rows) + 0.5) * (v1 - v0) / rows
+
+    def depths(at: np.ndarray) -> np.ndarray:
+        d = surface.depth_at(np.repeat(at, rows), np.tile(heights, len(at))).reshape(len(at), rows)
+        with warnings.catch_warnings():  # a column with no wall: "All-NaN slice", filled from its neighbours
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmedian(d, axis=1)
+
+    s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
+    d = depths(s)
+    if not np.isfinite(d).any():
+        raise ValueError("no surface in the depth band along the trace: the length on the face needs the wall")
+    for _ in range(FACE_HALVINGS):
+        points = _face_points(frame, s, d)
+        gap = np.hypot(*np.diff(points, axis=0).T)
+        halve = gap > 1.5 * FACE_COLUMN  # a fan, not the roughness of a face (a column deeper than the next)
+        for k in _kept(points, FACE_TOLERANCE)[1:-1]:  # the corner lies in one of the two columns beside it
+            halve[k - 1] |= gap[k - 1] > FACE_CORNER
+            halve[k] |= gap[k] > FACE_CORNER
+        if not halve.any():
+            break
+        middle = (s[:-1][halve] + s[1:][halve]) / 2.0
+        order = np.argsort(np.concatenate([s, middle]), kind="stable")
+        s, d = np.concatenate([s, middle])[order], np.concatenate([d, depths(middle)])[order]
+    points = _face_points(frame, s, d)
+    u = _along_face(points, _kept(points, FACE_TOLERANCE))
+    # strictly increasing (a face point may fall behind the one before it on a rough face), 0 at s = 0
+    u = np.concatenate([[0.0], np.cumsum(np.maximum(np.diff(np.maximum.accumulate(u)), 1e-6 * np.diff(s)))])
+    u -= float(_interp(0.0, s, u))
+    keep = _thinned(s, u, FACE_PAIR)
+    return [[float(a), float(b)] for a, b in zip(s[keep], u[keep])]
+
+
+def height_range(chunk: Chunk, frame: WallPath, depth: tuple[float, float], span=None) -> tuple[float, float]:
+    """The heights ``(v0, v1)`` of the wall along the line of ``frame``: the 0.5 and 99.5 percentiles of the
+    height of the vertices of the model that lie in the ``depth`` band of the frame between the lengths ``span``
+    (``(s0, s1)`` along the line; default its two ends), rounded outward to :data:`HEIGHT_STEP`. Only the
+    vertices within the box of the trace (and of the two ends of ``span``) widened by the band are projected on
+    the frame. ``ValueError`` when none lies there."""
+    from ..io.mesh_ply import read_mesh
+
+    path = chunk.product_path("model")
+    if path is None:
+        raise RuntimeError("build the model first: the heights of a wall are read on the model")
+    lo, hi = float(depth[0]), float(depth[1])
+    span = np.array([0.0, frame.length] if span is None else [float(span[0]), float(span[1])])
+    u0, u1 = frame.u_of(span)
+    box = np.vstack([frame.vertices, frame.point(np.array([u0, u1]), 0.0, 0.0)[:, :2]])
+    reach = max(abs(lo), abs(hi))
+    xyz = chunk.to_world(read_mesh(path).xyz)
+    near = ((xyz[:, 0] >= box[:, 0].min() - reach) & (xyz[:, 0] <= box[:, 0].max() + reach)
+            & (xyz[:, 1] >= box[:, 1].min() - reach) & (xyz[:, 1] <= box[:, 1].max() + reach))
+    uvd = frame.coords(xyz[near])
+    wall = (uvd[:, 0] >= u0) & (uvd[:, 0] <= u1) & (uvd[:, 2] >= lo) & (uvd[:, 2] <= hi)
+    if not wall.any():
+        raise ValueError("no vertex of the model lies in the depth band of the wall between the two ends")
+    v0, v1 = np.percentile(uvd[wall, 1], [0.5, 99.5])
+    return (round(float(np.floor(v0 / HEIGHT_STEP + 1e-6)) * HEIGHT_STEP, 6),
+            round(float(np.ceil(v1 / HEIGHT_STEP - 1e-6)) * HEIGHT_STEP, 6))
+
+
 def wall_length(entry: dict) -> float:
-    """The length of the wall all round (metres) of an elevation scaled on the wall (``entry["scale"]`` "wall"),
-    else the reference cylinder's circumference."""
+    """The length of the wall (metres) of an elevation: of a wall traced on the plan, from one end of its trace
+    to the other on the face (on the line, for one built on the trace); of a cylinder scaled on the wall
+    (``entry["scale"]`` "wall") all round, else the reference cylinder's circumference."""
     frame = frame_from_dict(entry["frame"])
+    if frame.kind == "path":
+        return float(frame.u_of(frame.length) - frame.u_of(0.0))
     if getattr(frame, "u_map", None) is None:
         return float(2 * np.pi * frame.radius) if frame.kind == "cylinder" else float("nan")
     return float(frame.u_map[-1, 1] - frame.u_map[0, 1])
@@ -748,12 +979,38 @@ def write_profile_dxf(chunk: Chunk, entry: dict, path) -> Path | None:
     return path
 
 
+def _wall_part(chunk: Chunk, raycaster, lock, frame: WallPath, resolution: float, depth, bounds, scale: str,
+               u_map, extend, heights, progress: Progress):
+    """The frame an elevation of the line of a wall is built on and the bounds of the part built: ``frame`` with
+    the ``u_map`` given, with the one measured on the face (``scale`` "wall" without a map: :func:`face_map` on
+    the part) or without one (``scale`` "trace"); the part, when no ``bounds`` say it, is the trace prolonged by
+    ``extend`` between the ``heights`` asked, or those of the model along it (:func:`height_range`)."""
+    plain = WallPath(frame.vertices, radius=frame.radius, radii=frame.radii, clicked=frame.clicked)
+    before, after = (0.0, 0.0) if extend is None else (float(extend[0]), float(extend[1]))
+    span = (-before, plain.length + after) if bounds is None else (0.0, plain.length)
+    if bounds is not None:
+        v0, v1 = float(bounds[1]), float(bounds[3])
+    elif heights is not None:
+        v0, v1 = float(heights[0]), float(heights[1])
+    else:
+        v0, v1 = height_range(chunk, plain, depth, span)
+    if scale == "wall" and u_map is None:
+        progress(0.02, "Length of the wall on its face")
+        u_map = face_map(FrameSurface(chunk, raycaster, plain, resolution, lock, depth, (span[0], v0, span[1], v1)))
+    if u_map is not None:
+        plain = WallPath(plain.vertices, radius=plain.radius, radii=plain.radii, u_map=u_map, clicked=plain.clicked)
+    if bounds is None:
+        bounds = (float(plain.u_of(span[0])), v0, float(plain.u_of(span[1])), v1)
+    return plain, bounds
+
+
 def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: str | None = None,
                     depth: tuple[float, float] | None = None, blending: str = "mosaic",
                     colour_correction: bool | None = None, ghosting: bool = False, fill_holes: bool = True,
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
-                    bounds=None, kind: str = "elevation", scale: str = "cylinder", u_map=None,
-                    texture: bool | None = None) -> dict:
+                    bounds=None, kind: str = "elevation", scale: str | None = None, u_map=None,
+                    texture: bool | None = None, extend: tuple[float, float] | None = None,
+                    heights: tuple[float, float] | None = None) -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
@@ -762,9 +1019,9 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     ``kind`` ``section``: nothing in front of the plane is kept (the depth band starts at 0) and the
     line where the plane cuts the model is saved as the profile (``profile.json``, a plane only).
 
-    ``scale`` (a cylinder): ``cylinder`` - ``u`` the arc on the reference cylinder, as the frame says; ``wall`` -
-    ``u`` the length along the wall (:func:`wall_map` from a first pass on the relief, kept in the frame's
-    ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall".
+    ``scale`` (a cylinder; by default ``cylinder``): ``cylinder`` - ``u`` the arc on the reference cylinder, as
+    the frame says; ``wall`` - ``u`` the length along the wall (:func:`wall_map` from a first pass on the relief,
+    kept in the frame's ``u_map``; ``bounds`` then in those metres), ``entry["scale"]`` "wall".
 
     ``u_map`` (``[theta_deg, u]`` pairs, a cylinder): the development on the wall with THIS map instead of one
     measured again on the relief - the grid in ``u`` of an earlier build kept (the rebuild of a stale elevation,
@@ -772,25 +1029,57 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     with a ``u_map`` (the frame of an elevation scaled on the wall, :func:`frame_from_dict`) keeps that map, one
     without stays on the cylinder (:func:`build_like` builds on the frame and grid of an existing elevation).
 
+    **The line of a wall** (a :class:`WallPath`, a wall traced on the plan): ``depth`` is by default 0.5 m in
+    front of the line and 0.5 m behind it; ``v`` is the height. Without ``bounds`` the part built is the trace
+    from one end to the other, prolonged by ``extend`` (``(before the start, past the end)``, metres along the
+    end tangents) and between the ``heights`` ``(v0, v1)`` (default :func:`height_range`: those of the model
+    along it). ``scale``: ``wall`` (the default) - ``u`` the length on the face of the wall (:func:`face_map`
+    measured on that part - with ``bounds``, on the trace between its ends over their heights - and kept in the
+    frame's ``u_map``; ``entry["scale"]`` "wall"); ``trace`` - ``u`` the length along the line of the frame,
+    without a map; ``keep`` - the frame as it is, with its map or without. ``u_map`` (``[s, u]`` pairs): THIS
+    map, the grid kept. ``bounds`` are in metres of that ``u``, and are given instead of ``extend`` and
+    ``heights``, not with them. No section is made on it. The entry says ``extend`` when it was asked.
+
     ``texture``: the orthophoto from the texture of the model (:mod:`.texture_ortho`): None chooses it when the chunk
     has no aligned photo (an imported or merged model), True asks for it. The relief is the same either way."""
+    wall_path = frame.kind == "path"
+    if scale is None:
+        scale = "wall" if wall_path else "cylinder"
     if scale == "keep":
-        if u_map is None and frame.kind == "cylinder" and getattr(frame, "u_map", None) is not None:
+        if u_map is None and frame.kind != "plane" and getattr(frame, "u_map", None) is not None:
             u_map = frame.u_map
-        scale = "cylinder" if u_map is None else "wall"
+        scale = ("trace" if wall_path else "cylinder") if u_map is None else "wall"
     if u_map is not None:
-        if frame.kind != "cylinder":
+        if frame.kind == "plane":
             raise ValueError("a u_map is for cylindrical developments")
         scale = "wall"
-    if scale not in ("cylinder", "wall"):
-        raise ValueError(f"unknown scale {scale!r}: cylinder, wall or keep")
-    if scale == "wall" and frame.kind != "cylinder":
+    if scale not in ("cylinder", "wall", "trace"):
+        raise ValueError(f"unknown scale {scale!r}: cylinder, wall, trace or keep")
+    if scale == "wall" and frame.kind == "plane":
         raise ValueError("the scale on the wall is for cylindrical developments")
+    if scale == "trace" and not wall_path:
+        raise ValueError("the scale on the trace is for the path of a wall")
+    if not wall_path and (extend is not None or heights is not None):
+        raise ValueError("extend and heights are for the path of a wall")
     if kind == "section":
         if frame.kind != "plane":
             raise ValueError("a section is made on a plane")
         lo = depth[0] if depth is not None else -np.inf
         depth = (lo, 0.0)
+    if wall_path:
+        if scale == "cylinder":
+            raise ValueError("the scale on the cylinder is for cylindrical developments: the path of a wall takes "
+                             "wall, trace or keep")
+        if bounds is not None and (extend is not None or heights is not None):
+            raise ValueError("bounds say the part to build: extend and heights are for a build without bounds")
+        if extend is not None and not (len(extend) == 2 and np.isfinite(extend).all() and min(extend) >= 0.0):
+            raise ValueError("extend: two lengths in metres, zero or more - before the start and past the end of "
+                             "the trace")
+        if heights is not None and not (len(heights) == 2 and np.isfinite(heights).all()
+                                        and heights[0] < heights[1]):
+            raise ValueError("heights: the lowest and the highest height of the part to build, in metres")
+        if depth is None:
+            depth = (-DEFAULT_FRONT, DEFAULT_FRONT)
     import rasterio
     from rasterio.enums import ColorInterp, Resampling
     from rasterio.transform import from_origin
@@ -822,7 +1111,10 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     lock = threading.Lock()
     if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
         frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt)
-    if scale == "wall":
+    if wall_path:
+        frame, bounds = _wall_part(chunk, raycaster, lock, frame, resolution, depth, bounds, scale, u_map, extend,
+                                   heights, progress)
+    elif scale == "wall":
         if u_map is not None:  # the grid kept
             umap = np.asarray(u_map, np.float64).reshape(-1, 2)
         else:
@@ -832,7 +1124,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt,
                          u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
-    tile = 512 if frame.kind == "plane" else max(32, min(512, int(0.15 * frame.radius / resolution)))
+    tile = frame_tile(frame, resolution)
     if from_texture:
         ctx = None
     else:
@@ -883,7 +1175,8 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     (folder / "frame.json").write_text(json.dumps({"frame": frame.to_dict(), "depth": [surf.dmin, surf.dmax],
                                                    "resolution": resolution, "kind": kind, "bounds": list(surf.bounds),
                                                    "v_is_height": heights}, indent=1))
-    default = "Sezione" if kind == "section" else ("Prospetto" if frame.kind == "plane" else "Sviluppo cilindrico")
+    default = "Sezione" if kind == "section" else {"plane": "Prospetto", "path": "Prospetto del muro"}.get(
+        frame.kind, "Sviluppo cilindrico")
     entry = {"id": eid, "name": name or default, "kind": kind, "crs": chunk.crs,
              "frame": frame.to_dict(), "depth": [surf.dmin, surf.dmax], "resolution": resolution,
              "bounds": list(surf.bounds), "v_is_height": heights,
@@ -897,6 +1190,8 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         entry["tilt"] = dict(frame.tilt)
     if scale == "wall":
         entry["scale"] = "wall"
+    if wall_path and extend is not None:
+        entry["extend"] = [float(extend[0]), float(extend[1])]
     if kind == "section":
         progress(0.985, "Profile of the section")
         lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)

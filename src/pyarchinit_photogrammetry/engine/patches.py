@@ -334,7 +334,7 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     """Redraw the cells of the patches added, changed or removed since the orthophoto of the elevation (or section)
     ``frame`` was written, painted as the elevation was built (the rest of the file is left as it is, its relief
     never changes), then its overviews. Returns the path of the orthophoto."""
-    from .elevation import elevation_paths, entry_settings, frame_grid
+    from .elevation import elevation_paths, entry_settings, frame_grid, frame_tile
     from .ortho import _context, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
 
@@ -358,7 +358,7 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     surf = frame_grid(chunk, entry, raycaster, lock)
     resolution = float(entry["resolution"])
     frm = surf.frame
-    tile = 512 if frm.kind == "plane" else max(32, min(512, int(0.15 * frm.radius / resolution)))  # as built
+    tile = frame_tile(frm, resolution)  # as built
     settings = entry_settings(entry)  # as the file was made, so that the patches match the rest
     current = [dict(p) for p in entry.get("patches") or []]
     ctx = _context(chunk, resolution, cams, surf, raycaster, settings["blending"], settings["max_angle"],

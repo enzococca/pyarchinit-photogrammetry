@@ -33,7 +33,7 @@ from ..core import stamps
 _log = _logging.getLogger(__name__)
 
 REASONS = ("crs", "markers", "cameras", "aligned_to", "scalebars", "collinear", "plane_points", "plane_rough", "nan",
-           "points")
+           "points", "path_elevations")
 COLLINEAR_SIN = 1e-3
 MIN_PLANE_POINTS = 30
 MAX_PLANE_NMAD = 0.10
@@ -482,11 +482,51 @@ def _tilt(info: dict | None, m: np.ndarray, s: float, axis: np.ndarray, centre: 
     return out
 
 
+def _upright(r: np.ndarray) -> bool:
+    """Whether the rotation ``r`` keeps the vertical: a turn about Z (the motion may still shift and scale)."""
+    return bool(np.allclose(r[2], [0.0, 0.0, 1.0], atol=1e-12))
+
+
+def _path_elevations(chunk) -> list[str]:
+    """The names of the elevations of ``chunk`` made on the line of a wall traced on the plan."""
+    return [str(e.get("name") or e["id"]) for e, *_files in _elevation_files(chunk)
+            if (e.get("frame") or {}).get("kind") == "path"]
+
+
+def _refuse_tilted_paths(chunks, r: np.ndarray) -> None:
+    """Refuses (``"path_elevations"``, with their names) a motion that does not keep the vertical when a chunk it
+    moves has elevations on the line of a wall: such a frame is a line of the plan and heights, and has no tilted
+    form. Before anything is changed."""
+    if _upright(r):
+        return
+    names = [name for ch in chunks for name in _path_elevations(ch)]
+    if names:
+        raise OrientRefused("path_elevations", "the elevations of walls traced on the plan follow a motion that "
+                            "keeps the vertical (a turn about Z, a shift, a scale), not a tilt: remove them first, "
+                            "and trace the walls again after the orientation", names)
+
+
 def _moved_frame(frame, m: np.ndarray, s: float, r: np.ndarray, heights: bool):
     """``(new frame, c, v_is_height)``: ``frame`` moved by ``m``; a drawing at ``(u, v)`` is at ``(s u, s v + c)`` in
-    the new one (``c``: a plane whose v measured the heights and still does, re-anchored on Z = 0)."""
+    the new one (``c``: a plane whose v measured the heights and still does, re-anchored on Z = 0; the line of a
+    wall, whose v is the height: the height the motion adds). The line of a wall follows a motion that keeps the
+    vertical - its vertices and the trace as clicked moved on the plan, its radii and both columns of its
+    ``u_map`` scaled - and no other (``OrientRefused``, ``"path_elevations"``)."""
     from . import elevation as el
 
+    if frame.kind == "path":
+        if not _upright(r):
+            raise OrientRefused("path_elevations", "the line of a wall traced on the plan cannot be tilted")
+
+        def plan(xy):
+            xy = np.asarray(xy, float)
+            return xy[:, :1] * m[:2, 0] + xy[:, 1:2] * m[:2, 1] + m[:2, 3]
+
+        new = el.WallPath(plan(frame.vertices), radius=frame.radius * s,
+                          radii=None if frame.radii is None else [float(x) * s for x in frame.radii],
+                          u_map=None if frame.u_map is None else frame.u_map * s,
+                          clicked=None if frame.clicked is None else plan(frame.clicked))
+        return new, float(m[2, 3]), True
     if frame.kind == "cylinder":
         axis = r @ frame.axis
         u_map = None
@@ -552,6 +592,7 @@ def _elevations(chunk, m, s, r, mover, drawings: dict | None, shapely):
 
     from . import elevation as el
 
+    _refuse_tilted_paths([chunk], r)
     seen = set()
     for e, frame_json, profile, files in _elevation_files(chunk):
         seen.add(e["id"])
@@ -565,6 +606,8 @@ def _elevations(chunk, m, s, r, mover, drawings: dict | None, shapely):
             new["depth"] = [float(v) * s for v in e["depth"]]
         if e.get("resolution") is not None:
             new["resolution"] = float(e["resolution"]) * s
+        if e.get("extend") is not None:  # of the line of a wall: how far its trace was prolonged
+            new["extend"] = [float(v) * s for v in e["extend"]]
         if e.get("bounds"):
             u0, v0, u1, v1 = (float(v) for v in e["bounds"])
             new["bounds"] = [u0 * s, v0 * s + c, u1 * s, v1 * s + c]
@@ -806,7 +849,9 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True, dry_run: boo
     the sections of the project moved when no other chunk of the project is in a local system (else kept);
     ``meta["levelled"]`` set (the levelling of the DEM must not undo it); the elevations moved with it stay current,
     the rasters on a grid are stale. The window stores its drawings into the chunk first. Refused as :func:`check`
-    says. On any error everything is put back and the error raised again. ``notify``: the listeners
+    says, and (``"path_elevations"``, before anything is changed) when the motion does not keep the vertical and a
+    chunk it moves has elevations on walls traced on the plan: they follow a turn about Z, a shift and a scale, not
+    a tilt. On any error everything is put back and the error raised again. ``notify``: the listeners
     (:func:`on_transform_changed`) told here (False: the caller tells them with :func:`fire`, e.g. the window from its
     interface thread after a run in the background). ``dry_run``: no file written (the chunks changed in memory: the
     caller puts them back with the state).
@@ -828,6 +873,7 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True, dry_run: boo
                             [b.label for b in gcp.control_scalebars(chunk)])
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
+    _refuse_tilted_paths(moving, r)
     doc = getattr(chunk, "document", None)
     path = hg._sections_file(chunk)
     sections = None
@@ -1126,6 +1172,7 @@ def orient(chunk, points=None, markers=None, plane_xyz=None, toward=None, x_alon
             kept_bar = None
     aligned = aligned_to(chunk)
     moving = [chunk] + (aligned if move_aligned else [])
+    _refuse_tilted_paths(moving, geo.decompose_similarity(m)[1])  # before the markers are written
     state = capture(moving, None if dry_run else hg._sections_file(chunk), files=not dry_run)
     previous = {k: _copy.deepcopy(chunk.meta[k]) for k in ("orientation", "marker_excluded") if k in chunk.meta}
     try:
