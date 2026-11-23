@@ -679,7 +679,8 @@ def test_the_side_of_a_point_is_taken_at_its_nearest_point_of_the_line(model_out
         for far in (0.3, 1.0, 2.5):
             point = turn[1] + far * np.array([np.cos(angle), np.sin(angle)])
             assert T.side_of(ch, turn, point) == "right" and T.side_of(ch, turn[::-1], point) == "left"
-    for bad in ((2.0, 0.0), (4.0, 0.0), (1.0,), (np.nan, 1.0), "sopra", None):  # on the line, on its corner, no point
+    # on the line, on its corner, not a point, not a word of these; nothing said and no photo
+    for bad in ((2.0, 0.0), (4.0, 0.0), (1.0,), (np.nan, 1.0), "sopra", None):
         with pytest.raises(TraceRefused) as e:
             T.side_of(ch, turn, bad)
         assert e.value.reason == "side"
