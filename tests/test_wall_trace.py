@@ -289,6 +289,10 @@ def test_a_segment_without_a_face_goes_with_those_that_have_one(tmp_path):
     for end, fitted in ((8.9, True), (9.1, False)):         # 2.6 m of wall in 8.5 and in 8.7 m
         r = T.snap_trace(ch, o + [[3.4, -0.3], [end + 3.0, -0.3]], side="right")
         assert r["snapped"] is fitted and (r["segments"][0]["share"] >= T.MIN_SNAP_SHARE) is fitted
+    # three columns of ten on the wall, the others past its end: three tenths are enough (a shift: 15 cm of face)
+    r = T.snap_trace(ch, o + [[5.85, -0.3], [6.35, -0.3]], side="right")
+    assert r["segments"][0]["share"] == 0.3 == T.MIN_SNAP_SHARE and r["snapped"] is True
+    assert np.abs(r["points"] - (o + [[5.85, 0.0], [6.35, 0.0]])).max() < 0.005
     # a gap of 2 m, the wall going on 10 cm further back: the part without a face joins the two
     scene = make_wall_scene(trace=[(0.0, 0.0), (3.0, 0.0)])
     more = make_wall_scene(trace=[(5.0, 0.1), (8.0, 0.1)])
@@ -344,10 +348,6 @@ def test_a_line_has_three_tenths_of_the_columns_on_it(tmp_path):
     assert first["share"] == 1.0 and 0.0 < second["share"] < T.MIN_SNAP_SHARE
     assert (second["offset"], second["slope"]) == (0.0, 0.0)
     assert np.abs(r["points"] - (o + [[0.0, 0.0], [6.0, 0.0], [12.0, 0.0]])).max() < 0.005     # it goes with the first
-    # three columns of ten on the wall, the others past its end: a line (a shift: 15 cm of face)
-    r = T.snap_trace(ch, o + [[5.85, -0.3], [6.35, -0.3]], side="right", heights=(100.0, 102.0), band=0.5)
-    assert r["segments"][0]["share"] == 0.3 == T.MIN_SNAP_SHARE and r["snapped"] is True
-    assert np.abs(r["points"] - (o + [[5.85, 0.0], [6.35, 0.0]])).max() < 0.005
 
 
 def test_the_heights_the_face_is_looked_for_at(tmp_path):
