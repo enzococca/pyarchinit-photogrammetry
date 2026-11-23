@@ -196,6 +196,62 @@ def test_the_sd_of_a_block_nothing_places_and_of_one_held_by_positions_with_a_bi
         assert _sd(_drone_block(0.0, references)) > 0.1
 
 
+def _large_block(rows: int, per_row: int, seed: int = 1) -> bundle.Problem:
+    """``rows`` strips of ``per_row`` photos pitched along the strips, 30 m above rolling ground (the strips 12 m
+    apart, the photos 8 m), tie points with 0.3 px of noise seen by two photos or more, the focal length and the
+    radial distortion of its RADIAL camera free, the first photo and the farthest from it held."""
+    rng = np.random.default_rng(seed)
+    rotations = np.array([bundle_problems._look_down(0.02 * (r % 3), bundle_problems.TILT * (1 if r % 2 == 0 else -1))
+                          for r in range(rows) for _k in range(per_row)])
+    centres = np.array([[8.0 * k, 12.0 * r, 30.0] for r in range(rows) for k in range(per_row)])
+    n = len(centres)
+    xy = rng.uniform(centres[:, :2].min(0) - 15, centres[:, :2].max(0) + 15, (21 * n, 2))
+    points = np.column_stack([xy, 0.6 * np.sin(xy[:, 0] / 7) + 0.4 * np.cos(xy[:, 1] / 5)])
+    w, h, f = bundle_problems.W, bundle_problems.H, bundle_problems.F
+    params = [f, w / 2, h / 2, -0.02, 0.01]
+    cam = pycolmap.Camera(model="RADIAL", width=w, height=h, params=params)
+    images, ids, pixels = [], [], []
+    for i in range(n):
+        near = np.flatnonzero(np.all(np.abs(points[:, :2] - centres[i, :2]) < 40, axis=1))
+        local = (points[near] - centres[i]) @ rotations[i].T
+        px = np.asarray(cam.img_from_cam(local))[:, :2]
+        seen = (local[:, 2] > 0) & (px[:, 0] > 5) & (px[:, 0] < w - 5) & (px[:, 1] > 5) & (px[:, 1] < h - 5)
+        images += [i] * int(seen.sum())
+        ids += list(near[seen])
+        pixels.append(px[seen])
+    pixels = np.vstack(pixels) + rng.normal(0, NOISE, (len(images), 2))
+    pb = bundle.Problem(rotations, centres, np.zeros(n, int), [("RADIAL", params, w, h)], points, np.array(images),
+                        np.array(ids), pixels, free_intrinsics=[[0, 3, 4]])
+    pb = bundle._without_held(pb, np.bincount(pb.obs_point, minlength=len(points)) >= 2)
+    pb.fixed_images = {0, bundle_problems._farthest(centres)}
+    return pb
+
+
+@needs_core
+def test_the_gauge_of_a_free_block_neither_moves_the_sd_nor_breaks_the_inverse(monkeypatch):
+    """The size of a block nothing places is a pure gauge: the sd of its focal length is the same whether the
+    position that holds it is loose or tight (a tenth to ten times the extent of the block), and at the sigma the
+    module uses the normal matrix of a block of hundreds of photos inverts - a position a hundred extents loose is
+    below what double precision keeps beside the tie points (400 photos: a pivot that is not positive)."""
+    small = _drone_block(bundle_problems.TILT, "none")
+    sds = []
+    for extents in (0.1, 1.0, 10.0):
+        monkeypatch.setattr(bundle, "GAUGE_SIGMA_EXTENTS", extents)
+        sds.append(bundle.focal_sds(small)[0][0])
+    assert sds[2] == pytest.approx(sds[1], rel=1e-4)  # ten times looser: the same
+    assert sds[0] == pytest.approx(sds[1], rel=1e-3)  # ten times tighter: a ten thousandth smaller
+    monkeypatch.undo()
+    assert bundle.GAUGE_SIGMA_EXTENTS <= 1.0
+    large = _large_block(10, 40)
+    assert len(large.centres) == 400 and len(large.obs_image) > 50000
+    probe, _flight = bundle._with_gauge(large)
+    assert probe.fixed_images == {0} and len(probe.gnss) == 1
+    variances = bundle.intrinsics_variances(probe)[0]  # at a pixel of accuracy: no factor to help the numbers
+    assert 0 < np.sqrt(variances[0]) / bundle_problems.F < 0.002
+    sd, factor = bundle.focal_sds(large)
+    assert 0 < sd[0] < 0.001 and factor == pytest.approx(NOISE ** 2, rel=0.5)
+
+
 # ------------------------------------------------------------------- the optimisation of the cameras
 ENGINES = ("colmap", "ppg")  # the two formulations of optimize_cameras
 GPS = dict(accuracy=(5.0, 5.0, 10.0), status=None)  # positions of a drone without RTK: they hold nothing
