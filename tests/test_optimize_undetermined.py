@@ -252,6 +252,48 @@ def test_the_gauge_of_a_free_block_neither_moves_the_sd_nor_breaks_the_inverse(m
     assert 0 < sd[0] < 0.001 and factor == pytest.approx(NOISE ** 2, rel=0.5)
 
 
+@needs_core
+def test_what_holds_nothing_does_not_break_the_covariance():
+    """What an adjustment carries without being held by it must not make the normal matrix singular - the sd would
+    then be missing for a block that determines its focal length. A photo with fewer than three observations has
+    no pose of its own: it is held as it is. Control points whose markers no photo measures place nothing: the
+    block gets the gauge of a free one. Scale bars between such markers give no size: the position that holds the
+    size of a free block is added."""
+    pitched = _drone_block(bundle_problems.TILT)
+    sd = bundle.focal_sds(pitched)[0][0]
+    assert 0 < sd < bundle.FOCAL_SD_HOLD
+    # a photo that lost its tie points and its markers (cleaned away): the sd of the others' block
+    blind = dataclasses.replace(pitched)
+    last = len(blind.centres) - 1
+    keep, mkeep = blind.obs_image != last, blind.mobs_image != last
+    blind.obs_image, blind.obs_point, blind.obs_xy = blind.obs_image[keep], blind.obs_point[keep], blind.obs_xy[keep]
+    blind.mobs_image, blind.mobs_marker = blind.mobs_image[mkeep], blind.mobs_marker[mkeep]
+    blind.mobs_xy = blind.mobs_xy[mkeep]
+    assert bundle.focal_sds(blind)[0][0] == pytest.approx(sd, rel=0.2)
+    probe, _flight = bundle._with_gauge(blind)
+    assert probe.fixed_images == {last}
+    # control points that no photo measures: nothing places the block
+    unseen = dataclasses.replace(pitched, mobs_image=np.zeros(0, int), mobs_marker=np.zeros(0, int),
+                                 mobs_xy=np.zeros((0, 2)))
+    assert unseen.absolute  # five control points are stated
+    free = bundle.focal_sds(dataclasses.replace(unseen, gcps=[], markers=np.zeros((0, 3))))[0][0]  # its tie points
+    assert 0 < free < bundle.FOCAL_SD_HOLD
+    assert bundle.focal_sds(unseen)[0][0] == pytest.approx(free, rel=1e-6)
+    probe, _flight = bundle._with_gauge(unseen)
+    assert probe.fixed_images == {0} and len(probe.gnss) == 1 and len(probe.gcps) == 5
+    # scale bars between markers no photo measures: no size, and no marker to adjust - the gauge of a free block
+    bars = dataclasses.replace(unseen, gcps=[], bars=[(0, 2, 30.0, 0.001), (1, 3, 30.0, 0.001)])
+    assert bundle.focal_sds(bars)[0][0] == pytest.approx(free, rel=1e-6)
+    probe, _flight = bundle._with_gauge(bars)
+    assert len(probe.markers) == 0 and probe.bars == [] and len(probe.gnss) == 1
+    # a bar between two measured markers gives the size: no position is added, and the sd is the free block's
+    sized = dataclasses.replace(pitched, gcps=[], bars=[(0, 2, float(np.linalg.norm(pitched.markers[0]
+                                                                                    - pitched.markers[2])), 0.001)])
+    probe, _flight = bundle._with_gauge(sized)
+    assert probe.fixed_images == {0} and probe.gnss == [] and len(probe.bars) == 1
+    assert bundle.focal_sds(sized)[0][0] == pytest.approx(free, rel=0.05)
+
+
 # ------------------------------------------------------------------- the optimisation of the cameras
 ENGINES = ("colmap", "ppg")  # the two formulations of optimize_cameras
 GPS = dict(accuracy=(5.0, 5.0, 10.0), status=None)  # positions of a drone without RTK: they hold nothing

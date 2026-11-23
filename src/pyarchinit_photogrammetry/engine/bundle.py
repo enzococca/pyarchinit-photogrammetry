@@ -696,27 +696,62 @@ def tie_variance_factor(pb: Problem) -> float:
     return total / redundancy if redundancy > 0 and total > 0 else 1.0
 
 
+def _held_markers(pb: Problem) -> Problem:
+    """``pb`` without the markers that nothing holds - measured in fewer than two photos and not a control point
+    (the end of a scale bar seen once) -, their observations and the bars that end on them: a marker like that
+    has no position of its own."""
+    if not len(pb.markers):
+        return pb
+    keep = np.bincount(np.asarray(pb.mobs_marker, int), minlength=len(pb.markers)) >= 2
+    for m, _target, _sigma in pb.gcps:
+        keep[m] = True
+    if keep.all():
+        return pb
+    index = np.cumsum(keep) - 1
+    sel = keep[np.asarray(pb.mobs_marker, int)]
+    return replace(pb, markers=pb.markers[keep], mobs_image=pb.mobs_image[sel],
+                   mobs_marker=index[np.asarray(pb.mobs_marker, int)[sel]], mobs_xy=pb.mobs_xy[sel],
+                   gcps=[(int(index[m]), target, sigma) for m, target, sigma in pb.gcps],
+                   bars=[(int(index[a]), int(index[b]), length, sigma) for a, b, length, sigma in pb.bars
+                         if keep[a] and keep[b]])
+
+
 def _with_gauge(pb: Problem) -> tuple[Problem, int | None]:
-    """``pb`` as the covariance of its adjustment is taken (:func:`focal_sds`): without the tie points that cannot
-    be adjusted (:func:`_adjustable`) and with a gauge that adds nothing the block does not have. A block its
-    references do not place (:attr:`Problem.absolute` False) has its first photo held, its place and its
-    orientation, and, without scale bars, a position of the photo farthest from it whose sigma is
-    :data:`GAUGE_SIGMA_EXTENTS` times their distance, its size - the two photos :func:`problem_from_chunk` holds
+    """``pb`` as the covariance of its adjustment is taken (:func:`focal_sds`): the same block, with nothing in it
+    that the observations do not hold - the normal matrix must invert - and a gauge that adds nothing the block
+    does not have. The tie points that cannot be adjusted are left out (:func:`_adjustable`), as are the markers
+    nothing holds (:func:`_held_markers`); a photo with fewer than three observations has no pose of its own and
+    is held as it is. What places the block is counted by what the photos see: three control points whose markers
+    two photos or more measure, or three positions of photos that are not held (:attr:`Problem.absolute` counts
+    what is stated). A block that nothing places has its first photo held, its place and its orientation, and -
+    without a scale bar between measured markers - a position of the photo farthest from it whose sigma is
+    :data:`GAUGE_SIGMA_EXTENTS` times their distance, its size: the two photos :func:`problem_from_chunk` holds
     for the solvers are more than a gauge, and a sd taken with them is too small. Positions with a bias per flight
-    and no control point: the bias of one flight is held at zero (the frame of the positions; the biases of all
-    the flights and a shift of the block would trade off). Returns the problem and that flight (None: none)."""
+    and no measured control point: the bias of one flight is held at zero (the frame of the positions; the biases
+    of all the flights and a shift of the block would trade off). Returns the problem and that flight (None:
+    none)."""
     keep = _adjustable(pb)
-    out = replace(pb, gnss=list(pb.gnss)) if keep.all() else replace(_without_held(pb, keep), gnss=list(pb.gnss))
+    out = replace(_held_markers(pb if keep.all() else _without_held(pb, keep)), gnss=list(pb.gnss))
+    n = len(out.centres)
+    seen = np.bincount(out.obs_image, minlength=n) + np.bincount(np.asarray(out.mobs_image, int), minlength=n)
+    loose = {int(i) for i in np.flatnonzero(seen < 3)}
+    measured = np.bincount(np.asarray(out.mobs_marker, int), minlength=len(out.markers)) >= 2
+    placed = (sum(1 for m, _target, _sigma in out.gcps if measured[m]) >= 3
+              or sum(1 for g in out.gnss if g[0] not in loose) >= 3)
+    held = [i for i in range(n) if i not in loose]
     flight = None
-    if not out.absolute and len(out.centres) >= 2:
-        distance = np.linalg.norm(out.centres - out.centres[0], axis=1)
-        far = int(np.argmax(distance))
-        out.fixed_images = {0}
-        if not out.bars:
+    if placed or len(held) < 2:
+        out.fixed_images = set(out.fixed_images) | loose
+    else:
+        first = held[0]
+        distance = np.linalg.norm(out.centres[held] - out.centres[first], axis=1)
+        far = held[int(np.argmax(distance))]
+        out.fixed_images = loose | {first}
+        if not any(measured[a] and measured[b] for a, b, *_rest in out.bars):
             flight = min((g[3] for g in out.gnss), default=1) - 1  # a flight of its own, without a bias
-            sigma = GAUGE_SIGMA_EXTENTS * max(float(distance[far]), 1e-3)
+            sigma = GAUGE_SIGMA_EXTENTS * max(float(distance.max()), 1e-3)
             out.gnss.append((far, np.array(out.centres[far], float), np.full(3, sigma), flight))
-    if out.gnss_bias and not out.gcps and flight is None and out.gnss:
+    if out.gnss_bias and not any(measured[m] for m, _target, _sigma in out.gcps) and flight is None and out.gnss:
         flight = min(g[3] for g in out.gnss)
     return out, (flight if out.gnss_bias else None)
 
