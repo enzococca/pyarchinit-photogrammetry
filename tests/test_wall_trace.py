@@ -182,6 +182,39 @@ def test_a_narrow_place_of_the_line_is_looked_at_from_within(trace, viewer, by, 
         np.radians(75.0)), abs=0.01)
 
 
+@pytest.mark.parametrize("viewer, inside", [("left", 0.20), ("left", -0.15), ("right", -0.20), ("right", 0.15)])
+def test_a_room_traced_all_round_stays_closed(viewer, inside, tmp_path):
+    """A line that ends on its first point is a room traced all round: that point is one corner, where the lines
+    of the last wall and of the first meet - seen from inside or from outside, clicked in front of the faces or on
+    the crests. Each end moved onto its own wall, the two would part by 28 cm, or cross."""
+    room = np.array([[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0], [0.0, 0.0]])
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=room, viewer=viewer))
+    face = np.asarray(info["face"])
+    clicked = face[0] + np.array([[inside, inside], [4.0 - inside, inside], [4.0 - inside, 3.0 - inside],
+                                  [inside, 3.0 - inside], [inside, inside]])
+    r = T.snap_trace(ch, clicked, side=viewer)
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
+    assert np.array_equal(r["points"][0], r["points"][-1]) and all(s["share"] > 0.85 for s in r["segments"])
+    assert np.allclose(r["shift"], abs(inside) * np.sqrt(2.0), atol=0.01)
+    path, report = T.path_from_trace(ch, clicked, side=viewer)
+    assert np.array_equal(path.vertices[0], path.vertices[-1]) and len(path.vertices) == 5
+    assert report["corners"] == 3 and report["snapped"] and np.array_equal(path.clicked, clicked)
+    # a line that stops half a metre short of its first point has two ends, each on its own wall
+    short = clicked.copy()
+    short[-1] += [0.0, 0.5]
+    r = T.snap_trace(ch, short, side=viewer)
+    assert np.abs(r["points"][[0, -1]] - (face[0] + [[inside, 0.0], [0.0, inside + 0.5]])).max() < 0.005
+    assert np.abs(r["points"][1:4] - face[1:4]).max() < 0.005
+    # the fourth wall without its face (11 to 14 m; the band stops short of its back): its two corners go with the
+    # walls beside it, each onto that wall's line, and the line still ends on its first point
+    scene = make_wall_scene(trace=room, viewer=viewer)
+    _doc, holed, _info = model_doc(tmp_path / "senza", scene, drop=(11.0, 14.0))
+    r = T.snap_trace(holed, clicked, side=viewer, band=abs(inside) + 0.03, heights=(100.0, 102.0))
+    assert r["snapped"] and r["segments"][3]["share"] < T.MIN_SNAP_SHARE < r["segments"][2]["share"]
+    assert np.abs(r["points"][1:3] - face[1:3]).max() < 0.005 and np.array_equal(r["points"][0], r["points"][-1])
+    assert np.abs(r["points"][[0, 3]] - (face[0] + [[inside, 0.0], [inside, 3.0]])).max() < 0.005
+
+
 def test_a_wall_traced_alone_in_a_narrow_place_wants_a_narrow_band(tmp_path):
     """What stands in front of a wall within the band and is no part of the line is met first: one wall of a
     corridor of 60 cm traced without the other is looked at from behind that other one."""
@@ -503,6 +536,15 @@ def test_the_vertices_keep_the_order_clicked(tmp_path):
                 towards=np.array([[0.0, -1.0], [np.sqrt(0.75), 0.5]]), found=np.array([True, True]))
     out = T._moved(turn, fits=np.array([[-0.2, 0.0], [-2.0, 0.0]]), **wide)
     assert np.allclose(out, [[0.0, 0.2], [0.134, -0.4], [-1.232, -0.134]], atol=1e-3)
+    # a square traced all round whose first wall is found leaning, so that it meets the last one a metre past the
+    # corner before: the point the line starts and ends on goes between the two, as one corner
+    square = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]])
+    round_ = dict(length=np.ones(4), t=np.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]),
+                  towards=np.array([[0.0, -1.0], [1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]]), found=np.ones(4, bool))
+    lean = np.array([[-2.0, 2.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])
+    out = T._moved(square, fits=lean, closed=True, **round_)
+    assert np.allclose(out, [[0.447, 0.106], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.447, 0.106]], atol=1e-3)
+    assert np.allclose(T._moved(square, fits=np.zeros((4, 2)), closed=True, **round_), square)
 
 
 def test_projected_and_local_coordinates_snap_alike(model_outside, tmp_path):

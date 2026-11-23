@@ -235,7 +235,7 @@ def _fit(x: np.ndarray, d: np.ndarray, width: float) -> tuple[float, float]:
 
 
 def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray, fits: np.ndarray,
-           found: np.ndarray) -> np.ndarray | None:
+           found: np.ndarray, closed: bool = False) -> np.ndarray | None:
     """Where the vertices ``v`` of a clicked line go, given the line fitted to each segment that has one
     (``found``; ``fits`` its depth at the start of the segment and its slope, along ``towards``, the normal of
     the segment towards the viewer).
@@ -246,7 +246,8 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
     as far from the one line as from the other, which is where they meet when the vertex is as far from both
     (a click on a straight wall, the chords of a curve). A vertex with one fitted line goes onto it along the
     normal of that segment. The others move as the nearest vertices that have a line do, in proportion along
-    the clicked line between two of them.
+    the clicked line between two of them. On a ``closed`` line - one that ends on its first point, a room traced
+    all round - that point is one vertex, between the last segment and the first.
 
     The vertices keep the order clicked. Where a segment would be turned back - two lines that meet past the
     next vertex or before the one before, as do those of the short chords of a smoothed corner, each at another
@@ -257,14 +258,18 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
     end = v[1:] + (fits[:, 0] + fits[:, 1] * length)[:, None] * towards
     slope = np.hypot(1.0, fits[:, 1])[:, None]
     heading, across = (t + fits[:, 1:] * towards) / slope, (towards - fits[:, 1:] * t) / slope  # along it, off it
-    meet = np.full(v.shape, np.nan)  # of an interior vertex: where its two lines meet
-    between = np.full(v.shape, np.nan)  # ... and the place between them; of the others, the foot on their line
-    if found[0]:
-        between[0] = start[0]
-    if found[-1]:
-        between[-1] = end[-1]
-    for j in range(1, len(v) - 1):
-        a, b = j - 1, j  # the segment that ends at the vertex, the one that starts from it
+    last = len(v) - 1
+    meet = np.full(v.shape, np.nan)  # of a vertex between two segments: where their two lines meet
+    between = np.full(v.shape, np.nan)  # ... and the place between them; of an end, the foot on its line
+    joints = [(j - 1, j, j) for j in range(1, last)]  # the segment that ends at a vertex, the one that starts, it
+    if closed:
+        joints.append((last - 1, 0, 0))
+    else:
+        if found[0]:
+            between[0] = start[0]
+        if found[-1]:
+            between[-1] = end[-1]
+    for a, b, j in joints:
         if found[a] and found[b]:
             cos = across[a] @ across[b]
             if cos > 0.0:  # as far from each line as the mean of how far the vertex is from the two
@@ -287,13 +292,16 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
     run = np.concatenate([[0.0], np.cumsum(length)])
     while True:
         to = np.where(met[:, None], meet, between) - v
-        out = v + np.column_stack([np.interp(run, run[placed], to[placed, k]) for k in (0, 1)])
+        out = v + np.column_stack([np.interp(run, run[placed], to[placed, k], period=run[-1] if closed else None)
+                                   for k in (0, 1)])
         back = ((out[1:] - out[:-1]) * t).sum(axis=1) <= 0.0  # the segments turned back on themselves
         if not back.any():
             return out
         ends = np.zeros(len(v), bool)
         ends[:-1] |= back
         ends[1:] |= back
+        if closed:
+            ends[0] |= ends[-1]
         if not (ends & met).any():
             return None
         met &= ~ends
@@ -321,8 +329,9 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
 
     A vertex between two segments goes where their lines meet (between the two where they are one wall going on,
     or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its segment
-    along its normal. A segment without a line keeps the direction clicked and goes with its vertices: each is
-    moved by the other segment it belongs to, an end that belongs to no other as the vertex next to it.
+    along its normal; the two ends of a line that ends on its first point, a room traced all round, are one
+    vertex. A segment without a line keeps the direction clicked and goes with its vertices: each is moved by the
+    other segment it belongs to, an end that belongs to no other as the vertex next to it.
 
     Returns ``points`` (N, 2: the line snapped, in the order clicked), ``snapped`` (whether it was moved),
     ``shift`` (N: how far each vertex went, metres), ``median_shift``, ``max_shift`` and ``segments``: for each
@@ -358,6 +367,7 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
             kept.append(i)
         place[i] = len(kept) - 1
     line = clicked[kept]
+    closed = len(line) > 3 and float(np.hypot(*(line[-1] - line[0]))) <= _MIN_STEP  # it ends on its first point
     v = line - line[0]
     length, t, _turn = _turns(v)
     towards = (1.0 if which == "right" else -1.0) * np.column_stack([t[:, 1], -t[:, 0]])
@@ -385,7 +395,7 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
                     fits[i] = a, b
             progress((i + 1) / len(length))
     progress(1.0)
-    moved = _moved(v, length, t, towards, fits, share >= MIN_SNAP_SHARE)
+    moved = _moved(v, length, t, towards, fits, share >= MIN_SNAP_SHARE, closed)
     out = clicked if moved is None else (line[0] + moved)[place]
     shift = np.hypot(*(out - clicked).T)
     segments = [{"offset": 0.0, "slope": 0.0, "share": 0.0} if place[i] == place[i + 1] else
