@@ -1452,6 +1452,59 @@ def test_an_undetermined_focal_length_is_held_between_its_estimate_and_the_lens_
         assert _calibration(ch)[0][0] == pytest.approx(1.3 * F, rel=1e-9)  # where the alignment left it
 
 
+def test_the_notes_of_the_walk(caplog):
+    """``sfm._note_lens_prior``: what the walk did, at the head of the notes of the check - where the focal length
+    was put and what was weighed, the lens prior itself for an estimate without an sd - and, as a warning, a block
+    that did not follow, of which the record keeps no row."""
+    record = sfm._check_record(True)
+    record["notes"].append("sensor 0: focal held: undetermined, sd 9.70 %")
+    rows = [{"sensor": 0, "estimate": 747.28, "sd": 0.2153, "prior": 1000.0, "target": 996.15, "steps": 4,
+             "reprojection": [0.179, 0.183], "followed": True},
+            {"sensor": 1, "estimate": 1300.0, "sd": None, "prior": 1000.0, "target": 1000.0, "steps": 3,
+             "reprojection": [0.771, 0.64], "followed": True},
+            {"sensor": 2, "estimate": 3909.22, "sd": 0.0649, "prior": 1000.0, "target": 1017.99, "steps": 15,
+             "reprojection": [0.179, 0.512], "followed": False}]
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry.engine.sfm"):
+        sfm._note_lens_prior(record, rows)
+    assert record["notes"] == [
+        "sensor 0: focal walked to 996.15 px, between its estimate 747.28 px (sd 21.53 %) and the lens prior "
+        "1000.00 px (sd 2.00 %), in 4 steps (reprojection 0.179 -> 0.183 px)",
+        "sensor 1: focal walked to 1000.00 px, the lens prior, its estimate 1300.00 px being without an sd, in 3 "
+        "steps (reprojection 0.771 -> 0.640 px)",
+        "sensor 2: focal left at 3909.22 px: the block does not follow to 1017.99 px, between its estimate "
+        "3909.22 px (sd 6.49 %) and the lens prior 1000.00 px (sd 2.00 %) (reprojection 0.179 -> 0.512 px)",
+        "sensor 0: focal held: undetermined, sd 9.70 %"]
+    assert record["lens_prior"] == [
+        {"sensor": 0, "estimate": 747.28, "sd": 0.2153, "prior": 1000.0, "prior_sd": 0.02, "target": 996.15,
+         "steps": 4},
+        {"sensor": 1, "estimate": 1300.0, "sd": None, "prior": 1000.0, "prior_sd": 0.02, "target": 1000.0,
+         "steps": 3}]
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if "focal" in r.getMessage()]
+    assert [level for level, _text in said] == [logging.INFO, logging.INFO, logging.WARNING]
+    assert said[2][1] == "camera optimisation: " + record["notes"][2]
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_block_that_does_not_follow_is_left_as_the_alignment_left_it(tmp_path, monkeypatch, engine):
+    """The net of the walk: a block whose mean reprojection error ends above ``LENS_PRIOR_WORSE`` times the one it
+    started with (and ``LENS_PRIOR_SLACK_PX`` more) has not followed its focal length - nothing is written, the
+    focal length is held where the alignment left it, the sensor keeps no target, and the notes say so first.
+    The limits are set to nothing here, so that the slid grid, which follows, counts as a block that does not."""
+    _doc, ch = _block(tmp_path)
+    _slide_along_the_valley(ch, 1.3)
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", F
+    monkeypatch.setattr(sfm, "LENS_PRIOR_WORSE", 0.0)
+    monkeypatch.setattr(sfm, "LENS_PRIOR_SLACK_PX", 0.0)
+    ch.optimize_cameras(engine=engine)
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert check["lens_prior"] == [] and ch.sensors[0].focal_target is None
+    assert check["notes"][0].startswith("sensor 0: focal left at 1300.00 px: the block does not follow to 1000.")
+    assert check["notes"][1].startswith("sensor 0: focal held: undetermined, sd ") and check["held"]["focal"] == [0]
+    assert _calibration(ch)[0][0] == pytest.approx(1.3 * F, rel=1e-9)
+    assert _heights(ch).mean() == pytest.approx(52.0, abs=0.5)
+
+
 @needs_core
 @pytest.mark.parametrize("engine", ENGINES)
 def test_a_focal_length_the_block_nearly_determines_stays_near_its_estimate(tmp_path, engine):
