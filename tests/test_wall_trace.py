@@ -797,6 +797,19 @@ def test_the_samples_a_segment_looks_from(model_outside, monkeypatch, tmp_path):
     assert np.allclose(first.v, 100.025 + 0.05 * np.arange(40))
     assert np.allclose(first.front, np.minimum(2.15, 3.15 - first.u), atol=1e-6)
     assert np.allclose(second.front, np.minimum(2.5, np.minimum(second.u, 4.3 - second.u)), atol=1e-6)
+    # a look starts a centimetre on the other side of the clicked line, so that a face on the line is met: the
+    # face alone, clicked 5 mm behind it (in the open: the face is not behind the line), is found from the line
+    del band[:]
+    _doc, ch, info = model_doc(tmp_path / "sola", _face_alone(make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)])))
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [0.0, 0.005], side="right", step=0.5)
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 1e-3 and not band
+    # ... and so is a wall under a cover 60 cm over its top, clicked 5 mm in front of it (under the cover: the
+    # face is not in front of the line)
+    scene = _block(make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)]), (-1.0, -1.0, 2.6), (7.0, 1.0, 2.7))
+    _doc, ch, info = model_doc(tmp_path / "coperta", scene)
+    r = T.snap_trace(ch, face + [0.0, -0.005], side="right", step=0.5, heights=(100.0, 102.0))
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 1e-3 and not band
 
 
 # ---------------------------------------------------------------- the side
