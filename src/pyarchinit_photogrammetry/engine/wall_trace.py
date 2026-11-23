@@ -182,15 +182,13 @@ def _reach(v: np.ndarray, i: int, x: np.ndarray, towards: np.ndarray, band: floa
     return reach
 
 
-def _columns(surface: FrameSurface, x: np.ndarray, u: np.ndarray, heights: tuple[float, float],
-             samples: int) -> np.ndarray:
-    """What a clicked segment sees through its plane in its columns (``x`` their middles along the segment, ``u``
-    the same on the plane): in each the median depth of the surface over ``samples`` heights between the two of
-    ``heights`` - NaN for a column with surface at fewer than :data:`~.elevation.FACE_ROWS` of them (the ground
-    the lowest rays meet anywhere is not a face)."""
-    n = len(x)
+def _columns(surface: FrameSurface, u: np.ndarray, heights: tuple[float, float], samples: int) -> np.ndarray:
+    """What a clicked segment sees through its plane in its columns (``u`` their middles on the plane): in each
+    the median depth of the surface over ``samples`` heights between the two of ``heights`` - NaN for a column
+    with surface at fewer than :data:`~.elevation.FACE_ROWS` of them (the ground the lowest rays meet anywhere is
+    not a face)."""
     v = heights[0] + (np.arange(samples) + 0.5) * (heights[1] - heights[0]) / samples
-    d = surface.depth_at(np.repeat(u, samples), np.tile(v, n)).reshape(n, samples)
+    d = surface.depth_at(np.repeat(u, samples), np.tile(v, len(u))).reshape(len(u), samples)
     with warnings.catch_warnings():  # a column that sees nothing: "All-NaN slice"
         warnings.simplefilter("ignore", RuntimeWarning)
         column = np.nanmedian(d, axis=1)
@@ -372,16 +370,16 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
         if raycaster is None:
             raise RuntimeError("the model of the chunk cannot be read: a trace is snapped onto the face of the model")
         for i in range(len(length)):
-            columns = max(1, int(np.ceil(length[i] / step - 1e-9)))
-            x = (np.arange(columns) + 0.5) * length[i] / columns
+            n = max(1, int(np.ceil(length[i] / step - 1e-9)))  # columns of step at most, taken at their middles
+            x = (np.arange(n) + 0.5) * length[i] / n
             plane = plane_from_line(chunk, line[i], line[i + 1], (line[i] + line[i + 1]) / 2.0 + towards[i])
-            u = plane.coords(np.column_stack([line[i] + x[:, None] * t[i], np.zeros(columns)]))[:, 0]
+            u = plane.coords(np.column_stack([line[i] + x[:, None] * t[i], np.zeros(n)]))[:, 0]
             sight = _Sight(plane, u, _reach(v, i, x, towards[i], band))
             surface = FrameSurface(chunk, raycaster, sight, step, lock, (-band, band),
                                    (0.0, heights[0], float(length[i]), heights[1]))
-            d = _columns(surface, x, u, heights, samples)
+            d = _columns(surface, u, heights, samples)
             if np.isfinite(d).any():
-                a, b = _fit(x, d, float(length[i]) / columns)
+                a, b = _fit(x, d, float(length[i]) / n)
                 share[i] = (np.abs(d - (a + b * x)) <= FIT_NEAR).mean()
                 if share[i] >= MIN_SNAP_SHARE:
                     fits[i] = a, b
