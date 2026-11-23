@@ -53,7 +53,10 @@ def fields(op: str, params: dict) -> list[Field]:
                 Field("tiepoint_limit", "Limite punti di legame", p["tiepoint_limit"], minimum=500, maximum=100000)]
     if op == "optimize_cameras":
         return [Field("use_markers", "Con i punti di controllo e le barre di scala", p["use_markers"]),
-                Field("fit_principal_point", "Stima anche il punto principale", p["fit_principal_point"])]
+                Field("fit_principal_point", "Stima anche il punto principale", p["fit_principal_point"]),
+                # as in the dialog of the step (main_window.optimize_cameras): same words
+                Field("hold_undetermined", "Tieni le parti della calibrazione che il blocco non determina",
+                      p["hold_undetermined"])]
     if op == "field_check":
         return [Field("min_photos", "Foto che servono per ogni punto", p["min_photos"], minimum=2, maximum=10)]
     if op == "build_depth_maps":
