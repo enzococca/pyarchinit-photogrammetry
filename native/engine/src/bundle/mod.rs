@@ -27,7 +27,7 @@ pub use problem::{
 };
 pub use residuals::{evaluate, evaluate_at, Evaluation, Loss, BEHIND_CAMERA_RESIDUAL};
 pub use solve::{
-    bias_covariance, choose_linear_solver, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_COLUMNS,
+    bias_covariance, choose_linear_solver, intrinsics_variances, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_COLUMNS,
     DENSE_MAX_PHOTOS, PCG_ABOVE_BYTES, ROBUST_FUNCTION_TOLERANCE,
 };
 

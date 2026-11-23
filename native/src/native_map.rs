@@ -582,6 +582,12 @@ impl NativeMapper {
         d.set_item("variance_factors", r.variance_factors.map(|v| (v[0], v[1], v[2])))?;
         d.set_item("rounds", rounds_list(py, &r.rounds)?)?;
         d.set_item("notes", r.notes.clone())?;
+        let focal_sd: Vec<(u32, Option<f64>)> =
+            r.focal_sd.iter().enumerate().map(|(c, sd)| (self.camera_id(c), *sd)).collect();
+        d.set_item("focal_sd", focal_sd)?;
+        let held: Vec<u32> =
+            r.intrinsics_held.iter().enumerate().filter(|(_, h)| **h).map(|(c, _)| self.camera_id(c)).collect();
+        d.set_item("intrinsics_held", held)?;
         d.set_item("stopped", seen.stopped.clone())?;
         Ok(d)
     }

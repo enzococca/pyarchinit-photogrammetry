@@ -205,6 +205,42 @@ pub fn bias_covariance(pb: &Problem, sol: &Solution, loss: Loss) -> Result<Vec<(
     Ok(out)
 }
 
+/// The variances of the free intrinsics of each camera of `pb` at its own parameters (the
+/// diagonal of the blocks of the inverse of the normal matrix, as `bias_covariance` takes them):
+/// per camera, one value per column of `CameraBlock::free`, in its order (none for a camera with
+/// none free). The accuracies of `pb` are taken as they are (a caller with variance factors puts
+/// them into the sigmas first). `Err` when the reduced system is not positive definite (a gauge
+/// left free, an intrinsic the observations do not hold). Dense up to
+/// `lm::COVARIANCE_DENSE_MAX_COLUMNS` reduced columns, the conjugate gradients per column above.
+pub fn intrinsics_variances(pb: &Problem, loss: Loss) -> Result<Vec<Vec<f64>>, String> {
+    pb.check()?;
+    let model = BundleModel::new(pb, loss);
+    let start: Vec<usize> = model
+        .cam_size
+        .iter()
+        .scan(0, |at, &s| {
+            let c = *at;
+            *at += s;
+            Some(c)
+        })
+        .collect();
+    let mut cols = Vec::new();
+    let mut spans = Vec::with_capacity(pb.cameras.len());
+    for c in 0..pb.cameras.len() {
+        let from = cols.len();
+        if let Some(block) = model.intr_block[c] {
+            cols.extend(start[block]..start[block] + model.cam_size[block]);
+        }
+        spans.push(from..cols.len());
+    }
+    if cols.is_empty() {
+        return Ok(vec![Vec::new(); pb.cameras.len()]);
+    }
+    let block = covariance_block(&model, &cols)?;
+    let k = cols.len();
+    Ok(spans.into_iter().map(|span| span.map(|j| block[j * k + j]).collect()).collect())
+}
+
 /// The bundle adjustment of a problem as a `Model`: the parameters it is at, the layout of their
 /// columns, and the camera blocks of the reduced system with the layout column of each of their
 /// columns.

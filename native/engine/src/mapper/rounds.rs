@@ -27,6 +27,14 @@
 //!   fy free. Without positions the principal point is never freed, as COLMAP's mappers hold it.
 //! - after the solve of round 1 on positions, the accuracy of the positions is estimated again
 //!   (`estimate_sigmas`) and round 1 is solved once more with it.
+//! - an intrinsic is freed only where the block determines it (ruling R16): after round 1 the
+//!   posterior sd of each camera's focal length is taken (`focal_sds`: its column free, the
+//!   covariance scaled by the variance factors); a camera whose sd is above
+//!   `FOCAL_SD_HOLD` of its focal length (a flat nadir block, which cannot tell its focal length
+//!   from its height), or whose sd cannot be computed, keeps all its intrinsics held in every later
+//!   round. A round that moves the focal length of a freed camera by more than `FOCAL_MOVE_HOLD`
+//!   from its value after round 1 is run again from the state before it with that camera held,
+//!   held from then on. The notes say so per camera (`camera c: focal held: ...`).
 //!
 //! Then, unless `Options::final_all_tracks` is false, every track of three placed photos or more
 //! without a point is triangulated with the poses held, filtered, and one last adjustment runs
@@ -127,6 +135,17 @@ fn groups(model: Model) -> [&'static [usize]; 4] {
     }
 }
 
+/// Ruling R16: the relative posterior sd of a camera's focal length after round 1 above which its
+/// intrinsics stay held (the block does not determine them).
+pub const FOCAL_SD_HOLD: f64 = 0.005;
+/// Ruling R16: a freed round that moves a camera's focal length by more than this share of its
+/// value after round 1 is run again with the camera held.
+pub const FOCAL_MOVE_HOLD: f64 = 0.2;
+/// Without positions, the sd of the focal lengths is taken with the scale of the block held by a
+/// position of one photo whose sigma is this many times the extent of the block: a gauge that
+/// adds no information the block has.
+pub const GAUGE_SIGMA_EXTENTS: f64 = 100.0;
+
 /// The names of the groups of `groups`, as the reports give them.
 pub const INTRINSICS: [&str; 4] = ["focal", "radial", "principal_point", "decentring"];
 
@@ -175,6 +194,10 @@ pub struct State {
     pub variance_factors: Option<[f64; 3]>,
     pub last_filter: (usize, usize),
     pub notes: Vec<String>,
+    /// Per camera, the relative posterior sd of its focal length after round 1 (`None`: not taken,
+    /// or the covariance could not be computed) and whether its intrinsics stay held (R16).
+    pub focal_sd: Vec<Option<f64>>,
+    pub intrinsics_held: Vec<bool>,
 }
 
 /// What a round did: its number (from 1; `rounds + 1` for the last adjustment with every track),
@@ -659,7 +682,7 @@ fn intrinsics(state: &State, round: usize, rounds: usize, positions: bool) -> (V
         .iter()
         .enumerate()
         .map(|(c, cam)| {
-            if round < 2 {
+            if round < 2 || state.intrinsics_held.get(c).copied().unwrap_or(false) {
                 return Vec::new();
             }
             let principal = round >= rounds && positions && state.frame == Frame::Gnss && state.opencv_sensor[c];
@@ -695,6 +718,14 @@ fn posterior_bias_covariance(
     sol: &Solution,
     o: &Options,
 ) -> Result<(Vec<(i64, [[f64; 3]; 3])>, [f64; 3]), String> {
+    let factors = variance_factors(state, b, sol);
+    let pb = scaled_problem(state, b, factors);
+    Ok((bundle::bias_covariance(&pb, sol, scaled_loss(o, pb.pixel_sigma))?, factors))
+}
+
+/// The variance factors of the tie points, of the horizontal and of the vertical positions at the
+/// solution `sol` of `b` (see `posterior_bias_covariance`).
+fn variance_factors(state: &State, b: &Built, sol: &Solution) -> [f64; 3] {
     let (fh, fv, taken) = match &state.sigma_estimate {
         Some(e) => (e.factor[0], e.factor[1], 3.0 * e.positions as f64 - e.redundancy[0] - e.redundancy[1]),
         None => (1.0, 1.0, 0.0),
@@ -712,6 +743,12 @@ fn posterior_bias_covariance(
     let unknowns = bundle::Layout::new(&b.pb).size as f64;
     let redundancy = 2.0 * b.pb.obs.len() as f64 - (unknowns - taken);
     let ft = if redundancy > 0.0 && tie_cost > 0.0 { 2.0 * tie_cost / redundancy } else { 1.0 };
+    [ft, fh, fv]
+}
+
+/// The problem of `b` with its sigmas scaled by the variance factors `[ft, fh, fv]`: the normal
+/// matrix the sum of the groups' each over its own factor.
+fn scaled_problem(state: &State, b: &Built, [ft, fh, fv]: [f64; 3]) -> Problem {
     let mut pb = b.pb.clone();
     let g = state.gnss.as_ref();
     for (j, &k) in b.positions.iter().enumerate() {
@@ -719,7 +756,56 @@ fn posterior_bias_covariance(
         pb.gnss[j].2 = [rec[0] * fh.sqrt(), rec[1] * fh.sqrt(), rec[2] * fv.sqrt()];
     }
     pb.pixel_sigma = b.pb.pixel_sigma * ft.sqrt();
-    Ok((bundle::bias_covariance(&pb, sol, scaled_loss(o, pb.pixel_sigma))?, [ft, fh, fv]))
+    pb
+}
+
+/// Ruling R16: per camera, the relative posterior sd of its focal length at the state after round
+/// 1 (`b`, `sol`: its last solve): the problem of the state with the focal length of every
+/// camera free (its column only, as the ruling asks: a radial term that would trade with it in a
+/// freed round is caught by the guard on the move, `moved_too_far`), its sigmas scaled by the
+/// variance factors of round 1, and the largest sd of the focal columns over the focal length. Without positions the
+/// gauge of the scale is held by a position of the photo farthest from the held one, its sigma
+/// `GAUGE_SIGMA_EXTENTS` times that distance. `Err` (for every camera) when the covariance cannot
+/// be computed.
+fn focal_sds(state: &State, input: &Input, o: &Options, b: &Built, sol: &Solution) -> Result<Vec<f64>, String> {
+    let factors = variance_factors(state, b, sol);
+    let free: Vec<Vec<usize>> = state
+        .cameras
+        .iter()
+        .map(|cam| {
+            groups(cam.model)[0].to_vec()
+        })
+        .collect();
+    let opened = build(state, input, &free, false);
+    let mut pb = scaled_problem(state, &opened, factors);
+    if pb.gnss.is_empty() && pb.centres.len() >= 2 {
+        let first = Vector3::from(pb.centres[0]);
+        let (far, extent) = pb
+            .centres
+            .iter()
+            .enumerate()
+            .map(|(j, c)| (j, (Vector3::from(*c) - first).norm()))
+            .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+        let sigma = GAUGE_SIGMA_EXTENTS * extent.max(1e-3);
+        pb.gnss.push((far, pb.centres[far], [sigma; 3], 0));
+        pb.gnss_bias = false;
+    }
+    let variances = bundle::intrinsics_variances(&pb, scaled_loss(o, pb.pixel_sigma))?;
+    Ok(state
+        .cameras
+        .iter()
+        .enumerate()
+        .map(|(c, cam)| {
+            let focal_cols: Vec<usize> = groups(cam.model)[0].to_vec();
+            let positions = &free[c];
+            let worst = focal_cols
+                .iter()
+                .filter_map(|col| positions.iter().position(|p| p == col))
+                .filter_map(|j| variances[c].get(j).copied())
+                .fold(0.0f64, f64::max);
+            worst.max(0.0).sqrt() / cam.params[0].abs()
+        })
+        .collect())
 }
 
 /// Whether round `round` is the last adjustment (no adjustment with every track after it).
@@ -739,7 +825,7 @@ fn adjust_state(
     estimate: bool,
     covariance: bool,
     observe: &mut dyn FnMut() -> bool,
-) -> Result<(f64, f64, usize), String> {
+) -> Result<(f64, f64, usize, Built, Solution), String> {
     let b = build(state, input, free, all_tracks);
     let sol = adjust(&b.pb, o, observe)?;
     write_back(state, &b, &sol);
@@ -776,7 +862,87 @@ fn adjust_state(
         let result = posterior_bias_covariance(state, &last.0, &last.1, o);
         record_covariance(state, result);
     }
-    Ok((cost_initial, cost, observations))
+    Ok((cost_initial, cost, observations, last.0, last.1))
+}
+
+/// Ruling R16, after round 1: the sd of each camera's focal length into the state, and the cameras
+/// the block does not determine held from then on, with a note each.
+fn hold_undetermined(state: &mut State, input: &Input, o: &Options, b: &Built, sol: &Solution) {
+    let k = state.cameras.len();
+    state.intrinsics_held.resize(k, false);
+    match focal_sds(state, input, o, b, sol) {
+        Ok(sds) => {
+            state.focal_sd = sds.iter().map(|&sd| sd.is_finite().then_some(sd)).collect();
+            for (c, sd) in sds.into_iter().enumerate() {
+                if !(sd <= FOCAL_SD_HOLD) {
+                    state.intrinsics_held[c] = true;
+                    state.notes.push(format!("camera {c}: focal held: undetermined, sd {:.2} %", 100.0 * sd));
+                }
+            }
+        }
+        Err(why) => {
+            state.focal_sd = vec![None; k];
+            for c in 0..k {
+                state.intrinsics_held[c] = true;
+                state.notes.push(format!("camera {c}: focal held: undetermined, no covariance ({why})"));
+            }
+        }
+    }
+}
+
+/// Ruling R16, after a freed adjustment: the cameras whose focal length moved by more than
+/// `FOCAL_MOVE_HOLD` from `after_round_1`, with the share they moved.
+fn moved_too_far(state: &State, free: &[Vec<usize>], after_round_1: &[f64]) -> Vec<(usize, f64)> {
+    state
+        .cameras
+        .iter()
+        .enumerate()
+        .filter(|(c, _)| !free[*c].is_empty())
+        .filter_map(|(c, cam)| {
+            let moved = (cam.params[0] / after_round_1[c] - 1.0).abs();
+            (moved > FOCAL_MOVE_HOLD || !moved.is_finite()).then_some((c, moved))
+        })
+        .collect()
+}
+
+/// `adjust_state` with the guard of ruling R16: when the adjustment moves the focal length of a
+/// freed camera too far (`moved_too_far`), the state goes back to what it was before it and the
+/// adjustment runs again with those cameras held (held from then on, a note each). The free
+/// intrinsics it ran with, their names, and what `adjust_state` gives.
+#[allow(clippy::too_many_arguments)]
+fn guarded_adjustment(
+    state: &mut State,
+    input: &Input,
+    o: &Options,
+    round: usize,
+    rounds: usize,
+    positions: bool,
+    all_tracks: bool,
+    covariance: bool,
+    after_round_1: &[f64],
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<(Vec<Vec<usize>>, Vec<String>, (f64, f64, usize, Built, Solution)), String> {
+    let before = state.clone();
+    let (free, names) = intrinsics(state, round, rounds, positions);
+    let done = adjust_state(state, input, o, &free, all_tracks, round == 1, covariance, observe)?;
+    if round < 2 || after_round_1.is_empty() {
+        return Ok((free, names, done));
+    }
+    let moved = moved_too_far(state, &free, after_round_1);
+    if moved.is_empty() {
+        return Ok((free, names, done));
+    }
+    let notes = state.notes.clone();
+    *state = before;
+    state.notes = notes;
+    for (c, share) in moved {
+        state.intrinsics_held[c] = true;
+        state.notes.push(format!("camera {c}: focal held: moved {:.1} % in round {round}, the round run again \
+                                  with it held", 100.0 * share));
+    }
+    let (free, names) = intrinsics(state, round, rounds, positions);
+    let done = adjust_state(state, input, o, &free, all_tracks, false, covariance, observe)?;
+    Ok((free, names, done))
 }
 
 /// The posterior covariance of the biases into the state; when it cannot be computed (a reduced
@@ -831,6 +997,9 @@ pub fn refine(
     let mut last_free = vec![Vec::new(); input.cameras.len()];
     let mut last_names = Vec::new();
     let rounds = o.rounds;
+    state.intrinsics_held = vec![false; input.cameras.len()];
+    state.focal_sd = vec![None; input.cameras.len()];
+    let mut after_round_1: Vec<f64> = Vec::new();
     for round in 1..=rounds {
         let clock = Instant::now();
         if !observe() {
@@ -838,16 +1007,20 @@ pub fn refine(
         }
         if round >= 2 && round == rounds && positions && state.frame == Frame::Gnss {
             for c in 0..state.cameras.len() {
-                if state.opencv_sensor[c] {
+                if state.opencv_sensor[c] && !state.intrinsics_held[c] {
                     if let Some(w) = state.cameras[c].widened() {
                         state.cameras[c] = w;
                     }
                 }
             }
         }
-        let (free, names) = intrinsics(state, round, rounds, positions);
-        let (cost_initial, cost, observations) =
-            adjust_state(state, input, o, &free, false, round == 1, last_adjustment(o, round), observe)?;
+        let (free, names, (cost_initial, cost, observations, b, sol)) = guarded_adjustment(
+            state, input, o, round, rounds, positions, false, last_adjustment(o, round), &after_round_1, observe)?;
+        if round == 1 && rounds >= 2 {
+            hold_undetermined(state, input, o, &b, &sol);
+            after_round_1 = state.cameras.iter().map(|cam| cam.params[0]).collect();
+        }
+        drop((b, sol));
         if !observe() {
             return Err("cancelled".into());
         }
@@ -889,8 +1062,29 @@ pub fn refine(
         let every: Vec<usize> = (0..state.tracks.len()).filter(|&t| placed_views(t) >= 3).collect();
         triangulate_missing(state, input, &every);
         filter(state, input, o, 1.0)?;
-        let (cost_initial, cost, observations) =
+        // the last adjustment frees what the last round freed, and is guarded the same way
+        let unguarded = state.clone();
+        let (mut cost_initial, mut cost, mut observations, _, _) =
             adjust_state(state, input, o, &last_free, true, false, true, observe)?;
+        if !after_round_1.is_empty() {
+            let moved = moved_too_far(state, &last_free, &after_round_1);
+            if !moved.is_empty() {
+                let notes = state.notes.clone();
+                *state = unguarded;
+                state.notes = notes;
+                for (c, share) in moved {
+                    state.intrinsics_held[c] = true;
+                    last_free[c].clear();
+                    state.notes.push(format!("camera {c}: focal held: moved {:.1} % in round {}, the round run \
+                                              again with it held", 100.0 * share, rounds + 1));
+                }
+                (cost_initial, cost, observations, _, _) =
+                    adjust_state(state, input, o, &last_free, true, false, true, observe)?;
+                if last_free.iter().all(|f| f.is_empty()) {
+                    last_names.clear();
+                }
+            }
+        }
         if !observe() {
             return Err("cancelled".into());
         }
@@ -936,6 +1130,8 @@ mod tests {
             variance_factors: Some([1.0; 3]),
             last_filter: (0, 0),
             notes: Vec::new(),
+            focal_sd: Vec::new(),
+            intrinsics_held: Vec::new(),
         }
     }
 

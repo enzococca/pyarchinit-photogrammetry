@@ -15,7 +15,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use common::{ring, scene, InputOptions, Kind, Random, Scene};
+use common::{convergent, ring, ring_with_relief, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
 use ppg_engine::camera::{Camera, Model};
 use ppg_engine::mapper::graph::ViewGraph;
@@ -415,6 +415,7 @@ fn the_principal_point_is_freed_only_on_a_block_held_by_gnss() {
     let (input, truth) = shifted_principal_point(&s, 53);
     let mut held = Mapper::new(input, o.clone()).unwrap();
     let report = run(&mut held, Some(&gnss), None);
+    eprintln!("with GNSS: focal sd {:?}, held {:?}, notes {:?}", report.focal_sd, report.intrinsics_held, report.notes);
     let last = &report.rounds[2];
     assert_eq!(last.intrinsics, ["focal", "radial", "principal_point", "decentring"].map(String::from).to_vec());
     let cam = &held.state().unwrap().cameras[0];
@@ -706,4 +707,66 @@ fn the_positioning_is_returned() {
     assert_eq!(p.frame, Frame::Gnss);
     assert_eq!((p.sigma_h, p.sigma_v), (Some(5.0), Some(10.0)));
     assert_eq!(p.centres.len(), 40);
+}
+
+/// Ruling R16: a flat nadir ring cannot tell its focal length from its height (the positions of
+/// the photos hold the heights to 10 m): the posterior sd of the focal length after round 1 is
+/// above `FOCAL_SD_HOLD`, so the intrinsics stay held in every later round, the report says so
+/// per camera, and the ring keeps its shape.
+#[test]
+fn a_flat_nadir_ring_keeps_its_undetermined_focal_length() {
+    let diameter = 240.0;
+    let s = ring_with_relief(48, diameter, HEIGHT, 0.2, 121);
+    let gnss = gnss_with(&s, 2.0, 4.0, [5.0, 5.0, 10.0], 122, &[]);
+    let (m, report) = mapped(&s, 123, Options::default(), Some(&gnss), None);
+    let (shape, points) = point_shape(&s, &m);
+    eprintln!("flat ring: focal sd {:?}, held {:?}, focal {:.2}, shape {:.5} of the diameter ({points} points), \
+               notes {:?}", report.focal_sd, report.intrinsics_held, m.state().unwrap().cameras[0].params[0],
+              shape / diameter, report.notes);
+    assert_eq!(report.placed, 48);
+    assert_eq!(report.intrinsics_held, vec![true]);
+    let sd = report.focal_sd[0].expect("a covariance on the flat ring");
+    assert!(sd > ppg_engine::mapper::rounds::FOCAL_SD_HOLD, "{sd}");
+    assert!(report.rounds.iter().all(|r| r.intrinsics.is_empty()), "{:?}", report.rounds);
+    assert_eq!(m.state().unwrap().cameras[0].params[0], common::FOCAL, "the focal length held at its start");
+    assert!(report.notes.iter().any(|n| n.starts_with("camera 0: focal held: undetermined, sd ")), "{:?}",
+            report.notes);
+    assert!(shape < 0.005 * diameter, "{shape} m over {diameter} m");
+}
+
+/// Ruling R16, the other side: a convergent block (a turntable seen from above, depths that vary)
+/// determines its focal length: it is freed from round 2 and a start 15 % too long is recovered.
+#[test]
+fn a_convergent_block_frees_and_recovers_its_focal_length() {
+    let s = convergent(24, 131);
+    let start = 1.15 * common::FOCAL;
+    let input = s.input(&InputOptions { noise_px: 0.5, start_focal: start, seed: 132, ..InputOptions::default() });
+    let mut m = Mapper::new(input, Options::default()).expect("a mapper");
+    let report = run(&mut m, None, None);
+    let focal = m.state().unwrap().cameras[0].params[0];
+    eprintln!("convergent block: focal sd {:?}, held {:?}, focal {focal:.2} from {start}, notes {:?}",
+              report.focal_sd, report.intrinsics_held, report.notes);
+    assert_eq!(report.placed, 24);
+    assert_eq!(report.intrinsics_held, vec![false]);
+    let sd = report.focal_sd[0].expect("a covariance on the convergent block");
+    assert!(sd < ppg_engine::mapper::rounds::FOCAL_SD_HOLD, "{sd}");
+    assert_eq!(report.rounds[1].intrinsics, vec!["focal".to_string()]);
+    assert!((focal / common::FOCAL - 1.0).abs() < 0.005, "{focal}");
+}
+
+/// Ruling R16, the guard: on a ground with no relief at all the covariance after round 1 says the
+/// focal length is determined, but the freed round runs away with it (the plane trades the focal
+/// length with the height and the tilt); the round is run again with the camera held, and the
+/// note says so.
+#[test]
+fn a_focal_length_that_runs_away_is_held_again() {
+    let s = ring_with_relief(48, 240.0, HEIGHT, 0.0, 121);
+    let gnss = gnss_with(&s, 2.0, 4.0, [5.0, 5.0, 10.0], 122, &[]);
+    let (m, report) = mapped(&s, 123, Options::default(), Some(&gnss), None);
+    eprintln!("plane: focal sd {:?}, held {:?}, notes {:?}", report.focal_sd, report.intrinsics_held, report.notes);
+    assert_eq!(report.intrinsics_held, vec![true]);
+    assert!(report.focal_sd[0].expect("a covariance") <= ppg_engine::mapper::rounds::FOCAL_SD_HOLD);
+    assert!(report.notes.iter().any(|n| n.starts_with("camera 0: focal held: moved ")), "{:?}", report.notes);
+    assert!(report.rounds.iter().all(|r| r.intrinsics.is_empty()), "{:?}", report.rounds);
+    assert_eq!(m.state().unwrap().cameras[0].params[0], common::FOCAL);
 }

@@ -216,6 +216,12 @@ fn views_of(poses: &[Pose], points: &[Vector3<f64>]) -> Vec<Vec<(usize, [f64; 2]
 /// middle of the window, inside all four photos) and seen by those four only: a photo shares
 /// points with its 3 neighbours on each side and with no other photo. The rays are exact.
 pub fn ring(n: usize, diameter: f64, height: f64, seed: u64) -> Scene {
+    ring_with_relief(n, diameter, height, 2.0, seed)
+}
+
+/// `ring` over a ground whose heights are drawn within `relief` metres of zero (0: a flat ground,
+/// where a nadir block cannot tell its focal length from its height).
+pub fn ring_with_relief(n: usize, diameter: f64, height: f64, relief: f64, seed: u64) -> Scene {
     let mut random = Random::new(seed);
     let radius = diameter / 2.0;
     let angle = |i: f64| std::f64::consts::TAU * i / n as f64;
@@ -242,7 +248,7 @@ pub fn ring(n: usize, diameter: f64, height: f64, seed: u64) -> Scene {
             assert!(attempts < 100 * POINTS_PER_WINDOW, "no ground under the window of photo {k}");
             let (s, c) = angle(k as f64 + 1.5 + random.uniform_in(-0.5, 0.5)).sin_cos();
             let rho = radius + random.uniform_in(-0.4, 0.4) * height;
-            let x = Vector3::new(rho * c, rho * s, random.uniform_in(-2.0, 2.0));
+            let x = Vector3::new(rho * c, rho * s, random.uniform_in(-relief, relief));
             let pixels: Vec<Option<[f64; 2]>> = window.iter().map(|&i| pixel_of(&poses[i], &x)).collect();
             if pixels.iter().any(|p| p.is_none()) {
                 continue;
@@ -284,6 +290,32 @@ pub fn patch(nx: usize, ny: usize, spacing: f64, height: f64, seed: u64) -> Scen
         .map(|_| {
             Vector3::new(random.uniform_in(-0.5 * height, wx + 0.5 * height),
                          random.uniform_in(-0.4 * height, wy + 0.4 * height), random.uniform_in(-1.0, 1.0))
+        })
+        .collect();
+    let views = views_of(&poses, &points);
+    Scene { kind: Kind::Patch, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
+}
+
+/// A turntable seen from outside: `n` photos on a circle of 10 m radius 6 m above the ground,
+/// each looking at the centre of the circle from above, over an object of points spread in a box
+/// 8 m x 8 m x 4 m around that centre: a convergent block whose depths vary, which tells the focal
+/// length.
+pub fn convergent(n: usize, seed: u64) -> Scene {
+    let mut random = Random::new(seed);
+    let poses: Vec<Pose> = (0..n)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            let centre = Vector3::new(10.0 * a.cos(), 10.0 * a.sin(), 6.0 + random.uniform_in(-0.5, 0.5));
+            let target = Vector3::new(random.uniform_in(-0.3, 0.3), random.uniform_in(-0.3, 0.3), 1.0);
+            let z = (target - centre).normalize();
+            let x = z.cross(&Vector3::z()).normalize();
+            let y = z.cross(&x);
+            Pose { rotation: Matrix3::from_rows(&[x.transpose(), y.transpose(), z.transpose()]), centre }
+        })
+        .collect();
+    let points: Vec<Vector3<f64>> = (0..60 * n)
+        .map(|_| {
+            Vector3::new(random.uniform_in(-4.0, 4.0), random.uniform_in(-4.0, 4.0), random.uniform_in(-1.0, 3.0))
         })
         .collect();
     let views = views_of(&poses, &points);
