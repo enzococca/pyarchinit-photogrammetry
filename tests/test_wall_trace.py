@@ -318,7 +318,7 @@ def test_rough_ground_past_the_ends_of_the_wall_is_not_its_face(tmp_path):
     # ground would be five eighths of the columns, all at one depth, and the line would go there
     assert seg["share"] == pytest.approx(6.0 / 16.0, abs=0.01)
     assert r["snapped"] and np.abs(r["points"] - (o + [[-5.0, 0.0], [11.0, 0.0]])).max() < 0.005
-    # the heights of the model along the line are those of its surface: the ground has 300 times the vertices
+    # the heights of the model along the line are those of its surface: the ground has 350 times the vertices
     # of this wall, all within 12 cm
     assert T._heights_near(ch, clicked, 2.5) == pytest.approx((100.0, 102.0), abs=0.01)
     r = T.snap_trace(ch, clicked, side="right")
