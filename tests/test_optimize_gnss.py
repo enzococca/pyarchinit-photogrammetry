@@ -275,7 +275,9 @@ def test_unconstrained_bend_is_reverted(tmp_path, monkeypatch, caplog, gnss):
     assert np.allclose(ch.transform, transform)
     assert err == pytest.approx(error)
     assert ch.meta["sfm"]["reprojection_error"] == pytest.approx(error)
-    warning = next(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    # (a block that gives no covariance to judge its calibration by has a warning of its own before this one)
+    warning = next(r.getMessage() for r in caplog.records
+                   if r.levelno == logging.WARNING and "not judged" not in r.getMessage())
     assert "bent the block" in warning and "disagree with the control points" in warning
     assert "switch off the camera references" in warning
     assert not list((ch.data_dir / "sfm").glob("*before*"))  # the copy of the model goes away

@@ -3061,8 +3061,8 @@ _EVERY_OR_NONE = "COLMAP's adjustment holds it for every sensor or for none"
 _WHOLE_OR_NOT = "COLMAP's adjustment refines the distortion whole or not at all"
 
 
-def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool,
-                       together: bool = False) -> tuple[dict, dict]:
+def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool, together: bool = False,
+                       marker_weight: float | None = None) -> tuple[dict, dict]:
     """What an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine of each
     calibration: each group of intrinsics only where the block determines it - the rule of the rounds of the
     native mapper, applied to the camera optimisation group by group and on one scale
@@ -3077,11 +3077,16 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
       when the marginal sd of the displacement it causes at the corner of the photo is above
       :data:`.bundle.GROUP_SD_HOLD_PX`, half a pixel - a ring flown once does not determine its tangential terms,
       a nadir grid over flat ground its radial ones (they trade with a dome of the block);
-    * without a covariance at all (a normal matrix that cannot be inverted) the group being judged is held.
+    * without a covariance at all (a normal matrix that cannot be inverted) the group being judged is held: not
+      a verdict on the block, said as such in the notes and as a warning in the log.
 
     The order is fixed: the focal length first, then from what a real lens needs least to what it needs most, so
-    that of two groups that trade with each other the earlier is given up and the later may stay.
+    that of two groups that trade with each other the earlier is given up and the later may stay - also where the
+    earlier one had passed: a later group that fails is judged again without the earlier groups still free, and
+    where it then passes they are held in its place.
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment).
+    ``marker_weight``: the measurements of the markers count as so many tie point observations each (COLMAP's
+    adjustment again: their accuracy follows that of the tie points, variance factor included).
     Nothing is asked with ``hold_undetermined`` False (every calibration is refined as the options say), where the
     adjustment refines no intrinsic (:data:`NOTHING_TO_JUDGE`), and where the core cannot give the covariance
     (:func:`.bundle.covariance_ready`: every calibration is refined as before, one line of the log at INFO says
@@ -3092,8 +3097,10 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
     ``tangential_sd``, ``principal_point_sd`` and ``radial_sd`` (pixels at the corner of the photo): [sensor, sd] of
     every camera whose group would be refined (sd None without a covariance), ``held`` ({group: sensors}) and
     ``notes`` (``sensor 3: focal held: undetermined, sd 11.42 %``, ``sensor 3: radial held: undetermined, sd 3.16
-    px at the image corner``): numbers and fixed words, the key of a sensor and never a name - and ``{index of the
-    camera in pb: groups to hold}``."""
+    px at the image corner``, ``sensor 3: tangential held: given up for the radial terms (0.91 px at the image
+    corner with it free, 0.04 px without)``, ``sensor 3: focal held: not judged, the block gave no covariance
+    (...)``): numbers and fixed words, the key of a sensor and never a name - and ``{index of the camera in pb:
+    groups to hold}``."""
     from . import bundle
 
     record = _check_record(hold_undetermined)
@@ -3115,7 +3122,7 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
         return record, {}
     record["checked"] = True
     sensors = _camera_sensors(chunk, rec, ids["cameras"])
-    sds, verdicts, factor = bundle.judge_intrinsics(pb, together=together)
+    sds, verdicts, factor = bundle.judge_intrinsics(pb, together=together, marker_weight=marker_weight)
     record["variance_factor"] = None if factor is None else float(factor)
     held: dict = {}
     for group in bundle.JUDGED:
@@ -3136,8 +3143,12 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
                     if sensors[c] in record["held"][group]:
                         continue  # another camera of the same sensor has said why
                     note = f"with sensor {sensors[value]} ({_EVERY_OR_NONE})"
-                else:
-                    note = f"undetermined, no covariance ({value})"
+                elif kind == "for":
+                    note = _given_up_note(*value)
+                else:  # nothing to judge it by: not a verdict on the block, and said louder
+                    _hold(record, group, sensors[c], f"not judged, the block gave no covariance ({value})",
+                          level=logging.WARNING)
+                    continue
                 _hold(record, group, sensors[c], note)
     return record, held
 
@@ -3149,13 +3160,22 @@ def _check_record(hold_undetermined: bool, reason: str | None = None) -> dict:
             "held": {"focal": [], "tangential": [], "principal_point": [], "radial": []}, "notes": []}
 
 
-def _hold(record: dict, group: str, sensor, note: str) -> None:
+def _hold(record: dict, group: str, sensor, note: str, level: int = logging.INFO) -> None:
     """The ``group`` of ``sensor`` among what the check of :func:`_calibration_check` holds, with its note (also
-    in the log)."""
+    in the log, at ``level``)."""
     if sensor not in record["held"][group]:
         record["held"][group].append(sensor)
     record["notes"].append(f"sensor {sensor}: {_GROUP_WORDS[group]} held: {note}")
-    log.info("camera optimisation: %s", record["notes"][-1])
+    log.log(level, "camera optimisation: %s", record["notes"][-1])
+
+
+def _given_up_note(later: str, with_it: float, without_it: float) -> str:
+    """The note of a group that passed and is held in place of the group ``later``, which failed with it free
+    (:func:`.bundle.judge_intrinsics`): the sd of the later group with this one free and without it."""
+    what = {"tangential": "the tangential terms", "principal_point": "the principal point",
+            "radial": "the radial terms"}[later]
+    return (f"given up for {what} ({with_it:.2f} px at the image corner with it free, {without_it:.2f} px "
+            "without)")
 
 
 def _moved_note(group: str, amount: float) -> str:
@@ -3350,8 +3370,12 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     trade with a dome of the block that control points at its corners do not see) and stay as the alignment left
     them. The order is fixed, the focal length first and then from what a real lens needs least to what it needs
     most: of two groups that trade with each other the earlier is given up and the later, judged without it, may
-    stay (the tangential terms of our own formulation on that ring, 1.6 px, and not its radial terms). Without a
-    covariance at all the group being judged is held. A guard watches what was refined
+    stay (the tangential terms of our own formulation on that ring, 1.6 px, and not its radial terms). An earlier
+    group that passed is given up too for a later one that fails only with it free: the later group is judged
+    again without the earlier groups still free, and where it then passes they are held in its place (on a block
+    of many tie points the tangential terms of that ring pass at 0.5 px and its radial terms, with them free, fail
+    at 0.9 px: the tangential terms are held, the radial terms refined). Without a covariance at all the group
+    being judged is held, with a warning: nothing was judged. A guard watches what was refined
     (:func:`.bundle.runaways`): a focal length moved by more than :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its
     start, or a first radial term changed by more than :data:`.bundle.K1_MOVE_HOLD` (0.5), has the optimisation
     run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment refines a group
@@ -3575,8 +3599,8 @@ def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, pos
                                             fit_principal_point=fit_principal_point, hold_focal=positions)
     except ValueError as exc:  # rigs: our formulation does not take them
         return _check_record(True, str(exc)), set()
-    pb.marker_sigma = pb.pixel_sigma / float(np.sqrt(max(1, int(marker_weight))))
-    record, held = _calibration_check(chunk, rec, pb, ids, True, together=True)
+    record, held = _calibration_check(chunk, rec, pb, ids, True, together=True,
+                                      marker_weight=max(1, int(marker_weight)))
     groups = {group for held_groups in held.values() for group in held_groups}
     if groups & {"radial", "tangential"}:
         sensors = _camera_sensors(chunk, rec, ids["cameras"])

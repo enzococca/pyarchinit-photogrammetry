@@ -106,9 +106,10 @@ def test_a_reference_flight_holds_the_frame_of_the_positions():
 NOISE = 0.3  # px, on the observations of the blocks below
 
 
-def _drone_block(tilt: float, references: str = "control", seed: int = 3, free=None) -> bundle.Problem:
+def _drone_block(tilt: float, references: str = "control", seed: int = 3, free=None,
+                 noise: float = NOISE) -> bundle.Problem:
     """The block of :func:`bundle_problems.block` (18 photos 30 m above ground with a metre of relief) with
-    :data:`NOISE` on its tie points, its cameras pitched by ``tilt`` along the strips, and what places it:
+    ``noise`` (:data:`NOISE`) on its tie points, its cameras pitched by ``tilt`` along the strips, and what places it:
     ``"control"`` its five markers as control points at 2 mm, ``"gnss"`` or ``"bias"`` a position of every photo at
     2 cm (two flights, with a bias each for ``"bias"``), ``"none"`` nothing (tie points alone, two photos held as
     :func:`bundle.problem_from_chunk` holds them). The block is adjusted with its calibration held, as an alignment
@@ -116,7 +117,7 @@ def _drone_block(tilt: float, references: str = "control", seed: int = 3, free=N
     rng = np.random.default_rng(seed)
     pb, truth = bundle_problems.block(rng, tilt=tilt)
     pb = bundle._without_held(pb, np.bincount(pb.obs_point, minlength=len(pb.points)) >= 2)
-    pb.obs_xy = pb.obs_xy + rng.normal(0, NOISE, pb.obs_xy.shape)
+    pb.obs_xy = pb.obs_xy + rng.normal(0, noise, pb.obs_xy.shape)
     if references == "control":
         pb.gcps = [(k, truth["markers"][k].copy(), np.full(3, 0.002)) for k in range(5)]
     else:
@@ -327,6 +328,79 @@ def test_the_order_decides_between_two_groups_that_trade():
 
 
 @needs_core
+def test_an_earlier_group_is_given_up_for_a_later_one_that_fails():
+    """A later group that fails while an earlier one is still free is judged again without the earlier one, and
+    where it then passes the earlier one is held in its place (ruling R25): what a lens needs more is not given up
+    for what it needs less. Pitched photos with little noise, every intrinsic free: the tangential terms pass
+    (0.47 px at the corner) and stay free; the principal point, judged with them free, fails (1.7 px). Without the
+    tangential terms it is determined (0.2 px): the tangential terms are held for it, and it is refined. The focal
+    length, which the block determines, is not given up: the tangential terms are enough."""
+    pb = _drone_block(bundle_problems.TILT, free=range(8), noise=0.2)
+    model, params, width, height = pb.cameras[0]
+    sds, held, factor = bundle.judge_intrinsics(pb)
+
+    def corner(columns, gone=()):
+        cov, free = _oracle(pb, factor, gone)
+        index = [free.index(k) for k in columns]
+        return bundle.corner_sd(model, params, width, height, list(columns), cov[np.ix_(index, index)])
+
+    before, after = corner((2, 3)), corner((2, 3), gone=(6, 7))
+    assert corner((6, 7)) < 0.49 and before > 1.5 and after < 0.3  # by a dense inverse
+    assert list(held[0]) == ["tangential"]
+    kind, (later, with_it, without_it) = held[0]["tangential"]
+    assert (kind, later) == ("for", "principal_point")
+    assert with_it == pytest.approx(before, rel=1e-4) and without_it == pytest.approx(after, rel=1e-4)
+    assert sds[0]["principal_point"] == pytest.approx(after, rel=1e-4)  # as it is refined
+    assert sds[0]["tangential"] == pytest.approx(corner((6, 7)), rel=1e-4)  # as it was judged
+    assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and 0 < sds[0]["radial"] < 0.2
+
+
+def _conditional(matrix: np.ndarray, kept: list, gone: list) -> np.ndarray:
+    """The covariance of the parameters ``kept`` of ``matrix`` once the parameters ``gone`` are held."""
+    if not gone:
+        return matrix[np.ix_(kept, kept)]
+    cross = matrix[np.ix_(kept, gone)]
+    return matrix[np.ix_(kept, kept)] - cross @ np.linalg.solve(matrix[np.ix_(gone, gone)], cross.T)
+
+
+@needs_core
+@pytest.mark.parametrize("tied", [True, False])
+def test_the_focal_length_is_the_last_to_be_given_up_for_a_later_group(monkeypatch, tied):
+    """The focal length is given up for a later group only when nothing else is enough. A covariance in which the
+    radial terms fail at the corner (0.8 px) while the focal length passes (0.4 %): where the two trade (the
+    radial terms are 0.2 px once the focal length is held) the focal length is held for them and they are
+    refined; where they do not (0.8 px with or without it) the radial terms are held and the focal length stays
+    free."""
+    pb = _drone_block(bundle_problems.TILT)  # fx, fy, k1, k2 free
+    model, params, width, height = pb.cameras[0]
+    reach = np.linalg.norm(bundle.corner_jacobians(model, params, width, height, [4])[0][:, 0])  # px per unit of k1
+    sd_f, sd_k = 0.004 * params[0], 0.8 / reach
+    rho = np.sqrt(1.0 - (0.2 / 0.8) ** 2) if tied else 0.0
+    full = np.diag([sd_f ** 2, sd_f ** 2, sd_k ** 2, 1e-16])
+    full[0, 2] = full[2, 0] = rho * sd_f * sd_k
+    asked = []
+
+    def covariance(problem, **kwargs):
+        free = list(problem.free_intrinsics[0])
+        asked.append(free)
+        kept = [[0, 1, 4, 5].index(k) for k in free]
+        gone = [j for j in range(4) if j not in kept]
+        return _conditional(full, kept, gone), [len(free)]
+
+    monkeypatch.setattr(bundle, "intrinsics_covariance", covariance)
+    monkeypatch.setattr(bundle, "tie_variance_factor", lambda problem: 1.0)
+    sds, held, _factor = bundle.judge_intrinsics(pb)
+    assert sds[0]["focal"] == pytest.approx(0.004)
+    if tied:
+        assert held[0] == {"focal": ("for", ("radial", pytest.approx(0.8, rel=1e-6), pytest.approx(0.2, rel=1e-6)))}
+        assert sds[0]["radial"] == pytest.approx(0.2, rel=1e-6)
+    else:
+        assert held[0] == {"radial": ("sd", pytest.approx(0.8, rel=1e-6))}
+        assert sds[0]["radial"] == pytest.approx(0.8, rel=1e-6)
+    assert asked[0] == [0, 1, 4, 5]
+
+
+@needs_core
 def test_what_is_held_leaves_the_adjustment_before_the_next_group_is_judged():
     """The radial terms of a block that cannot tell its focal length from its height: judged with the focal length
     free they look as lost as it is - they trade with it -, judged once it is held they are what the block gives
@@ -408,6 +482,31 @@ def test_colmap_holds_a_group_for_every_camera_or_for_none():
     assert held[0] == {"focal": ("with", 1), "radial": ("with", 1)}
     assert held[1] == {"focal": ("sd", sds[1]["focal"]), "radial": ("sd", sds[1]["radial"])}
     assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and 0 < sds[0]["radial"] < 0.5  # its own figures stay
+
+
+@needs_core
+def test_the_measurements_of_the_markers_follow_the_tie_points_where_they_are_tie_points():
+    """COLMAP's adjustment has the measurements of the markers as tie point observations, each counted
+    ``marker_weight`` times: in the judgement of that adjustment their accuracy is that of the tie points,
+    variance factor included, over the square root of the count. Left at the pixel the problem states, on a block
+    with 0.3 px of noise, they would weigh a tenth of what they do and the sd of the focal length would come out
+    larger. Our own adjustment has them at the accuracy they state: nothing is scaled there."""
+    pb = _drone_block(0.0)  # looking straight down: the control points are what the focal length has
+    focal = pb.cameras[0][1][0]
+
+    def dense(**sigmas) -> float:
+        probe = dataclasses.replace(pb, **sigmas)
+        return float(np.sqrt(_dense_variances(probe)[bundle._Layout(probe).camera_cols[0]][:2].max())) / focal
+
+    sds, _held, factor = bundle.judge_intrinsics(pb, marker_weight=4)
+    ties = pb.pixel_sigma * np.sqrt(factor)
+    assert factor == pytest.approx(NOISE ** 2, rel=0.05)
+    assert sds[0]["focal"] == pytest.approx(dense(pixel_sigma=ties, marker_sigma=ties / 2.0), rel=1e-5)
+    without_the_factor = dense(pixel_sigma=ties, marker_sigma=pb.pixel_sigma / 2.0)
+    assert without_the_factor > 1.05 * sds[0]["focal"]
+    own, _held, _factor = bundle.judge_intrinsics(pb)
+    assert own[0]["focal"] == pytest.approx(dense(pixel_sigma=ties), rel=1e-5)
+    assert pb.marker_sigma == 0.5 and own[0]["focal"] != pytest.approx(sds[0]["focal"], rel=0.01)
 
 
 @needs_core
@@ -648,7 +747,7 @@ def test_a_pitched_grid_asked_for_its_principal_point_keeps_it_and_its_focal_len
     """What the fixed order gives where two groups trade (focal length, tangential terms, principal point, radial
     terms; what is held leaves the adjustment before the next group is judged). Pitched photos asked for their
     principal point: with it free the focal length is beyond its limit (0.55 % with COLMAP's formulation, 1.4 %
-    with ours) and, first in the order, is held; the principal point, judged without it, is beyond its own (1.2
+    with ours) and, first in the order, is held; the principal point, judged without it, is beyond its own (0.9
     and 1.4 px) and is held too; the distortion is refined. A rule that gave up the group furthest beyond its
     limit first would have held the principal point alone (3.0 and 11 px with the focal length free) and refined
     the focal length, which is determined without it (0.19 % and 0.34 %)."""
@@ -659,7 +758,7 @@ def test_a_pitched_grid_asked_for_its_principal_point_keeps_it_and_its_focal_len
     check = rep["intrinsics"]
     assert check["checked"] is True and check["held"] == {**NOTHING_HELD, "focal": [0], "principal_point": [0]}
     focal, principal_point = check["focal_sd"][0][1], check["principal_point_sd"][0][1]
-    assert bundle.FOCAL_SD_HOLD < focal < 0.02 and 1.0 < principal_point < 2.0
+    assert bundle.FOCAL_SD_HOLD < focal < 0.02 and 0.7 < principal_point < 2.0  # 0.92 px (COLMAP's), 1.41 px (ours)
     assert check["notes"] == [f"sensor 0: focal held: undetermined, sd {100 * focal:.2f} %",
                               f"sensor 0: principal point held: undetermined, sd {principal_point:.2f} px at the "
                               "image corner"]
@@ -718,9 +817,10 @@ def test_without_the_core_the_calibration_is_refined_as_before_and_the_log_says_
 
 @needs_core
 @pytest.mark.parametrize("engine", ENGINES)
-def test_a_block_without_a_covariance_keeps_its_calibration(tmp_path, monkeypatch, engine):
-    """A normal matrix that cannot be inverted (an intrinsic the block does not hold at all) is the same answer:
-    each group that would be refined is held, and the notes say why."""
+def test_a_block_without_a_covariance_keeps_its_calibration(tmp_path, monkeypatch, caplog, engine):
+    """A normal matrix that cannot be inverted (an intrinsic the block does not hold at all, or numbers the solver
+    cannot take) leaves nothing to judge by: each group that would be refined is held. That is not a verdict on
+    the block: the notes say the group was not judged, in their own words, and the log has them as warnings."""
     _doc, ch = _block(tmp_path, pitch=PITCH)
     before = _calibration(ch)
 
@@ -728,15 +828,20 @@ def test_a_block_without_a_covariance_keeps_its_calibration(tmp_path, monkeypatc
         raise RuntimeError("pivot 7 of the reduced system is not positive")
 
     monkeypatch.setattr(bundle, "intrinsics_covariance", no_covariance)
-    ch.optimize_cameras(engine=engine)
+    with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry.engine.sfm"):
+        ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
     groups = ["focal", "tangential", "radial"] if engine == "ppg" else ["focal", "radial"]
     assert check["checked"] is True and 0.2 < check["variance_factor"] < 0.4
     assert check["held"] == {group: ([0] if group in groups else []) for group in bundle.JUDGED}
     assert all(check[f"{group}_sd"] == [[0, None]] for group in groups) and check["principal_point_sd"] == []
-    why = "undetermined, no covariance (pivot 7 of the reduced system is not positive)"
+    why = "not judged, the block gave no covariance (pivot 7 of the reduced system is not positive)"
     assert check["notes"] == [f"sensor 0: {group} held: {why}" for group in groups]
+    assert not any("undetermined" in note for note in check["notes"])
+    warned = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.WARNING and "not judged" in r.getMessage()]
+    assert warned == [f"camera optimisation: {note}" for note in check["notes"]]
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
     assert _calibration(ch) == before and rep["after"]["control"] < 0.005
 
@@ -752,7 +857,7 @@ def test_what_the_check_holds_stays_out_of_the_adjustment(tmp_path, monkeypatch,
     sds = {"focal": 0.001, "tangential": 0.11, "principal_point": 0.22, "radial": 0.33}
     sds[group] = 0.02 if group == "focal" else 2.0
     verdict = ([sds], [{group: ("sd", sds[group])}], 0.25)
-    monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, together=False: verdict)
+    monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, **kwargs: verdict)
     calls, problems = _spy_on_colmap(monkeypatch), []
     real = bundle.adjust
 
@@ -792,6 +897,56 @@ def test_what_the_check_holds_stays_out_of_the_adjustment(tmp_path, monkeypatch,
 
 
 @needs_core
+def test_the_record_says_what_a_group_was_given_up_for(tmp_path, monkeypatch):
+    """A group that passed and is held in place of a later one that failed with it free: the record holds it,
+    the note names the later group with its sd with this one free and without it, and the adjustment refines the
+    later group and not this one."""
+    _doc, ch = _block(tmp_path, pitch=PITCH)
+    sds = {"focal": 0.001, "tangential": 0.48, "principal_point": None, "radial": 0.04}
+    verdict = ([sds], [{"tangential": ("for", ("radial", 0.91, 0.04))}], 0.25)
+    monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, **kwargs: verdict)
+    problems = []
+    real = bundle.adjust
+
+    def adjust(pb, **kwargs):
+        problems.append(copy.deepcopy(pb.free_intrinsics))
+        return real(pb, **kwargs)
+
+    monkeypatch.setattr(bundle, "adjust", adjust)
+    ch.optimize_cameras(engine="ppg")
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert check["held"] == {**NOTHING_HELD, "tangential": [0]}
+    assert check["tangential_sd"] == [[0, 0.48]] and check["radial_sd"] == [[0, 0.04]]
+    assert check["notes"] == ["sensor 0: tangential held: given up for the radial terms (0.91 px at the image "
+                              "corner with it free, 0.04 px without)"]
+    assert problems == [[[0, 1, 4, 5]]]
+    other = sfm._check_record(True)
+    sfm._hold(other, "focal", 3, sfm._given_up_note("principal_point", 1.66, 0.23))
+    assert other["notes"] == ["sensor 3: focal held: given up for the principal point (1.66 px at the image "
+                              "corner with it free, 0.23 px without)"]
+
+
+@needs_core
+def test_colmaps_judgement_weighs_the_markers_as_its_adjustment_does(tmp_path, monkeypatch):
+    """COLMAP's adjustment counts each measurement of a marker ``marker_weight`` times among its tie point
+    observations: its judgement is told so (the accuracy of the markers then follows that of the tie points,
+    variance factor included); the judgement of our own adjustment is not."""
+    seen = []
+    real = bundle.judge_intrinsics
+
+    def judge(pb, **kwargs):
+        seen.append(kwargs.get("marker_weight"))
+        return real(pb, **kwargs)
+
+    monkeypatch.setattr(bundle, "judge_intrinsics", judge)
+    for name, options in (("a", dict(engine="colmap")), ("b", dict(engine="colmap", marker_weight=9)),
+                          ("c", dict(engine="ppg"))):
+        _doc, ch = _block(tmp_path / name)
+        ch.optimize_cameras(**options)
+    assert seen == [4, 9, None]
+
+
+@needs_core
 def test_colmap_refines_the_distortion_whole_or_not_at_all(tmp_path, monkeypatch):
     """COLMAP's adjustment refines the distortion of its cameras whole: where the check holds the tangential terms
     of a camera that has them (a calibration gave them: its model keeps them) and not its radial terms, the radial
@@ -801,7 +956,7 @@ def test_colmap_refines_the_distortion_whole_or_not_at_all(tmp_path, monkeypatch
     assert [cam.model.name for cam in rec.cameras.values()] == ["OPENCV"]
     verdict = ([{"focal": 0.001, "tangential": 1.62, "principal_point": None, "radial": 0.12}],
                [{"tangential": ("sd", 1.62)}], 0.25)
-    monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, together=False: verdict)
+    monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, **kwargs: verdict)
     record, groups = sfm._colmap_calibration_check(ch, rec, hold_undetermined=True, positions=False,
                                                    use_markers=True, fit_principal_point=False, marker_weight=4)
     assert groups == {"tangential", "radial"}
@@ -1131,6 +1286,30 @@ def test_the_option_holds_by_default_and_reaches_both_formulations(tmp_path, mon
         assert ppg.Document.open(doc.path).chunk.meta["sfm"]["optimize"]["intrinsics"]["hold_undetermined"] is True
 
 
+def test_a_batch_takes_the_option(tmp_path, monkeypatch):
+    """The step *optimize_cameras* of a batch has ``hold_undetermined`` among its parameters, True unless the step
+    says otherwise; it reaches the chunk, and the form of the step in the batch window offers it."""
+    from pyarchinit_photogrammetry import batch
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    assert batch.OPERATIONS["optimize_cameras"]["hold_undetermined"] is True
+    assert batch.step("optimize_cameras")["params"]["hold_undetermined"] is True
+    freed = batch.step("optimize_cameras", hold_undetermined=False)
+    assert freed["params"] == {"fit_principal_point": False, "use_markers": True, "hold_undetermined": False}
+    doc, _ch = _block(tmp_path)
+    doc.save()
+    seen = []
+    monkeypatch.setattr(Chunk, "optimize_cameras", lambda self, **kwargs: seen.append(kwargs["hold_undetermined"]))
+    report = batch.run_batch(doc, [freed, batch.step("optimize_cameras")], resume=False)
+    assert seen == [False, True] and not report["failed"]
+    pytest.importorskip("PySide6")
+    from pyarchinit_photogrammetry.gui import batch_dialog
+
+    form = {f.name: f for f in batch_dialog.fields("optimize_cameras", freed["params"])}
+    assert form["hold_undetermined"].default is False and "calibrazione" in form["hold_undetermined"].label
+    assert {f.name: f.default for f in batch_dialog.fields("optimize_cameras", {})}["hold_undetermined"] is True
+
+
 @needs_core
 def test_the_command_says_which_sensors_were_held(tmp_path):
     from typer.testing import CliRunner
@@ -1360,6 +1539,36 @@ def test_the_weak_ring_meets_the_four_lines_of_its_gate(weak_ring, tmp_path, eng
     errors = _marker_rmse(ch)
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm (COLMAP's), 1.22 mm (ours)
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.87 mm and 8.88 mm
+
+
+@needs_core
+@pytest.mark.slow
+def test_the_weak_ring_with_many_tie_points_gives_up_its_tangential_terms_for_the_radial_ones(weak_ring, tmp_path,
+                                                                                               monkeypatch):
+    """The ring with twelve times the weight of its tie points - a block of thousands of tie points a photo, here
+    their variance factor over twelve - and our formulation: every sd is 3.5 times smaller. The tangential terms
+    now pass (0.47 px at the corner) and stay free; the radial terms, judged with them free, fail (0.89 px).
+    Held there, they would stay at the zero of the mapper and the check targets at 17 mm. They are judged again
+    without the tangential terms, pass (0.04 px) and are refined; the tangential terms are held for them: both
+    lines of the gate hold."""
+    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
+
+    real = bundle.tie_variance_factor
+    monkeypatch.setattr(bundle, "tie_variance_factor", lambda pb: real(pb) / 12.0)
+    ch = _copy_of(weak_ring.project, tmp_path / "many").chunk
+    ch.optimize_cameras(engine="ppg")
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    sensor = check["focal_sd"][0][0]
+    assert check["held"] == {**NOTHING_HELD, "focal": [sensor], "tangential": [sensor]}
+    assert 0.4 < check["tangential_sd"][0][1] < bundle.GROUP_SD_HOLD_PX and 0 < check["radial_sd"][0][1] < 0.1
+    assert len(check["notes"]) == 2 and check["notes"][1].startswith(
+        f"sensor {sensor}: tangential held: given up for the radial terms (0.91 px at the image corner with it "
+        "free, 0.04 px without)")
+    calibration = _calibration(ch)[0]
+    assert calibration[4] == pytest.approx(-0.04, abs=0.005) and calibration[6:] == [0.0, 0.0]
+    errors = _marker_rmse(ch)
+    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
+    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
 
 
 @needs_core

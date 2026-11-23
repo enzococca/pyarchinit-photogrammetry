@@ -66,12 +66,15 @@ INTRINSICS_MISSING = "the native core with the covariance of the intrinsics (API
 # is known of lenses: the focal length first, with every other group free, as the mapper judges it; then from
 # what a real lens needs least to what it needs most - the tangential terms, near zero in most lenses, the
 # principal point, near the centre of the photo, the radial terms last. Of two groups that trade the earlier is
-# given up, and the later, judged without it, may stay. An order by how far each group is beyond its limit, the
-# worst first, was tried and dropped: on a ring flown once, with the focal length held, it gave up the radial
-# terms (3.07 px) in place of the tangential ones (1.63 px), left k1 at zero for a true -0.04 and the check
-# targets at 17 mm - 9 mm in this order. What an adjustment then moves too far is held and the adjustment run
-# again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first radial term by more than
-# K1_MOVE_HOLD
+# given up, and the later, judged without it, may stay - also where the earlier one had passed on its own: a
+# later group that fails is judged again without the earlier groups that are still free, and where it then
+# passes they are held in its place (the tangential terms of a ring flown once pass at 0.5 px on a block of many
+# tie points while its radial terms, judged with them free, fail at 0.9 px: the tangential terms go, the radial
+# terms are refined). An order by how far each group is beyond its limit, the worst first, was tried and
+# dropped: on that ring, with the focal length held, it gave up the radial terms (3.07 px) in place of the
+# tangential ones (1.63 px), left k1 at zero for a true -0.04 and the check targets at 17 mm - 9 mm in this
+# order. What an adjustment then moves too far is held and the adjustment run again (runaways): a focal length
+# by more than FOCAL_MOVE_HOLD of its start, the first radial term by more than K1_MOVE_HOLD
 FOCAL_SD_HOLD = 0.005
 GROUP_SD_HOLD_PX = 0.5
 JUDGED = ("focal", "tangential", "principal_point", "radial")
@@ -824,7 +827,26 @@ def corner_sd(model: str, params, width: float, height: float, indices, covarian
     return float(np.sqrt(max(worst, 0.0)))
 
 
-def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, float | None]:
+def _conditional_covariance(matrix: np.ndarray, kept: list, gone: list) -> np.ndarray | None:
+    """The covariance of the columns ``kept`` of ``matrix`` once the columns ``gone`` are held - what the
+    covariance of the adjustment without them gives: ``S_kk - S_kg S_gg^-1 S_gk``. None where the block of the
+    columns to hold cannot be inverted."""
+    if not gone:
+        return matrix[np.ix_(kept, kept)]
+    block = matrix[np.ix_(gone, gone)]
+    scale = np.sqrt(block.diagonal())
+    if not np.all(np.isfinite(scale)) or np.any(scale <= 0.0):
+        return None
+    cross = matrix[np.ix_(kept, gone)] / scale  # the columns to hold at unit variance: one scale for all of them
+    try:
+        solved = np.linalg.solve(block / np.outer(scale, scale), cross.T)
+    except np.linalg.LinAlgError:
+        return None
+    return matrix[np.ix_(kept, kept)] - cross @ solved
+
+
+def judge_intrinsics(pb: Problem, together: bool = False,
+                     marker_weight: float | None = None) -> tuple[list, list, float | None]:
     """Which groups of the intrinsics of each camera an adjustment of ``pb`` determines, at the parameters of the
     problem (the rule of the rounds of the native mapper, group by group and on one scale). Per camera and per
     group of :data:`JUDGED` that the problem frees, the marginal sd of the group in the adjustment:
@@ -844,18 +866,29 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     principal point, the radial terms -, so that of two groups that trade with each other the earlier is given up
     and the later, judged without it, may stay; it does not follow how far each group is beyond its limit (the
     tangential terms of a ring flown once are less far beyond theirs than its radial terms are while they are
-    free, and are the ones to give up). ``together``: a group held
-    for one camera is held for every camera that would refine it (COLMAP's adjustment refines a group for all its
-    cameras or for none). Without a covariance (a normal matrix that cannot be inverted: an intrinsic the block
-    does not hold at all) the group being judged is held for every camera, and the next one is judged without it.
+    free, and are the ones to give up).
+
+    An earlier group that passed is given up as well for a later one that fails: the later group is judged again
+    without the earlier groups of its camera that are still free - the tangential terms first, then the
+    principal point too, the focal length only when nothing else is enough - and where it then passes they are
+    held in its place and it is refined; where it fails even without them it is held, and they stay free.
+
+    ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment
+    refines a group for all its cameras or for none), and a later group is refined only where giving up the
+    earlier groups of every camera lets it pass for all of them. Without a covariance (a normal matrix that
+    cannot be inverted: an intrinsic the block does not hold at all) the group being judged is held for every
+    camera, and the next one is judged without it.
 
     The covariance is scaled by the variance factor of the tie points (:func:`tie_variance_factor`: it goes into
     ``pixel_sigma``; the references keep the accuracy they state) and taken with the gauge of
-    :func:`_with_gauge`. Returns, per camera, ``{group: sd}`` (None for a group the problem does not free, or
-    without a covariance) and ``{group: why}`` for the groups to hold - ``("sd", sd)``, ``("no covariance",
-    message)`` or ``("with", camera)`` -, and the variance factor (None when the problem frees nothing that is
-    judged: the core is not asked). RuntimeError where the core cannot give a covariance at all
-    (:func:`covariance_ready`)."""
+    :func:`_with_gauge`. ``marker_weight``: the measurements of the markers are tie point observations, each
+    counted so many times (COLMAP's adjustment has them so): their accuracy is that of the tie points, variance
+    factor included, over its square root. Returns, per camera, ``{group: sd}`` (the sd the group is refined
+    with, or the one it was held at; None for a group the problem does not free, or without a covariance) and
+    ``{group: why}`` for the groups to hold - ``("sd", sd)``, ``("no covariance", message)``, ``("with",
+    camera)`` or ``("for", (later group, its sd with this one free, its sd without))`` -, and the variance factor
+    (None when the problem frees nothing that is judged: the core is not asked). RuntimeError where the core
+    cannot give a covariance at all (:func:`covariance_ready`)."""
     n = len(pb.cameras)
     groups = [intrinsic_groups(model) for model, *_rest in pb.cameras]
     free = [list(f) for f in _free_intrinsics(pb)]
@@ -873,6 +906,8 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     probe, flight = _with_gauge(pb)
     factor = tie_variance_factor(probe)
     probe.pixel_sigma = float(probe.pixel_sigma) * float(np.sqrt(factor))
+    if marker_weight:
+        probe.marker_sigma = probe.pixel_sigma / float(np.sqrt(marker_weight))
 
     def covariance():
         """The covariance of what is still free with the column of each ``(camera, parameter)``, or None with why."""
@@ -883,8 +918,44 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
             return None, str(exc)
         return matrix, {(c, k): j for j, (c, k) in enumerate((c, k) for c in range(n) for k in free[c])}
 
+    def judged(c: int, group: str, block) -> tuple[float, float]:
+        """The sd of ``group`` of camera ``c``, ``block`` the covariance of its terms that are free, and its limit."""
+        model, params, width, height = pb.cameras[c]
+        if block is None:
+            return float("nan"), 0.0
+        if group == "focal":
+            return float(np.sqrt(max(float(block.diagonal().max()), 0.0))) / abs(float(params[0])), FOCAL_SD_HOLD
+        return corner_sd(model, params, float(width), float(height), refined(c, group), block), GROUP_SD_HOLD_PX
+
+    def without_earlier(group: str, failing: dict, earlier: list) -> dict:
+        """Ruling R25: the cameras of ``failing`` ({camera: the sd ``group`` fails with}) whose ``group`` passes
+        once earlier groups that are still free are held, with those groups and the sd it then has. The earlier
+        groups are given up one more at a time (``earlier``, in the order they go), for the camera itself - for
+        every camera with ``together``, where the group must then pass for all the cameras that fail."""
+        saved: dict = {}
+        for count in range(1, len(earlier) + 1):
+            given = earlier[:count]
+            pending = [c for c in failing if c not in saved]
+            if not pending:
+                break
+            trial = {}
+            for c in pending:
+                owners = range(n) if together else [c]
+                gone = [columns[(o, k)] for o in owners for e in given for k in refined(o, e)]
+                if not gone:
+                    continue
+                kept = [columns[(c, k)] for k in refined(c, group)]
+                sd, limit = judged(c, group, _conditional_covariance(matrix, kept, gone))
+                if np.isfinite(sd) and sd <= limit:
+                    trial[c] = (list(given), sd)
+            if together and len(trial) < len(pending):
+                continue  # not for every camera: more is given up, or the group is held
+            saved.update(trial)
+        return saved
+
     matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
-    for group in JUDGED:
+    for position, group in enumerate(JUDGED):
+        failing: dict = {}
         for c in range(n):
             terms = refined(c, group)
             if not terms:
@@ -893,31 +964,37 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
                 held[c][group] = ("no covariance", str(columns))
                 continue
             index = [columns[(c, k)] for k in terms]
-            block = matrix[np.ix_(index, index)]
-            model, params, width, height = pb.cameras[c]
-            if group == "focal":
-                sd = float(np.sqrt(max(float(block.diagonal().max()), 0.0))) / abs(float(params[0]))
-                limit = FOCAL_SD_HOLD
-            else:
-                sd = corner_sd(model, params, float(width), float(height), terms, block)
-                limit = GROUP_SD_HOLD_PX
+            sd, limit = judged(c, group, matrix[np.ix_(index, index)])
             if not np.isfinite(sd):
                 held[c][group] = ("no covariance", "its variance is not a number")
                 continue
             sds[c][group] = sd
             if sd > limit:
+                failing[c] = sd
+        # the earlier groups that go for it, the first to go first: what a lens needs least, the focal length last
+        earlier = [g for g in JUDGED[:position] if g != "focal"] + [g for g in JUDGED[:position] if g == "focal"]
+        saved = without_earlier(group, failing, earlier) if failing and matrix is not None else {}
+        given_up: dict = {}  # {camera: [earlier groups held in place of this one]}
+        for c, sd in failing.items():
+            if c in saved:
+                given, after = saved[c]
+                sds[c][group] = after
+                for owner in (range(n) if together else [c]):
+                    for e in given:
+                        if refined(owner, e) and e not in held[owner]:
+                            held[owner][e] = ("for", (group, sd, after)) if owner == c else ("with", c)
+                            given_up.setdefault(owner, []).append(e)
+            else:
                 held[c][group] = ("sd", sd)
         holders = [c for c in range(n) if group in held[c]]
-        if not holders:
-            continue
-        if together:
+        if holders and together:
             for c in range(n):
                 if refined(c, group) and group not in held[c]:
                     held[c][group] = ("with", holders[0])
         for c in range(n):
-            if group in held[c]:
-                free[c] = [k for k in free[c] if k not in groups[c][group]]
-        if any(refined(c, later) for c in range(n) for later in JUDGED[JUDGED.index(group) + 1:]):
+            gone = set(given_up.get(c, ())) | ({group} if group in held[c] else set())
+            free[c] = [k for k in free[c] if not any(k in groups[c][g] for g in gone)]
+        if (holders or given_up) and any(refined(c, later) for c in range(n) for later in JUDGED[position + 1:]):
             matrix, columns = covariance()  # what is still to judge, in the adjustment without what was held
     return sds, held, factor
 
