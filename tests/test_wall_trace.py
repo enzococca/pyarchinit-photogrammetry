@@ -18,6 +18,9 @@ from wall_helpers import distance_to, model_doc, wall_doc
 
 ARC = 3.0 * np.column_stack([np.cos(np.radians(np.linspace(0, 120, 61))), np.sin(np.radians(np.linspace(0, 120, 61)))])
 TURN = [[0.0, 0.0], [4.0, 0.0], [4.0 + 4.0 * np.cos(np.radians(120.0)), 4.0 * np.sin(np.radians(120.0))]]
+BUTTRESS = [[0.0, 0.0], [3.0, 0.0], [3.0, -0.6], [3.8, -0.6], [3.8, 0.0], [7.0, 0.0]]   # 60 cm to the right of the line
+ZIGZAG = [[0.0, 0.0], [4.0, 0.0], [1.4, 1.5], [5.4, 1.5]]                               # two turns of 150 degrees
+CORRIDOR = [[0.6, 3.0], [0.6, 0.0], [0.0, 0.0], [0.0, 3.0]]                             # 60 cm wide, seen from inside
 OFF = [[0.10, -0.40], [0.25, -0.20], [0.30, -0.15]]      # clicks up to 0.4 m in front of the L, not parallel to it
 
 
@@ -62,6 +65,19 @@ def _rough_ground(scene, lo, hi, rough: float, cell: float = 0.04, seed: int = 3
     idx = np.arange(gx.size).reshape(gx.shape)
     a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
     return _added(scene, xyz, np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])]))
+
+
+def _in_front(face, viewer: str, by: float) -> np.ndarray:
+    """The line of a face moved ``by`` metres towards its viewer, its corners where the moved segments meet."""
+    face = np.asarray(face, np.float64)
+    t = np.diff(face, axis=0)
+    t /= np.hypot(*t.T)[:, None]
+    n = (1.0 if viewer == "right" else -1.0) * np.column_stack([t[:, 1], -t[:, 0]])
+    out = face.copy()
+    out[0], out[-1] = face[0] + by * n[0], face[-1] + by * n[-1]
+    for i in range(1, len(face) - 1):
+        out[i] = face[i] + by * (n[i - 1] + n[i]) / (1.0 + n[i - 1] @ n[i])
+    return out
 
 
 def _stand(chunk, places):
@@ -143,6 +159,26 @@ def test_a_curve_of_short_segments_is_shifted_segment_by_segment(tmp_path):
     _doc, ch, info = model_doc(tmp_path / "dentro", make_wall_scene(trace=ARC, viewer="left"))
     r = T.snap_trace(ch, centre + (face - centre) * (2.8 / 3.0), side="left")
     assert r["snapped"] and distance_to(face, r["points"]).max() < 0.02 and np.abs(r["shift"] - 0.2).max() < 0.005
+
+
+@pytest.mark.parametrize("trace, viewer, by, band", [
+    (CORRIDOR, "right", 0.10, 0.3),       # 60 cm between its two long walls
+    (BUTTRESS, "left", 0.20, 0.5),        # seen from the other side a buttress is a niche: 80 cm wide, 60 deep
+    (BUTTRESS, "left", -0.15, 0.5),       # ... clicked on the crest
+    (ZIGZAG, "right", 0.20, 0.5),         # the next leg comes back 1.5 m in front of this one
+    (ZIGZAG, "left", 0.20, 0.5)])
+def test_a_narrow_place_wants_a_narrow_band(trace, viewer, by, band, tmp_path):
+    """What a segment takes for the face is the first surface met from ``band`` in front of it: in a place
+    narrower than the band, the other side of the place - the back of the wall across a corridor, the far side of
+    a niche, the next leg of a zigzag. With a band narrower than the place the line goes onto the face; with the
+    2.5 m it has by default it is left as clicked or goes elsewhere."""
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=trace, viewer=viewer))
+    face = np.asarray(info["face"])
+    clicked = _in_front(face, viewer, by)
+    r = T.snap_trace(ch, clicked, side=viewer, band=band)
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
+    wide = T.snap_trace(ch, clicked, side=viewer)
+    assert wide["snapped"] is False or np.abs(wide["points"] - face).max() > 0.2
 
 
 def test_the_line_fitted_to_what_a_segment_sees(model_outside, tmp_path):
@@ -507,7 +543,7 @@ def test_the_side_by_the_photos_a_word_or_a_point(wall_dataset, model_outside, t
     _doc, (ch,), info = wall_doc(tmp_path, wall_dataset)
     face = np.asarray(info["face"])
     assert T.side_of(ch, face, "auto") == "right" and T.side_of(ch, face) == "right"
-    assert T.side_of(ch, face[::-1], "auto") == "left"
+    assert T.side_of(ch, face[::-1], "auto") == "left" and T.side_of(ch, face[::-1], None) == "left"
     assert T.side_of(ch, face, face[0] + [3.0, -3.0]) == "right"          # a point 3 m south of the first leg
     assert T.side_of(ch, face, tuple(face[0] + [3.0, 3.0])) == "left"     # ... and 3 m north of it
     assert T.side_of(ch, face[::-1], [*(face[0] + [3.0, -3.0]), 101.0]) == "left"        # a height with it
@@ -556,6 +592,12 @@ def test_the_side_of_a_point_is_taken_at_its_nearest_point_of_the_line(model_out
     assert T.side_of(ch, turn, (-1.0, 0.2)) == "left" and T.side_of(ch, turn, (-1.0, -0.2)) == "right"   # before it
     assert T.side_of(ch, turn, np.array([1.0, 4.0])) == "left"                  # past its end, on the tangent's left
     assert T.side_of(ch, turn, np.array([2.0, 5.0])) == "right"
+    # all round the outside of the corner, from the right of the first leg to the right of the second (the two
+    # legs are as near as each other there, to the last digit: either may be taken for the nearest)
+    for angle in np.radians(np.linspace(-89.0, 29.0, 60)):
+        for far in (0.3, 1.0, 2.5):
+            point = turn[1] + far * np.array([np.cos(angle), np.sin(angle)])
+            assert T.side_of(ch, turn, point) == "right" and T.side_of(ch, turn[::-1], point) == "left"
     for bad in ((2.0, 0.0), (4.0, 0.0), (1.0,), (np.nan, 1.0), "sopra", None):  # on the line, on its corner, no point
         with pytest.raises(TraceRefused) as e:
             T.side_of(ch, turn, bad)
@@ -563,6 +605,28 @@ def test_the_side_of_a_point_is_taken_at_its_nearest_point_of_the_line(model_out
     with pytest.raises(TraceRefused) as e:
         T.side_of(ch, [turn[0]], "right")                      # the line itself is asked first
     assert e.value.reason == "points"
+
+
+def test_outside_a_corner_whichever_leg_is_taken_for_the_nearest():
+    """Outside a corner its two legs are as near as each other - both at the corner - and which of the two is
+    found the nearer is a matter of the last digit: for one point in sixteen of these it is the second, whose own
+    line would put one in nine of them on the wrong side."""
+    rng = np.random.default_rng(0)
+    seen = 0
+    for _ in range(60):
+        line = np.cumsum(rng.uniform(-3.0, 3.0, (4, 2)), axis=0) + rng.choice([0.0, 1.0]) * np.array([5e5, 4.4e6])
+        step = np.diff(line, axis=0)
+        heading = np.arctan2(step[:, 1], step[:, 0])
+        turn = (np.diff(heading) + np.pi) % (2.0 * np.pi) - np.pi
+        if np.abs(turn).max() > np.radians(160.0) or np.abs(turn).min() < np.radians(5.0):
+            continue
+        for k in (1, 2):                                      # round the outside of each corner, leg to leg
+            angle = heading[k - 1] - np.sign(turn[k - 1]) * np.pi / 2.0 + rng.uniform(0.02, 0.98, 50) * turn[k - 1]
+            points = line[k] + rng.uniform(0.1, 3.0, 50)[:, None] * np.column_stack([np.cos(angle), np.sin(angle)])
+            here = distance_to(line, points) > np.hypot(*(points - line[k]).T) - 1e-9    # the corner is the nearest
+            assert (T._sides(line, points[here]) == np.sign(turn[k - 1])).all()         # a left turn: on its right
+            seen += int(here.sum())
+    assert seen > 2000
 
 
 # ---------------------------------------------------------------- the frame
