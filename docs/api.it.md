@@ -2448,7 +2448,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | `archaeo.coreg` | `coregister` (ricerca iniziale sulle pendenze per spostamenti di metri, poi spostamento di Nuth e Kääb con scarto verticale e inclinazione sul terreno stabile), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (GlobalId IFC dal `node_uuid` di una scheda US), `read_ifc_elements` |
-| `archaeo.stratigraphy` (rapporti) | `RELATION_EDGES` (i rapporti delle schede di PyArchInit in italiano, inglese e tedesco come archi dell'Extended Matrix), `stratigraphic_edges` (ogni rapporto dichiarato una volta sola, dall'inizio del suo arco) |
+| `archaeo.stratigraphy` (rapporti) | `RELATION_EDGES` (i rapporti delle schede di PyArchInit in italiano, inglese e tedesco come archi dell'Extended Matrix), `stratigraphic_edges` (ogni rapporto dichiarato una volta sola, dall'inizio del suo arco; `>` / `<` sono `is_after`, i legami ai paradati `>>` / `<<` di `PARADATA_LINKS` restano fuori) |
 | `ai.classify` | `classify_chunk`, `classify_by_units`, `unit_class_name`, `units_table_csv`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
 | `ai.learn` | `point_features`, `train`, `predict`, `ClassifierModel`, `train_on_chunk`, `classify_chunk_with_model` (vedi sotto) |
 | `ai.sam` | `Sam2Segmenter`, `segment_orthomosaic`, `auto_units`, `classify_from_masks`, `segment_photo_and_classify` |

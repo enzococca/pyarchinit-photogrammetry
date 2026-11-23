@@ -2378,7 +2378,7 @@ assistant ("limited for scripts" under 2).
 | `archaeo.coreg` | `coregister` (initial search on the slopes for shifts of metres, then the Nuth & Kääb shift with bias and tilt on the stable ground), `Coregistration`, `coregister_chunk`, `reference_dem`, `summary`, `bilinear`, `xdem_available` |
 | `archaeo.stratigraphy` | `UnitPolygon`, `mask_to_polygons`, `export_units` |
 | `bim.ifc` | `export_ifc`, `export_chunk_ifc`, `export_proxies_ifc`, `split_mesh_by_units`, `global_id` (IFC GlobalId from the `node_uuid` of a US form), `read_ifc_elements` |
-| `archaeo.stratigraphy` (relations) | `RELATION_EDGES` (the relations of PyArchInit's forms in Italian, English and German as Extended Matrix edges), `stratigraphic_edges` (each declared relation once, from the start of its edge) |
+| `archaeo.stratigraphy` (relations) | `RELATION_EDGES` (the relations of PyArchInit's forms in Italian, English and German as Extended Matrix edges), `stratigraphic_edges` (each declared relation once, from the start of its edge; `>` / `<` are `is_after`, the paradata links `>>` / `<<` of `PARADATA_LINKS` are left out) |
 | `ai.classify` | `classify_chunk`, `classify_by_units`, `unit_class_name`, `units_table_csv`, `assign_class_by_polygons`, `class_statistics`, `set_class`, `clear_manual`, `class_names` |
 | `ai.learn` | `point_features`, `train`, `predict`, `ClassifierModel`, `train_on_chunk`, `classify_chunk_with_model` (see below) |
 | `ai.sam` | `Sam2Segmenter`, `segment_orthomosaic`, `auto_units`, `classify_from_masks`, `segment_photo_and_classify` |
