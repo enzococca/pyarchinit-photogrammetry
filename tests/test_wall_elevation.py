@@ -83,6 +83,32 @@ def window(ch, entry, box):
                            rgb=np.moveaxis(ortho_of(ch, entry)[:3, rows, cols], 0, -1))
 
 
+def _added(scene, vertices, faces):
+    """``scene`` with more triangles (``faces`` index ``vertices``, local metres): a block, a panel, a ground. In
+    place; returns the scene."""
+    k = len(scene.vertices)
+    scene.vertices = np.vstack([scene.vertices, np.asarray(vertices, np.float64)])
+    scene.faces = np.vstack([scene.faces, np.asarray(faces) + k]).astype(scene.faces.dtype)
+    scene.face_columns = np.concatenate([scene.face_columns, np.full(len(faces), np.nan)])
+    return scene
+
+
+def _model_of(folder, xyz, faces, label: str = "Modello"):
+    """A chunk in a local system whose model is the mesh ``xyz``, ``faces`` (metres), and nothing else."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.io.mesh_ply import MeshData, write_mesh
+
+    doc = ppg.Document()
+    ch = doc.add_chunk(label)
+    ch.meta["metric"] = True
+    folder.mkdir(parents=True, exist_ok=True)
+    doc.save(folder / "modello.ppg")
+    v = np.empty(len(xyz), [("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+    v["x"], v["y"], v["z"] = np.asarray(xyz, np.float64).T
+    ch._set_product("model", write_mesh(ch.data_dir / "model.ply", MeshData(v, np.asarray(faces, np.int64))))
+    return ch
+
+
 @pytest.fixture(scope="module")
 def wall(wall_dataset, tmp_path_factory):
     """The wall seen from outside its corner, with its photos: ``(chunk, info)``."""
@@ -177,12 +203,19 @@ def test_the_wall_is_painted_round_its_corner(which, built):
 
 
 def test_the_band_follows_the_limits_of_the_frame(tmp_path):
-    _doc, ch, info = model_doc(tmp_path, make_wall_scene(viewer="left"))
+    # the wall seen from inside, with a merlon 3 m high on its last metres
+    scene = _added(make_wall_scene(viewer="left"), [[0.9, 0.0, 2.0], [1.1, 0.0, 2.0], [1.0, 0.0, 3.0]], [[0, 1, 2]])
+    _doc, ch, info = model_doc(tmp_path, scene)
     frame = WallPath(ordered(info["face"], "left"), radius=0.5)
     rc, lock = raycaster_for_chunk(ch), threading.Lock()
     surf = E.FrameSurface(ch, rc, frame, RES, lock, (-0.5, 0.5), None)
     # without bounds: u from the trace's own ends, v from the vertices of the model in the band between them
-    assert surf.bounds == pytest.approx((0.0, 100.0, frame.length, 102.0), abs=1e-6)
+    assert surf.bounds == pytest.approx((0.0, 100.0, frame.length, 103.0), abs=1e-6)
+    # a trace shorter than the wall, its ends between two vertices of the model: still its own ends, not the wall's
+    # (which goes on past both) nor the vertices next to them; the merlon, past its end, is not of its heights
+    short = WallPath(np.array([[6.0, 3.07], [6.0, 0.0], [2.07, 0.0]]) + info["shift"][:2], radius=0.5)
+    part = E.FrameSurface(ch, rc, short, RES, lock, (-0.5, 0.5), None)
+    assert part.bounds == pytest.approx((0.0, 100.0, short.length, 102.0), abs=1e-6)
     mid = frame.corners()[0]["u"]
     lo, hi = surf.band(np.array([1.0, mid, np.nan]))
     assert np.allclose(lo[:2], -0.5) and np.allclose(hi[:2], [0.5, 0.5 - CLEARANCE], atol=1e-6)
@@ -214,6 +247,27 @@ def test_the_band_follows_the_limits_of_the_frame(tmp_path):
     lo, hi = grid.band(np.array([mid, 1.0, np.nan, mid]))            # in any order, twice, not a number
     assert np.allclose(hi[[0, 1, 3]], [0.5 - CLEARANCE, 0.5, 0.5 - CLEARANCE], atol=1e-6) and np.isnan(hi[2])
     assert asked == [64, 32, 2] and np.allclose(lo[[0, 1, 3]], -0.5) and np.isnan(lo[2])
+
+
+def test_nothing_is_kept_behind_the_end_of_the_frame(tmp_path):
+    """Behind a convex corner the frame ends at the centre of its arc: what lies further belongs to the other
+    face of the wall, and is not kept even when the band asked goes deeper. A wall without its face for 0.4 m
+    either side of the corner: the rays of the arc go through to the back of the wall."""
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene(), drop=(5.6, 6.4))
+    frame = WallPath(np.asarray(info["face"]), radius=0.2)
+    rc = raycaster_for_chunk(ch)
+    surf = E.FrameSurface(ch, rc, frame, RES, threading.Lock(), (-0.8, 0.5), (0.0, 100.0, frame.length, 102.0))
+    mid = frame.corners()[0]["u"]
+    u, v = np.array([mid - 0.05, mid + 0.05]), np.array([101.0, 101.0])
+    lo, hi = surf.band(u)
+    assert np.allclose(lo, -(0.2 - CLEARANCE), atol=1e-6) and np.allclose(hi, 0.5)
+    # the model has a surface on those rays, inside the band asked and behind the end of the frame
+    found = hi - rc.hit_distance(ch.to_internal(frame.point(u, v, hi)), -frame.view(u, v))
+    assert ((found > -0.8) & (found < lo - 0.3)).all()
+    assert np.isnan(surf.depth_at(u, v)).all()
+    # where the wall has its face the depth is the face's, and the limit behind is the band's
+    assert surf.depth_at(np.array([3.0]), np.array([101.0])) == pytest.approx([0.0], abs=1e-4)
+    assert surf.band(np.array([3.0]))[0] == pytest.approx([-0.8])
 
 
 def test_u_is_the_length_on_the_face(model):
@@ -265,6 +319,21 @@ def test_the_heights_of_the_wall_are_read_on_the_model(tmp_path):
         E.height_range(ch, frame, (0.6, 0.9))                        # nothing of the model in front of the face
     with pytest.raises(ValueError, match="band"):
         E.height_range(ch, frame, (-0.5, 0.5), span=(frame.length + 1.0, frame.length + 2.0))   # past the end
+    # the 0.5 and the 99.5 percentiles of the vertices along the line: of 10,000, the 30 far below and the 30 far
+    # above are not the wall, the 170 of a footing under it and the 170 of a pier over it are, down to the 20th of
+    # them from each end (0.44 m under, 1.88 m over, rounded outward). The vertices past the end of the line and
+    # those behind its band, all 9 m up, are not of it
+    z = np.concatenate([np.full(30, -1.0), np.linspace(-0.5, 0.0, 170), np.linspace(0.0, 1.0, 9600),
+                        np.linspace(1.0, 2.0, 170), np.full(30, 3.5)])
+    x = np.random.default_rng(5).permutation(np.linspace(0.05, 5.95, len(z)))
+    past = np.column_stack([np.linspace(6.05, 6.45, 80), np.zeros(80), np.full(80, 9.0)])
+    behind = np.column_stack([np.linspace(1.0, 5.0, 80), np.full(80, 0.4), np.full(80, 9.0)])
+    cloud = _model_of(tmp_path / "vertici", np.vstack([np.column_stack([x, np.zeros(len(z)), z]), past, behind]),
+                      [[0, 1, 2]])
+    line = WallPath([[0.0, 0.0], [6.0, 0.0]])
+    assert E.height_range(cloud, line, (-0.2, 0.5)) == pytest.approx((-0.45, 1.9), abs=1e-9)
+    assert E.height_range(cloud, line, (-0.2, 0.5), span=(0.0, 6.5))[1] == pytest.approx(9.0)    # with those past
+    assert E.height_range(cloud, line, (-0.5, 0.5))[1] == pytest.approx(9.0)                     # with those behind
 
 
 def test_a_path_is_built_as_asked(model):
@@ -417,11 +486,8 @@ def test_a_ray_along_the_end_of_the_wall_adds_no_length(tmp_path):
     """The column on the very end of a wall may find any depth: its rays run along the return of the wall. With a
     sliver 0.2 m behind the face that the last column alone sees, and with a first column of the wall that answers
     0.3 m, the wall is as long as its face and ``u`` does not jump where the wall starts."""
-    scene = make_wall_scene()
-    k = len(scene.vertices)
-    scene.vertices = np.vstack([scene.vertices, [[5.8, 4.0005, 0.0], [5.8, 4.0015, 0.0], [5.8, 4.0015, 2.0],
-                                                 [5.8, 4.0005, 2.0]]])
-    scene.faces = np.vstack([scene.faces, [[k, k + 1, k + 2], [k, k + 2, k + 3]]]).astype(scene.faces.dtype)
+    scene = _added(make_wall_scene(), [[5.8, 4.0005, 0.0], [5.8, 4.0015, 0.0], [5.8, 4.0015, 2.0],
+                                       [5.8, 4.0005, 2.0]], [[0, 1, 2], [0, 2, 3]])
     _doc, ch, info = model_doc(tmp_path, scene)
     face = np.asarray(info["face"]) + [[0.0, 0.0], [0.0, 0.0], [0.0, 0.001]]     # the trace ends 1 mm past the wall
     frame = WallPath(face, radii=corner_radii(face))
@@ -447,6 +513,21 @@ def test_a_ray_along_the_end_of_the_wall_adds_no_length(tmp_path):
     assert np.abs(np.interp([-1.0, 0.0, 3.0, 9.0], pairs[:, 0], pairs[:, 1]) - want).max() < 0.002
 
 
+def test_the_face_of_a_column_is_what_most_of_its_height_shows(tmp_path):
+    """The depth of a column is the median over its heights. A bench against the foot of the wall, a quarter of its
+    height, stands in front of the face and is not the face: the wall is no longer for it. A pier three quarters
+    of its height is the face there: the wall runs round it, 0.3 m out and 0.3 m back."""
+    scene = make_wall_scene(trace=[[0.0, 0.0], [8.0, 0.0]])
+    for x0, x1, top in ((2.0, 4.0, 0.5), (5.0, 6.0, 1.5)):                             # 0.3 m in front of the face
+        _added(scene, [[x0, -0.3, 0.0], [x1, -0.3, 0.0], [x1, -0.3, top], [x0, -0.3, top]], [[0, 1, 2], [0, 2, 3]])
+    _doc, ch, info = model_doc(tmp_path, scene)
+    entry = E.build_elevation(ch, path_of(info), resolution=RES, heights=(100.0, 102.0))
+    on_the_face = np.array([[1.0, 0.0, 1.9], [4.5, 0.0, 1.9], [7.0, 0.0, 1.9]]) + info["shift"]
+    u = E.frame_from_dict(entry["frame"]).coords(on_the_face)[:, 0]
+    assert np.abs(u - [1.0, 4.5, 7.0 + 0.6]).max() < 0.003
+    assert abs(E.wall_length(entry) - 8.6) < 0.005
+
+
 def test_the_face_line_bows_with_the_wall_not_with_its_roughness():
     """Between two points the simplification keeps, the face line is as long as the wall that curves between
     them, and as long as their chord where the face only has a bump."""
@@ -467,22 +548,12 @@ def test_the_face_line_bows_with_the_wall_not_with_its_roughness():
 def _ribbed(folder, depth: float, length: float = 8.0, every: float = 0.2):
     """A chunk whose model is a straight wall along x, 2 m high, with vertical ribs: its face goes ``depth`` in and
     out of the line y = 0 once every ``every`` metres. Returns the chunk and the length of the face."""
-    import pyarchinit_photogrammetry as ppg
-    from pyarchinit_photogrammetry.io.mesh_ply import MeshData, write_mesh
-
     x = np.linspace(0.0, length, int(round(length / 0.005)) + 1)
     y = depth * np.sin(2.0 * np.pi * x / every)
-    v = np.empty(2 * len(x), [("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
-    v["x"], v["y"], v["z"] = np.tile(x, 2), np.tile(y, 2), np.repeat([0.0, 2.0], len(x))
+    xyz = np.column_stack([np.tile(x, 2), np.tile(y, 2), np.repeat([0.0, 2.0], len(x))])
     low, high = np.arange(len(x) - 1), np.arange(len(x) - 1) + len(x)
     faces = np.vstack([np.column_stack([low, low + 1, high + 1]), np.column_stack([low, high + 1, high])])
-    doc = ppg.Document()
-    ch = doc.add_chunk("Muro a coste")
-    ch.meta["metric"] = True
-    folder.mkdir(parents=True, exist_ok=True)
-    doc.save(folder / "coste.ppg")
-    ch._set_product("model", write_mesh(ch.data_dir / "model.ply", MeshData(v, faces)))
-    return ch, float(np.hypot(np.diff(x), np.diff(y)).sum())
+    return _model_of(folder, xyz, faces, "Muro a coste"), float(np.hypot(np.diff(x), np.diff(y)).sum())
 
 
 def test_roughness_under_five_centimetres_adds_no_length(tmp_path):
@@ -514,8 +585,13 @@ def test_tile_follows_the_frame_and_patches_paint_across_the_corner(built, monke
     ch, _info, entry = built["outside"]
     prepare(ch)
     plain(monkeypatch)                                              # every photo a plain colour of its own
+    from pyarchinit_photogrammetry.engine import ortho
+
+    tiles, context = [], ortho._context                             # the tile the mosaic is given, each time
+    monkeypatch.setattr(ortho, "_context", lambda *a, **k: (tiles.append(a[11]), context(*a, **k))[1])
     part = E.build_elevation(ch, E.frame_from_dict(entry["frame"]), resolution=RES, max_angle=89.0, scale="keep",
                              bounds=(5.0, 100.2, 7.0, 101.8), name="Angolo")
+    assert tiles == [64]                                            # the frame's, not the 512 of a plane
     try:
         eid = part["id"]
         poly = box(5.6, 100.5, 6.4, 101.5)                          # 0.4 m of each face, across the corner
@@ -523,7 +599,9 @@ def test_tile_follows_the_frame_and_patches_paint_across_the_corner(built, monke
         assert first["coverage"] > 0.9
         before, t = ortho_with_transform(ch, part)
         P.add_patch(ch, poly, [first["label"]], frame=eid)
+        del tiles[:]
         after = _read(ch.update_elevation(eid))[0]
+        assert tiles == [64]                                        # as built
         rows, cols = np.mgrid[0:after.shape[1], 0:after.shape[2]]
         u, v = t.c + (cols + 0.5) * RES, t.f - (rows + 0.5) * RES
         inside = contains_xy(poly.buffer(-0.015), u, v) & np.isfinite(relief_of(ch, part))
