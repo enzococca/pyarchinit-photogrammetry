@@ -2,8 +2,8 @@
 
 A line clicked on the plan is never on the face of the wall: it runs on its crest, in front of it, a couple of
 metres off. :func:`snap_trace` moves it onto the face of the model. Through the vertical plane of each clicked
-segment the face is looked for in a band in front of the line and behind it, a line is fitted to what the segment
-sees, and each vertex goes where the lines of its two segments meet. :func:`side_of` says from which side of the
+segment the face is looked for from the line, in a band in front of it and behind it, a line is fitted to what
+the segment sees, and each vertex goes where the lines of its two segments meet. :func:`side_of` says from which side of the
 line the wall is seen - a word, a point of the plan, or where most photos are - and :func:`path_from_trace` makes
 the frame of the wall (:class:`~.wall_path.WallPath`) of the clicked line: smoothed and snapped as asked, put in
 the order of the viewer, its fillets sized on the depth kept in front of the face and behind it.
@@ -27,8 +27,12 @@ MIN_FIT = 0.5  # m of face a line is fitted to: a shorter stretch gives a shift 
 FIT_MAD = 3.0  # a column further than this many median deviations from the line fitted is left out of it
 FIT_COLUMNS = 400  # at most, for the slope of the first line (the slopes between them two by two)
 FIT_NEAR = 0.1  # m: a column within this of the line of its segment lies on it
+OVER_TOP = 1.0  # m over the highest height looked at: what stands higher above a click is a cover, not a crest
 SAME_WALL_DEG = 5.0  # two fitted lines that turn less are one wall going on: no corner to put where they meet
 STRAIGHT = 0.01  # m: a vertex this near the line between its neighbours is a click on a straight wall, not a turn
+
+_OVERLAP = 0.01  # m: a look starts this far on the other side of the clicked line: a face on the line itself is met
+_PAST = 0.001  # m past a surface, where a look goes on from
 
 
 # ---------------------------------------------------------------- the side
@@ -152,8 +156,8 @@ class _Sight:
 
 def _reach(v: np.ndarray, i: int, x: np.ndarray, towards: np.ndarray, band: float) -> np.ndarray:
     """How far in front of segment ``i`` of the clicked line ``v`` (towards its viewer) each of its columns ``x``
-    looks from: ``band``, or less where another segment of the line is as near as its own before that - half way
-    across a corridor both walls of which are traced, in a niche, between the legs of a zigzag, by a corner seen
+    looks from, when it looks from the band: ``band``, or less where another segment of the line is as near as
+    its own before that - half way across a room both walls of which are traced, in a niche, by a corner seen
     from inside. A segment that looked from further would look through that other part of the wall."""
     step = v[i + 1] - v[i]
     p = v[i] + x[:, None] * step / np.hypot(*step)
@@ -182,13 +186,56 @@ def _reach(v: np.ndarray, i: int, x: np.ndarray, towards: np.ndarray, band: floa
     return reach
 
 
-def _columns(surface: FrameSurface, u: np.ndarray, heights: tuple[float, float], samples: int) -> np.ndarray:
-    """What a clicked segment sees through its plane in its columns (``u`` their middles on the plane): in each
-    the median depth of the surface over ``samples`` heights between the two of ``heights`` - NaN for a column
-    with surface at fewer than :data:`~.elevation.FACE_ROWS` of them (the ground the lowest rays meet anywhere is
-    not a face)."""
-    v = heights[0] + (np.arange(samples) + 0.5) * (heights[1] - heights[0]) / samples
-    d = surface.depth_at(np.repeat(u, samples), np.tile(v, len(u))).reshape(len(u), samples)
+def _cast(chunk: Chunk, raycaster, lock, start: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """How far (world metres, infinite for nothing) the first surface of the model is from each of the world
+    points ``start``, along the world direction ``direction`` (one for all of them)."""
+    inverse = np.linalg.inv(chunk.transform)
+    along = inverse[:3, :3] @ np.asarray(direction, np.float64)
+    along = np.tile(along / np.linalg.norm(along), (len(start), 1))
+    with lock:
+        t = raycaster.hit_distance(start @ inverse[:3, :3].T + inverse[:3, 3], along)
+    return t * chunk.scale
+
+
+def _from_line(chunk: Chunk, raycaster, lock, plane, u: np.ndarray, v: np.ndarray, top: float,
+               band: float) -> np.ndarray:
+    """The depth of the face at the samples ``(u, v)`` of the plane of a clicked segment, looked for from the
+    clicked line itself: the surface nearest the line that faces the viewer, within ``band`` (NaN for none).
+
+    A ray straight up says what the click stands on. With a surface above the sample, no higher than
+    :data:`OVER_TOP` over ``top`` (the highest height looked at), the sample is under the model - the crest of the
+    wall, the ground beside a trench - and the face is the first surface in front of the line, met from inside.
+    With nothing above it the sample is in the open - the floor in front of the wall, the air of a trench - and
+    the face is the first surface behind the line; or, when that is nearer, the way out of what stands in front:
+    where the look goes into something and comes out of it again, a thin wall clicked past its back. A wall and a
+    trench are each the mould of the other: only the vertical tells which side of a surface is the air."""
+    normal = plane.normal  # towards the viewer
+    on = plane.point(u, v, np.zeros(len(u)))
+    under = v + _cast(chunk, raycaster, lock, on, np.array([0.0, 0.0, 1.0])) <= top + OVER_TOP
+    depth = np.full(len(u), np.nan)
+    rows = np.nonzero(under)[0]
+    if len(rows):  # under the model: the way out towards the viewer
+        t = _cast(chunk, raycaster, lock, on[rows] - _OVERLAP * normal, normal) - _OVERLAP
+        depth[rows] = np.where(t <= band, t, np.nan)
+    rows = np.nonzero(~under)[0]
+    if len(rows):  # in the open: the first surface behind the line ...
+        t = _cast(chunk, raycaster, lock, on[rows] + _OVERLAP * normal, -normal) - _OVERLAP
+        behind = np.where(t <= band, -t, np.nan)
+        out = np.full(len(rows), np.nan)  # ... or the way out of what stands in front of it
+        into = _cast(chunk, raycaster, lock, on[rows], normal)
+        some = np.nonzero(into < band)[0]
+        if len(some):
+            far = into[some] + _PAST
+            far = far + _cast(chunk, raycaster, lock, on[rows[some]] + far[:, None] * normal, normal)
+            out[some] = np.where(far <= band, far, np.nan)
+        depth[rows] = np.where(np.isnan(out) | (np.abs(behind) <= out), behind, out)
+    return depth
+
+
+def _columns(d: np.ndarray) -> np.ndarray:
+    """The depth of the face in each column of a clicked segment, of the depths ``d`` (columns, heights) its
+    samples see: their median - NaN for a column with surface at fewer than :data:`~.elevation.FACE_ROWS` of
+    its heights (the ground the lowest rays meet anywhere is not a face)."""
     with warnings.catch_warnings():  # a column that sees nothing: "All-NaN slice"
         warnings.simplefilter("ignore", RuntimeWarning)
         column = np.nanmedian(d, axis=1)
@@ -312,13 +359,15 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     """The clicked line ``points`` (plan points in the order clicked, chunk CRS) moved onto the face of the wall
     seen from ``side`` (:func:`side_of`), as the model of ``chunk`` has it.
 
-    Each clicked segment looks at the model through its own vertical plane, from ``band`` metres in front of
-    the line to ``band`` behind it, and takes the first surface met from the viewer's side: a click on the crest
-    of the wall, or behind it, finds the face all the same. Where another part of the line is nearer than the
-    band - across a corridor both walls of which are traced, in a niche, by a corner seen from inside - the
-    segment looks from where that part is as near as itself (:func:`_reach`), not through it. What stands in
-    front of the wall within the band and is no part of the line is met first - the other side of a narrow room
-    when one wall alone is traced, the ground where the wall stands in a trench: give a narrower ``band`` there.
+    Each clicked segment looks for the face from its own line, through its vertical plane, within ``band``
+    metres in front of the line and behind it (:func:`_from_line`). What the click stands on says which way.
+    Under the model - on the crest of the wall, on the ground beside a trench - the face is the first surface in
+    front of the line, met from inside. In the open - on the floor in front of the wall, in the air of a trench -
+    it is the first surface behind the line, or the way out of what stands in front of it when that is nearer (a
+    thin wall clicked past its back). The other side of a narrow room, the side of the trench a wall stands in,
+    are not taken for it. A segment that finds no line that way looks from ``band`` in front of the line at the
+    first surface met, as far as the band behind it (a model that is the face alone, clicked behind it) - or from
+    where another part of the line is as near as itself, when that is nearer than the band (:func:`_reach`).
 
     In columns ``step`` wide along the segment the depth of the face is the median of the surface over
     ``samples`` heights between the two of ``heights`` (default: those of the model along the line,
@@ -379,20 +428,32 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
         raycaster, lock = raycaster_for_chunk(chunk), threading.Lock()
         if raycaster is None:
             raise RuntimeError("the model of the chunk cannot be read: a trace is snapped onto the face of the model")
+        rows = heights[0] + (np.arange(samples) + 0.5) * (heights[1] - heights[0]) / samples  # at their middles
         for i in range(len(length)):
             n = max(1, int(np.ceil(length[i] / step - 1e-9)))  # columns of step at most, taken at their middles
             x = (np.arange(n) + 0.5) * length[i] / n
             plane = plane_from_line(chunk, line[i], line[i + 1], (line[i] + line[i + 1]) / 2.0 + towards[i])
             u = plane.coords(np.column_stack([line[i] + x[:, None] * t[i], np.zeros(n)]))[:, 0]
-            sight = _Sight(plane, u, _reach(v, i, x, towards[i], band))
-            surface = FrameSurface(chunk, raycaster, sight, step, lock, (-band, band),
-                                   (0.0, heights[0], float(length[i]), heights[1]))
-            d = _columns(surface, u, heights, samples)
-            if np.isfinite(d).any():
-                a, b = _fit(x, d, float(length[i]) / n)
-                share[i] = (np.abs(d - (a + b * x)) <= FIT_NEAR).mean()
-                if share[i] >= MIN_SNAP_SHARE:
-                    fits[i] = a, b
+            uu, hh = np.repeat(u, samples), np.tile(rows, n)
+
+            def from_line() -> np.ndarray:
+                return _from_line(chunk, raycaster, lock, plane, uu, hh, heights[1], band)
+
+            def from_band() -> np.ndarray:  # the first surface met from the band in front of the line
+                sight = _Sight(plane, u, _reach(v, i, x, towards[i], band))
+                surface = FrameSurface(chunk, raycaster, sight, step, lock, (-band, band),
+                                       (0.0, heights[0], float(length[i]), heights[1]))
+                return surface.depth_at(uu, hh)
+
+            for look in (from_line, from_band):  # from the band only what has no line from the clicked line
+                d = _columns(look().reshape(n, samples))
+                if np.isfinite(d).any():
+                    a, b = _fit(x, d, float(length[i]) / n)
+                    on = float((np.abs(d - (a + b * x)) <= FIT_NEAR).mean())
+                    share[i] = max(share[i], on)
+                    if on >= MIN_SNAP_SHARE:
+                        fits[i], share[i] = (a, b), on
+                        break
             progress((i + 1) / len(length))
     progress(1.0)
     moved = _moved(v, length, t, towards, fits, share >= MIN_SNAP_SHARE, closed)

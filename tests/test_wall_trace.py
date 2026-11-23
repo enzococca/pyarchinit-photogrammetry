@@ -67,6 +67,46 @@ def _rough_ground(scene, lo, hi, rough: float, cell: float = 0.04, seed: int = 3
     return _added(scene, xyz, np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])]))
 
 
+def _pit(width: float, length: float = 8.0, depth: float = 1.0, around: float = 6.0):
+    """A pit ``width`` by ``length`` metres, ``depth`` deep, in a flat ground at height 0, as the scene of a model
+    (for ``model_doc``): its north side stands on y = 0 from x = 0 to ``length`` - ``face``, seen from the pit, the
+    viewer on the right - and the pit lies south of it."""
+    x0, x1, y0, y1 = 0.0, length, -width, 0.0
+    v, f = [], []
+
+    def quad(*corners):
+        k = len(v)
+        v.extend(corners)
+        f.extend([[k, k + 1, k + 2], [k, k + 2, k + 3]])
+
+    for a, b in (((x0 - around, y0 - around), (x1 + around, y0)), ((x0 - around, y1), (x1 + around, y1 + around)),
+                 ((x0 - around, y0), (x0, y1)), ((x1, y0), (x1 + around, y1))):          # the ground round the pit
+        quad((a[0], a[1], 0.0), (b[0], a[1], 0.0), (b[0], b[1], 0.0), (a[0], b[1], 0.0))
+    quad((x0, y0, -depth), (x1, y0, -depth), (x1, y1, -depth), (x0, y1, -depth))        # its floor
+    for a, b in (((x0, y1), (x1, y1)), ((x0, y0), (x1, y0)), ((x0, y0), (x0, y1)), ((x1, y0), (x1, y1))):
+        quad((*a, 0.0), (*b, 0.0), (*b, -depth), (*a, -depth))                          # its four sides
+    return SimpleNamespace(vertices=np.array(v, np.float64), faces=np.array(f), face=np.array([[x0, y1], [x1, y1]]),
+                           viewer="right", height=depth, thickness=0.0, marks=[], face_columns=None)
+
+
+def _two_rooms():
+    """A wall 20 cm thick (the scene's own: its face on y = 0, seen from the south) between two rooms 2 m wide: the
+    wall across the first room stands on y = -2, that across the second on y = 2.2."""
+    scene = make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)], thickness=0.2)
+    for trace in ([(6.0, -2.0), (0.0, -2.0)], [(0.0, 2.2), (6.0, 2.2)]):
+        other = make_wall_scene(trace=trace)
+        _added(scene, other.vertices, other.faces)
+    return scene
+
+
+def _face_alone(scene):
+    """``scene`` without the body of its wall: the ground and the face, no top, no back, no ends. In place."""
+    keep = np.isfinite(scene.face_columns)
+    keep[:2] = True
+    scene.faces, scene.face_columns = scene.faces[keep], scene.face_columns[keep]
+    return scene
+
+
 def _in_front(face, viewer: str, by: float) -> np.ndarray:
     """The line of a face moved ``by`` metres towards its viewer, its corners where the moved segments meet."""
     face = np.asarray(face, np.float64)
@@ -171,9 +211,9 @@ def test_a_curve_of_short_segments_is_shifted_segment_by_segment(tmp_path):
     (ZIGZAG, "left", 0.20),
     (ZIGZAG, "left", -0.15)])
 def test_a_narrow_place_of_the_line_is_looked_at_from_within(trace, viewer, by, tmp_path):
-    """A segment looks at the wall from where another part of the line is as near as itself, when that is
-    nearer than the band: half way across a corridor, a niche, the wedge of a zigzag. From 2.5 m in front it would
-    first meet the other side of the place - the back of the wall across the corridor, the next leg."""
+    """A corridor of 60 cm, a niche, the wedge of a zigzag, clicked in their air or on the crests: each segment
+    looks from its own clicked line. From 2.5 m in front it would first meet the other side of the place - the
+    back of the wall across the corridor, the next leg."""
     _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=trace, viewer=viewer))
     face = np.asarray(info["face"])
     r = T.snap_trace(ch, _in_front(face, viewer, by), side=viewer)
@@ -215,17 +255,83 @@ def test_a_room_traced_all_round_stays_closed(viewer, inside, tmp_path):
     assert np.abs(r["points"][[0, 3]] - (face[0] + [[inside, 0.0], [inside, 3.0]])).max() < 0.005
 
 
-def test_a_wall_traced_alone_in_a_narrow_place_wants_a_narrow_band(tmp_path):
-    """What stands in front of a wall within the band and is no part of the line is met first: one wall of a
-    corridor of 60 cm traced without the other is looked at from behind that other one."""
+def test_a_wall_traced_alone_in_a_narrow_place(tmp_path):
+    """One wall of a corridor of 60 cm traced without the other: the wall across, which no part of the line says
+    is there, is not taken for it - a look from 2.5 m in front would start behind that wall and meet its back."""
     _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=CORRIDOR))
     face = np.asarray(info["face"])[:2]                       # its first wall, seen from the corridor
-    clicked = face + [[-0.1, 0.0], [-0.1, 0.5]]              # 10 cm in front of it
-    r = T.snap_trace(ch, clicked, side="right", band=0.3)
-    assert r["snapped"] and np.abs(r["points"] - (face + [[0.0, 0.0], [0.0, 0.5]])).max() < 0.005
-    wide = T.snap_trace(ch, clicked, side="right")           # 2.5 m: the outside of the wall across the corridor
-    assert wide["snapped"] and np.abs(wide["points"] - (face + [[-1.0, 0.0], [-1.0, 0.5]])).max() < 0.005
-    assert wide["max_shift"] == pytest.approx(0.9, abs=0.005)       # the snap says how far it went
+    for by in (0.1, 0.3, -0.15):                              # in the corridor, half way across it, on the crest
+        r = T.snap_trace(ch, face + [[-by, 0.0], [-by, 0.5]], side="right")
+        assert r["snapped"] and np.abs(r["points"] - (face + [[0.0, 0.0], [0.0, 0.5]])).max() < 0.005
+        assert r["max_shift"] == pytest.approx(abs(by), abs=0.005)
+
+
+@pytest.mark.parametrize("width", [1.0, 1.5, 2.0])
+@pytest.mark.parametrize("off", [-0.3, -0.1, 0.1, 0.3])
+def test_the_side_of_a_pit_clicked_by_its_edge(width, off, tmp_path):
+    """A pit 1 m deep, 1 to 2 m wide, its north side clicked within 30 cm of its edge: in the air of the pit
+    (``off`` under 0: the side is the first surface behind the line) or on the ground beside it (the side is the
+    first surface in front, met from inside the earth). The other side of the pit is not taken for it."""
+    _doc, ch, info = model_doc(tmp_path, _pit(width))
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [[0.5, off], [-0.5, off]], side="right")
+    assert r["snapped"] and np.abs(r["points"] - (face + [[0.5, 0.0], [-0.5, 0.0]])).max() < 0.005
+    assert r["max_shift"] == pytest.approx(abs(off), abs=0.005) and r["segments"][0]["share"] == 1.0
+
+
+@pytest.mark.parametrize("gap", [0.6, 1.0, 1.5])
+@pytest.mark.parametrize("by", [0.2, -0.2])
+def test_a_wall_in_a_trench(gap, by, tmp_path):
+    """A wall standing in a trench whose side is 0.6 to 1.5 m in front of its face, the ground beside the trench
+    1.5 m up: clicked in the air between the two (``by`` over 0) or on its crest, the wall is found, not the side."""
+    scene = _block(make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)]), (-2.0, -gap - 4.0, 0.0), (8.0, -gap, 1.5))
+    _doc, ch, info = model_doc(tmp_path, scene)
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [0.0, -by], side="right")
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005 and r["segments"][0]["share"] == 1.0
+
+
+@pytest.mark.parametrize("by", [0.3, 0.1, -0.1, -0.4, -0.7])
+def test_a_thin_wall_between_two_rooms(by, tmp_path):
+    """A wall of 20 cm between two rooms 2 m wide, clicked in the first room (``by`` over 0), on its crest (10 cm
+    behind its face) and past its back, in the second room: there its face is the way out of what stands in front
+    of the line - nearer than the wall across the second room, which is the first surface behind it."""
+    _doc, ch, info = model_doc(tmp_path, _two_rooms())
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [0.0, -by], side="right")
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005 and r["segments"][0]["share"] == 1.0
+    assert r["max_shift"] == pytest.approx(abs(by), abs=0.005)
+
+
+@pytest.mark.parametrize("thickness", [1.2, 2.0])
+@pytest.mark.parametrize("viewer", ["right", "left"])
+def test_a_click_anywhere_on_the_crest_of_a_thick_wall(thickness, viewer, tmp_path):
+    """Walls 1.2 and 2 m thick, clicked on their crest 20 cm behind the face, in the middle and 20 cm from the
+    back: under the crest the face is the first surface in front of the line, however near the back is."""
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene(viewer=viewer, thickness=thickness))
+    face = np.asarray(info["face"])
+    for behind in (0.2, thickness / 2.0, thickness - 0.2):
+        r = T.snap_trace(ch, _in_front(face, viewer, -behind), side=viewer)
+        assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
+        # (seen from inside, a leg clicked on the crest runs on past the corner under the crest of the other leg:
+        # there it sees nothing within the band, 1.8 m of 5.8 at most)
+        assert all(s["share"] > (0.9 if viewer == "right" else 0.65) for s in r["segments"])
+
+
+@pytest.mark.parametrize("by", [0.2, -0.2])
+def test_a_shelter_over_the_wall_is_no_crest(by, tmp_path):
+    """The wall in its trench (the side 80 cm in front) under a roof 3.5 m up: what stands more than a metre over
+    the highest height looked at is a cover, not the crest of a wall - the click in the air is still in the open."""
+    scene = _block(make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)]), (-2.0, -4.8, 0.0), (8.0, -0.8, 1.5))
+    _block(scene, (-3.0, -5.5, 3.5), (9.0, 4.0, 3.6))
+    _doc, ch, info = model_doc(tmp_path, scene)
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [0.0, -by], side="right")
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
+    # the crest itself may stand over the heights looked at, by a metre at most: looked at up to 1.2 m, the top of
+    # this wall of 2 m is still its crest
+    r = T.snap_trace(ch, face + [0.0, -by], side="right", heights=(100.0, 101.2))
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
 
 
 def test_the_line_fitted_to_what_a_segment_sees(model_outside, tmp_path):
@@ -500,26 +606,28 @@ def test_two_lines_that_are_one_wall_and_two_that_make_a_corner(tmp_path):
 
 
 def test_the_vertices_keep_the_order_clicked(tmp_path):
-    # two faces whose lines meet past the end of the second segment - the first leans, the second stands 2.2 m
-    # in front of the line: put where they meet, the corner would turn that segment back
-    scene = make_wall_scene(trace=[(0.0, 0.1), (2.0, 1.1)])
-    more = make_wall_scene(trace=[(4.2, 0.0), (4.2, 2.0)])
+    # two faces whose lines meet past the end of the second segment - behind the first a wall that leans away by
+    # 50 degrees, behind the second one 20 cm off: put where they meet, the corner would turn that segment back
+    scene = make_wall_scene(trace=[(0.0, 0.1), (1.3, 1.66)])
+    more = make_wall_scene(trace=[(1.8, 0.05), (1.8, 2.0)])
     _doc, ch, info = model_doc(tmp_path, _added(scene, more.vertices, more.faces))
     o = np.asarray(info["shift"][:2])
-    lean, front = o + [[0.0, 0.1], [2.0, 1.1]], o + [[4.2, -9.0], [4.2, 9.0]]
+    lean, straight = o + [[-5.0, -5.9], [5.0, 6.1]], o + [[1.8, -9.0], [1.8, 9.0]]
     clicked = o + [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0]]
     r = T.snap_trace(ch, clicked, side="right")
-    assert r["snapped"] is True and all(s["share"] > 0.9 and s["offset"] != 0.0 for s in r["segments"])
-    assert distance_to(lean, r["points"][:1])[0] < 1e-3 and distance_to(front, r["points"][2:])[0] < 1e-3
+    first, second = r["segments"]
+    assert r["snapped"] is True and 0.6 < first["share"] < 0.7 and second["share"] > 0.9
+    assert first["slope"] == pytest.approx(-1.2, abs=0.01) and second["offset"] == pytest.approx(-0.2, abs=1e-3)
+    assert distance_to(lean, r["points"][:1])[0] < 1e-3 and distance_to(straight, r["points"][2:])[0] < 1e-3
     step = np.diff(r["points"], axis=0)
     assert step[0, 0] > 0 and step[1, 1] > 0                       # on as clicked: east, then north
     corner = r["points"][1:2]                                      # as far from the one face as from the other
-    assert distance_to(o + [[-9.0, -4.4], [9.0, 4.6]], corner)[0] == pytest.approx(distance_to(front, corner)[0],
-                                                                                 abs=1e-3)
-    assert np.abs(corner[0] - (o + [4.2, 2.2])).max() > 1.0
+    assert distance_to(lean, corner)[0] == pytest.approx(distance_to(straight, corner)[0], abs=1e-3)
+    assert distance_to(lean, corner)[0] == pytest.approx(0.7, abs=0.01)
+    assert np.abs(corner[0] - (o + [1.8, 2.26])).max() > 0.5       # ... not where the two meet
     # a second segment that goes on past where they meet: the corner is there
     longer = T.snap_trace(ch, o + [[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]], side="right")
-    assert longer["snapped"] is True and np.abs(longer["points"][1] - (o + [4.2, 2.2])).max() < 0.01
+    assert longer["snapped"] is True and np.abs(longer["points"][1] - (o + [1.8, 2.26])).max() < 0.01
     # an L with legs of 1 m whose two faces are found 5 m behind it: they meet 4 m back along both legs, and
     # between them is no better - there is no way to keep the order, and the line is left as clicked
     v = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
@@ -578,45 +686,65 @@ def test_the_snap_says_how_far_it_is_and_can_be_stopped(model_outside):
     assert seen == [0.0, 1.0] and r["snapped"] is False
 
 
-def test_the_columns_and_the_heights_a_segment_looks_at(model_outside, model_inside, monkeypatch, tmp_path):
+def test_the_samples_a_segment_looks_from(model_outside, monkeypatch, tmp_path):
     ch, info = model_outside
     clicked = np.asarray(info["face"]) + OFF
-    cast = []
-    depth_at = T.FrameSurface.depth_at
+    cast, band = [], []
+    look, depth_at = T._cast, T.FrameSurface.depth_at
 
-    def spy(self, u, v):
+    def spy(chunk, raycaster, lock, start, direction):
+        cast.append(SimpleNamespace(start=np.array(start), direction=np.array(direction)))
+        return look(chunk, raycaster, lock, start, direction)
+
+    def spy_band(self, u, v):
         columns = np.unique(u)
-        cast.append(SimpleNamespace(u=columns, v=np.unique(v), rays=len(u), band=(self.dmin, self.dmax),
+        band.append(SimpleNamespace(u=columns, v=np.unique(v), rays=len(u), band=(self.dmin, self.dmax),
                                     front=self.band(columns)[1], behind=self.band(columns)[0]))
         return depth_at(self, u, v)
 
-    monkeypatch.setattr(T.FrameSurface, "depth_at", spy)
+    monkeypatch.setattr(T, "_cast", spy)
+    monkeypatch.setattr(T.FrameSurface, "depth_at", spy_band)
     T.snap_trace(ch, clicked, side="right", band=1.5, heights=(100.4, 101.6), step=0.5, samples=6)
-    first, second = cast
-    assert first.band == (-1.5, 1.5) and first.rays == 13 * 6 and second.rays == 9 * 6   # 6.15, 4.05 m by 0.5 m
-    assert np.allclose(first.u, (np.arange(13) + 0.5) * np.hypot(6.15, 0.2) / 13)   # ... at most, at their middles
-    assert np.allclose(first.v, 100.5 + 0.2 * np.arange(6))                         # the middles of six equal parts
-    assert (first.front == 1.5).all() and (first.behind == -1.5).all()              # outside a corner: the band
-    T.snap_trace(ch, clicked, side="right")                                         # 5 cm, forty heights, 2.5 m
-    assert cast[2].band == (-2.5, 2.5) and cast[2].rays == 124 * 40
-    assert np.allclose(cast[2].v, 100.025 + 0.05 * np.arange(40)) and (cast[2].front == 2.5).all()
-    T.snap_trace(ch, clicked[::-1], side="left", step=0.5, samples=6)               # the line clicked the other way
-    assert np.allclose(cast[4].u, (np.arange(9) + 0.5) * np.hypot(0.05, 4.05) / 9) and cast[4].rays == 9 * 6
-    # inside a corner each leg looks from where the other is as near: the line that halves the corner
-    ch, info = model_inside
+    up = [c for c in cast if c.direction[2] == 1.0]            # first, straight up from each sample
+    assert len(up) == 2 and len(up[0].start) == 13 * 6 and len(up[1].start) == 9 * 6     # 6.15, 4.05 m by 0.5 m
+    along = np.unique(np.round(np.hypot(*(up[0].start[:, :2] - clicked[0]).T), 9))       # on the clicked line ...
+    assert np.allclose(along, (np.arange(13) + 0.5) * np.hypot(6.15, 0.2) / 13)          # at most, at their middles
+    assert np.allclose(np.unique(up[0].start[:, 2]), 100.5 + 0.2 * np.arange(6))         # the middles of six parts
+    # the samples are in the open: each looks behind the line from a centimetre in front of it, and in front of it
+    step = (clicked[1] - clicked[0]) / np.hypot(*(clicked[1] - clicked[0]))
+    viewer = np.array([step[1], -step[0], 0.0])
+    behind, into = cast[1], cast[2]
+    assert np.allclose(behind.direction, -viewer) and np.allclose(into.direction, viewer)
+    assert np.allclose(behind.start, up[0].start + 0.01 * viewer) and np.allclose(into.start, up[0].start)
+    assert not band                                             # a line from the clicked line: no other look
     del cast[:]
-    T.snap_trace(ch, np.asarray(info["face"]), side="left", step=0.5)
-    first, second = cast
-    # (u runs from the viewer's left: from the corner along the first leg, towards it along the second)
-    assert np.allclose(first.front, np.minimum(2.5, first.u), atol=1e-6) and (first.behind == -2.5).all()
-    assert np.allclose(second.front, np.minimum(2.5, 4.0 - second.u), atol=1e-6)
-    # in a room 4 m wide seen from inside, half way to the wall across it, 2 m, and no further than the corner
+    T.snap_trace(ch, clicked, side="right")                    # 5 cm, forty heights
+    up = [c for c in cast if c.direction[2] == 1.0]
+    assert len(up[0].start) == 124 * 40 and np.allclose(np.unique(up[0].start[:, 2]), 100.025 + 0.05 * np.arange(40))
+    del cast[:]
+    T.snap_trace(ch, clicked[::-1], side="left", step=0.5, samples=6)                    # clicked the other way:
+    assert len(cast[0].start) == 9 * 6                                                   # the second leg first,
+    assert np.allclose(cast[1].direction, [-1.0, 0.05 / 4.05, 0.0], atol=1e-3)           # behind it is the west
+    # under the crest: one look, in front of the line from a centimetre behind it
+    del cast[:]
+    crest = np.asarray(info["face"]) + [[0.0, 0.15], [-0.15, 0.15], [-0.15, 0.0]]
+    r = T.snap_trace(ch, crest, side="right", step=0.5, samples=6)
+    assert r["snapped"] and len(cast) == 4 and not band
+    assert np.allclose(cast[1].direction, [0.0, -1.0, 0.0]) and np.allclose(cast[1].start, cast[0].start + [0, 0.01, 0])
+    # a room of 4 m by 3 seen from inside, its walls without a crest and without a back, clicked 15 cm behind
+    # them: in the open, with nothing behind the line and no way out in front. With no line from the clicked
+    # line a segment looks from the band in front of it - 2.5 m, or where another part of the line is as near
+    # as itself: half way to the wall across the room, and no further than the corner
     room = [[4.0, 3.0], [4.0, 0.0], [0.0, 0.0], [0.0, 3.0]]
-    _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=room))
-    del cast[:]
-    r = T.snap_trace(ch, np.asarray(info["face"]), side="right", step=0.5)
-    assert r["snapped"] and np.allclose(cast[0].front, np.minimum(2.0, 3.0 - cast[0].u), atol=1e-6)
-    assert np.allclose(cast[1].front, np.minimum(2.5, np.minimum(cast[1].u, 4.0 - cast[1].u)), atol=1e-6)
+    _doc, ch, info = model_doc(tmp_path, _face_alone(make_wall_scene(trace=room)))
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, _in_front(face, "right", -0.15), side="right", step=0.5)
+    assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005 and len(band) == 3
+    first, second, _third = band
+    assert first.band == (-2.5, 2.5) and first.rays == 7 * 40 and (first.behind == -2.5).all()
+    assert np.allclose(first.v, 100.025 + 0.05 * np.arange(40))
+    assert np.allclose(first.front, np.minimum(2.15, 3.15 - first.u), atol=1e-6)
+    assert np.allclose(second.front, np.minimum(2.5, np.minimum(second.u, 4.3 - second.u)), atol=1e-6)
 
 
 # ---------------------------------------------------------------- the side
