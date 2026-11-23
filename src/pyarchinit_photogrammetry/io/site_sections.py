@@ -55,22 +55,29 @@ def entries(chunk) -> list[dict]:
     return out
 
 
-def trace(entry: dict, bounds) -> dict | None:
+def trace(entry: dict, bounds, z: bool = False) -> dict | None:
     """The trace of the elevation ``entry`` on the plan, in the coordinates of the chunk, as a GeoJSON geometry: a
-    line along ``u`` at the middle height for an upright plane or a cylinder, the outline of the frame for a plane
-    that lies down (a plan slice, a sloping face)."""
+    line along ``u`` at the middle height for an upright plane or a cylinder, the line of the wall as it was traced -
+    its sharp corners, on the face once snapped, not the line with its fillets - for a wall path, the outline of the
+    frame for a plane that lies down (a plan slice, a sloping face). ``z``: each point with its height too (the
+    middle height of ``bounds`` for a line)."""
     from ..engine.elevation import frame_from_dict
 
     frame = frame_from_dict(entry["frame"])
     u0, v0, u1, v1 = (float(b) for b in bounds)
     vm = (v0 + v1) / 2
+    dims = 3 if z else 2
     if frame.kind == "plane" and abs(float(frame.v_axis[2])) < 0.7:
         corners = frame.point(np.array([u0, u1, u1, u0, u0]), np.array([v0, v0, v1, v1, v0]), np.zeros(5))
-        return {"type": "Polygon", "coordinates": [corners[:, :2].tolist()]}
+        return {"type": "Polygon", "coordinates": [corners[:, :dims].tolist()]}
+    if frame.kind == "path":
+        xy = frame.trace_line(min(u0, u1), max(u0, u1))
+        pts = np.column_stack([xy, np.full(len(xy), vm)])  # the height of a wall path is v
+        return {"type": "LineString", "coordinates": pts[:, :dims].tolist()}
     n = 2 if frame.kind == "plane" else max(16, min(256, int(abs(u1 - u0) / 0.05)))
     us = np.linspace(u0, u1, n)
     pts = frame.point(us, np.full(n, vm), np.zeros(n))
-    return {"type": "LineString", "coordinates": pts[:, :2].tolist()}
+    return {"type": "LineString", "coordinates": pts[:, :dims].tolist()}
 
 
 def _geometry(geom, dv: float) -> dict:

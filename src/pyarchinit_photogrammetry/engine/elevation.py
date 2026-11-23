@@ -1492,22 +1492,55 @@ def _on_plane(entry: dict):
                                                                                        np.zeros(len(c))), include_z=True)
 
 
+PLACE_STEP = 0.02  # m: the least step a drawing of a wall path is densified to before it is placed on the surface
+
+
+def _placer(chunk: Chunk, entry: dict):
+    """The function that places a ``(u, v)`` geometry of the elevation ``entry`` in 3D world coordinates: on a wall
+    path, the geometry densified (every ``max(2 resolution, PLACE_STEP)`` metres) and each vertex at the depth of
+    the relief there - on the face of the wall, also round its corners - or on the line (``d`` = 0) where the relief
+    has none; on a plane or a cylinder, the vertices as drawn on it (``d`` = 0, :func:`_on_plane`)."""
+    import shapely
+
+    frame = frame_from_dict(entry["frame"])
+    if frame.kind != "path":
+        return _on_plane(entry)
+    from .elevation_drawings import surface_depths
+
+    step = max(2.0 * float(entry.get("resolution") or 0.0), PLACE_STEP)
+
+    def on_surface(c):
+        d = surface_depths(chunk, entry, c[:, :2])
+        return frame.point(c[:, 0], c[:, 1], np.where(np.isfinite(d), d, 0.0))
+
+    def place(geom):
+        dense = shapely.segmentize(shapely.force_2d(geom), step)
+        if dense.geom_type != geom.geom_type and geom.geom_type.startswith("Multi"):
+            dense = type(geom)([dense])  # segmentize gives a collection of one part as that part
+        return shapely.transform(shapely.force_3d(dense), on_surface, include_z=True)
+
+    return place
+
+
 UNIT_COLUMNS = {"us": "TEXT", "area": "TEXT", "tipo": "TEXT", "sito": "TEXT", "ppg_id": "TEXT"}
 QUOTE_COLUMNS = {"quota_q": "REAL", "us_q": "TEXT", "area_q": "TEXT", "sito_q": "TEXT", "unita_misu_q": "TEXT",
                  "ppg_id": "TEXT"}
 
 
-def world_tables(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
+def world_tables(chunk: Chunk, entry: dict, data: dict | None = None, trace: bool = False) -> dict:
     """The drawings of the elevation ``entry`` placed on the survey, 3D in the CRS the elevation was made in:
     ``{name: (geometry type, {column: SQL type}, [(geometry with Z, values)])}`` for ``unita`` (MULTIPOLYGON, on the
     plane), ``quote`` (POINT, the point of the surface), ``punti`` (POINT), ``pietre`` (POLYGON), ``linee``
     (LINESTRING, the break lines on the plane) and, for a section,
     ``profilo`` (LINESTRING) - written with Z by :func:`write_world_tables` (the GeoPackage of the export, the live
-    GeoPackage of QGIS and RustGIS)."""
+    GeoPackage of QGIS and RustGIS). On a wall path "on the plane" is on the surface of the wall (:func:`_placer`).
+    ``trace``: also ``traccia`` (LINESTRING), the trace of the elevation on the plan at its middle height
+    (:func:`..io.site_sections.trace`; none for a plane that lies down), with ``nome`` (the elevation's name),
+    ``prospetto`` (its id) and ``tipo`` (the kind of its frame)."""
     from shapely.geometry import LineString, MultiPolygon, Point
 
     items = _drawing_items(chunk, entry, data)
-    place = _on_plane(entry)
+    place = _placer(chunk, entry)
     units = []
     for geom, rec in items["units"]:
         multi = geom if geom.geom_type == "MultiPolygon" else MultiPolygon([geom]) if geom.geom_type == "Polygon" \
@@ -1536,7 +1569,56 @@ def world_tables(chunk: Chunk, entry: dict, data: dict | None = None) -> dict:
         out["profilo"] = ("LINESTRING", {"n": "INTEGER"},
                           [(place(LineString(line)), {"n": i + 1}) for i, line in enumerate(items["profile"])
                            if len(line) > 1])
+    if trace:
+        from ..io import site_sections
+
+        g = site_sections.trace(entry, bounds_of(chunk, entry), z=True)
+        rows = [] if g is None or g["type"] != "LineString" else \
+            [(LineString(g["coordinates"]), {"nome": entry.get("name"), "prospetto": entry["id"],
+                                             "tipo": frame_from_dict(entry["frame"]).kind})]
+        out["traccia"] = ("LINESTRING", {"nome": "TEXT", "prospetto": "TEXT", "tipo": "TEXT"}, rows)
     return out
+
+
+TRACES_LAYER = "Tracce dei prospetti"  # the layer of the plan (and of the live GeoPackage of QGIS) of the traces
+
+
+def traces(chunk: Chunk) -> list[dict]:
+    """The traces of the elevations of ``chunk`` on its plan (sections have a layer of their own and are left out):
+    ``id``, ``name``, ``kind`` (that of the frame: ``plane``, ``cylinder``, ``path``), ``geometry`` (the GeoJSON
+    LineString of :func:`..io.site_sections.trace`, in the chunk's system) and ``length_m`` (the length of the
+    elevation along ``u``). Only lines: a plane that lies down has none; an elevation made in another system than
+    the chunk's now, or whose record is broken, is left out."""
+    from ..io import site_sections
+
+    out = []
+    for entry in elevations(chunk):
+        if not isinstance(entry, dict) or not entry.get("id") or entry.get("kind") == "section":
+            continue
+        if not same_crs(entry.get("crs") or chunk.crs, chunk.crs):
+            continue
+        try:
+            bounds = bounds_of(chunk, entry)
+            g = site_sections.trace(entry, bounds)
+            kind = frame_from_dict(entry["frame"]).kind
+        except Exception as exc:  # noqa: BLE001 - a broken record: the other traces are given
+            log.warning("No trace for the elevation %s: %s", entry.get("name"), exc)
+            continue
+        if g is None or g["type"] != "LineString":
+            continue
+        out.append({"id": entry["id"], "name": entry.get("name") or entry["id"], "kind": kind, "geometry": g,
+                    "length_m": float(bounds[2] - bounds[0])})
+    return out
+
+
+def trace_layer(chunk: Chunk) -> dict:
+    """The traces of the elevations of ``chunk`` (:func:`traces`) as a line layer of the 2D view and of the live
+    GeoPackage of QGIS (:data:`TRACES_LAYER`): one feature per elevation with ``etichetta`` and ``prospetto`` (its
+    name), ``prospetto_id``, ``tipo`` and ``lunghezza_m``."""
+    return {"kind": "line", "features": [
+        {"etichetta": t["name"], "prospetto": t["name"], "prospetto_id": t["id"], "tipo": t["kind"],
+         "lunghezza_m": round(t["length_m"], 3),
+         "_geom": ("LineString", [tuple(c[:2]) for c in t["geometry"]["coordinates"]])} for t in traces(chunk)]}
 
 
 def write_world_tables(con, tables: dict, srs_id: int, prefix: str = "") -> list[str]:
@@ -1757,7 +1839,7 @@ def _write_drawings_world_gpkg(chunk: Chunk, entry: dict, path: Path, data: dict
     try:
         con.execute("BEGIN IMMEDIATE")
         gpkg.create(con, srs)
-        write_world_tables(con, world_tables(chunk, entry, data), srs[0])
+        write_world_tables(con, world_tables(chunk, entry, data, trace=True), srs[0])
         con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -1772,12 +1854,13 @@ def _write_drawings_gpkg(chunk: Chunk, items: dict, entry: dict, path: Path) -> 
     """GeoPackage of the elevation unfolded: the table ``frame`` (the elevation and its plane) and the drawings in
     ``(u, v)`` metres (no CRS: QGIS and RustGIS load them as a plan of the façade, over the orthophoto of the
     elevation, whose GeoTIFF is in the same frame), each row with ``geom_world``, the WKT of the drawing in the CRS of
-    the elevation (on the plane, ``d`` = 0; a spot height on the surface)."""
+    the elevation (on the plane, ``d`` = 0, or on the surface of a wall path, :func:`_placer`; a spot height on the
+    surface)."""
     from shapely.geometry import Point
 
     from ..io import gpkg
 
-    on_plane = _on_plane(entry)
+    on_plane = _placer(chunk, entry)
 
     gpkg.refuse_foreign(path)
     if path.exists():
