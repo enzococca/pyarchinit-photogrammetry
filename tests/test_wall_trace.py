@@ -864,6 +864,12 @@ def test_a_photo_weighs_by_how_well_it_sees_the_wall(wall_dataset, model_outside
     _stand(ch, [((1.0, -10.0), (1.0, 0.0)), ((2.0, -10.0), (2.0, 0.0)), ((3.0, -10.0), (3.0, 0.0)),
                 ((3.0, 2.5), (3.0, 0.0))])
     assert T.side_votes(ch, face) == pytest.approx({"left": 0.4, "right": 0.3}) and T.side_of(ch, face) == "left"
+    # ... the same in a chunk turned by a quarter of a turn: the places and the views are those of the world
+    moved = np.array(ch.transform, np.float64)
+    ch.transform = moved @ np.array([[0.0, -1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0, 0, 0, 1.0]])
+    turned = (face - moved[:2, 3]) @ np.array([[0.0, 1.0], [-1.0, 0.0]]) + moved[:2, 3]
+    assert T.side_votes(ch, turned) == pytest.approx({"left": 0.4, "right": 0.3}) and T.side_of(ch, turned) == "left"
+    ch.transform = moved
     # the angle: 60 degrees off the normal of the face; along the wall; away from it; down at its foot from 45
     # degrees (one at a time, 2.5 m in front of the first leg)
     for at, weight in (((3.0 + 2.5 * np.tan(np.radians(60.0)), 0.0), 0.25 / 2.5), ((9.0, -2.5), 0.0),
