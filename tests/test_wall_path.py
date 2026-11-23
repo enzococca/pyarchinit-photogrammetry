@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 from pyarchinit_photogrammetry.engine import elevation as E
-from pyarchinit_photogrammetry.engine.wall_path import (CLEARANCE, DEFAULT_RADIUS, TraceRefused, WallPath,
-                                                        corner_radii, ordered, smooth_trace)
+from pyarchinit_photogrammetry.engine.wall_path import (CLEARANCE, DEFAULT_RADIUS, MAX_TURN_DEG, TraceRefused,
+                                                        WallPath, corner_radii, ordered, smooth_trace)
 
 L = [[0.0, 0.0], [6.0, 0.0], [6.0, 4.0]]               # the viewer on the right of the travel: outside the corner
 INSIDE = L[::-1]                                         # the same wall seen from inside the corner
@@ -95,14 +95,15 @@ def test_a_buttress_and_sharp_turns_keep_the_inverse(trace):
 
 def test_a_place_a_hair_from_a_joint_comes_back_to_itself():
     # by the joint of a run and an arc the distances to the two differ by less than float64 resolves: the place
-    # is found by where the foot falls, not by that tie
+    # is found by where the foot falls, not by that tie - from the first of the two to the second, and back
     p = WallPath(L, radius=0.5)
     joints = p.corners()[0]["s"] + np.array([-0.5, 0.5]) * 0.5 * np.pi / 2
-    for hair in (1e-8, -1e-8, 1e-6, -1e-6):
-        for depth in (1.4, 50.0, 900.0):
-            back = p.coords(p.point(joints + hair, 1.0, depth))
-            assert np.abs(back[:, 0] - (joints + hair)).max() < 1e-10 and np.abs(back[:, 2] - depth).max() < 1e-9
-        assert np.all(np.isinf(p.max_depth_at(joints + hair)))        # in front of a convex corner: no limit
+    hairs = np.geomspace(1e-9, 1e-6, 31)
+    s = (joints[:, None] + np.concatenate([-hairs, hairs])).ravel()
+    for depth in (1.4, 7.0, 50.0, 900.0):
+        back = p.coords(p.point(s, 1.0, depth))
+        assert np.abs(back[:, 0] - s).max() < 1e-10 and np.abs(back[:, 2] - depth).max() < 1e-9
+    assert np.all(np.isinf(p.max_depth_at(s)))        # in front of a convex corner: no limit
 
 
 def test_a_curve_of_many_clicks_is_one_smooth_line():
@@ -150,6 +151,14 @@ def test_projected_coordinates_keep_the_nanometre_on_the_face():
     for band, tol in ((0.05, 1e-9), (0.4, 1e-7)):
         d = rng.uniform(-band, band, 4000)
         assert np.abs(p.coords(p.point(s, v, d)) - np.column_stack([s, v, d])).max() < tol
+    # the frame computes from its first vertex: a whole shift of the trace and of the points changes no digit
+    # (plan points on a grid of 1/1024 m, so that the shifted ones are exact in float64)
+    whole = np.array([401234.0, 2634567.0, 0.0])
+    near, far = WallPath(L, radius=0.5), WallPath(np.asarray(L) + whole[:2], radius=0.5)
+    q = np.column_stack([rng.integers(-4096, 10240, 4000) / 1024.0, rng.integers(-4096, 8192, 4000) / 1024.0,
+                         rng.uniform(100.0, 104.0, 4000)])
+    here = near.coords(q)
+    assert np.isfinite(here).all(axis=1).mean() > 0.9 and np.array_equal(far.coords(q + whole), here, equal_nan=True)
 
 
 def test_odd_traces():
@@ -180,6 +189,10 @@ def test_u_map_is_the_length_on_the_face():
     assert np.abs(p.coords(p.point(u, v, d)) - np.column_stack([u, v, d])).max() < 1e-9
     # the limits are asked in u as well: behind the middle of the arc (u = 6) the frame ends at its centre
     assert np.allclose(p.min_depth_at(np.array([3.0, 6.0])), [-(3.0 - CLEARANCE), -(0.5 - CLEARANCE)], atol=1e-6)
+    # in u, not in the length along the line: u = 6.4 is still on the arc (the line is on its second wall at 6.4 m),
+    # u = 6 is its middle (1 rad into it at 6 m)
+    assert np.allclose(p.min_depth_at(np.array([6.4])), [-(0.5 - CLEARANCE)], atol=1e-6)
+    assert np.allclose(p.view(6.0, 0.0), [np.sqrt(0.5), -np.sqrt(0.5), 0.0], atol=1e-12)
     for bad in ([[0, 0], [5, 5], [4, 6]], [[0, 0], [5, 5], [6, 5]], [[0, 0]]):
         with pytest.raises(ValueError, match="increas"):
             WallPath(L, radius=0.5, u_map=bad)
@@ -224,6 +237,9 @@ def test_trace_line_and_order():
     shift = np.array([401234.567, 2634567.890])                               # the trace is in plan coordinates
     far = WallPath(np.asarray(L) + shift, radius=0.5)
     assert np.abs(far.trace_line(-1.0, far.length + 2.0) - (np.asarray(ends) + shift)).max() < 1e-9
+    assert far.corners()[0]["xy"] == (np.asarray(L[1]) + shift).tolist()     # the corner as traced, where it is
+    # the corner lies between the two ends in u, not in metres along the line: here it is at u = 7.23 (5.89 m)
+    assert len(m.trace_line(0.0, 6.5)) == 2 and len(m.trace_line(6.5, 12.0)) == 3
     assert np.array_equal(ordered(L, "left"), L[::-1]) and np.array_equal(ordered(L, "right"), L)
     with pytest.raises(TraceRefused) as e:
         ordered(L, "auto")                                # the side is chosen before the line is ordered
@@ -250,6 +266,11 @@ def test_smoothing_is_off_unless_asked():
     assert WallPath(out).length == pytest.approx(10.0, abs=0.01)
     shift = np.array([401234.567, 2634567.890])
     assert np.abs(smooth_trace(pts + shift, 1.0) - shift - smooth_trace(pts, 1.0)).max() < 1e-9
+    # the bell is sigma wide: a wave of 4 m keeps exp(-2 pi^2 sigma^2 / 4^2) = 0.29 of its 5 cm under 1 m (1.38 cm
+    # as clicked every 0.5 m); a bell of half the width leaves 3.5 cm, one of twice the width 0.05 cm
+    x = np.linspace(0.0, 16.0, 33)
+    wave = smooth_trace(np.column_stack([x, 0.05 * np.sin(2.0 * np.pi * x / 4.0)]), 1.0)
+    assert 0.011 < np.abs(wave[:, 1]).max() < 0.016 and len(wave) == 34     # 33 steps of half a metre at most
 
 
 def test_points_off_the_frame_are_nan_rows():
@@ -310,5 +331,41 @@ def test_shapes_and_arguments():
         with pytest.raises(ValueError, match="radius"):
             WallPath(L, radius=radius)
     with pytest.raises(TraceRefused) as e:
-        WallPath([[0.0, 0.0], [np.nan, 1.0]])
+        WallPath([[0.0, 0.0], [np.nan, 1.0], [5.0, 0.0]])       # not taken for a point clicked twice
     assert e.value.reason == "points"
+
+
+def test_the_thresholds_of_a_trace():
+    def turn(deg):
+        return [[0.0, 0.0], [5.0, 0.0], [5.0 + 5.0 * np.cos(np.radians(deg)), 5.0 * np.sin(np.radians(deg))]]
+
+    def bend(rad):
+        return [[0.0, 0.0], [3.0, 0.0], [3.0 + 3.0 * np.cos(rad), 3.0 * np.sin(rad)]]
+
+    def room(width):                                        # seen from inside, walls of 3 km
+        return WallPath([[width, 3000.0], [width, 0.0], [0.0, 0.0], [0.0, 3000.0]], radius=0.5)
+
+    # a turn of 170 degrees at most, to either side
+    assert MAX_TURN_DEG == 170.0 and [len(WallPath(turn(deg)).corners()) for deg in (169.0, -169.0)] == [1, 1]
+    for deg in (171.0, -171.0):
+        with pytest.raises(TraceRefused) as e:
+            WallPath(turn(deg))
+        assert e.value.reason == "turns_back"
+    # two points within a nanometre are one point
+    assert len(WallPath([[0.0, 0.0], [5e-10, 0.0], [6.0, 0.0], [6.0, 4.0]]).vertices) == 3
+    assert len(WallPath([[0.0, 0.0], [2e-9, 0.0], [6.0, 0.0], [6.0, 4.0]]).vertices) == 4
+    # a vertex has its arc when it turns by more than 1e-9 rad
+    assert WallPath(bend(5e-10)).corners() == [] and len(WallPath(bend(2e-9)).corners()) == 1
+    # and an arc of 0.05 mm (a turn of 1e-4 rad) still ends the frame at its centre
+    slight = WallPath(bend(1e-4), radius=0.5)
+    assert np.allclose(slight.min_depth_at(np.array([slight.corners()[0]["s"]])), [-(0.5 - CLEARANCE)], atol=1e-6)
+    # a place that still holds 1,000 m away has no limit: a room 1,300 m wide is shared at 650 m, one of 2,400 m is not
+    assert np.allclose(room(1300.0).max_depth_at(np.array([100.0])), [650.0 - CLEARANCE], atol=1e-6)
+    assert np.isinf(room(2400.0).max_depth_at(np.array([100.0]))[0])
+    # a limit is the last depth that held: within 1e-7 m of the place where the frame ends, never past it
+    behind = WallPath(L, radius=0.5).min_depth_at(np.array([3.0, 5.5 + 0.5 * np.pi / 4]))
+    exact = np.array([-(3.0 - CLEARANCE), -(0.5 - CLEARANCE)])
+    assert np.all(behind >= exact) and np.all(behind < exact + 1e-7)
+    # no limit for a u that is not a number
+    assert np.isnan(slight.max_depth_at(np.array([np.nan, 1.0]))).tolist() == [True, False]
+    assert np.isnan(slight.min_depth_at(np.array([np.nan]))[0])
