@@ -726,6 +726,11 @@ def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
 
 FACE_COLUMN = 0.01  # m between the columns the face of a wall is measured in
 FACE_ROWS = 0.1  # the share of its heights where a column must have surface to be of the face
+
+
+class NoSurface(ValueError):
+    """No surface of the model along the line of a wall, in its depth band: no column with surface at
+    :data:`FACE_ROWS` of its heights at least."""
 FACE_TOLERANCE = 0.05  # m: roughness of the face under this adds no length to the wall
 FACE_CURVE = 0.25  # m: a bow of the face tighter than this radius is its roughness, not a wall that curves
 FACE_PAIR = 0.0005  # m in u: how far a pair left out of the map may be from the line between those kept
@@ -874,7 +879,7 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
     d = depths(s)  # as measured: the columns on the edges are settled at each use, those halved with the others
     if not np.isfinite(d).any():
-        raise ValueError(f"no surface in the depth band along the trace (a column is of the face when the model is met "
+        raise NoSurface(f"no surface in the depth band along the trace (a column is of the face when the model is met "
                          f"at {FACE_ROWS:.0%} of its heights at least): the length on the face needs the wall")
     for _ in range(FACE_HALVINGS):
         points = _face_points(frame, s, _settled(d))
