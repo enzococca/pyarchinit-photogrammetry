@@ -580,6 +580,47 @@ def test_the_face_of_a_column_is_what_most_of_its_height_shows(tmp_path):
     assert abs(E.wall_length(entry) - 8.6) < 0.005
 
 
+def test_the_edge_of_a_stretch_of_surface_takes_the_depth_inside_it():
+    """The column on each edge of a stretch of surface takes the depth of the column next to it, inside the
+    stretch; a stretch of one or two columns has no inside, and stays as measured."""
+    nan = np.nan
+    measured = np.array([nan, 1.0, 2.0, nan, 3.0, 4.0, 5.0, 6.0, nan, 7.0, nan, 8.0, 9.0, 10.0])
+    settled = np.array([nan, 1.0, 2.0, nan, 4.0, 4.0, 5.0, 5.0, nan, 7.0, nan, 9.0, 9.0, 9.0])
+    assert np.array_equal(E._settled(measured), settled, equal_nan=True)
+    assert np.array_equal(E._settled(np.array([1.0, 2.0])), [1.0, 2.0]) and np.isnan(E._settled(np.full(3, nan))).all()
+
+
+def test_a_column_halved_onto_the_edge_of_the_wall_is_an_edge_too(tmp_path):
+    """In front of a corner the columns are halved, the one between the last empty column and the first of the
+    wall too: the new column, on the very edge of the wall, may find any depth as the first one may. Depths given
+    by hand: nothing before an edge in the arc of the corner, 0.2 m in front of the line after it and, on the
+    edge itself, nothing or 0.25 m behind the line. The length on the face is the same."""
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene())                            # any chunk: no ray is cast
+    frame = WallPath(np.asarray(info["face"]), radius=0.3)
+    columns = np.linspace(0.0, frame.length, int(np.ceil(frame.length / E.FACE_COLUMN - 1e-9)) + 1)
+    k = int(np.searchsorted(columns, frame.corners()[0]["s"]))
+    edge = (columns[k - 1] + columns[k]) / 2.0                     # half way between two columns of the first pass
+    surf = E.FrameSurface(ch, raycaster_for_chunk(ch), frame, RES, threading.Lock(), (-0.5, 0.5),
+                          (0.0, 100.0, frame.length, 102.0))
+    asked = []
+
+    def by_hand(on_the_edge):
+        def depth_at(u, v):
+            asked.extend(np.unique(u).tolist())
+            d = np.where(u > edge, 0.2, np.nan)
+            d[np.abs(u - edge) < 1e-9] = on_the_edge
+            return d
+        return depth_at
+
+    surf.depth_at = by_hand(np.nan)
+    clean = np.array(E.face_map(surf))
+    assert np.abs(np.asarray(asked) - edge).min() < 1e-9             # the edge was halved onto
+    surf.depth_at = by_hand(-0.25)
+    found = np.array(E.face_map(surf))
+    s = np.linspace(0.0, frame.length, 500)
+    assert np.abs(np.interp(s, found[:, 0], found[:, 1]) - np.interp(s, clean[:, 0], clean[:, 1])).max() < 1e-3
+
+
 def test_the_face_line_bows_with_the_wall_not_with_its_roughness():
     """Between two points the simplification keeps, the face line is as long as the wall that curves between
     them, and as long as their chord where the face only has a bump."""

@@ -738,6 +738,20 @@ def _face_points(frame: WallPath, s: np.ndarray, d: np.ndarray) -> np.ndarray:
     return frame.point(s, 0.0, np.interp(s, s[ok], d[ok]))[:, :2] - frame.vertices[0]
 
 
+def _settled(d: np.ndarray) -> np.ndarray:
+    """The depths of the columns of a face, in the order of the line (NaN: no surface), with the column on each
+    edge of a stretch of surface - the end of the wall, the side of a hole, the end of the part - taking the depth
+    of the column next to it, inside the stretch: on the very end of a wall a ray runs along its return and finds
+    any depth, which would be a step of the face that is not there. A stretch of one or two columns has no column
+    inside it: it stays as measured."""
+    ok = np.isfinite(d)
+    before, after = np.concatenate([[False], ok[:-1]]), np.concatenate([ok[1:], [False]])  # the columns beside it
+    inside = ok & before & after
+    first = ok & ~before & np.concatenate([inside[1:], [False]])
+    last = ok & ~after & np.concatenate([[False], inside[:-1]])
+    return np.where(first, np.concatenate([d[1:], [np.nan]]), np.where(last, np.concatenate([[np.nan], d[:-1]]), d))
+
+
 def _kept(points: np.ndarray, tolerance: float) -> np.ndarray:
     """The indices of the points of a polyline (N, 2) that its simplification within ``tolerance`` keeps."""
     from shapely.geometry import LineString
@@ -821,8 +835,7 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     band, is not the face. An empty column - a hole in the model, the trace prolonged past the wall - takes the
     depth interpolated between the nearest columns with a face on either side, past the last of them the depth of
     that one: there the face is the line of the frame carried on, and ``u`` does not jump. The column on the edge
-    of a stretch of surface takes the depth of the one next to it: on the very end of a wall a ray runs along its
-    return and finds any depth, which would be a step of the face that is not there. The face points are the
+    of a stretch of surface takes the depth of the one next to it (:func:`_settled`). The face points are the
     points of the line moved by that depth along its normal; the face line goes through those of them that
     their simplification within :data:`FACE_TOLERANCE` keeps (the roughness of the masonry adds no length, a
     corner stays), bowed between them as the face is (:func:`_along_face`: a curved wall keeps its length), and
@@ -855,17 +868,11 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
         return column
 
     s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
-    d = depths(s)
-    ok = np.isfinite(d)
-    if not ok.any():
+    d = depths(s)  # as measured: the columns on the edges are settled at each use, those halved with the others
+    if not np.isfinite(d).any():
         raise ValueError("no surface in the depth band along the trace: the length on the face needs the wall")
-    # the column on the edge of a stretch of surface - the end of the wall, the side of a hole, the end of the part -
-    # takes the depth of the column next to it: a ray along the return of a wall finds any depth there
-    before, after = np.concatenate([[False], ok[:-1]]), np.concatenate([ok[1:], [False]])
-    d = np.where(ok & after & ~before, np.concatenate([d[1:], [np.nan]]),
-                 np.where(ok & before & ~after, np.concatenate([[np.nan], d[:-1]]), d))
     for _ in range(FACE_HALVINGS):
-        points = _face_points(frame, s, d)
+        points = _face_points(frame, s, _settled(d))
         gap = np.hypot(*np.diff(points, axis=0).T)
         halve = gap > 1.5 * FACE_COLUMN  # a fan, not the roughness of a face (a column deeper than the next)
         for k in _kept(points, FACE_TOLERANCE)[1:-1]:  # the corner lies in one of the two columns beside it
@@ -876,7 +883,7 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
         middle = (s[:-1][halve] + s[1:][halve]) / 2.0
         order = np.argsort(np.concatenate([s, middle]), kind="stable")
         s, d = np.concatenate([s, middle])[order], np.concatenate([d, depths(middle)])[order]
-    points = _face_points(frame, s, d)
+    points = _face_points(frame, s, _settled(d))
     u = _along_face(points, _kept(points, FACE_TOLERANCE))
     # strictly increasing (a face point may fall behind the one before it on a rough face), 0 at s = 0
     u = np.concatenate([[0.0], np.cumsum(np.maximum(np.diff(np.maximum.accumulate(u)), 1e-6 * np.diff(s)))])
