@@ -417,7 +417,11 @@ class WorkspaceTree(QTreeWidget):
                     tip = tr("Doppio clic per vederlo; tasto destro: esporta, elimina")
                     if e.get("tilt"):
                         tip += "\n" + axis_text(e["tilt"])
-                    if e.get("scale") == "wall":
+                    if (e.get("frame") or {}).get("kind") == "path":  # a wall traced on the plan
+                        tip += "\n" + (tr("Muro tracciato in pianta: u = lunghezza sulla faccia del muro")
+                                        if e.get("scale") == "wall" else
+                                        tr("Muro tracciato in pianta: u = lunghezza lungo la traccia"))
+                    elif e.get("scale") == "wall":
                         tip += "\n" + tr("Scala sulla parete: u = lunghezza lungo il muro")
                     it.setToolTip(0, tip)
                     el.addChild(it)
