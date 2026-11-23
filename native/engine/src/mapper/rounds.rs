@@ -143,8 +143,12 @@ pub const FOCAL_SD_HOLD: f64 = 0.005;
 pub const FOCAL_MOVE_HOLD: f64 = 0.2;
 /// Without positions, the sd of the focal lengths is taken with the scale of the block held by a
 /// position of one photo whose sigma is this many times the extent of the block: a gauge that
-/// adds no information the block has.
-pub const GAUGE_SIGMA_EXTENTS: f64 = 100.0;
+/// adds no information the block has (the sd is the same to four digits from a tenth of the
+/// extent to a hundred times it). Not looser than the extent itself: beside the tie points of a
+/// block of hundreds of photos a hundred extents is below what double precision keeps, and the
+/// reduced system then fails to invert now and then (700 pitched photos: a pivot that is not
+/// positive), which holds a focal length the block determines.
+pub const GAUGE_SIGMA_EXTENTS: f64 = 1.0;
 
 /// The names of the groups of `groups`, as the reports give them.
 pub const INTRINSICS: [&str; 4] = ["focal", "radial", "principal_point", "decentring"];
@@ -759,6 +763,30 @@ fn scaled_problem(state: &State, b: &Built, [ft, fh, fv]: [f64; 3]) -> Problem {
     pb
 }
 
+/// The scale of a block without positions held for its covariance: a position of the photo
+/// farthest from the first one, at its place, its sigma `GAUGE_SIGMA_EXTENTS` times their distance.
+/// Nothing is added to a problem that has positions, or fewer than two photos.
+pub fn hold_scale(pb: &mut bundle::Problem) {
+    hold_scale_by(pb, GAUGE_SIGMA_EXTENTS);
+}
+
+/// `hold_scale` with the sigma of the position `extents` times the extent of the block.
+pub fn hold_scale_by(pb: &mut bundle::Problem, extents: f64) {
+    if !pb.gnss.is_empty() || pb.centres.len() < 2 {
+        return;
+    }
+    let first = Vector3::from(pb.centres[0]);
+    let (far, extent) = pb
+        .centres
+        .iter()
+        .enumerate()
+        .map(|(j, c)| (j, (Vector3::from(*c) - first).norm()))
+        .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    let sigma = extents * extent.max(1e-3);
+    pb.gnss.push((far, pb.centres[far], [sigma; 3], 0));
+    pb.gnss_bias = false;
+}
+
 /// Ruling R16: per camera, the relative posterior sd of its focal length at the state after round
 /// 1 (`b`, `sol`: its last solve): the problem of the state with its cameras as the last round has
 /// them (a camera of an OPENCV sensor widened to OPENCV on a block held by its positions, as
@@ -797,18 +825,7 @@ fn focal_sds(
     let (free, _) = intrinsics(&probe, last, o.rounds, positions);
     let opened = build(&probe, input, &free, false);
     let mut pb = scaled_problem(&probe, &opened, factors);
-    if pb.gnss.is_empty() && pb.centres.len() >= 2 {
-        let first = Vector3::from(pb.centres[0]);
-        let (far, extent) = pb
-            .centres
-            .iter()
-            .enumerate()
-            .map(|(j, c)| (j, (Vector3::from(*c) - first).norm()))
-            .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-        let sigma = GAUGE_SIGMA_EXTENTS * extent.max(1e-3);
-        pb.gnss.push((far, pb.centres[far], [sigma; 3], 0));
-        pb.gnss_bias = false;
-    }
+    hold_scale(&mut pb);
     let variances = bundle::intrinsics_variances(&pb, scaled_loss(o, pb.pixel_sigma))?;
     Ok(probe
         .cameras

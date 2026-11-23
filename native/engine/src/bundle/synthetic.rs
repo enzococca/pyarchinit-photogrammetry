@@ -220,6 +220,98 @@ pub fn grid_block(photos: usize, points_per_photo: usize, seed: u64) -> (Problem
     (pb, truth)
 }
 
+/// The pitch of the photos of `pitched_block`, radians: forward on the even strips, backward on the
+/// odd ones, so that the block tells its focal length from its flying height.
+const PITCH: f64 = 0.25;
+
+/// world -> camera of `look_down(yaw)` leaning by `pitch` along the x axis of the world (the
+/// direction of the strips).
+fn look_down_pitched(yaw: f64, pitch: f64) -> [[f64; 3]; 3] {
+    let down = look_down(-yaw);
+    let (s, c) = pitch.sin_cos();
+    let lean = [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]];
+    let mut r = [[0.0; 3]; 3];
+    for (i, row) in r.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = (0..3).map(|k| lean[i][k] * down[k][j]).sum();
+        }
+    }
+    r
+}
+
+/// A free block as an alignment without positions leaves it: `rows` strips of `per_row` photos
+/// (the strips 12 m apart, the photos 8 m along them) 30 m above the rolling ground of
+/// `grid_block`, pitched by `PITCH` forward and backward on alternate strips, about
+/// `points_per_photo` tie points a photo drawn by `seed`, each seen by two photos at least with
+/// `noise_px` of noise, by a RADIAL camera of 1200 x 900 pixels whose focal length and radial terms
+/// are free. Nothing places it - no position, no control point: its first photo is held. The
+/// parameters are the true ones.
+pub fn pitched_block(rows: usize, per_row: usize, points_per_photo: usize, noise_px: f64, seed: u64) -> Problem {
+    let mut rng = Rng(seed);
+    let params = [FOCAL, WIDTH / 2.0, HEIGHT / 2.0, -0.02, 0.01];
+    let photos = rows * per_row;
+    let mut rotations = Vec::with_capacity(photos);
+    let mut centres = Vec::with_capacity(photos);
+    for row in 0..rows {
+        let pitch = if row % 2 == 0 { PITCH } else { -PITCH };
+        for k in 0..per_row {
+            rotations.push(look_down_pitched(0.02 * (row % 3) as f64, pitch));
+            centres.push([8.0 * k as f64, 12.0 * row as f64, FLYING_HEIGHT]);
+        }
+    }
+    let (x1, y1) = (8.0 * (per_row - 1) as f64 + 15.0, 12.0 * (rows - 1) as f64 + 15.0);
+    let (mut points, mut obs) = (Vec::new(), Vec::new());
+    for _ in 0..photos * points_per_photo {
+        let (x, y) = (rng.uniform_in(-15.0, x1), rng.uniform_in(-15.0, y1));
+        let w = [x, y, ground(x, y)];
+        // the photos whose centre is within 40 m: the strips nearby, the photos nearby along them
+        let near = |v: f64, step: f64, count: usize| {
+            let lo = ((v - 40.0) / step).ceil().max(0.0) as usize;
+            lo..(((v + 40.0) / step).floor().max(-1.0) as isize + 1).clamp(0, count as isize) as usize
+        };
+        let mut views = Vec::new();
+        for row in near(y, 12.0, rows) {
+            for k in near(x, 8.0, per_row) {
+                let i = row * per_row + k;
+                let (r, c) = (&rotations[i], centres[i]);
+                let rel = [w[0] - c[0], w[1] - c[1], w[2] - c[2]];
+                let cam: Vec<f64> = r.iter().map(|a| a[0] * rel[0] + a[1] * rel[1] + a[2] * rel[2]).collect();
+                if cam[2] <= 0.0 {
+                    continue;
+                }
+                let (u, v) = project(Model::Radial, &params, cam[0] / cam[2], cam[1] / cam[2]);
+                if u > MARGIN_PX && u < WIDTH - MARGIN_PX && v > MARGIN_PX && v < HEIGHT - MARGIN_PX {
+                    views.push((i, [u + noise_px * rng.normal(), v + noise_px * rng.normal()]));
+                }
+            }
+        }
+        if views.len() < 2 {
+            continue;
+        }
+        let point = points.len();
+        points.push(w);
+        obs.extend(views.into_iter().map(|(image, xy)| Obs { image, point, xy }));
+    }
+    let mut fixed_images = vec![false; photos];
+    fixed_images[0] = true;
+    Problem {
+        rotations,
+        centres,
+        image_camera: vec![0; photos],
+        cameras: vec![CameraBlock {
+            model: Model::Radial,
+            params: params.to_vec(),
+            width: WIDTH,
+            height: HEIGHT,
+            free: vec![0, 3, 4],
+        }],
+        points,
+        obs,
+        fixed_images,
+        ..Problem::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

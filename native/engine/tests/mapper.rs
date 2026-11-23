@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::{convergent, ring, ring_with_relief, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
+use ppg_engine::bundle::synthetic::pitched_block;
+use ppg_engine::bundle::{intrinsics_variances, Loss};
 use ppg_engine::camera::{Camera, Model};
 use ppg_engine::mapper::graph::ViewGraph;
 use ppg_engine::mapper::input::Input;
@@ -800,3 +802,44 @@ fn the_marginal_sd_of_the_focal_length_decides() {
             report.notes);
 }
 
+/// The scale of a block without positions is held, for the covariance of its focal length, by a
+/// position of the photo farthest from the first one (`rounds::hold_scale`): a gauge, which adds
+/// nothing the block has - the sd is the same whether that position is a tenth of the extent of
+/// the block loose or ten times it. It must also stay within what double precision keeps beside
+/// the tie points of a block of hundreds of photos: at a hundred extents the reduced system of
+/// these 700 pitched photos, their tie points at the accuracy of their noise as the rounds scale
+/// them, has a pivot that is not positive (so have 600 and 800 photos in long strips, and 400 at
+/// a pixel of accuracy; other shapes pass): there is no covariance, and the focal length of a
+/// block that determines it is held for no reason of the block.
+#[test]
+fn the_scale_of_a_large_free_block_is_held_within_double_precision() {
+    use ppg_engine::mapper::rounds::{hold_scale, hold_scale_by, GAUGE_SIGMA_EXTENTS};
+    let mut free = pitched_block(20, 35, 21, 0.3, 1);
+    free.pixel_sigma = 0.3;
+    assert_eq!((free.centres.len(), free.gnss.len()), (700, 0));
+    assert!(free.obs.len() > 80_000, "{}", free.obs.len());
+    let sd = |pb: &ppg_engine::bundle::Problem| -> f64 {
+        let variances = intrinsics_variances(pb, Loss::None).expect("a covariance of the pitched block");
+        variances[0][0].sqrt() / pb.cameras[0].params[0]
+    };
+    let mut held = free.clone();
+    hold_scale(&mut held);
+    assert_eq!(held.gnss.len(), 1, "one position holds the scale");
+    assert!(!held.gnss_bias);
+    let at_the_constant = sd(&held);
+    eprintln!("700 pitched photos, {} observations: focal sd {at_the_constant:.6} with the gauge at \
+               {GAUGE_SIGMA_EXTENTS} extents", free.obs.len());
+    assert!(at_the_constant > 0.0 && at_the_constant < 0.001, "{at_the_constant}");
+    assert!(GAUGE_SIGMA_EXTENTS <= 1.0, "{GAUGE_SIGMA_EXTENTS}");
+    for extents in [0.1, 10.0] {
+        let mut other = free.clone();
+        hold_scale_by(&mut other, extents);
+        let got = sd(&other);
+        assert!((got / at_the_constant - 1.0).abs() < 1e-3, "{extents} extents: {got} vs {at_the_constant}");
+    }
+    // a block with positions has its scale: nothing is added
+    let mut placed = free.clone();
+    placed.gnss.push((3, placed.centres[3], [0.05; 3], 0));
+    hold_scale(&mut placed);
+    assert_eq!(placed.gnss.len(), 1);
+}

@@ -79,9 +79,10 @@ FOCAL_MOVE_HOLD = 0.2
 K1_MOVE_HOLD = 0.5
 # the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
 # many times the extent of the block: a gauge that adds no information the block has (the sd of a focal length is
-# the same to four digits from a tenth of the extent to a hundred times it). Not looser: the rounds of the native
-# mapper use 100, and beside the tie points of a block of hundreds of photos that is below what double precision
-# keeps - the normal matrix then fails to invert now and then (400 photos: a pivot that is not positive)
+# the same to four digits from a tenth of the extent to a hundred times it). Not looser than the extent itself:
+# beside the tie points of a block of hundreds of photos a hundred extents is below what double precision keeps,
+# and the normal matrix then fails to invert now and then (400 photos: a pivot that is not positive). The rounds
+# of the native mapper hold the scale the same way (GAUGE_SIGMA_EXTENTS of native/engine/src/mapper/rounds.rs)
 GAUGE_SIGMA_EXTENTS = 1.0
 
 
