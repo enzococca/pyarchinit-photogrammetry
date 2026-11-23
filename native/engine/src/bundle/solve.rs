@@ -219,6 +219,16 @@ pub fn bias_covariance(pb: &Problem, sol: &Solution, loss: Loss) -> Result<Vec<(
 pub fn intrinsics_covariance(pb: &Problem, loss: Loss) -> Result<(Vec<f64>, Vec<usize>), String> {
     pb.check()?;
     let model = BundleModel::new(pb, loss);
+    let (cols, counts) = intrinsic_columns(&model, pb);
+    if cols.is_empty() {
+        return Ok((Vec::new(), counts));
+    }
+    Ok((covariance_block(&model, &cols)?, counts))
+}
+
+/// The reduced columns of the free intrinsics of the cameras of `pb` in `model`, in the order of
+/// `intrinsics_covariance`, and how many of them each camera has.
+fn intrinsic_columns(model: &BundleModel, pb: &Problem) -> (Vec<usize>, Vec<usize>) {
     let start: Vec<usize> = model
         .cam_size
         .iter()
@@ -237,10 +247,7 @@ pub fn intrinsics_covariance(pb: &Problem, loss: Loss) -> Result<(Vec<f64>, Vec<
         }
         counts.push(cols.len() - from);
     }
-    if cols.is_empty() {
-        return Ok((Vec::new(), counts));
-    }
-    Ok((covariance_block(&model, &cols)?, counts))
+    (cols, counts)
 }
 
 /// The variances of the free intrinsics of each camera of `pb` at its own parameters (the
@@ -643,6 +650,44 @@ mod tests {
     use super::*;
     use crate::bundle::problem::{CameraBlock, Obs};
     use crate::camera::Model;
+
+    /// A weak block - a nadir flight over gentle relief, its positions loose (2 m), no control
+    /// point, every intrinsic free: the focal length hardly told from the flying height, the poorly
+    /// determined direction the covariance is asked for. The columns the conjugate gradients give
+    /// (the dense limit forced to 0) are those of the dense inverse; stopped before they converge
+    /// they are refused, never a truncated (smaller) variance in that direction.
+    #[test]
+    fn the_covariance_by_the_conjugate_gradients_is_the_dense_one_on_a_weak_block_or_refused() {
+        use crate::bundle::lm::{covariance_block_with_limits, COVARIANCE_PCG_ITERATIONS};
+        let (mut pb, _) = crate::bundle::synthetic::grid_block(12, 200, 3);
+        pb.gcps.clear();
+        pb.mobs.clear();
+        pb.markers.clear();
+        for g in pb.gnss.iter_mut() {
+            g.2 = [2.0; 3];
+        }
+        pb.cameras[0].free = (0..8).collect();
+        pb.check().unwrap();
+        let model = BundleModel::new(&pb, Loss::None);
+        let (cols, counts) = intrinsic_columns(&model, &pb);
+        assert_eq!(counts, vec![8]);
+        let k = cols.len();
+        let dense = covariance_block_with_limits(&model, &cols, usize::MAX, COVARIANCE_PCG_ITERATIONS).unwrap();
+        let pcg = covariance_block_with_limits(&model, &cols, 0, COVARIANCE_PCG_ITERATIONS).unwrap();
+        // the focal length (1000 px): a sd of more than 1 % per pixel of the observations - the weak
+        // direction
+        assert!(dense[0].sqrt() > 10.0, "sd of the focal {}", dense[0].sqrt());
+        for i in 0..k {
+            for j in 0..k {
+                let scale = (dense[i * k + i] * dense[j * k + j]).sqrt();
+                let (a, b) = (pcg[i * k + j], dense[i * k + j]);
+                assert!((a - b).abs() <= 1e-5 * scale, "({i}, {j}): {a} vs {b}");
+            }
+        }
+        // a few iterations do not reach the inverse: refused, not returned short
+        let short = covariance_block_with_limits(&model, &cols, 0, 3);
+        assert!(short.is_err(), "{short:?}");
+    }
 
     #[test]
     fn auto_chooses_by_the_limits_it_is_given() {

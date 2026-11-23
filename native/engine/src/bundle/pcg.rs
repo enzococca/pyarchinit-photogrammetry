@@ -283,14 +283,15 @@ fn product(cx: &Context, scratch: &mut Scratch, x: &[f64], out: &mut [f64]) {
 
 /// The preconditioned conjugate gradients on `apply` (the damped reduced system) from zero,
 /// until the Q-criterion (`forcing`), an exact solution or `max_iterations`: the iterate
-/// reached, or an error when the system is not positive definite.
+/// reached and whether it converged (`false` when `max_iterations` stopped it, or the
+/// preconditioned residual lost its sign), or an error when the system is not positive definite.
 fn conjugate_gradients(
     mut apply: impl FnMut(&[f64], &mut [f64]),
     blocks: &[DiagonalBlock],
     b: &[f64],
     forcing: f64,
     max_iterations: usize,
-) -> Result<Vec<f64>, String> {
+) -> Result<(Vec<f64>, bool), String> {
     let n = b.len();
     let dot = |a: &[f64], c: &[f64]| a.iter().zip(c).map(|(x, y)| x * y).sum::<f64>();
     let precondition = |r: &[f64], z: &mut [f64]| {
@@ -300,7 +301,7 @@ fn conjugate_gradients(
     };
     let mut x = vec![0.0; n];
     if dot(b, b) == 0.0 {
-        return Ok(x);
+        return Ok((x, true));
     }
     let mut r = b.to_vec();
     let mut z = vec![0.0; n];
@@ -325,12 +326,12 @@ fn conjugate_gradients(
         let zeta = k as f64 * (next - model) / next;
         model = next;
         if zeta < forcing || dot(&r, &r) == 0.0 {
-            break;
+            return Ok((x, true));
         }
         precondition(&r, &mut z);
         let rz_next = dot(&r, &z);
         if !(rz_next > 0.0) {
-            break;
+            return Ok((x, rz_next == 0.0));
         }
         let beta = rz_next / rz;
         for i in 0..n {
@@ -338,11 +339,12 @@ fn conjugate_gradients(
         }
         rz = rz_next;
     }
-    Ok(x)
+    Ok((x, false))
 }
 
 /// One step of the damped normal equations, as `schur::dense_step`, with the reduced system
-/// solved by the conjugate gradients stopped by `forcing` or `max_iterations`.
+/// solved by the conjugate gradients stopped by `forcing` or `max_iterations` (a step of the
+/// adjustment takes the iterate reached either way).
 pub(crate) fn pcg_step_with(
     red: &Reduced,
     g: &[f64],
@@ -350,19 +352,47 @@ pub(crate) fn pcg_step_with(
     forcing: f64,
     max_iterations: usize,
 ) -> Result<Vec<f64>, String> {
+    pcg_solve(red, g, damping, forcing, max_iterations).map(|(delta, _)| delta)
+}
+
+/// `pcg_step_with` that refuses an iterate `max_iterations` stopped before the Q-criterion
+/// (`forcing`) was met: the solve of a column of an inverse (`lm::covariance_block`), where a
+/// truncated iterate is short exactly in the poorly determined directions.
+pub(crate) fn pcg_step_converged(
+    red: &Reduced,
+    g: &[f64],
+    damping: &[f64],
+    forcing: f64,
+    max_iterations: usize,
+) -> Result<Vec<f64>, String> {
+    match pcg_solve(red, g, damping, forcing, max_iterations)? {
+        (delta, true) => Ok(delta),
+        (_, false) => Err(format!("the conjugate gradients did not converge in {max_iterations} iterations")),
+    }
+}
+
+fn pcg_solve(
+    red: &Reduced,
+    g: &[f64],
+    damping: &[f64],
+    forcing: f64,
+    max_iterations: usize,
+) -> Result<(Vec<f64>, bool), String> {
     let points = point_inverses(red, g, damping);
     let cx = Context { shape: red.shape, lin: red.lin, g, damping, points: &points };
     let n = red.shape.n;
     let mut delta = vec![0.0; n + red.shape.n_point_cols];
+    let mut converged = true;
     if n > 0 {
         let (blocks, b) = preconditioner(&cx);
         let mut scratch = Scratch::new(red);
         let apply = |p: &[f64], q: &mut [f64]| product(&cx, &mut scratch, p, q);
-        let x = conjugate_gradients(apply, &blocks, &b, forcing, max_iterations)?;
+        let (x, done) = conjugate_gradients(apply, &blocks, &b, forcing, max_iterations)?;
         delta[..n].copy_from_slice(&x);
+        converged = done;
     }
     back_substitute(&cx, &mut delta);
-    Ok(delta)
+    Ok((delta, converged))
 }
 
 /// One step of the damped normal equations, as `schur::dense_step`: the reduced system solved
