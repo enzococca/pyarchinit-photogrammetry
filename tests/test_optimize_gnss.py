@@ -24,8 +24,9 @@ from pyarchinit_photogrammetry.markers import gcp
 
 pycolmap = pytest.importorskip("pycolmap")
 
-needs_native = pytest.mark.skipif(not _native.has("bundle"), reason="the native core with the bundle adjustment "
-                                                                    "(API 12) is not installed")
+needs_native = pytest.mark.skipif(not (_native.enabled() and _native.has("bundle")),
+                                  reason="the native core with the bundle adjustment (API 12) is not installed, or "
+                                         "PPG_NATIVE=0")
 SOLVERS = ["scipy", pytest.param("native", marks=needs_native)]  # the solvers of our own adjustment
 W, H, F = 1000, 750, 1000.0
 K1, K2 = -0.05, 0.01

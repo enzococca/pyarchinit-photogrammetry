@@ -648,7 +648,8 @@ def test_process_with_the_native_engine_asked_for(scene_dir, tmp_path, monkeypat
         assert alignment == {"requested": "native", "used": "native", "fallback": None}
     else:
         assert (alignment["requested"], alignment["used"]) == ("native", "classic")
-        assert alignment["fallback"] == f"the native core with the mapper (API {_native.MAPPER_API}) is not installed"
+        assert alignment["fallback"] == ("PPG_NATIVE=0" if not _native.enabled() else  # switched off, or missing
+                                         f"the native core with the mapper (API {_native.MAPPER_API}) is not installed")
     record = chunk.meta["engine"]["build_depth_maps"]
     assert (record["requested"], record["used"]) == ("native", "classic")
     assert record["fallback"] == "the native engine does not do 'build_depth_maps' yet"
