@@ -1154,6 +1154,36 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
         w.close()
 
 
+def test_the_report_names_the_parts_of_the_calibration_that_were_held(tmp_path):
+    """The parameters of the optimisation in the report (the PDF and its tables): beside the focal length held,
+    with its reason, a row for the other parts of the calibration the check held, by their names in both
+    languages; no such row when it held none of them, nor for an optimisation that kept no record of them."""
+    from pyarchinit_photogrammetry.io import report_content as rc
+
+    def rows(ch, language):
+        w = rc.Words(language)
+        return [(label, value) for step, label, value in rc.parameter_rows(ch, w) if step == w("step_optimize")]
+
+    _doc, ch = _block(tmp_path)
+    record = sfm._check_record(True)
+    record.update(checked=True, focal_sd=[[0, 0.11]],
+                  held={"focal": [0], "tangential": [], "principal_point": [0], "radial": [0]})
+    ch.meta.setdefault("sfm", {})["optimize"] = {"reprojection_error": 0.5, "intrinsics": record,
+                                                 "focal_held": sfm.FOCAL_HELD_UNDETERMINED}
+    english = rows(ch, "en")
+    assert ("Focal length of the alignment held", f"yes ({sfm.FOCAL_HELD_UNDETERMINED})") in english
+    assert ("Other parts of the calibration held", "principal point, radial distortion") in english
+    assert all(label in {t[1] for t in rc.TEXT.values()} for label, _value in english), english  # no raw key
+    assert ("Altre parti della calibrazione tenute", "punto principale, distorsione radiale") in rows(ch, "it")
+    record["held"] = {**NOTHING_HELD, "tangential": [0]}
+    assert ("Other parts of the calibration held", "tangential distortion") in rows(ch, "en")
+    for held in ({**NOTHING_HELD, "focal": [0]}, NOTHING_HELD, {"focal": [0]}):
+        record["held"] = held
+        assert not any("calibration" in label for label, _value in rows(ch, "en")), held
+    del ch.meta["sfm"]["optimize"]["intrinsics"]  # a report of before the check
+    assert not any("calibration" in label for label, _value in rows(ch, "en"))
+
+
 # ------------------------------------------------------------------- the weak ring and the trench
 @pytest.fixture(scope="module")
 def weak_ring(tmp_path_factory):
