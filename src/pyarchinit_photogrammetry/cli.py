@@ -1289,14 +1289,15 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                                         help="with --engine ppg: auto, native (the core), scipy (the reference)"),
              hold_undetermined: bool = typer.Option(
                  True, "--hold-undetermined/--free-undetermined",
-                 help="keep the calibration of a camera whose focal length the block does not determine (photos "
-                      "looking straight down over flat ground: its marginal sd above 0.5 %, the report says so "
-                      "per sensor); --free-undetermined refines every calibration whatever the block determines"),
+                 help="keep the focal length of a camera where the block does not determine it (photos looking "
+                      "straight down over flat ground: its marginal sd above 0.5 %; the distortion is still "
+                      "refined, the report says so per sensor), and a principal point asked for likewise; "
+                      "--free-undetermined refines every calibration whatever the block determines"),
              chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
     held by the accurate GNSS positions of the photos; an optimisation that takes the cameras away from those
     positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
-    references to keep it). The calibration of a camera is refined only where the block determines it."""
+    references to keep it). The focal length of a camera is refined only where the block determines it."""
     from .engine.bundle import SOLVERS
     from .engine.sfm import GNSS_MODES, resolve_optimize_engine
 

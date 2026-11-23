@@ -7836,7 +7836,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 ("plain", "usate con la loro accuratezza (motore proprio)"),
                 ("bias", "usate, con un bias per volo (motore proprio)")]),
             Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False),
-            Field("hold", "Tieni la calibrazione delle camere di cui il blocco non determina la focale", True)],
+            Field("hold", "Tieni la focale delle camere dove il blocco non la determina", True)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o più punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
                      "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
@@ -7860,10 +7860,11 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 "scarto di prima e 30 cm in più), si rimette l'allineamento di prima - o piegava il blocco, o le "
                 "posizioni non concordano con i punti di controllo; per tenerla, togli la spunta alle camere nel "
                 "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + tr(
-                "La calibrazione di una camera viene affinata solo dove il blocco la determina: con sole foto "
-                "nadirali su terreno piatto la focale non si distingue dalla quota di volo (lo scarto della focale "
-                "supera lo 0,5 %), e la calibrazione resta quella dell'allineamento; il risultato dice per quanti "
-                "sensori. Togli l'ultima spunta per affinarla comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
+                "Ogni parte della calibrazione di una camera viene affinata solo dove il blocco la determina: con "
+                "sole foto nadirali su terreno piatto la focale non si distingue dalla quota di volo (il suo scarto "
+                "supera lo 0,5 %) e resta quella dell'allineamento, mentre la distorsione viene affinata lo stesso; "
+                "il punto principale, se chiesto, resta fermo quando il blocco non lo determina. Il risultato dice "
+                "per quanti sensori. Togli l'ultima spunta per affinare tutto comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
@@ -7923,11 +7924,16 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 text += tr("; la compensazione con le posizioni GNSS non è riuscita ({0}): il blocco resta come "
                            "l'ha lasciato l'allineamento", held["termination"])
             judged = rep.get("intrinsics") or {}
-            if judged.get("held"):  # the sensors whose focal length the block does not determine
-                text += tr("; calibrazione dell'allineamento tenuta: il blocco non determina la focale ({0} "
-                           "sensori su {1})", len(judged["held"]), len(judged.get("focal_sd") or judged["held"]))
+            held = judged.get("held") or {}  # what the block does not determine, by group: the sensors held
+            if held.get("focal"):
+                text += tr("; focale dell'allineamento tenuta: il blocco non la determina ({0} sensori su {1})",
+                           len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
             elif rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
+            if held.get("principal_point"):
+                text += tr("; punto principale tenuto: il blocco non lo determina")
+            if held.get("radial"):
+                text += tr("; distorsione radiale tenuta: scappava durante l'ottimizzazione")
             if offsets:
                 text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),
                            _length(offsets["after"]))

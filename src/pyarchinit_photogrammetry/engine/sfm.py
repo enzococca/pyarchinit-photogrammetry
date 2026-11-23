@@ -2705,10 +2705,11 @@ BEND_MARGIN_M = 0.3  # many times the offsets before, and this much more, is und
 # why optimize_cameras kept the focal length of the alignment: report["focal_held"] (None when it was refined)
 FOCAL_HELD_BY_POSITIONS = "the camera positions hold the block"
 FOCAL_HELD_NO_REFERENCES = "no references: the focal length cannot be told from the depth"
-FOCAL_HELD_UNDETERMINED = "the block does not determine the focal length"  # the check of _focal_check, or its guard
+FOCAL_HELD_UNDETERMINED = "the block does not determine the focal length"  # _calibration_check, or its guard
 # why that check asked nothing of the core though it was wanted (report["intrinsics"]["reason"]): the optimisation
-# refines no focal length (the positions hold the block, nothing places it, every calibration is fixed)
-FOCAL_NOT_REFINED = "no focal length is refined"
+# refines nothing the check judges - no focal length (the positions hold the block, nothing places it, every
+# calibration is fixed) and no principal point (it was not asked for)
+NOTHING_TO_JUDGE = "no focal length or principal point is refined"
 
 
 def accurate_gnss(camera) -> bool:
@@ -3053,32 +3054,48 @@ def _camera_sensors(chunk: Chunk, rec, camera_ids) -> list:
     return [sensors.get(c) for c in camera_ids]
 
 
-def _focal_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool) -> tuple[dict, dict]:
-    """The calibrations an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine:
-    the rule of the rounds of the native mapper, applied to the camera optimisation. The calibration of a camera
-    is refined only where the block determines it: the relative marginal sd of its focal length
-    (:func:`.bundle.focal_sds`: every intrinsic the adjustment frees free with it, the covariance scaled by the
-    variance factor of the tie points) must be within :data:`.bundle.FOCAL_SD_HOLD`, 0.5 %; a camera above it -
-    nadir photos over flat ground, which cannot tell the focal length from the height, whatever control points on
-    that ground say - or without a covariance at all keeps every intrinsic as the alignment left it. Nothing is
-    asked with ``hold_undetermined`` False (the calibrations are refined whatever the block determines), where
-    the adjustment refines no focal length (:data:`FOCAL_NOT_REFINED`), and where the core cannot give the
-    covariance (:func:`.bundle.variances_ready`: every calibration is refined as before, one line of the log at
-    INFO says that the check needs the native core).
+# the groups of intrinsics the camera optimisation may hold, as its notes name them
+_GROUP_WORDS = {"focal": "focal", "principal_point": "principal point", "radial": "radial"}
+
+
+def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool) -> tuple[dict, dict]:
+    """What an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine of each
+    calibration: each group of intrinsics only where the block determines it - the rule of the rounds of the
+    native mapper, applied to the camera optimisation group by group. From the covariance of the adjustment at the
+    alignment (:func:`.bundle.intrinsic_sds`: every intrinsic the adjustment frees free together, scaled by the
+    variance factor of the tie points):
+
+    * the focal length of a camera whose relative marginal sd is above :data:`.bundle.FOCAL_SD_HOLD`, 0.5 %, is
+      held - nadir photos over flat ground cannot tell it from the height, whatever control points on that ground
+      say. The focal length alone: the distortion is still refined (the block does determine it once the focal
+      length is held);
+    * the principal point, when the adjustment refines it, is held when its marginal sd is above
+      :data:`.bundle.PRINCIPAL_SD_HOLD`, 0.5 % of the side of the photo;
+    * without a covariance at all (a normal matrix that cannot be inverted) both are held.
+
+    Nothing is asked with ``hold_undetermined`` False (every calibration is refined as the options say), where the
+    adjustment refines neither a focal length nor a principal point (:data:`NOTHING_TO_JUDGE`), and where the core
+    cannot give the covariance (:func:`.bundle.variances_ready`: every calibration is refined as before, one line
+    of the log at INFO says that the check needs the native core).
 
     Returns the record of the check, ``report["intrinsics"]`` of the optimisation - ``hold_undetermined``,
-    ``checked`` (the core was asked), ``reason`` (why not), ``variance_factor``, ``focal_sd`` ([sensor, sd] of
-    every camera whose focal length would be refined; sd None without a covariance), ``held`` (the sensors held)
-    and ``notes`` (``sensor 3: focal held: undetermined, sd 11.42 %``): numbers and fixed words, the key of a
-    sensor and never a name - and ``{index of the camera in pb: sensor}`` of the cameras to hold."""
+    ``checked`` (the core was asked), ``reason`` (why not), ``variance_factor``, ``focal_sd`` and
+    ``principal_point_sd`` ([sensor, sd] of every camera whose group would be refined; sd None without a
+    covariance), ``held`` ({group: sensors} for ``focal``, ``principal_point`` and ``radial``, the last one filled
+    by the guard of the optimisation) and ``notes`` (``sensor 3: focal held: undetermined, sd 11.42 %``): numbers
+    and fixed words, the key of a sensor and never a name - and ``{index of the camera in pb: groups to hold}``."""
     from . import bundle
 
     record = _check_record(hold_undetermined)
     if not hold_undetermined:
         return record, {}
-    refined = bundle.focal_free(pb)
-    if not any(refined):
-        record["reason"] = FOCAL_NOT_REFINED
+    free = bundle._free_intrinsics(pb)
+    judged = []
+    for c, (model, *_rest) in enumerate(pb.cameras):
+        groups = bundle.intrinsic_groups(model)
+        judged.append({name: any(k in groups[name] for k in free[c]) for name in ("focal", "principal_point")})
+    if not any(flag for camera in judged for flag in camera.values()):
+        record["reason"] = NOTHING_TO_JUDGE
         return record, {}
     reason = bundle.variances_ready(pb)
     if reason is not None:
@@ -3089,56 +3106,62 @@ def _focal_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool) -> t
     record["checked"] = True
     sensors = _camera_sensors(chunk, rec, ids["cameras"])
     try:
-        sds, factor = bundle.focal_sds(pb)
+        sds, factor = bundle.intrinsic_sds(pb)
         why = None
     except RuntimeError as exc:  # no covariance: an intrinsic the block does not hold at all
-        sds, factor, why = [None] * len(pb.cameras), None, str(exc)
+        sds, factor, why = [{"focal": None, "principal_point": None} for _camera in pb.cameras], None, str(exc)
     record["variance_factor"] = None if factor is None else float(factor)
-    held = {}
-    for c, free in enumerate(refined):
-        if not free:
-            continue
-        sd, missing = sds[c], why
-        if sd is not None and not np.isfinite(sd):
-            sd, missing = None, "the variance of the focal length is not a number"
-        record["focal_sd"].append([sensors[c], sd])
-        if sd is None:
-            note = f"focal held: undetermined, no covariance ({missing})"
-        elif sd > bundle.FOCAL_SD_HOLD:
-            note = f"focal held: undetermined, sd {100 * sd:.2f} %"
-        else:
-            continue
-        held[c] = sensors[c]
-        _hold_sensor(record, sensors[c], note)
+    held: dict = {}
+    limits = (("focal", bundle.FOCAL_SD_HOLD, ""), ("principal_point", bundle.PRINCIPAL_SD_HOLD, " of the image side"))
+    for c, camera in enumerate(judged):
+        for group, limit, of in limits:
+            if not camera[group]:
+                continue
+            sd, missing = sds[c][group], why
+            if sd is not None and not np.isfinite(sd):
+                sd, missing = None, "its variance is not a number"
+            record[f"{group}_sd"].append([sensors[c], sd])
+            if sd is None:
+                note = f"undetermined, no covariance ({missing})"
+            elif sd > limit:
+                note = f"undetermined, sd {100 * sd:.2f} %{of}"
+            else:
+                continue
+            held.setdefault(c, set()).add(group)
+            _hold(record, group, sensors[c], note)
     return record, held
 
 
 def _check_record(hold_undetermined: bool, reason: str | None = None) -> dict:
-    """The record of a check of the focal lengths (:func:`_focal_check`) that asked nothing of the core."""
+    """The record of a check of the calibrations (:func:`_calibration_check`) that asked nothing of the core."""
     return {"hold_undetermined": bool(hold_undetermined), "checked": False, "reason": reason,
-            "variance_factor": None, "focal_sd": [], "held": [], "notes": []}
+            "variance_factor": None, "focal_sd": [], "principal_point_sd": [],
+            "held": {"focal": [], "principal_point": [], "radial": []}, "notes": []}
 
 
-def _hold_sensor(record: dict, sensor, note: str) -> None:
-    """``sensor`` among the sensors the check of :func:`_focal_check` holds, with its note (also in the log)."""
-    if sensor not in record["held"]:
-        record["held"].append(sensor)
-    record["notes"].append(f"sensor {sensor}: {note}")
+def _hold(record: dict, group: str, sensor, note: str) -> None:
+    """The ``group`` of ``sensor`` among what the check of :func:`_calibration_check` holds, with its note (also
+    in the log)."""
+    if sensor not in record["held"][group]:
+        record["held"][group].append(sensor)
+    record["notes"].append(f"sensor {sensor}: {_GROUP_WORDS[group]} held: {note}")
     log.info("camera optimisation: %s", record["notes"][-1])
 
 
-def _moved_note(share: float) -> str:
-    """The note of a camera held by the guard of :func:`_focal_check`: its focal length moved by ``share``."""
-    return f"focal held: moved {100 * share:.1f} % in the optimisation, run again with it held"
+def _moved_note(group: str, amount: float) -> str:
+    """The note of a group held by the guard of the optimisation (:func:`.bundle.runaways`): a focal length that
+    moved by the share ``amount`` of its start, a first radial term that changed by ``amount``."""
+    moved = f"moved {100 * amount:.1f} %" if group == "focal" else f"k1 moved by {amount:.2f}"
+    return f"{moved} in the optimisation, run again with it held"
 
 
 def _focal_held(reason: str | None, record: dict) -> str | None:
-    """``report["focal_held"]`` of an optimisation whose check of the focal lengths is ``record``: the ``reason``
-    the optimisation already has, else :data:`FOCAL_HELD_UNDETERMINED` when that check held a sensor (with how
-    many of those it judged when it did not hold them all), else None."""
-    if reason is not None or not record["held"]:
+    """``report["focal_held"]`` of an optimisation whose check of the calibrations is ``record``: the ``reason``
+    the optimisation already has, else :data:`FOCAL_HELD_UNDETERMINED` when that check held the focal length of a
+    sensor (with how many of those it judged when it did not hold them all), else None."""
+    held, judged = len(record["held"]["focal"]), len(record["focal_sd"])
+    if reason is not None or not held:
         return reason
-    held, judged = len(record["held"]), len(record["focal_sd"])
     return FOCAL_HELD_UNDETERMINED if held >= judged else f"{FOCAL_HELD_UNDETERMINED} of {held} of {judged} sensors"
 
 
@@ -3152,10 +3175,10 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     control points and fewer than three positions) the focal length is kept whatever was asked - photos of
     flat ground from one height cannot tell it from the depth, and the native solver walks that valley -
     and ``report["focal_held"]`` says why it was kept (None when it was refined); ``solver``: the one of
-    :func:`bundle.adjust` (``report["solver"]`` says which ran). ``hold_undetermined``: the calibration of a
-    camera is refined only where the block determines it (:func:`_focal_check`, ``report["intrinsics"]``), and
-    an adjustment that moves a focal length it refined by more than :data:`bundle.FOCAL_MOVE_HOLD` of its start
-    runs again from the same start with that camera held."""
+    :func:`bundle.adjust` (``report["solver"]`` says which ran). ``hold_undetermined``: each group of the
+    intrinsics of a camera is refined only where the block determines it (:func:`_calibration_check`,
+    ``report["intrinsics"]``), and an adjustment that moves a focal length or a first radial term it refined too
+    far (:func:`bundle.runaways`) runs again from the same start with that group of that camera held."""
     from ..markers import gcp
     from . import bundle
 
@@ -3175,20 +3198,23 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
         focal_held = FOCAL_HELD_NO_REFERENCES
     else:
         focal_held = FOCAL_HELD_BY_POSITIONS if hold_focal else None
-    check, undetermined = _focal_check(chunk, rec, pb, ids, hold_undetermined)
-    while True:  # once, or again from the same start with the cameras whose focal length ran away held
-        for c in undetermined:
-            pb.free_intrinsics[c] = []
+    check, undetermined = _calibration_check(chunk, rec, pb, ids, hold_undetermined)
+    while True:  # once, or again from the same start with what ran away held
+        for c, groups in undetermined.items():
+            index = bundle.intrinsic_groups(pb.cameras[c][0])
+            gone = {k for group in groups for k in index[group]}
+            pb.free_intrinsics[c] = [k for k in pb.free_intrinsics[c] if k not in gone]
         res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
-        moved = {c: bundle.focal_move(pb.cameras[c][0], pb.cameras[c][1], res.camera_params[c])
-                 for c, free in enumerate(bundle.focal_free(pb)) if free} if check["checked"] else {}
-        moved = {c: share for c, share in moved.items() if share > bundle.FOCAL_MOVE_HOLD}
+        moved = {c: bundle.runaways(model, params, res.camera_params[c], pb.free_intrinsics[c])
+                 for c, (model, params, *_size) in enumerate(pb.cameras)} if check["checked"] else {}
+        moved = {c: groups for c, groups in moved.items() if groups}
         if not moved:
             break
         sensors = _camera_sensors(chunk, rec, ids["cameras"])
-        for c, share in moved.items():
-            undetermined[c] = sensors[c]
-            _hold_sensor(check, sensors[c], _moved_note(share))
+        for c, groups in moved.items():
+            for group, amount in groups.items():
+                undetermined.setdefault(c, set()).add(group)
+                _hold(check, group, sensors[c], _moved_note(group, amount))
     focal_held = _focal_held(focal_held, check)
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
@@ -3296,25 +3322,31 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     ``"ppg"``), with the restrictions of the one it is; ``report["engine_choice"]`` says which was asked and which
     ran.
 
-    ``hold_undetermined`` (True by default, either engine): the calibration of a camera is refined only where the
-    block determines it, the rule of the rounds of the native mapper (:func:`_focal_check`). Before the first
-    adjustment the relative marginal sd of the focal length of every camera whose focal length would be refined is
-    taken from the covariance of the adjustment at the alignment - every intrinsic the options free free with it
-    (the distortion, the principal point when asked), the control points, the bars and the positions that take
-    part in it at their accuracy, scaled by the variance factor of the tie points; a camera whose sd is above
-    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %), or that has no covariance at all, keeps every intrinsic as the
-    alignment left it: nadir photos over flat ground cannot tell the focal length from the height, whatever
-    control points on that ground say, and an adjustment that refines it there slides along that trade (a ring
-    flown once over flat ground: the focal length ten times longer, the cameras 131 m higher, the check targets
-    0.6 m off). A focal length that the optimisation refined and moved by more than
-    :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its start has the optimisation run again from the start with that
-    camera held. ``report["intrinsics"]`` says what was judged, in numbers and by the key of each sensor
-    (``checked``, ``variance_factor``, ``focal_sd``, ``held``, ``notes``: ``sensor 0: focal held: undetermined, sd
-    11.42 %``; ``reason`` when nothing was asked: no focal length to refine, or a core that cannot give the
-    covariance - missing, older than API 17, a camera model it does not know: the calibration is then refined as
-    before and the log says so once), ``report["focal_held"]`` is then :data:`FOCAL_HELD_UNDETERMINED`.
-    ``hold_undetermined=False``: every calibration is refined as the other options say, whatever the block
-    determines (the optimisation of before)."""
+    ``hold_undetermined`` (True by default, either engine): each group of the intrinsics of a camera is refined
+    only where the block determines it, the rule of the rounds of the native mapper taken group by group
+    (:func:`_calibration_check`). Before the first adjustment the marginal sds are taken from the covariance of the
+    adjustment at the alignment - every intrinsic the options free free together (the distortion, the principal
+    point when asked), the control points, the bars and the positions that take part in it at their accuracy,
+    scaled by the variance factor of the tie points. A focal length whose relative sd is above
+    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %), or that has no covariance at all, is held as the alignment left it:
+    nadir photos over flat ground cannot tell the focal length from the height, whatever control points on that
+    ground say, and an adjustment that refines it there slides along that trade (a ring flown once over flat
+    ground: the focal length ten times longer, the cameras 131 m higher, the check targets 0.6 m off). The focal
+    length alone: the distortion is still refined, which such a block does determine once its focal length is
+    held. A principal point that was asked for (``fit_principal_point``) is held when its marginal sd is above
+    :data:`.bundle.PRINCIPAL_SD_HOLD` (0.5 % of the side of the photo). A guard watches what was refined
+    (:func:`.bundle.runaways`): a focal length moved by more than :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its
+    start, or a first radial term changed by more than :data:`.bundle.K1_MOVE_HOLD` (0.5), has the optimisation
+    run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment refines a group
+    for every camera or for none: with several sensors, what is held for one is held for all (our own adjustment
+    holds it sensor by sensor). ``report["intrinsics"]`` says what was judged, in numbers and by the key of each
+    sensor (``checked``, ``variance_factor``, ``focal_sd``, ``principal_point_sd``, ``held`` by group, ``notes``:
+    ``sensor 0: focal held: undetermined, sd 11.42 %``; ``reason`` when nothing was asked: neither a focal length
+    nor a principal point to refine, or a core that cannot give the covariance - missing, older than API 17, a
+    camera model it does not know: the calibration is then refined as before and the log says so once),
+    ``report["focal_held"]`` is then :data:`FOCAL_HELD_UNDETERMINED`. ``hold_undetermined=False``: every
+    calibration is refined as the other options say, whatever the block determines, and nothing is guarded (the
+    optimisation of before)."""
     from .bundle import SOLVERS
 
     progress = as_progress(progress)
@@ -3474,39 +3506,58 @@ def _back_to_the_start(chunk: Chunk, start: dict) -> None:
             m.position = start["markers"][m.key]
 
 
-def _colmap_focal_check(chunk: Chunk, rec, *, hold_undetermined: bool, refined: bool, use_markers: bool,
-                        fit_principal_point: bool, marker_weight: int) -> tuple[dict, dict]:
-    """:func:`_focal_check` for COLMAP's adjustment of ``rec`` (its cameras as that adjustment has them: one focal
-    length, :func:`_square_pixels`): on the problem of our own formulation that frees what COLMAP frees - the focal
-    length, the distortion and, when asked, the principal point of every camera that is not fixed -, with
+def _for_every_sensor(record: dict, group: str, refined: dict) -> None:
+    """COLMAP's adjustment holds a group of intrinsics for every camera it refines or for none: when ``record``
+    (:func:`_calibration_check`) holds ``group`` for a sensor, the other sensors that would refine it
+    (``refined``: {sensor: whether it would}) are held with it, each with a note that says so."""
+    if not record["held"][group]:
+        return
+    first = record["held"][group][0]
+    for sensor, would in refined.items():
+        if would and sensor not in record["held"][group]:
+            _hold(record, group, sensor, f"with sensor {first} (COLMAP's adjustment holds it for every sensor or "
+                                         "for none)")
+
+
+def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, positions: bool, use_markers: bool,
+                              fit_principal_point: bool, marker_weight: int) -> tuple[dict, set]:
+    """:func:`_calibration_check` for COLMAP's adjustment of ``rec`` (its cameras as that adjustment has them: one
+    focal length, :func:`_square_pixels`): on the problem of our own formulation that frees what COLMAP frees - the
+    focal length, the distortion and, when asked, the principal point of every camera that is not fixed -, with
     ``use_markers`` the control points by their accuracy, the control bars and their measured markers, each
-    measurement weighing ``marker_weight`` tie point observations as COLMAP's fixed points do, without the
-    positions of the photos (where they hold the block the focal length is not refined: ``refined`` False, nothing
-    is asked). A reconstruction with rigs is not judged (the faces of 360-degree photos are fixed cameras).
-    Returns the record and ``{COLMAP camera: sensor}`` of the cameras to hold."""
+    measurement weighing ``marker_weight`` tie point observations as COLMAP's fixed points do; with ``positions``
+    (the positions of the photos hold the block: COLMAP's pose priors) the positions by their accuracy and the
+    focal length held, as that adjustment holds it. A reconstruction with rigs is not judged (the faces of
+    360-degree photos are fixed cameras). COLMAP refines a group for every camera or for none
+    (:func:`_for_every_sensor`). Returns the record and the groups to hold."""
     from . import bundle
 
     if not hold_undetermined:
-        return _check_record(False), {}
-    if not refined:
-        return _check_record(True, FOCAL_NOT_REFINED), {}
+        return _check_record(False), set()
     try:
-        pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss="off",
-                                            fit_principal_point=fit_principal_point)
+        pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss="plain" if positions else "off",
+                                            fit_principal_point=fit_principal_point, hold_focal=positions)
     except ValueError as exc:  # rigs: our formulation does not take them
-        return _check_record(True, str(exc)), {}
+        return _check_record(True, str(exc)), set()
     pb.marker_sigma = pb.pixel_sigma / float(np.sqrt(max(1, int(marker_weight))))
-    record, held = _focal_check(chunk, rec, pb, ids, True)
-    return record, {ids["cameras"][c]: sensor for c, sensor in held.items()}
+    record, held = _calibration_check(chunk, rec, pb, ids, True)
+    sensors = _camera_sensors(chunk, rec, ids["cameras"])
+    free = bundle._free_intrinsics(pb)
+    for group in ("focal", "principal_point"):
+        refined = {sensors[c]: any(k in bundle.intrinsic_groups(model)[group] for k in free[c])
+                   for c, (model, *_rest) in enumerate(pb.cameras)}
+        _for_every_sensor(record, group, refined)
+    return record, {group for groups in held.values() for group in groups}
 
 
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,
                      progress: Progress, hold_undetermined: bool = True) -> float:
-    """:func:`optimize_cameras` with COLMAP's adjustment. ``hold_undetermined``: the calibration of a camera is
-    refined only where the block determines it (:func:`_colmap_focal_check`, once, before the first adjustment:
-    the cameras it holds are fixed cameras of every adjustment of the run, ``report["intrinsics"]``); a run that
-    moves a focal length it refined by more than :data:`.bundle.FOCAL_MOVE_HOLD` of its start is run again from
-    the start (:func:`_back_to_the_start`) with that camera held."""
+    """:func:`optimize_cameras` with COLMAP's adjustment. ``hold_undetermined``: each group of the intrinsics is
+    refined only where the block determines it (:func:`_colmap_calibration_check`, once, before the first
+    adjustment: what it holds is held in every adjustment of the run, ``report["intrinsics"]``); a run that moves
+    a focal length or a first radial term it refined too far (:func:`.bundle.runaways`) is run again from the
+    start (:func:`_back_to_the_start`) with that group held - the focal lengths, or the distortion, of every
+    camera: COLMAP refines a group for all of them or for none."""
     import pycolmap
 
     from ..markers import gcp
@@ -3528,9 +3579,9 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     with_gcps = use_markers and len(controls) >= 3
     constrained = fixed_points_hold(chunk, use_markers)  # fewer control points do not place the chunk
     start = _before_adjusting(chunk) if hold_undetermined else None
-    check = None  # the record of the check of the focal lengths (report["intrinsics"]), made once
-    undetermined: dict = {}  # {COLMAP camera: sensor} held by that check, then by its guard
-    while True:  # once, or again from the start with the cameras whose focal length ran away held
+    check = None  # the record of the check of the calibrations (report["intrinsics"]), made once
+    undetermined: set = set()  # the groups held by that check, then by its guard
+    while True:  # once, or again from the start with what ran away held
         rec = load_reconstruction(chunk)
         drop_missing_points(rec)  # models written from imported poses by earlier versions
         if constrained:
@@ -3542,16 +3593,20 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
                  + (f" held by the GNSS positions of {len(priors)} photos" if priors else ""))
         _square_pixels(chunk, rec)
         opts = pycolmap.BundleAdjustmentOptions()
+        if check is None:
+            check, undetermined = _colmap_calibration_check(
+                chunk, rec, hold_undetermined=hold_undetermined, positions=bool(priors), use_markers=constrained,
+                fit_principal_point=fit_principal_point, marker_weight=marker_weight)
         try:
-            opts.refine_principal_point = fit_principal_point
+            opts.refine_principal_point = fit_principal_point and "principal_point" not in undetermined
         except AttributeError:  # pragma: no cover - option name differs between versions
             pass
-        if check is None:
-            check, undetermined = _colmap_focal_check(
-                chunk, rec, hold_undetermined=hold_undetermined, refined=not priors, use_markers=constrained,
-                fit_principal_point=fit_principal_point, marker_weight=marker_weight)
-        fixed_cams = _rec_fixed_cameras(chunk, rec) | set(undetermined)
-        focals = {cid: (cam.model.name, list(cam.params)) for cid, cam in rec.cameras.items()}
+        if "focal" in undetermined:
+            opts.refine_focal_length = False
+        if "radial" in undetermined:
+            opts.refine_extra_params = False
+        fixed_cams = _rec_fixed_cameras(chunk, rec)
+        before_run = {cid: (cam.model.name, list(cam.params)) for cid, cam in rec.cameras.items()}
         if constrained:  # the block first finds its own shape and calibration, then bends to the references
             _adjust(rec, _at_most(opts, FREE_PASS_ITERATIONS), fixed_cameras=fixed_cams)
             _restore_sensor_models(chunk, rec)
@@ -3596,17 +3651,26 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
             else:
                 _adjust(rec, opts, fixed_cameras=fixed_cams)
         moved = {}
-        if check["checked"]:  # the guard: a focal length the run refined and moved too far
-            moved = {cid: bundle.focal_move(model, params, rec.cameras[cid].params)
-                     for cid, (model, params) in focals.items()
-                     if cid not in fixed_cams and rec.cameras[cid].model.name == model}
-            moved = {cid: share for cid, share in moved.items() if share > bundle.FOCAL_MOVE_HOLD}
+        if check["checked"]:  # the guard: a focal length or a first radial term the run refined and moved too far
+            refined = {"focal": opts.refine_focal_length and not priors, "radial": opts.refine_extra_params}
+            for cid, (model, params) in before_run.items():
+                if cid in fixed_cams or rec.cameras[cid].model.name != model:
+                    continue
+                groups = bundle.intrinsic_groups(model)
+                free = [k for name in ("focal", "radial") if refined[name] for k in groups[name]]
+                ran = bundle.runaways(model, params, rec.cameras[cid].params, free)
+                if ran:
+                    moved[cid] = ran
         if not moved:
             break
-        sensors = dict(zip(moved, _camera_sensors(chunk, rec, list(moved))))
-        for cid, share in moved.items():
-            undetermined[cid] = sensors[cid]
-            _hold_sensor(check, sensors[cid], _moved_note(share))
+        cameras = [cid for cid in before_run if cid not in fixed_cams]
+        sensors = dict(zip(cameras, _camera_sensors(chunk, rec, cameras)))
+        for cid, groups in moved.items():
+            for group, amount in groups.items():
+                undetermined.add(group)
+                _hold(check, group, sensors[cid], _moved_note(group, amount))
+        for group in sorted({group for groups in moved.values() for group in groups}):
+            _for_every_sensor(check, group, {sensors[cid]: True for cid in cameras})
         _back_to_the_start(chunk, start)
     pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)

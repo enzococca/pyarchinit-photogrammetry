@@ -674,14 +674,6 @@ def focal_free(pb: Problem) -> list[bool]:
     return [any(k in _focal_indices(model) for k in free[c]) for c, (model, *_rest) in enumerate(pb.cameras)]
 
 
-def focal_move(model: str, start, end) -> float:
-    """The largest share by which a focal length of a camera of ``model`` moved from the parameters ``start`` to
-    ``end`` (fx and fy of a model with two); infinite when one of them is not a number."""
-    index = list(_focal_indices(model))
-    share = np.abs(np.asarray(end, float)[index] / np.asarray(start, float)[index] - 1.0)
-    return float(share.max()) if np.all(np.isfinite(share)) else float("inf")
-
-
 def runaways(model: str, start, end, free) -> dict:
     """The groups of a camera of ``model`` that an adjustment moved too far, from its parameters ``start`` to
     ``end``, among those it refined (``free``, the indices of its free intrinsics): ``"focal"`` with the largest

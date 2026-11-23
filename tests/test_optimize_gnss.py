@@ -41,7 +41,8 @@ def _look_down(yaw: float, pitch: float = 0.0) -> np.ndarray:
     return np.array([[c, 0, s], [0, 1.0, 0], [-s, 0, c]]) @ turned
 
 
-def _rtk_block(folder, seed: int = 0, accuracy=(0.02, 0.02, 0.02), status: str | None = "fix", pitch: float = 0.0):
+def _rtk_block(folder, seed: int = 0, accuracy=(0.02, 0.02, 0.02), status: str | None = "fix",
+               pitch: float = 0.0):
     """A drone block as an alignment leaves it: 5 strips of 8 nadir photos 40 m above ground with 3 dm of relief
     (EPSG:32632 less :data:`ORIGIN`), its COLMAP model (6000 points, observations with 0.5 px of noise, the radial
     distortion of the lens) and every photo with a position 1 cm (per axis) off its camera, of the given accuracy
@@ -285,7 +286,7 @@ def test_gnss_off_keeps_todays_behaviour(tmp_path, monkeypatch):
     photos whose positions are not accurate (a drone without RTK: 5/5/10 m) the default is the same, with the same
     result, and there is nothing for the safety net to judge. The calibration is refined here whatever the block
     determines (``hold_undetermined=False``, the optimisation of before): looking straight down over flat ground
-    this block does not determine it, and the default holds it (tests/test_optimize_undetermined.py)."""
+    this block does not determine its focal length, and the default holds it (tests/test_optimize_undetermined.py)."""
     doc, ch = _rtk_block(tmp_path / "rtk")
     built, free = [], []
     real_adjuster, real_free = pycolmap.create_pose_prior_bundle_adjuster, pycolmap.bundle_adjustment
@@ -494,7 +495,7 @@ def test_control_points_in_another_height_datum_are_kept(tmp_path):
     against its positions (``placed``), so it does not undo a sound optimisation. The fixed points hold the block,
     so the GNSS positions take no part - the dialog's verdict and the engine's agree. The control points lie on
     the flat ground the photos look straight down on: they do not tell the focal length from the height either,
-    and the calibration of the alignment is kept."""
+    and the focal length of the alignment is kept."""
     doc, ch = _rtk_block(tmp_path)
     _add_control_points(ch, height_offset=30.0)
     assert sfm.fixed_points_hold(ch) and sfm.gnss_hold(ch)["why"] == "markers"
@@ -505,7 +506,7 @@ def test_control_points_in_another_height_datum_are_kept(tmp_path):
     assert rep["camera_offsets"]["placed"] is True and rep["camera_offsets"]["after"] < 0.05, rep["camera_offsets"]
     assert rep["control_points"] == 5 and rep["after"]["control"] < 0.01
     assert rep["gnss"]["photos"] == 0
-    if rep["intrinsics"]["checked"]:  # the calibration kept: the cameras rise with the control points, 30 m
+    if rep["intrinsics"]["checked"]:  # the focal length kept: the cameras rise with the control points, 30 m
         assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
         assert float(np.mean(_world_centres(ch)[:, 2] - heights)) == pytest.approx(30.0, abs=0.05)
     else:  # without the core that judges the block the focal length is refined, and slides with the height
@@ -654,9 +655,9 @@ def test_bias_mode_judges_each_position_less_the_bias_of_its_flight(tmp_path, mo
 def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     """Our adjustment under ``gnss="auto"``: the accurate positions hold the block with the focal length of the
     alignment kept, as with COLMAP; ``"plain"`` asked for leaves it to the adjustment, which refines it where the
-    block determines it - this one, looking straight down over flat ground, does not, and keeps its calibration
-    unless ``hold_undetermined=False`` says to refine it whatever the block determines; with fixed points (the same
-    rule as the dialog's) the positions take no part."""
+    block determines it - this one, looking straight down over flat ground, does not, and keeps its focal length
+    (the distortion is still refined) unless ``hold_undetermined=False`` says to refine it whatever the block
+    determines; with fixed points (the same rule as the dialog's) the positions take no part."""
     from pyarchinit_photogrammetry.engine import bundle
 
     seen = []
@@ -681,7 +682,7 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     rep = ch.meta["sfm"]["optimize"]
     assert rep["intrinsics"]["checked"] is checked
     assert rep["focal_held"] == (sfm.FOCAL_HELD_UNDETERMINED if checked else None)
-    assert seen[-1].free_intrinsics[0] == ([] if checked else [0, 1, 4, 5, 6, 7])
+    assert seen[-1].free_intrinsics[0] == ([4, 5, 6, 7] if checked else [0, 1, 4, 5, 6, 7])
 
     _add_control_points(ch)
     assert sfm.gnss_hold(ch)["why"] == "markers"

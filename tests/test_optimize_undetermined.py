@@ -1,8 +1,10 @@
-"""The camera optimisation frees the calibration of a camera only where the block determines it (the rule of the
-rounds of the native mapper, with both formulations of ``optimize_cameras``): the variances of the free intrinsics
-by the native core (API 17) against a dense inverse of the normal matrix, the variance factor of the tie points and
-the marginal sd of the focal length on synthetic blocks, the cameras the optimisation holds and the guard on a
-focal length that runs away, the option that frees them whatever the block says, what happens without the core."""
+"""The camera optimisation refines each group of the intrinsics of a camera only where the block determines it
+(the rule of the rounds of the native mapper taken group by group, with both formulations of ``optimize_cameras``):
+the variances of the free intrinsics by the native core (API 17) against a dense inverse of the normal matrix, the
+variance factor of the tie points and the marginal sds of the focal length and of the principal point on synthetic
+blocks, the focal lengths and the principal points the optimisation holds while it still refines the distortion,
+the guard on a focal length or a radial term that runs away, the option that frees everything whatever the block
+says, what happens without the core, and the weak ring and the trench optimised."""
 from __future__ import annotations
 
 import copy
@@ -370,12 +372,13 @@ def test_what_holds_nothing_does_not_break_the_covariance():
 ENGINES = ("colmap", "ppg")  # the two formulations of optimize_cameras
 GPS = dict(accuracy=(5.0, 5.0, 10.0), status=None)  # positions of a drone without RTK: they hold nothing
 PITCH = 0.4  # rad: the photos of a block that determines its focal length lean this much
+NOTHING_HELD = {"focal": [], "principal_point": [], "radial": []}
 
 
 def _block(folder, pitch: float = 0.0):
     """The synthetic block of the optimisation tests (5 strips of 8 photos 40 m above ground with 3 dm of relief, a
     COLMAP model with half a pixel of noise) with coarse positions, five control points on its ground and the
-    fifth of them a check point; ``pitch``: its photos lean forward, the strips opposite ways."""
+    fifth of them, in the middle, a check point; ``pitch``: its photos lean forward, the strips opposite ways."""
     doc, ch = _rtk_block(folder, pitch=pitch, **GPS)
     markers = _add_control_points(ch)
     markers[-1].checkpoint = True
@@ -387,39 +390,66 @@ def _calibration(ch) -> list:
     return [list(s.params) for s in ch.sensors.values()]
 
 
+def _spy_on_colmap(monkeypatch, after=None, before=None) -> list:
+    """Every adjustment the program asks of COLMAP noted as ``(focal refined, principal point refined, distortion
+    refined, cameras held, fixed points)``; ``before(constant points)`` runs before each and ``after(rec, call
+    number, constant points)`` after it."""
+    calls = []
+    real = sfm._adjust
+
+    def adjust(rec, opts, constant_points=(), fixed_cameras=()):
+        if before is not None:
+            before(constant_points)
+        calls.append((bool(opts.refine_focal_length), bool(opts.refine_principal_point),
+                      bool(opts.refine_extra_params), set(fixed_cameras), len(constant_points)))
+        real(rec, opts, constant_points, fixed_cameras)
+        if after is not None:
+            after(rec, len(calls), constant_points)
+
+    monkeypatch.setattr(sfm, "_adjust", adjust)
+    return calls
+
+
 @needs_core
 @pytest.mark.parametrize("engine", ENGINES)
-def test_a_nadir_block_keeps_its_calibration_and_a_pitched_one_refines_it(tmp_path, engine):
+def test_a_nadir_block_keeps_its_focal_length_and_a_pitched_one_refines_it(tmp_path, engine):
     """Photos looking straight down over nearly flat ground cannot tell the focal length from the height, whatever
-    the control points on that ground say: the optimisation holds the whole calibration of that sensor and the
-    report says so in numbers; the block still bends to its control points. Pitched photos determine it: the
-    calibration is refined as before."""
+    the control points on that ground say: the optimisation holds the focal length of that sensor - the focal
+    length alone: the distortion is still refined - and the report says so in numbers; the block still bends to
+    its control points. Pitched photos determine it: the whole calibration is refined as before."""
     _doc, ch = _block(tmp_path / "nadir")
     before = _calibration(ch)
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
     assert check["hold_undetermined"] is True and check["checked"] is True and check["reason"] is None
-    assert check["held"] == [0] and len(check["focal_sd"]) == 1
+    assert check["held"] == {"focal": [0], "principal_point": [], "radial": []}
+    assert len(check["focal_sd"]) == 1 and check["principal_point_sd"] == []  # the principal point was not asked
     sensor, sd = check["focal_sd"][0]
     assert sensor == 0 and sd > 0.05 > bundle.FOCAL_SD_HOLD
     assert check["notes"] == [f"sensor 0: focal held: undetermined, sd {100 * sd:.2f} %"]
     assert 0.2 < check["variance_factor"] < 0.4  # half a pixel of noise at a pixel of accuracy
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
-    assert _calibration(ch) == before  # every intrinsic, exactly
-    assert rep["control_points"] == 4 and rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.02
+    after = _calibration(ch)
+    assert after[0][:4] == before[0][:4]  # the focal length, exactly (and the principal point, not asked)
+    assert after[0][4:6] != before[0][4:6] and after[0][4] == pytest.approx(K1, abs=0.005)  # the distortion refined
+    assert rep["control_points"] == 4 and rep["after"]["control"] < 0.005
+    # the price on a nadir grid: the radial terms trade with a dome that the control points at the corners do not
+    # see - the point in the middle ends 6 cm (COLMAP's) and 4 cm (ours) off, where everything freed left 11 and
+    # 28 cm and everything held 3 mm
+    assert rep["after"]["check"] < 0.09
 
     _doc, ch = _block(tmp_path / "pitched", pitch=PITCH)
     before = _calibration(ch)
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
-    assert check["checked"] is True and check["held"] == [] and check["notes"] == []
+    assert check["checked"] is True and check["held"] == NOTHING_HELD and check["notes"] == []
     assert 0 < check["focal_sd"][0][1] < bundle.FOCAL_SD_HOLD
     assert rep["focal_held"] is None
     after = _calibration(ch)
     assert after != before and after[0][0] == pytest.approx(before[0][0], rel=0.01)  # refined, near the true one
-    assert after[0][4] == pytest.approx(K1, abs=0.003)
+    assert after[0][0] != before[0][0] and after[0][4] == pytest.approx(K1, abs=0.003)
     assert rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.02
 
 
@@ -431,20 +461,19 @@ def test_freeing_what_the_block_does_not_determine_is_the_users_choice(tmp_path,
     _doc, ch = _block(tmp_path)
     before = _calibration(ch)
     asked = []
-    monkeypatch.setattr(bundle, "focal_sds", lambda pb: asked.append(pb))
-    fixed, problems = [], []
-    real_adjust, real_own = sfm._adjust, bundle.adjust
-    monkeypatch.setattr(sfm, "_adjust", lambda rec, opts, constant_points=(), fixed_cameras=():
-                        fixed.append(set(fixed_cameras)) or real_adjust(rec, opts, constant_points, fixed_cameras))
-    monkeypatch.setattr(bundle, "adjust", lambda pb, **kwargs: problems.append(pb) or real_own(pb, **kwargs))
+    monkeypatch.setattr(bundle, "intrinsic_sds", lambda pb: asked.append(pb))
+    calls, problems = _spy_on_colmap(monkeypatch), []
+    real = bundle.adjust
+    monkeypatch.setattr(bundle, "adjust", lambda pb, **kwargs: problems.append(pb) or real(pb, **kwargs))
     ch.optimize_cameras(engine=engine, hold_undetermined=False)
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["intrinsics"] == {"hold_undetermined": False, "checked": False, "reason": None,
-                                 "variance_factor": None, "focal_sd": [], "held": [], "notes": []}
+    assert rep["intrinsics"] == sfm._check_record(False) == {
+        "hold_undetermined": False, "checked": False, "reason": None, "variance_factor": None, "focal_sd": [],
+        "principal_point_sd": [], "held": NOTHING_HELD, "notes": []}
     assert rep["focal_held"] is None and asked == []
-    assert _calibration(ch) != before
+    assert _calibration(ch)[0][0] != before[0][0]
     if engine == "colmap":
-        assert fixed and all(cams == set() for cams in fixed)
+        assert calls and all(call[:4] == (True, False, True, set()) for call in calls)
     else:
         assert [pb.free_intrinsics for pb in problems] == [[[0, 1, 4, 5, 6, 7]]]
 
@@ -461,9 +490,9 @@ def test_without_the_core_the_calibration_is_refined_as_before_and_the_log_says_
     with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry.engine.sfm"):
         ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["intrinsics"] == {"hold_undetermined": True, "checked": False, "reason": bundle.INTRINSICS_MISSING,
-                                 "variance_factor": None, "focal_sd": [], "held": [], "notes": []}
-    assert rep["focal_held"] is None and _calibration(ch) != before
+    assert rep["intrinsics"] == sfm._check_record(True, bundle.INTRINSICS_MISSING)
+    assert rep["intrinsics"]["checked"] is False and rep["intrinsics"]["reason"] == bundle.INTRINSICS_MISSING
+    assert rep["focal_held"] is None and _calibration(ch)[0][0] != before[0][0]
     lines = [r for r in caplog.records if "native core" in r.getMessage()]
     assert len(lines) == 1 and lines[0].levelno == logging.INFO
     assert "API 17" in lines[0].getMessage()
@@ -471,102 +500,205 @@ def test_without_the_core_the_calibration_is_refined_as_before_and_the_log_says_
 
 @needs_core
 @pytest.mark.parametrize("engine", ENGINES)
-def test_a_block_without_a_covariance_keeps_its_calibration(tmp_path, monkeypatch, engine):
+def test_a_block_without_a_covariance_keeps_its_focal_length(tmp_path, monkeypatch, engine):
     """A normal matrix that cannot be inverted (an intrinsic the block does not hold at all) is the same answer:
-    the calibration of every sensor whose focal length would be refined is held, and the note says why."""
+    the focal length of every sensor that would refine it is held, and the note says why."""
     _doc, ch = _block(tmp_path, pitch=PITCH)
     before = _calibration(ch)
 
     def no_covariance(pb):
         raise RuntimeError("pivot 7 of the reduced system is not positive")
 
-    monkeypatch.setattr(bundle, "focal_sds", no_covariance)
+    monkeypatch.setattr(bundle, "intrinsic_sds", no_covariance)
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
-    assert check["checked"] is True and check["held"] == [0] and check["focal_sd"] == [[0, None]]
+    assert check["checked"] is True and check["focal_sd"] == [[0, None]] and check["variance_factor"] is None
+    assert check["held"] == {"focal": [0], "principal_point": [], "radial": []}
     assert check["notes"] == ["sensor 0: focal held: undetermined, no covariance (pivot 7 of the reduced system is "
                               "not positive)"]
-    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and _calibration(ch) == before
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    after = _calibration(ch)
+    assert after[0][:4] == before[0][:4] and after[0][4:6] != before[0][4:6]
 
 
 @needs_core
-def test_the_guard_runs_our_adjustment_again_with_the_camera_held(tmp_path, monkeypatch):
+@pytest.mark.parametrize("engine", ENGINES)
+def test_the_principal_point_is_judged_on_its_own(tmp_path, monkeypatch, engine):
+    """A principal point that was asked for is refined where the block determines it and held where its marginal sd
+    is above 0.5 % of the side of the photo, whatever the verdict of the focal length - and the other way round."""
+    def judged(focal, principal_point):
+        sds = [{"focal": focal, "principal_point": principal_point}]
+        monkeypatch.setattr(bundle, "intrinsic_sds", lambda pb: (sds, 0.25))
+
+    _doc, ch = _block(tmp_path / "held", pitch=PITCH)
+    before = _calibration(ch)
+    judged(0.001, 0.02)
+    calls = _spy_on_colmap(monkeypatch)
+    ch.optimize_cameras(engine=engine, fit_principal_point=True)
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    assert check["focal_sd"] == [[0, 0.001]] and check["principal_point_sd"] == [[0, 0.02]]
+    assert check["held"] == {"focal": [], "principal_point": [0], "radial": []}
+    assert check["notes"] == ["sensor 0: principal point held: undetermined, sd 2.00 % of the image side"]
+    assert rep["focal_held"] is None
+    after = _calibration(ch)
+    assert after[0][2:4] == before[0][2:4] and after[0][0] != before[0][0]  # the focal length refined
+    if engine == "colmap":
+        assert calls and all(call[:3] == (True, False, True) for call in calls)
+
+    _doc, ch = _block(tmp_path / "refined", pitch=PITCH)
+    before = _calibration(ch)
+    judged(0.02, 0.001)  # the other way round: the focal length held, the principal point refined
+    calls.clear()
+    ch.optimize_cameras(engine=engine, fit_principal_point=True)
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["intrinsics"]["held"] == {"focal": [0], "principal_point": [], "radial": []}
+    assert rep["intrinsics"]["notes"] == ["sensor 0: focal held: undetermined, sd 2.00 %"]
+    after = _calibration(ch)
+    assert after[0][:2] == before[0][:2] and after[0][2:4] != before[0][2:4]
+    if engine == "colmap":
+        assert calls and all(call[:3] == (False, True, True) for call in calls)
+
+
+@needs_core
+def test_the_guard_runs_our_adjustment_again_with_what_ran_away_held(tmp_path, monkeypatch):
     """A focal length that the adjustment moves by more than :data:`bundle.FOCAL_MOVE_HOLD` of its start, on a
     block whose covariance said it was determined (the valley is not a straight line): the adjustment runs again
-    from the same start with that camera held, and the notes say by how much it had moved."""
-    _doc, ch = _block(tmp_path, pitch=PITCH)
-    before = _calibration(ch)
-    problems = []
+    from the same start with that focal length held, and the notes say by how much it had moved. A first radial
+    term that changes by more than :data:`bundle.K1_MOVE_HOLD`: again, with the radial terms held."""
     real = bundle.adjust
 
-    def adjust(pb, **kwargs):
-        problems.append(copy.deepcopy(pb.free_intrinsics))
-        res = real(pb, **kwargs)
-        if len(problems) == 1:  # the first run slides along the valley
-            res.camera_params[0] = np.array(res.camera_params[0], float)
-            res.camera_params[0][:2] = 1.3 * np.asarray(pb.cameras[0][1], float)[:2]
-        return res
+    def sliding(change):
+        problems = []
 
-    monkeypatch.setattr(bundle, "adjust", adjust)
+        def adjust(pb, **kwargs):
+            problems.append(copy.deepcopy(pb.free_intrinsics))
+            res = real(pb, **kwargs)
+            if len(problems) == 1:  # the first run slides along the valley
+                start = np.asarray(pb.cameras[0][1], float)
+                res.camera_params[0] = change(np.array(res.camera_params[0], float), start)
+            return res
+
+        monkeypatch.setattr(bundle, "adjust", adjust)
+        return problems
+
+    def longer(params, start):
+        params[:2] = 1.3 * start[:2]
+        return params
+
+    def bent(params, start):
+        params[4] = start[4] + 0.8
+        return params
+
+    _doc, ch = _block(tmp_path / "focal", pitch=PITCH)
+    before = _calibration(ch)
+    problems = sliding(longer)
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
-    assert problems == [[[0, 1, 4, 5, 6, 7]], [[]]]
+    assert problems == [[[0, 1, 4, 5, 6, 7]], [[4, 5, 6, 7]]]
     check = rep["intrinsics"]
-    assert check["held"] == [0] and 0 < check["focal_sd"][0][1] < bundle.FOCAL_SD_HOLD
+    assert check["held"] == {"focal": [0], "principal_point": [], "radial": []}
+    assert 0 < check["focal_sd"][0][1] < bundle.FOCAL_SD_HOLD
     assert check["notes"] == ["sensor 0: focal held: moved 30.0 % in the optimisation, run again with it held"]
-    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and _calibration(ch) == before
-    assert rep["after"]["control"] < 0.005
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    after = _calibration(ch)
+    assert after[0][:2] == before[0][:2] and after[0][4:6] != before[0][4:6] and rep["after"]["control"] < 0.005
+
+    _doc, ch = _block(tmp_path / "radial", pitch=PITCH)
+    before = _calibration(ch)
+    problems = sliding(bent)
+    ch.optimize_cameras(engine="ppg")
+    rep = ch.meta["sfm"]["optimize"]
+    assert problems == [[[0, 1, 4, 5, 6, 7]], [[0, 1, 6, 7]]]
+    check = rep["intrinsics"]
+    assert check["held"] == {"focal": [], "principal_point": [], "radial": [0]}
+    assert check["notes"] == ["sensor 0: radial held: k1 moved by 0.80 in the optimisation, run again with it held"]
+    assert rep["focal_held"] is None
+    after = _calibration(ch)
+    assert after[0][4:6] == before[0][4:6] and after[0][0] != before[0][0]
 
 
 @needs_core
 def test_the_guard_runs_colmaps_adjustment_again_from_the_start(tmp_path, monkeypatch):
     """The same guard on COLMAP's formulation, whose free pass and steps towards the control points change the
     chunk before the model is written: the chunk goes back to where it started (the cameras, the calibration, the
-    georeference, the markers), and the whole optimisation runs again with that camera held."""
-    _doc, ch = _block(tmp_path, pitch=PITCH)
-    before = _calibration(ch)
-    transform = np.array(ch.transform, float)
-    markers = {m.key: np.array(m.position, float) for m in ch.markers}
-    centres = {c.key: np.array(c.center, float) for c in ch.cameras}
-    real = sfm._adjust
-    runs, starts, slid = [], [], []
+    georeference, the markers), and the whole optimisation runs again with the focal lengths - or the distortion -
+    held."""
+    def run(folder, slide):
+        _doc, ch = _block(folder, pitch=PITCH)
+        state = {"before": _calibration(ch), "transform": np.array(ch.transform, float), "starts": [],
+                 "markers": {m.key: np.array(m.position, float) for m in ch.markers},
+                 "centres": {c.key: np.array(c.center, float) for c in ch.cameras}}
+        slid = []
 
-    def adjust(rec, opts, constant_points=(), fixed_cameras=()):
-        if not constant_points:  # the free pass, the first adjustment of a run
-            runs.append(set(fixed_cameras))
-            starts.append((np.array(ch.transform, float), {m.key: np.array(m.position, float) for m in ch.markers},
-                           {c.key: np.array(c.center, float) for c in ch.cameras}, _calibration(ch)))
-        real(rec, opts, constant_points, fixed_cameras)
-        if len(runs) == 1 and constant_points and not slid:  # the first run slides along the valley
-            slid.append(1)
-            for cam in rec.cameras.values():
-                params = list(cam.params)
-                params[0] *= 1.3
-                cam.params = params
+        def after(rec, number, constant_points):
+            if constant_points and not slid:  # the first run slides along the valley on its control points
+                slid.append(1)
+                for cam in rec.cameras.values():
+                    cam.params = slide(list(cam.params))
 
-    monkeypatch.setattr(sfm, "_adjust", adjust)
-    ch.optimize_cameras(engine="colmap")
+        def before(constant_points):
+            if not constant_points:  # the free pass, the first adjustment of a run: the chunk as it is then
+                state["starts"].append((np.array(ch.transform, float), _calibration(ch),
+                                        {m.key: np.array(m.position, float) for m in ch.markers},
+                                        {c.key: np.array(c.center, float) for c in ch.cameras}))
+
+        calls = _spy_on_colmap(monkeypatch, after, before)
+        ch.optimize_cameras(engine="colmap")
+        monkeypatch.undo()
+        return ch, state, calls
+
+    ch, state, calls = run(tmp_path / "focal", lambda p: [1.3 * p[0], *p[1:]])
     rep = ch.meta["sfm"]["optimize"]
-    assert runs == [set(), {1}]
-    for start in starts:  # each run starts from the chunk as it was
-        assert np.allclose(start[0], transform, atol=1e-12) and start[3] == before
-        assert all(np.allclose(start[1][k], markers[k], atol=1e-9) for k in markers)
-        assert all(np.allclose(start[2][k], centres[k], atol=1e-12) for k in centres)
+    free_passes = [call for call in calls if call[4] == 0]
+    assert [call[:4] for call in free_passes] == [(True, False, True, set()), (False, False, True, set())]
+    assert len(state["starts"]) == 2
+    for transform, calibration, markers, centres in state["starts"]:  # each run starts from the chunk as it was
+        assert np.allclose(transform, state["transform"], atol=1e-12) and calibration == state["before"]
+        assert all(np.allclose(markers[k], state["markers"][k], atol=1e-9) for k in markers)
+        assert all(np.allclose(centres[k], state["centres"][k], atol=1e-12) for k in centres)
     check = rep["intrinsics"]
-    assert check["held"] == [0] and 0 < check["focal_sd"][0][1] < bundle.FOCAL_SD_HOLD
-    assert len(check["notes"]) == 1
-    assert check["notes"][0].startswith("sensor 0: focal held: moved ")
-    assert check["notes"][0].endswith(" % in the optimisation, run again with it held")
-    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and _calibration(ch) == before
+    assert check["held"] == {"focal": [0], "principal_point": [], "radial": []}
+    assert 0 < check["focal_sd"][0][1] < bundle.FOCAL_SD_HOLD
+    assert check["notes"] == ["sensor 0: focal held: moved 30.0 % in the optimisation, run again with it held"]
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    after = _calibration(ch)
+    assert after[0][:2] == state["before"][0][:2] and after[0][4:6] != state["before"][0][4:6]
     assert rep["control_points"] == 4 and rep["after"]["control"] < 0.005
+
+    ch, state, calls = run(tmp_path / "radial", lambda p: [*p[:3], p[3] + 0.8, *p[4:]])  # RADIAL: f, cx, cy, k1, k2
+    rep = ch.meta["sfm"]["optimize"]
+    free_passes = [call for call in calls if call[4] == 0]
+    assert [call[:4] for call in free_passes] == [(True, False, True, set()), (True, False, False, set())]
+    check = rep["intrinsics"]
+    assert check["held"] == {"focal": [], "principal_point": [], "radial": [0]}
+    assert check["notes"] == ["sensor 0: radial held: k1 moved by 0.80 in the optimisation, run again with it held"]
+    assert rep["focal_held"] is None
+    after = _calibration(ch)
+    assert after[0][4:] == state["before"][0][4:] and after[0][0] != state["before"][0][0]
+
+
+def test_colmap_holds_a_group_for_every_sensor_or_for_none():
+    """COLMAP's adjustment refines the focal lengths of all its cameras or of none: when the check holds the focal
+    length of one sensor, the other sensors that would refine theirs are held with it and the notes say so; a
+    sensor that would not refine it (a fixed calibration) is not named."""
+    record = sfm._check_record(True)
+    sfm._hold(record, "focal", 2, "undetermined, sd 11.42 %")
+    sfm._for_every_sensor(record, "focal", {0: True, 2: True, 5: False})
+    assert record["held"] == {"focal": [2, 0], "principal_point": [], "radial": []}
+    assert record["notes"] == ["sensor 2: focal held: undetermined, sd 11.42 %",
+                               "sensor 0: focal held: with sensor 2 (COLMAP's adjustment holds it for every sensor "
+                               "or for none)"]
+    sfm._for_every_sensor(record, "principal_point", {0: True, 2: True})  # nothing held: nothing to follow
+    assert record["held"]["principal_point"] == [] and len(record["notes"]) == 2
 
 
 @needs_core
-def test_where_the_focal_length_is_not_refined_nothing_is_asked(tmp_path, monkeypatch):
+def test_where_nothing_judged_is_refined_nothing_is_asked(tmp_path, monkeypatch):
     """Accurate positions that hold the block keep the focal length of the alignment as before, and the distortion
     is still refined with it held; a block nothing places keeps it under our adjustment. The covariance is not
-    asked for: there is no focal length to judge."""
+    asked for: there is neither a focal length nor a principal point to judge."""
     asked = []
     real = bundle.intrinsics_variances
     monkeypatch.setattr(bundle, "intrinsics_variances", lambda pb, **kwargs: asked.append(1) or real(pb, **kwargs))
@@ -576,8 +708,7 @@ def test_where_the_focal_length_is_not_refined_nothing_is_asked(tmp_path, monkey
         ch.optimize_cameras(engine=engine)
         rep = ch.meta["sfm"]["optimize"]
         assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS and rep["gnss"]["photos"] == 40
-        assert rep["intrinsics"]["checked"] is False and rep["intrinsics"]["held"] == []
-        assert rep["intrinsics"]["reason"] == sfm.FOCAL_NOT_REFINED
+        assert rep["intrinsics"] == sfm._check_record(True, sfm.NOTHING_TO_JUDGE)
         assert ch.sensors[0].params[0] == pytest.approx(focal, rel=1e-9)
         assert ch.sensors[0].params[4] == pytest.approx(K1, abs=0.002)  # the distortion is refined
     _doc, ch = _rtk_block(tmp_path / "c", **GPS)
@@ -585,8 +716,27 @@ def test_where_the_focal_length_is_not_refined_nothing_is_asked(tmp_path, monkey
         cam.reference.enabled = False
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
-    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES and rep["intrinsics"]["reason"] == sfm.FOCAL_NOT_REFINED
+    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES and rep["intrinsics"]["reason"] == sfm.NOTHING_TO_JUDGE
     assert asked == []
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_principal_point_asked_for_is_judged_where_the_positions_hold_the_block(tmp_path, engine):
+    """Accurate positions hold the block and the focal length of the alignment is kept; a principal point that was
+    asked for is then the one thing the check judges, on the adjustment with those positions."""
+    _doc, ch = _rtk_block(tmp_path)
+    focal = ch.sensors[0].params[0]
+    ch.optimize_cameras(engine=engine, fit_principal_point=True)
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS
+    assert ch.sensors[0].params[0] == pytest.approx(focal, rel=1e-9)
+    assert check["checked"] is True and check["focal_sd"] == [] and len(check["principal_point_sd"]) == 1
+    sd = check["principal_point_sd"][0][1]
+    assert sd > 0
+    assert check["held"]["principal_point"] == ([0] if sd > bundle.PRINCIPAL_SD_HOLD else [])
+    assert check["held"]["focal"] == [] and check["held"]["radial"] == []
 
 
 @needs_core
@@ -596,8 +746,10 @@ def test_the_record_of_the_check_holds_numbers_and_no_names(tmp_path, engine):
     the label of a photo or a path."""
     doc, ch = _block(tmp_path)
     ch.sensors[0].label = "Hasselblad of the dig"
-    ch.optimize_cameras(engine=engine)
-    text = json.dumps(ch.meta["sfm"]["optimize"]["intrinsics"])
+    ch.optimize_cameras(engine=engine, fit_principal_point=True)
+    record = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert record["notes"] and record["focal_sd"] and record["principal_point_sd"]
+    text = json.dumps(record)
     assert "Hasselblad" not in text and ".jpg" not in text.lower()
     for cam in ch.cameras:
         assert cam.label not in text
@@ -606,20 +758,20 @@ def test_the_record_of_the_check_holds_numbers_and_no_names(tmp_path, engine):
     doc.save()  # the record is saved with the project
     import pyarchinit_photogrammetry as ppg
 
-    again = ppg.Document.open(doc.path).chunk.meta["sfm"]["optimize"]["intrinsics"]
-    assert again == ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert ppg.Document.open(doc.path).chunk.meta["sfm"]["optimize"]["intrinsics"] == record
 
 
 def test_the_reason_the_focal_length_was_held_counts_the_sensors():
     """``report["focal_held"]``: the reason the optimisation already has (the positions hold the block) stays; else
-    the check's, with how many of the sensors it judged when it did not hold them all."""
-    record = {"held": [], "focal_sd": [[0, 0.001], [1, 0.002]]}
+    the check's, with how many of the sensors it judged when it did not hold the focal length of them all. A
+    principal point or a distortion held is no reason of the focal length."""
+    record = {"held": {"focal": [], "principal_point": [0], "radial": [1]}, "focal_sd": [[0, 0.001], [1, 0.002]]}
     assert sfm._focal_held(None, record) is None
     assert sfm._focal_held(sfm.FOCAL_HELD_BY_POSITIONS, record) == sfm.FOCAL_HELD_BY_POSITIONS
-    record = {"held": [1], "focal_sd": [[0, 0.001], [1, 0.2]]}
+    record = {"held": {"focal": [1], "principal_point": [], "radial": []}, "focal_sd": [[0, 0.001], [1, 0.2]]}
     assert sfm._focal_held(None, record) == "the block does not determine the focal length of 1 of 2 sensors"
     assert sfm._focal_held(sfm.FOCAL_HELD_BY_POSITIONS, record) == sfm.FOCAL_HELD_BY_POSITIONS
-    record = {"held": [0, 1], "focal_sd": [[0, 0.1], [1, 0.2]]}
+    record = {"held": {"focal": [0, 1], "principal_point": [], "radial": []}, "focal_sd": [[0, 0.1], [1, 0.2]]}
     assert sfm._focal_held(None, record) == sfm.FOCAL_HELD_UNDETERMINED
     assert sfm.FOCAL_HELD_UNDETERMINED == "the block does not determine the focal length"
 
@@ -637,8 +789,7 @@ def test_a_block_our_formulation_does_not_take_is_optimised_as_before(tmp_path, 
     ch.optimize_cameras(engine="colmap")
     rep = ch.meta["sfm"]["optimize"]
     assert rep["intrinsics"]["checked"] is False and "rigs" in rep["intrinsics"]["reason"]
-    assert rep["focal_held"] is None and _calibration(ch) != before
-
+    assert rep["focal_held"] is None and _calibration(ch)[0][0] != before[0][0]
 
 # ------------------------------------------------------------------- the option, at every door
 def test_the_option_holds_by_default_and_reaches_both_formulations(tmp_path, monkeypatch):
@@ -696,8 +847,9 @@ def test_the_command_says_which_sensors_were_held(tmp_path):
 
 
 def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path, monkeypatch):
-    """*Ottimizza camere* has a tick, on by default, for the calibrations the block does not determine; the answer
-    reaches the chunk, and the log of the window says for how many sensors the calibration was kept."""
+    """*Ottimizza camere* has a tick, on by default, for the focal lengths the block does not determine; the answer
+    reaches the chunk, and the log of the window says for how many sensors the focal length was kept, and whether
+    a principal point or the radial distortion was held."""
     pytest.importorskip("PySide6")
     import os
 
@@ -724,11 +876,13 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
 
     def optimise(self, **kwargs):
         calls.append(kwargs["hold_undetermined"])
+        record = sfm._check_record(kwargs["hold_undetermined"])
+        if kwargs["hold_undetermined"]:
+            record.update(checked=True, focal_sd=[[0, 0.11]],
+                          held={"focal": [0], "principal_point": [0], "radial": [0]})
         self.meta.setdefault("sfm", {})["optimize"] = {
             "reprojection_error": 0.5, "focal_held": sfm.FOCAL_HELD_UNDETERMINED if kwargs["hold_undetermined"]
-            else None, "intrinsics": {"hold_undetermined": kwargs["hold_undetermined"], "checked": True,
-                                      "focal_sd": [[0, 0.11]], "held": [0] if kwargs["hold_undetermined"] else [],
-                                      "notes": []}}
+            else None, "intrinsics": record}
         return 0.5
 
     monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
@@ -743,12 +897,15 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
             app.processEvents()
         fields, intro = asked[-1]
         assert fields["hold"].default is True and "focale" in fields["hold"].label
-        assert "solo dove il blocco la determina" in intro
+        assert "solo dove il blocco la determina" in intro and "la distorsione viene affinata lo stesso" in intro
         assert calls == [True, False, True]
         said = [e[2] for e in w.log_pane.entries if "Errore di riproiezione" in e[2]]  # the line of each result
-        kept = "calibrazione dell'allineamento tenuta: il blocco non determina la focale (1 sensori su 1)"
+        kept = "focale dell'allineamento tenuta: il blocco non la determina (1 sensori su 1)"
         assert [kept in line for line in said] == [True, False, True]
-        assert not any("focale dell'allineamento tenuta" in line for line in said)
+        for words in ("punto principale tenuto: il blocco non lo determina",
+                      "distorsione radiale tenuta: scappava durante l'ottimizzazione"):
+            assert [words in line for line in said] == [True, False, True]
+        assert not any(line.count("focale dell'allineamento tenuta") > 1 for line in said)
     finally:
         w.setWindowModified(False)
         w.close()
@@ -816,44 +973,61 @@ def _marker_rmse(ch) -> dict:
 @needs_core
 @pytest.mark.slow
 @pytest.mark.parametrize("engine", ENGINES)
-def test_the_weak_ring_keeps_the_calibration_of_its_alignment(weak_ring, tmp_path, engine):
+def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_path, engine):
     """The weak ring cannot tell its focal length from its height (the native mapper held it, at the value of the
-    EXIF); the optimisation on its six control targets holds it too, with either formulation, and says so: the
-    cameras stay at their height and the control targets are met within the control line of the gate of the ring.
-    Before this rule the same optimisation moved the focal length ten times and the cameras 131 m up."""
-    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
-
+    EXIF); the optimisation on its six control targets holds it too, with either formulation, and says so; the
+    distortion, which the mapper left at zero with the focal length, is refined. The cameras stay at their height:
+    before this rule the same optimisation moved the focal length ten times and the cameras 131 m up."""
     ch = _copy_of(weak_ring, tmp_path / engine).chunk
-    before, heights = _calibration(ch), np.array([c.center[2] for c in ch.aligned_cameras])
+    before, heights = _calibration(ch), np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras])
+    assert before[0][4:] == [0.0, 0.0, 0.0, 0.0]  # the lens the native mapper left unmodelled
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
-    assert check["checked"] is True and len(check["held"]) == 1 and check["held"][0] == check["focal_sd"][0][0]
+    assert check["checked"] is True and len(check["held"]["focal"]) == 1
+    assert check["held"]["focal"][0] == check["focal_sd"][0][0] and check["held"]["radial"] == []
     assert check["focal_sd"][0][1] > 0.05  # 10 % (COLMAP's formulation) and 14 % (ours) measured
-    assert check["notes"][0].endswith(f"focal held: undetermined, sd {100 * check['focal_sd'][0][1]:.2f} %")
-    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and _calibration(ch) == before
-    assert rep["control_points"] == 6
-    rose = np.array([c.center[2] for c in ch.aligned_cameras]) - heights
-    assert np.abs(rose).max() < 0.1 * ch.scale  # internal units: within a decimetre of where the alignment put them
-    errors = _marker_rmse(ch)
-    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
-    assert errors["optimized_check_rmse"] < 0.02  # 16.9 mm measured, 18.6 mm before the optimisation
+    assert check["notes"] == [f"sensor {check['held']['focal'][0]}: focal held: undetermined, sd "
+                              f"{100 * check['focal_sd'][0][1]:.2f} %"]
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and rep["control_points"] == 6
+    after = _calibration(ch)
+    assert after[0][:4] == before[0][:4] and after[0][4] != 0.0  # the focal length exactly, the distortion refined
+    rose = np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras]) - heights
+    assert np.abs(rose).max() < 0.5  # in the coordinate system: where the alignment put them, the lens fitted
 
 
 @needs_core
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="with every intrinsic of the camera held the radial distortion stays at the "
-                                       "zero of the native alignment (true -0.04): check targets 16.9 mm with "
-                                       "both formulations, the line of the gate is 13 mm; with the focal length "
-                                       "alone held COLMAP's formulation reaches 8.8 mm, ours 20.1 mm")
-@pytest.mark.parametrize("engine", ENGINES)
-def test_the_weak_ring_meets_the_check_line_of_its_gate(weak_ring, tmp_path, engine):
-    """The check line of the gate of the weak ring after the optimisation (``WEAK_RING_GATE["check_m"]``, 13 mm)."""
+def test_the_weak_ring_meets_its_gate_after_the_optimisation(weak_ring, tmp_path):
+    """The two lines of the gate of the weak ring after the optimisation the program runs by default (COLMAP's
+    formulation): the control targets within ``WEAK_RING_GATE["control_m"]``, the check targets within
+    ``WEAK_RING_GATE["check_m"]``; the radial distortion found with the focal length held is the true one."""
     from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
 
-    ch = _copy_of(weak_ring, tmp_path / engine).chunk
-    ch.optimize_cameras(engine=engine)
-    assert _marker_rmse(ch)["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
+    ch = _copy_of(weak_ring, tmp_path / "gate").chunk
+    ch.optimize_cameras()
+    assert ch.meta["sfm"]["optimize"]["engine_choice"]["used"] == "colmap"
+    assert _calibration(ch)[0][4] == pytest.approx(-0.04, abs=0.005)  # the lens the photos were rendered with
+    errors = _marker_rmse(ch)
+    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm measured
+    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.8 mm measured
+
+
+@needs_core
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="our own formulation frees the tangential terms with the radial ones, and the "
+                                       "ring does not determine them either: p2 -0.0059, k1 +0.0106 for a true "
+                                       "-0.04, control 2.33 mm and check 20.1 mm (lines 2 and 13 mm); with the "
+                                       "tangential terms held it reaches 1.22 and 8.83 mm")
+def test_our_formulation_meets_the_gate_of_the_weak_ring(weak_ring, tmp_path):
+    """The same two lines with our own adjustment (``engine="ppg"``)."""
+    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
+
+    ch = _copy_of(weak_ring, tmp_path / "ours").chunk
+    ch.optimize_cameras(engine="ppg")
+    errors = _marker_rmse(ch)
+    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
+    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
 
 
 @needs_core
@@ -899,7 +1073,7 @@ def test_the_trench_refines_its_calibration_and_keeps_the_metric_gates(processed
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
-    assert check["checked"] is True and check["held"] == [] and check["notes"] == []
+    assert check["checked"] is True and check["held"] == NOTHING_HELD and check["notes"] == []
     assert 0 < check["focal_sd"][0][1] < 0.002 < bundle.FOCAL_SD_HOLD  # well determined
     assert rep["focal_held"] is None and _calibration(ch) != before
     assert rep["after"]["control"] < 0.002 and rep["after"]["check"] < 0.003

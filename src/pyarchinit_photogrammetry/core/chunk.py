@@ -566,11 +566,12 @@ class Chunk:
         :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
         positions of the photos - ``gnss`` "plain" or "bias" - the rolling shutter and its ``solver``:
         ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
-        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). The calibration of
-        a camera is refined only where the block determines it (``hold_undetermined``, True by default: a camera
-        whose focal length the block does not determine - nadir photos over flat ground - keeps the calibration of
-        the alignment, ``meta["sfm"]["optimize"]["intrinsics"]`` says which sensors and why; False refines every
-        calibration whatever the block determines). Returns the mean reprojection error in pixels; the
+        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Each group of the
+        intrinsics of a camera is refined only where the block determines it (``hold_undetermined``, True by
+        default: a focal length the block does not determine - nadir photos over flat ground - stays that of the
+        alignment while the distortion is still refined, a principal point asked for is held when the block does
+        not determine it, ``meta["sfm"]["optimize"]["intrinsics"]`` says which sensors and why; False refines
+        every calibration whatever the block determines). Returns the mean reprojection error in pixels; the
         control/check point, scale bar and GNSS report is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 
