@@ -165,14 +165,24 @@ def test_the_line_fitted_to_what_a_segment_sees(model_outside, tmp_path):
     longer = face[0] + np.array([[1.0, -0.3], [1.6, -0.15]])
     r = T.snap_trace(ch, longer, side="right")
     assert r["segments"][0]["slope"] == pytest.approx(0.25, abs=1e-3) and distance_to(face, r["points"]).max() < 1e-3
-    # a pile of stones against the wall, half a metre thick over 0.8 m of its 6 m: the line is that of the wall
-    _doc, piled, _info = model_doc(tmp_path / "mucchio", _block(make_wall_scene(), (4.2, -0.5, 0.0), (5.0, 0.0, 2.0)))
-    r = T.snap_trace(piled, clicked, side="right")
+
+
+@pytest.mark.parametrize("what, where", [("pile", (0.2, 1.0)), ("pile", (0.2, 2.6)), ("pile", (3.0, 5.4)),
+                                         ("door", (0.2, 2.8)), ("door", (3.6, 5.4))])
+def test_what_is_not_the_wall_does_not_pull_its_line(what, where, model_outside, tmp_path):
+    """A pile of stones half a metre thick against the first leg of the wall, or a doorway in it through which the
+    back of the wall is seen: over 0.8 m of its 6 m at its start (a least-squares line is pulled 23 cm off by
+    that, with the columns past the corner at the other end), over four tenths of it at either end."""
+    _ch, info = model_outside
+    face = np.asarray(info["face"])
+    if what == "pile":
+        scene = _block(make_wall_scene(), (where[0], -0.5, 0.0), (where[1], 0.0, 2.0))
+        _doc, ch, _info = model_doc(tmp_path, scene)
+    else:
+        _doc, ch, _info = model_doc(tmp_path, make_wall_scene(), drop=where)
+    r = T.snap_trace(ch, face + OFF, side="right")
     assert distance_to(face, r["points"]).max() < 0.01 and np.linalg.norm(r["points"][1] - face[1]) < 0.02
-    # a doorway 0.8 m wide in the same place (the back of the wall is seen through it): the wall again
-    _doc, open_, _info = model_doc(tmp_path / "porta", make_wall_scene(), drop=(4.2, 5.0))
-    r = T.snap_trace(open_, clicked, side="right")
-    assert distance_to(face, r["points"]).max() < 0.01 and np.linalg.norm(r["points"][1] - face[1]) < 0.02
+    assert r["segments"][0]["offset"] == pytest.approx(-0.4002, abs=1e-3)
 
 
 def test_a_segment_without_a_face_goes_with_those_that_have_one(tmp_path):
@@ -245,7 +255,7 @@ def test_the_heights_the_face_is_looked_for_at(tmp_path):
     assert T.snap_trace(ch, clicked, side="right", band=4.5, heights=(100.0, 102.0))["snapped"] is True
 
 
-def test_what_the_snap_refuses_and_what_it_leaves_as_clicked(model_outside, tmp_path):
+def test_what_the_snap_refuses_and_a_point_clicked_twice(model_outside):
     import pyarchinit_photogrammetry as ppg
 
     ch, info = model_outside
@@ -271,18 +281,38 @@ def test_what_the_snap_refuses_and_what_it_leaves_as_clicked(model_outside, tmp_
     assert r["points"].shape == (4, 2) and np.array_equal(r["points"][1], r["points"][2])
     assert np.linalg.norm(r["points"][1] - face[1]) < 0.02 and len(r["segments"]) == 3
     assert r["segments"][1] == {"offset": 0.0, "slope": 0.0, "share": 0.0} and r["shift"][1] == r["shift"][2]
-    # two faces that would turn the second segment back - the first leans, the second stands 2 m in front of the
-    # line, and they meet past its end: the trace is left as clicked
+
+
+def test_the_vertices_keep_the_order_clicked(tmp_path):
+    # two faces whose lines meet past the end of the second segment - the first leans, the second stands 2.2 m
+    # in front of the line: put where they meet, the corner would turn that segment back
     scene = make_wall_scene(trace=[(0.0, 0.1), (2.0, 1.1)])
     more = make_wall_scene(trace=[(4.2, 0.0), (4.2, 2.0)])
-    _doc, odd, info = model_doc(tmp_path, _added(scene, more.vertices, more.faces))
+    _doc, ch, info = model_doc(tmp_path, _added(scene, more.vertices, more.faces))
     o = np.asarray(info["shift"][:2])
+    lean, front = o + [[0.0, 0.1], [2.0, 1.1]], o + [[4.2, -9.0], [4.2, 9.0]]
     clicked = o + [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0]]
-    r = T.snap_trace(odd, clicked, side="right")
-    assert r["snapped"] is False and np.array_equal(r["points"], clicked) and not r["shift"].any()
-    assert all(s["share"] > 0.9 and s["offset"] != 0.0 for s in r["segments"])      # both were found
-    longer = T.snap_trace(odd, o + [[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]], side="right")   # they meet before its end
+    r = T.snap_trace(ch, clicked, side="right")
+    assert r["snapped"] is True and all(s["share"] > 0.9 and s["offset"] != 0.0 for s in r["segments"])
+    assert distance_to(lean, r["points"][:1])[0] < 1e-3 and distance_to(front, r["points"][2:])[0] < 1e-3
+    step = np.diff(r["points"], axis=0)
+    assert step[0, 0] > 0 and step[1, 1] > 0                       # on as clicked: east, then north
+    corner = r["points"][1:2]                                      # as far from the one face as from the other
+    assert distance_to(o + [[-9.0, -4.4], [9.0, 4.6]], corner)[0] == pytest.approx(distance_to(front, corner)[0],
+                                                                                 abs=1e-3)
+    assert np.abs(corner[0] - (o + [4.2, 2.2])).max() > 1.0
+    # a second segment that goes on past where they meet: the corner is there
+    longer = T.snap_trace(ch, o + [[0.0, 0.0], [2.0, 0.0], [2.0, 3.0]], side="right")
     assert longer["snapped"] is True and np.abs(longer["points"][1] - (o + [4.2, 2.2])).max() < 0.01
+    # an L with legs of 1 m whose two faces are found 5 m behind it: they meet 4 m back along both legs, and
+    # between them is no better - there is no way to keep the order, and the line is left as clicked
+    v = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
+    legs = dict(length=np.array([1.0, 1.0]), t=np.array([[1.0, 0.0], [0.0, 1.0]]),
+                towards=np.array([[0.0, -1.0], [1.0, 0.0]]), found=np.array([True, True]))
+    assert T._moved(v, fits=np.array([[-5.0, 0.0], [-5.0, 0.0]]), **legs) is None
+    near = T._moved(v, fits=np.array([[-0.5, 0.0], [-0.5, 0.0]]), **legs)           # half a metre behind it
+    assert np.allclose(near, [[0.0, 0.5], [0.5, 0.5], [0.5, 1.0]])
+    assert T._moved(v, fits=np.zeros((2, 2)), **{**legs, "found": np.array([False, False])}) is None
 
 
 def test_projected_and_local_coordinates_snap_alike(model_outside, tmp_path):
@@ -447,6 +477,21 @@ def test_the_line_is_smoothed_then_snapped(model_outside, monkeypatch):
     assert distance_to(face, path.vertices).max() < 0.01
     T.path_from_trace(ch, clicked, side="right", snap=False, smooth=1.0)
     assert len(given) == 1                                     # no snap unless asked
+
+
+@pytest.mark.parametrize("sigma", [0.5, 1.0])
+def test_a_smoothed_line_is_snapped_round_its_corner(sigma, model_outside):
+    """Smoothed, the line is short chords round the corner it cut: each sees a different depth, and the lines
+    of two chords next to each other meet anywhere along them. The vertices stay in their order all the same."""
+    ch, info = model_outside
+    face = np.asarray(info["face"])
+    path, report = T.path_from_trace(ch, face + OFF, side="right", smooth=sigma)
+    assert report["snapped"] is True and len(path.vertices) > 10
+    near = distance_to(face, path.vertices)
+    straight = np.hypot(*(path.vertices - face[1]).T) > 3.0 * sigma       # away from the corner it rounded
+    assert straight.sum() > 5 and near[straight].max() < 0.01 and near.max() < 0.05
+    step = np.diff(path.vertices, axis=0)
+    assert (step @ [1.0, 1.0] > 0).all()                                   # on along the wall, never back
 
 
 def test_clicks_on_a_straight_wall_by_a_corner_leave_its_fillet_whole(model_outside, tmp_path):

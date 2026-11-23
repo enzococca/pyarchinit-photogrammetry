@@ -25,6 +25,7 @@ SNAP_BAND = 2.5  # m in front of the clicked line and behind it where the face i
 MIN_SNAP_SHARE = 0.3  # the share of the columns of a segment that must see a surface for it to be moved
 MIN_FIT = 0.5  # m of face a line is fitted to: a shorter stretch gives a shift alone
 FIT_MAD = 3.0  # a column further than this many median deviations from the line fitted is left out of it
+FIT_COLUMNS = 400  # at most, for the slope of the first line (the slopes between them two by two)
 SAME_WALL_DEG = 5.0  # two fitted lines that turn less are one wall going on: no corner to put where they meet
 STRAIGHT = 0.01  # m: a vertex this near the line between its neighbours is a click on a straight wall, not a turn
 
@@ -141,19 +142,30 @@ def _least_squares(x: np.ndarray, d: np.ndarray) -> tuple[float, float]:
     return float(dm - b * xm), b
 
 
+def _median_line(x: np.ndarray, d: np.ndarray) -> tuple[float, float]:
+    """``(a, b)`` of the line ``d = a + b x`` most of the points lie on: ``b`` the median, point by point, of the
+    median slope from that point to all the others (the repeated median: it holds with nearly half the points
+    off the line, wherever they are along it), ``a`` the median of what is left. The slope is taken on
+    :data:`FIT_COLUMNS` points at most, picked evenly."""
+    pick = np.unique(np.round(np.linspace(0, len(x) - 1, min(len(x), FIT_COLUMNS))).astype(np.intp))
+    run = x[pick][None, :] - x[pick][:, None]
+    np.fill_diagonal(run, np.nan)
+    b = float(np.median(np.nanmedian((d[pick][None, :] - d[pick][:, None]) / run, axis=1)))
+    return float(np.median(d - b * x)), b
+
+
 def _fit(x: np.ndarray, d: np.ndarray, width: float) -> tuple[float, float]:
     """The line ``d = a + b x`` of the face a segment sees in its columns (``x`` their middles, ``d`` their
-    depths, NaN where they see nothing, ``width`` of a column): fitted twice, the second time without the
-    columns further than :data:`FIT_MAD` median deviations from the first (what stands in front of the wall, an
-    opening, the other wall past a corner). Where the columns that see a surface span less than
-    :data:`MIN_FIT`, their median and no slope: a shift."""
+    depths, NaN where they see nothing, ``width`` of a column), fitted twice: first the line most columns lie on
+    (:func:`_median_line`), then by least squares without the columns further than :data:`FIT_MAD` median
+    deviations from it - what stands in front of the wall, an opening, the other wall past a corner. Where the
+    columns that see a surface span less than :data:`MIN_FIT`, their median and no slope: a shift."""
     seen = np.nonzero(np.isfinite(d))[0]
     x, d = x[seen], d[seen]
-    if (seen[-1] - seen[0] + 1) * width < MIN_FIT:
+    if (seen[-1] - seen[0] + 1) * width < MIN_FIT or len(x) < 2:
         return float(np.median(d)), 0.0
-    a, b = _least_squares(x, d)
-    off = d - (a + b * x)
-    off = np.abs(off - np.median(off))
+    a, b = _median_line(x, d)
+    off = np.abs(d - (a + b * x))
     kept = off <= FIT_MAD * np.median(off)
     if kept.sum() >= 2:
         a, b = _least_squares(x[kept], d[kept])
@@ -164,41 +176,65 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
            found: np.ndarray) -> np.ndarray | None:
     """Where the vertices ``v`` of a clicked line go, given the line fitted to each segment that has one
     (``found``; ``fits`` its depth at the start of the segment and its slope, along ``towards``, the normal of
-    the segment towards the viewer). A vertex between two fitted lines goes where they meet, or half way between
-    them where they turn by less than :data:`SAME_WALL_DEG` and would meet anywhere; a vertex with one fitted
-    line goes onto it along the normal of that segment; the others move as the nearest vertices that have a
-    line do, in proportion along the clicked line between two of them. None when no segment has a line, or
-    when the lines found would turn a segment back on itself."""
+    the segment towards the viewer).
+
+    A vertex between two fitted lines goes where they meet. Where the two turn by less than
+    :data:`SAME_WALL_DEG` they are one wall going on and would meet anywhere along it: the vertex is moved off
+    the clicked line by the mean of its distances from the two, along the bisector of their normals - the point
+    as far from the one line as from the other, which is where they meet when the vertex is as far from both
+    (a click on a straight wall, the chords of a curve). A vertex with one fitted line goes onto it along the
+    normal of that segment. The others move as the nearest vertices that have a line do, in proportion along
+    the clicked line between two of them.
+
+    The vertices keep the order clicked. Where a segment would be turned back - two lines that meet past the
+    next vertex or before the one before, as do those of the short chords of a smoothed corner, each at another
+    depth - its vertices are put between their two lines, as above, and not where they meet.
+
+    None when no segment has a line, and when the order cannot be kept even so."""
     start = v[:-1] + fits[:, :1] * towards  # each fitted line at the two ends of its segment
     end = v[1:] + (fits[:, 0] + fits[:, 1] * length)[:, None] * towards
-    heading = t + fits[:, 1:] * towards
-    heading /= np.hypot(heading[:, 0], heading[:, 1])[:, None]
-    out = np.full(v.shape, np.nan)
+    slope = np.hypot(1.0, fits[:, 1])[:, None]
+    heading, across = (t + fits[:, 1:] * towards) / slope, (towards - fits[:, 1:] * t) / slope  # along it, off it
+    meet = np.full(v.shape, np.nan)  # of an interior vertex: where its two lines meet
+    between = np.full(v.shape, np.nan)  # ... and the place between them; of the others, the foot on their line
     if found[0]:
-        out[0] = start[0]
+        between[0] = start[0]
     if found[-1]:
-        out[-1] = end[-1]
+        between[-1] = end[-1]
     for j in range(1, len(v) - 1):
         a, b = j - 1, j  # the segment that ends at the vertex, the one that starts from it
         if found[a] and found[b]:
+            cos = across[a] @ across[b]
+            if cos > 0.0:  # as far from each line as the mean of how far the vertex is from the two
+                off = ((end[a] - v[j]) @ across[a] + (start[b] - v[j]) @ across[b]) / 2.0
+                between[j] = v[j] + off * (across[a] + across[b]) / (1.0 + cos)
+            else:  # a turn of a right angle and more has no such place nearby: half way between its two feet
+                between[j] = (end[a] + start[b]) / 2.0
             cross = heading[a, 0] * heading[b, 1] - heading[a, 1] * heading[b, 0]
             if abs(cross) >= np.sin(np.radians(SAME_WALL_DEG)):
                 gap = start[b] - end[a]
-                out[j] = end[a] + heading[a] * (gap[0] * heading[b, 1] - gap[1] * heading[b, 0]) / cross
-            else:
-                out[j] = (end[a] + start[b]) / 2.0
+                meet[j] = end[a] + heading[a] * (gap[0] * heading[b, 1] - gap[1] * heading[b, 0]) / cross
         elif found[a]:
-            out[j] = end[a]
+            between[j] = end[a]
         elif found[b]:
-            out[j] = start[b]
-    known = np.isfinite(out[:, 0])
-    if not known.any():
+            between[j] = start[b]
+    met = np.isfinite(meet[:, 0])  # the vertices put where their two lines meet
+    placed = met | np.isfinite(between[:, 0])
+    if not placed.any():
         return None
     run = np.concatenate([[0.0], np.cumsum(length)])
-    out = v + np.column_stack([np.interp(run, run[known], (out - v)[known, k]) for k in (0, 1)])
-    if (((out[1:] - out[:-1]) * t).sum(axis=1) <= 0.0).any():
-        return None
-    return out
+    while True:
+        to = np.where(met[:, None], meet, between) - v
+        out = v + np.column_stack([np.interp(run, run[placed], to[placed, k]) for k in (0, 1)])
+        back = ((out[1:] - out[:-1]) * t).sum(axis=1) <= 0.0  # the segments turned back on themselves
+        if not back.any():
+            return out
+        ends = np.zeros(len(v), bool)
+        ends[:-1] |= back
+        ends[1:] |= back
+        if not (ends & met).any():
+            return None
+        met &= ~ends
 
 
 def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heights=None, step: float = 0.05,
@@ -216,16 +252,17 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     (:func:`_fit`: twice, the second time without the columns far from the first; a shift alone under
     :data:`MIN_FIT`). A segment with fewer than :data:`MIN_SNAP_SHARE` of its columns on a surface has no line.
 
-    A vertex between two segments goes where their lines meet, an end vertex onto the line of its segment
-    along its normal. A segment without a line keeps the direction clicked and goes with its vertices: each is
-    moved by the other segment it belongs to, an end that belongs to no other as the vertex next to it.
+    A vertex between two segments goes where their lines meet (between the two lines where they are one wall
+    going on, or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its
+    segment along its normal. A segment without a line keeps the direction clicked and goes with its vertices:
+    each is moved by the other segment it belongs to, an end that belongs to no other as the vertex next to it.
 
     Returns ``points`` (N, 2: the line snapped, in the order clicked), ``snapped`` (whether it was moved),
     ``shift`` (N: how far each vertex went, metres), ``median_shift``, ``max_shift`` and ``segments``, for each
     clicked segment ``offset`` (the depth of its fitted line at its first point, towards the viewer), ``slope``
     (per metre along the direction clicked) and ``share`` (of its columns that see a surface); ``offset`` and
     ``slope`` are 0 for a segment without a line. ``snapped`` is False, and the points are those clicked, when
-    no segment has a line, and when the lines found would turn a segment of the line back on itself.
+    no segment has a line, and when the lines found cannot keep the vertices in the order clicked.
 
     :class:`~.wall_path.TraceRefused` as :func:`side_of`; ``RuntimeError`` without a model."""
     from .visibility import raycaster_for_chunk
