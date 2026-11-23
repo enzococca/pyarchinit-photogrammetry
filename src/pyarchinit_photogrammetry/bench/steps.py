@@ -4,8 +4,8 @@
 
 The job names the local photos, the work folder, the chain (``align``, ``all``, ``match`` or ``optimize``,
 :data:`CHAINS`), the
-mapper of the alignment (one of :data:`MAPPERS`), the engine of the matching (one of :data:`ENGINES`; the alignment
-and the depth maps run classic whatever the job asks: the bench measures the matching) and, when the set has them,
+mapper of the alignment (one of :data:`MAPPERS`), the engine of the matching and the engine of the alignment (each
+one of :data:`ENGINES`; the depth maps run classic whatever the job asks) and, when the set has them,
 the targets to detect, the reference to import and the labels of its markers that are check points (``check``), and
 the steps after which the project is kept as it was (``after``: :func:`snapshot_hooks`). The child makes a project
 in the work folder, adds the photos and runs public methods of :class:`..core.chunk.Chunk` only, in the order
@@ -41,9 +41,10 @@ ALIGN_STEPS = ("detect_markers", "match_photos", "align_cameras", "import_refere
 # the steps of ``match``: the matching alone (the markers before it when the job names targets), for the time of the
 # native matching against the classic one on a large set without a run of the mapper
 MATCH_STEPS = ALIGN_STEPS[:2]
-# the engines of the matching ``ppg bench run`` chooses from (--engine), the first its default: those of the switch
-# (engine/switch.py), whose default is auto. The job carries the choice to match_photos alone; the record keeps it as
-# settings["engine_requested"], while the engine of the step says what ran
+# the engines ``ppg bench run`` chooses from, for the matching (--engine) and for the alignment (--align-engine), the
+# first the default of both: those of the switch (engine/switch.py), whose default is auto. The job carries the two
+# choices apart, ``engine`` to match_photos alone and ``align_engine`` to align_cameras alone; the record keeps them
+# as settings["engine_requested"] and settings["align_engine_requested"], while the engine of each step says what ran
 ENGINES = switch.ENGINES
 # the targets ``all`` detects when the job names none: the default of ppg process, which is that of
 # Chunk.detect_markers (a test compares the three)
@@ -70,15 +71,18 @@ ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepo
              "align_cameras": {}, "update_transform": {}, "build_depth_maps": {"quality": "medium"},
              "build_point_cloud": {}, "build_model": {"surface": "arbitrary"}, "build_texture": {}, "build_dem": {},
              "build_orthomosaic": {}, "optimize_cameras": {}}
-# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. "engine", "features" and
+# the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names, nor the report of the native
+# mapper (native_mapper: its positioning names a CRS and an offset). "native_fallback" is the reason the native
+# mapper handed the alignment to the classic chain (a block it refused, a failure of it; None when it aligned or was
+# not asked), beside the mapper that aligned and that mapper's own fallback. "engine", "features" and
 # "routes" are the native matching's (its record names the engine, where the features were found and the routes the
-# pairs took; the classic record names no engine and no routes): facts of the run, not settings, for the table
-# (table.RUN_FACTS). The last five are the native matching's settings read from the environment (the JPEG decoded at
-# a DCT scale, and the second stage: on, its ratio test, its band, its check against the first stage's rivals), None
-# in a classic record: settings, so runs that differ in them are not one measurement
-SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
-                "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band",
-                "native_guided_check")
+# pairs took; the classic record names no engine and no routes): facts of the run, as the fallbacks are, not
+# settings, for the table (table.RUN_FACTS). The last five are the native matching's settings read from the
+# environment (the JPEG decoded at a DCT scale, and the second stage: on, its ratio test, its band, its check against
+# the first stage's rivals), None in a classic record: settings, so runs that differ in them are not one measurement
+SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback",
+                "native_fallback", "engine", "features", "routes", "native_dct", "native_guided",
+                "native_guided_ratio", "native_guided_band", "native_guided_check")
 MATCH_SETTINGS = ("max_ratio", "max_distance", "cross_check")
 PROJECT = "project.ppg"
 # the project as it was right after a step the job names in ``after`` (:func:`snapshot_hooks`), in the work folder
@@ -327,10 +331,10 @@ def wanted(step: str, job: dict, chunk, imported: bool) -> bool:
 
 def call(chunk, step: str, job: dict):
     """``step`` run on ``chunk``: the targets, the reference, the mapper (the first of :data:`MAPPERS` when the job
-    names none) and the engine of the matching (the first of :data:`ENGINES` when the job names none) from the job,
-    the rest with :data:`ARGUMENTS`. The two other steps that take an engine, the alignment and the depth maps, run
-    classic by the bench's own word: a run measures the matching, and what the computer asks for (``PPG_ENGINE``,
-    which the runner keeps out of the child anyway) never changes it."""
+    names none), the engine of the matching (``engine``) and the engine of the alignment (``align_engine``; each the
+    first of :data:`ENGINES` when the job names none) from the job, the rest with :data:`ARGUMENTS`. The depth maps,
+    the other step that takes an engine, run classic by the bench's own word, and what the computer asks for
+    (``PPG_ENGINE``, which the runner keeps out of the child anyway) never changes the engine of a step."""
     if step == "detect_markers":
         return chunk.detect_markers(job["targets"])
     if step == "import_reference":
@@ -338,6 +342,8 @@ def call(chunk, step: str, job: dict):
     kwargs = dict(ARGUMENTS[step])
     if step == "match_photos":
         kwargs["engine"] = job.get("engine", ENGINES[0])
+    elif step == "align_cameras":
+        kwargs["engine"] = job.get("align_engine", ENGINES[0])
     elif step in switch.STEPS:
         kwargs["engine"] = "classic"
     if step == "align_cameras":

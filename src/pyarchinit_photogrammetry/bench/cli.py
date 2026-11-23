@@ -32,8 +32,12 @@ STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the p
               "classic one on a large set)")
 MAPPER_HELP = ("the mapper of the alignment: auto (the one ppg process picks for the set), incremental or global; the "
                "record keeps it as mapper_requested beside the mapper the run used")
-ENGINE_HELP = ("the engine of the matching: auto (the choice of the program), classic or native; the alignment stays "
-               "classic. The record keeps it as engine_requested; the engine of the step says what ran")
+ENGINE_HELP = ("the engine of the matching: auto (the choice of the program), classic or native; the alignment has "
+               "its own, --align-engine. The record keeps it as engine_requested; the engine of the step says what ran")
+ALIGN_ENGINE_HELP = ("the engine of the alignment: auto (the choice of the program), classic or native (the global "
+                     "mapper of the native engine, the classic alignment behind it). The record keeps it as "
+                     "align_engine_requested; the engine of the step says what ran, native_fallback why the native "
+                     "mapper gave its block up")
 SEED_HELP = ("the seed of the RANSAC of the geometric verification of the matches (PPG_RANSAC_SEED in the child): runs "
              "with the same seed verify the same pairs; without it a seed from the clock, and the record says -1")
 RECORDS_HELP = "the folder of the records (default: OUT)"
@@ -48,6 +52,7 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
               steps: str = typer.Option("align", "--steps", help=STEPS_HELP),
               mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
               engine: str = typer.Option("auto", "--engine", help=ENGINE_HELP),
+              align_engine: str = typer.Option("auto", "--align-engine", help=ALIGN_ENGINE_HELP),
               seed: Optional[int] = typer.Option(None, "--seed", min=0, help=SEED_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
@@ -63,10 +68,11 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
     if mapper not in child.MAPPERS:
         raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
     _engine(engine)
+    _engine(align_engine, "--align-engine")
     _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper,
-                               engine=engine)
+                               engine=engine, align_engine=align_engine)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, mapper=mapper, seed=seed, engine=engine))
+              records=records, mapper=mapper, seed=seed, engine=engine, align_engine=align_engine))
 
 
 @bench_app.command("synthetic")
@@ -79,6 +85,7 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-
                                                                     "runs: the project of a kept run is what ppg "
                                                                     "bench adjust and ppg bench pairs take"),
                     engine: str = typer.Option("auto", "--engine", help=ENGINE_HELP),
+                    align_engine: str = typer.Option("auto", "--align-engine", help=ALIGN_ENGINE_HELP),
                     mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
                     steps: Optional[str] = typer.Option(None, "--steps", help="weak-ring only: align (the default) or "
                                                                               "optimize (align, then the optimization "
@@ -110,6 +117,7 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-
     if which not in SETS:
         raise typer.BadParameter(f"{_choices(SETS)}, not {which!r}")
     _engine(engine)
+    _engine(align_engine, "--align-engine")
     if mapper not in child.MAPPERS:
         raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
     if steps is not None and which != "weak-ring":
@@ -120,7 +128,8 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-
     name = f"synthetic-{which}"
     set_dir = _check(_set_folder, out, name, records)
     chain = {"trench": "all", "ring": "align"}.get(which) or steps or WEAK_RING_STEPS[0]
-    _, records_folder = _check(runner.check, out, name, chain, repeat, records, mapper=mapper, engine=engine)
+    _, records_folder = _check(runner.check, out, name, chain, repeat, records, mapper=mapper, engine=engine,
+                               align_engine=align_engine)
     if which == "trench":
         scene = synthetic.write_dataset(set_dir)
         kwargs = dict(reference=set_dir / "gcp.csv", crs=scene.crs, extra_results=truth.trench_truth)
@@ -139,7 +148,7 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-
     typer.echo(f"the set is written: {len(scene.cameras)} photos")
     # the synthetic sets are stamped with the targets ppg process detects by default (testing.synthetic._stamp_target)
     _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=chain, repeat=repeat, keep=keep,
-              records=records, targets=child.DEFAULT_TARGETS, engine=engine, **kwargs))
+              records=records, targets=child.DEFAULT_TARGETS, engine=engine, align_engine=align_engine, **kwargs))
 
 
 @bench_app.command("adjust")
@@ -208,12 +217,13 @@ def _choices(words) -> str:
     return f"{', '.join(words[:-1])} or {words[-1]}"
 
 
-def _engine(engine: str) -> None:
-    """``--engine`` checked before anything runs: one of :data:`.steps.ENGINES`, else a usage error."""
+def _engine(engine: str, option: str = "--engine") -> None:
+    """``--engine`` or ``--align-engine`` (``option``) checked before anything runs: one of :data:`.steps.ENGINES`,
+    else a usage error that names the option."""
     from . import steps as child
 
     if engine not in child.ENGINES:
-        raise typer.BadParameter(f"{_choices(child.ENGINES)}, not {engine!r}", param_hint="--engine")
+        raise typer.BadParameter(f"{_choices(child.ENGINES)}, not {engine!r}", param_hint=option)
 
 
 def _set_folder(out: Path, name: str, records: Optional[Path]) -> Path:
