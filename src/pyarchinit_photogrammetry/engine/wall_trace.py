@@ -132,22 +132,70 @@ def _heights_near(chunk: Chunk, line: np.ndarray, band: float) -> tuple[float, f
     return (float(v0), float(v1)) if v1 > v0 else None
 
 
-def _columns(surface: FrameSurface, start: np.ndarray, t: np.ndarray, length: float, step: float,
-             heights: tuple[float, float], samples: int) -> tuple[np.ndarray, np.ndarray]:
-    """What a clicked segment sees through its plane: the middles ``x`` (metres from ``start`` along ``t``) of
-    its columns, ``step`` wide at most, and in each the median depth of the surface over ``samples`` heights
-    between the two of ``heights`` - NaN for a column with surface at fewer than
-    :data:`~.elevation.FACE_ROWS` of them (the ground the lowest rays meet anywhere is not a face)."""
-    n = max(1, int(np.ceil(length / step - 1e-9)))
-    x = (np.arange(n) + 0.5) * length / n
-    u = surface.frame.coords(np.column_stack([start + x[:, None] * t, np.zeros(n)]))[:, 0]
+class _Sight:
+    """The plane of a clicked segment as the frame of a :class:`~.elevation.FrameSurface` that says how far in
+    front of the line it goes at each ``u`` (``front``, at the ``u`` of its columns): the rays start there."""
+
+    kind = "plane"
+
+    def __init__(self, plane, u: np.ndarray, front: np.ndarray):
+        order = np.argsort(u)
+        self.plane, self._u, self._front = plane, u[order], front[order]
+        self.point, self.view, self.coords, self.max_depth = plane.point, plane.view, plane.coords, plane.max_depth
+
+    def max_depth_at(self, u) -> np.ndarray:
+        return np.interp(u, self._u, self._front)
+
+    def min_depth_at(self, u) -> np.ndarray:
+        return np.full(np.shape(u), -np.inf)
+
+
+def _reach(v: np.ndarray, i: int, x: np.ndarray, towards: np.ndarray, band: float) -> np.ndarray:
+    """How far in front of segment ``i`` of the clicked line ``v`` (towards its viewer) each of its columns ``x``
+    looks from: ``band``, or less where another segment of the line is as near as its own before that - half way
+    across a corridor both walls of which are traced, in a niche, between the legs of a zigzag, by a corner seen
+    from inside. A segment that looked from further would look through that other part of the wall."""
+    step = v[i + 1] - v[i]
+    p = v[i] + x[:, None] * step / np.hypot(*step)
+    low, high = np.minimum(v[i], v[i + 1]) - 2.0 * band, np.maximum(v[i], v[i + 1]) + 2.0 * band
+    others = np.array([j for j in range(len(v) - 1) if j != i and (np.maximum(v[j], v[j + 1]) >= low).all()
+                       and (np.minimum(v[j], v[j + 1]) <= high).all()], np.intp)
+    reach = np.full(len(x), band)
+    if not len(others):
+        return reach
+    a, side = v[others], v[others + 1] - v[others]  # (others, 2): their starts, their steps
+    square = (side * side).sum(axis=1)
+
+    def own(depth: np.ndarray, rows: np.ndarray) -> np.ndarray:
+        """Whether the columns ``rows``, that far in front, are still nearer to their segment than to any other."""
+        w = (p[rows] + depth[:, None] * towards)[:, None, :] - a  # (rows, others, 2)
+        tau = np.clip((w * side).sum(axis=2) / square, 0.0, 1.0)
+        return np.hypot(*np.moveaxis(w - tau[..., None] * side, 2, 0)).min(axis=1) >= depth
+
+    rows = np.nonzero(~own(reach, np.arange(len(x))))[0]  # the distance to another segment less the depth only falls
+    lo, hi = np.zeros(len(rows)), np.full(len(rows), band)
+    for _ in range(24):
+        mid = (lo + hi) / 2.0
+        held = own(mid, rows)
+        lo, hi = np.where(held, mid, lo), np.where(held, hi, mid)
+    reach[rows] = lo
+    return reach
+
+
+def _columns(surface: FrameSurface, x: np.ndarray, u: np.ndarray, heights: tuple[float, float],
+             samples: int) -> np.ndarray:
+    """What a clicked segment sees through its plane in its columns (``x`` their middles along the segment, ``u``
+    the same on the plane): in each the median depth of the surface over ``samples`` heights between the two of
+    ``heights`` - NaN for a column with surface at fewer than :data:`~.elevation.FACE_ROWS` of them (the ground
+    the lowest rays meet anywhere is not a face)."""
+    n = len(x)
     v = heights[0] + (np.arange(samples) + 0.5) * (heights[1] - heights[0]) / samples
     d = surface.depth_at(np.repeat(u, samples), np.tile(v, n)).reshape(n, samples)
     with warnings.catch_warnings():  # a column that sees nothing: "All-NaN slice"
         warnings.simplefilter("ignore", RuntimeWarning)
         column = np.nanmedian(d, axis=1)
     column[np.isfinite(d).mean(axis=1) < FACE_ROWS] = np.nan
-    return x, column
+    return column
 
 
 def _least_squares(x: np.ndarray, d: np.ndarray) -> tuple[float, float]:
@@ -260,10 +308,14 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
 
     Each clicked segment looks at the model through its own vertical plane, from ``band`` metres in front of
     the line to ``band`` behind it, and takes the first surface met from the viewer's side: a click on the crest
-    of the wall, or behind it, finds the face all the same. What stands in front of the wall within the band is
-    met first - the other side of a narrow room, the ground where the wall stands in a trench: give a narrower
-    ``band`` there. In columns ``step`` wide along the segment the depth of the face is the median of the surface
-    over ``samples`` heights between the two of ``heights`` (default: those of the model along the line,
+    of the wall, or behind it, finds the face all the same. Where another part of the line is nearer than the
+    band - across a corridor both walls of which are traced, in a niche, by a corner seen from inside - the
+    segment looks from where that part is as near as itself (:func:`_reach`), not through it. What stands in
+    front of the wall within the band and is no part of the line is met first - the other side of a narrow room
+    when one wall alone is traced, the ground where the wall stands in a trench: give a narrower ``band`` there.
+
+    In columns ``step`` wide along the segment the depth of the face is the median of the surface over
+    ``samples`` heights between the two of ``heights`` (default: those of the model along the line,
     :func:`_heights_near`); a column with surface at fewer than a tenth of them sees nothing. A line is fitted to
     the columns (:func:`_fit`: twice, the second time without the columns far from the first; a shift alone under
     :data:`MIN_FIT`), and the segment has that line when :data:`MIN_SNAP_SHARE` of its columns lie on it, within
@@ -320,12 +372,16 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
         if raycaster is None:
             raise RuntimeError("the model of the chunk cannot be read: a trace is snapped onto the face of the model")
         for i in range(len(length)):
+            columns = max(1, int(np.ceil(length[i] / step - 1e-9)))
+            x = (np.arange(columns) + 0.5) * length[i] / columns
             plane = plane_from_line(chunk, line[i], line[i + 1], (line[i] + line[i + 1]) / 2.0 + towards[i])
-            surface = FrameSurface(chunk, raycaster, plane, step, lock, (-band, band),
+            u = plane.coords(np.column_stack([line[i] + x[:, None] * t[i], np.zeros(columns)]))[:, 0]
+            sight = _Sight(plane, u, _reach(v, i, x, towards[i], band))
+            surface = FrameSurface(chunk, raycaster, sight, step, lock, (-band, band),
                                    (0.0, heights[0], float(length[i]), heights[1]))
-            x, d = _columns(surface, line[i], t[i], float(length[i]), step, heights, samples)
+            d = _columns(surface, x, u, heights, samples)
             if np.isfinite(d).any():
-                a, b = _fit(x, d, float(length[i]) / len(x))
+                a, b = _fit(x, d, float(length[i]) / columns)
                 share[i] = (np.abs(d - (a + b * x)) <= FIT_NEAR).mean()
                 if share[i] >= MIN_SNAP_SHARE:
                     fits[i] = a, b
