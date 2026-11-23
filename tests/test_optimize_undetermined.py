@@ -470,6 +470,61 @@ def test_a_block_our_formulation_does_not_take_is_optimised_as_before(tmp_path, 
     assert rep["focal_held"] is None and _calibration(ch) != before
 
 
+# ------------------------------------------------------------------- the option, at every door
+def test_the_option_holds_by_default_and_reaches_both_formulations(tmp_path, monkeypatch):
+    """``hold_undetermined`` is True by default in the engine, on the chunk and on the command line
+    (``--hold-undetermined/--free-undetermined``), and reaches the formulation that runs; the report keeps it."""
+    import inspect
+
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+
+    for fn in (sfm.optimize_cameras, Chunk.optimize_cameras, sfm._optimize_colmap, sfm._optimize_own):
+        assert inspect.signature(fn).parameters["hold_undetermined"].default is True
+    doc, ch = _block(tmp_path)
+    doc.save()
+    seen = []
+    for name in ("_optimize_colmap", "_optimize_own"):
+        monkeypatch.setattr(sfm, name, lambda *args, _name=name, **kwargs:
+                            seen.append((_name, kwargs["hold_undetermined"])) or 0.5)
+    ch.optimize_cameras()
+    ch.optimize_cameras(hold_undetermined=False)
+    ch.optimize_cameras(engine="ppg")
+    ch.optimize_cameras(engine="ppg", hold_undetermined=False)
+    assert seen == [("_optimize_colmap", True), ("_optimize_colmap", False), ("_optimize_own", True),
+                    ("_optimize_own", False)]
+    monkeypatch.undo()
+
+    run = CliRunner().invoke
+    helptext = " ".join(run(app, ["optimize", "--help"]).output.replace("│", " ").split())
+    assert "--hold-undetermined" in helptext and "--free-undetermined" in helptext
+    result = run(app, ["optimize", str(doc.path), "--free-undetermined"])
+    assert result.exit_code == 0, result.output
+    assert "focal length of the alignment held" not in result.output
+    saved = ppg.Document.open(doc.path).chunk.meta["sfm"]["optimize"]
+    assert saved["intrinsics"]["hold_undetermined"] is False and saved["focal_held"] is None
+    for args in ([], ["--hold-undetermined"]):
+        result = run(app, ["optimize", str(doc.path), *args])
+        assert result.exit_code == 0, result.output
+        assert ppg.Document.open(doc.path).chunk.meta["sfm"]["optimize"]["intrinsics"]["hold_undetermined"] is True
+
+
+@needs_core
+def test_the_command_says_which_sensors_were_held(tmp_path):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, _ch = _block(tmp_path)
+    doc.save()
+    said = " ".join(CliRunner().invoke(app, ["optimize", str(doc.path)]).output.split())
+    assert f"focal length of the alignment held ({sfm.FOCAL_HELD_UNDETERMINED})" in said
+    assert "sensor 0: focal held: undetermined, sd " in said
+
+
 # ------------------------------------------------------------------- the weak ring and the trench
 @pytest.fixture(scope="module")
 def weak_ring(tmp_path_factory):
