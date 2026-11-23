@@ -279,23 +279,26 @@ def _opencv_sensors(chunk: Chunk, arrays: dict) -> list[bool]:
     return flags
 
 
-def tracks_per_photo(chunk: Chunk) -> int:
-    """The tracks kept per photo: ``PPG_NATIVE_TRACKS_PER_PHOTO``, else a quarter of the tie point limit of the
-    matching (500 at least), as the classic global mapper keeps them."""
+def tracks_per_photo(chunk: Chunk, tiepoint_limit: int | None = None) -> int:
+    """The tracks kept per photo: ``PPG_NATIVE_TRACKS_PER_PHOTO``, else a quarter of the tie point limit (500 at
+    least) - ``tiepoint_limit`` when given, as the classic mappers take it, else the limit of the matching - as the
+    classic global mapper keeps them."""
     word = os.environ.get(TRACKS_ENV, "").strip()
     if word:
         return max(1, int(word))
-    return max(500, int((chunk.meta.get("sfm") or {}).get("tiepoint_limit", 8000) or 0) // 4)
+    limit = (chunk.meta.get("sfm") or {}).get("tiepoint_limit", 8000) if tiepoint_limit is None else tiepoint_limit
+    return max(500, int(limit or 0) // 4)
 
 
 def global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int, progress: Progress,
-                   stages: timing.Stages) -> dict:
+                   stages: timing.Stages, tiepoint_limit: int | None = None, use_gps: bool | None = None) -> dict:
     """The block of the ``n`` photos of ``chunk`` built by the native mapper from the database ``db_path``, written in
     ``out/0`` in COLMAP's format and read back with the colours of the points from the photos under ``root``:
     ``{0: pycolmap.Reconstruction}``, as :func:`.sfm._global_mapping` returns its blocks. The stages are timed in
     ``stages`` and reported in ``chunk.meta["sfm"]["native_mapper"]``; a block that fails a check (the module) raises
     :class:`NativeMapperRejected`, a cancel of ``progress`` comes out as :class:`Cancelled`, and nothing is written
-    outside ``out``."""
+    outside ``out``. ``tiepoint_limit`` (None: the limit of the matching) sets the tracks per photo
+    (:func:`tracks_per_photo`); ``use_gps`` False positions the block without the positions of the photos."""
     cls = _native.native_mapper()
     if cls is None:
         raise RuntimeError(core_unavailable() or "the native mapper is not available")
@@ -313,16 +316,26 @@ def global_mapping(chunk: Chunk, db_path: Path, root: str, out: Path, n: int, pr
         try:
             report["view_graph"] = _plain(mapper.view_graph(relay))
         except BaseException:
-            report["report"] = _plain(mapper.report())
+            _keep_report(report, mapper)
             raise
     try:
-        return _stages(chunk, mapper, arrays, relay, stages, report, root, out, n, tracks_per_photo(chunk))
+        return _stages(chunk, mapper, arrays, relay, stages, report, root, out, n,
+                       tracks_per_photo(chunk, tiepoint_limit), use_gps is None or bool(use_gps))
     finally:
+        _keep_report(report, mapper)
+
+
+def _keep_report(report: dict, mapper) -> None:
+    """The report of ``mapper`` into ``report``; an error of ``report()`` itself never hides the error (or the
+    cancel) that is on its way out, and is kept as a word."""
+    try:
         report["report"] = _plain(mapper.report())
+    except Exception as exc:  # noqa: BLE001 - the report is for the record only
+        report["report"] = {"error": type(exc).__name__}
 
 
 def _stages(chunk: Chunk, mapper, arrays: dict, relay: _Relay, stages: timing.Stages, report: dict, root: str,
-            out: Path, n: int, per_photo: int) -> dict:
+            out: Path, n: int, per_photo: int, with_positions: bool = True) -> dict:
     """The stages of :func:`global_mapping` after the view graph: the checks, the model written and read back."""
     import pycolmap
 
@@ -334,7 +347,7 @@ def _stages(chunk: Chunk, mapper, arrays: dict, relay: _Relay, stages: timing.St
         raise NativeMapperRejected(f"placed {rotations['registered']} of {n} photos")
     with stages.stage("track_establishment"):
         report["tracks"] = {**_plain(mapper.tracks(per_photo, relay)), "per_photo": per_photo}
-    gnss, frame = gnss_input(chunk, [image[0] for image in arrays["images"]])
+    gnss, frame = gnss_input(chunk, [image[0] for image in arrays["images"]]) if with_positions else (None, {})
     with stages.stage("global_positioning"):
         position = mapper.position(gnss, relay)
     centres = np.asarray(position["centres"], float)

@@ -381,9 +381,11 @@ class _Spy:
 
     calls: dict = {}
     fail: str | None = None
+    options: dict = {}  # the options of the last mapper built
     real: type | None = None  # the class of the core
 
     def __init__(self, *args, **kwargs):
+        _Spy.options = dict(kwargs.get("options") or {})
         self._real = _Spy.real(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -567,6 +569,8 @@ def test_a_failure_of_the_mapper_goes_to_the_classic_chain(matched_trench, tmp_p
                                                   "fallback": "native mapper failed: boom"}
     assert spy.calls["refine"] == 1 and "write_model" not in spy.calls
     assert ch.meta["sfm"]["mapper"] in ("incremental", "global")
+    if ch.meta["sfm"]["mapper"] == "incremental":  # the verdict on the native block given up is not kept
+        assert "global_check" not in ch.meta["sfm"]
     warned = [r for r in caplog.records if r.levelname == "WARNING" and "native mapper failed: boom" in r.getMessage()]
     assert [r.name for r in warned] == ["pyarchinit_photogrammetry.engine.switch"]  # one WARNING: the switch's
 
@@ -598,6 +602,9 @@ def test_cancelling_the_native_mapper_leaves_the_project_as_it_was(matched_trenc
     sfm_dir = ch.data_dir / "sfm"
     files = [sfm_dir / "database.db", *sorted((sfm_dir / "model").iterdir())]
     before = {p: p.read_bytes() for p in files}
+    import copy
+
+    meta_before = {k: copy.deepcopy(v) for k, v in ch.meta.items() if k != "timings"}
     classic = []
     monkeypatch.setattr(sfm, "_global_mapping", lambda *a, **k: classic.append("global"))
     monkeypatch.setattr(pycolmap, "incremental_mapping", lambda *a, **k: classic.append("incremental"))
@@ -619,6 +626,8 @@ def test_cancelling_the_native_mapper_leaves_the_project_as_it_was(matched_trenc
     assert sorted((sfm_dir / "model").iterdir()) == files[1:]
     for p, data in before.items():
         assert p.read_bytes() == data, p.name
+    # the record of the project as it was too (the timings say the cancel, by design)
+    assert {k: v for k, v in ch.meta.items() if k != "timings"} == meta_before
 
 
 @pytest.mark.slow
@@ -653,3 +662,89 @@ def test_the_native_report_holds_no_names(matched_ring, tmp_path):
     for folder in (doc.path.parent, ch.data_dir, project.parent, tmp_path):
         assert str(folder) not in text and folder.name not in text
     assert "WRING" not in text and ".jpg" not in text.lower()
+
+
+@pytest.mark.slow
+def test_the_tie_point_limit_and_the_variables_of_the_mapper(matched_trench, tmp_path, monkeypatch, spy):
+    """The tracks per photo: a quarter of an explicit ``tiepoint_limit`` (as the classic mappers take it), else of
+    the limit of the matching, 500 at least; ``PPG_NATIVE_TRACKS_PER_PHOTO`` over both. The last adjustment with every
+    track unless ``PPG_NATIVE_FINAL_ALL_TRACKS=0``."""
+    from pyarchinit_photogrammetry.engine import native_map
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    monkeypatch.delenv(native_map.TRACKS_ENV, raising=False)
+    monkeypatch.delenv(native_map.FINAL_ALL_TRACKS_ENV, raising=False)
+    assert ch.align_cameras(engine="native", tiepoint_limit=4000) == len(ch.cameras)
+    assert ch.meta["sfm"]["native_mapper"]["tracks"]["per_photo"] == 1000
+    assert spy.options["final_all_tracks"] is True
+    ch.align_cameras(engine="native", tiepoint_limit=0)
+    assert ch.meta["sfm"]["native_mapper"]["tracks"]["per_photo"] == 500
+    ch.align_cameras(engine="native")
+    limit = ch.meta["sfm"]["tiepoint_limit"]
+    assert ch.meta["sfm"]["native_mapper"]["tracks"]["per_photo"] == max(500, limit // 4)
+    monkeypatch.setenv(native_map.TRACKS_ENV, "700")
+    monkeypatch.setenv(native_map.FINAL_ALL_TRACKS_ENV, "0")
+    ch.align_cameras(engine="native", tiepoint_limit=4000)
+    assert ch.meta["sfm"]["native_mapper"]["tracks"]["per_photo"] == 700
+    assert spy.options["final_all_tracks"] is False
+    assert native_map.tracks_per_photo(ch, 4000) == 700
+
+
+@pytest.mark.slow
+def test_the_database_is_read_as_the_mapper_takes_it(matched_trench, tmp_path):
+    """``read_database`` keeps the verified pairs only - ``MIN_INLIERS`` inlier matches or more, a configuration other
+    than UNDEFINED, DEGENERATE or WATERMARK - and the photos of ``names`` only."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import native_map
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    db = ch.data_dir / "sfm" / "database.db"
+    names = {int(k): v for k, v in ch.meta["sfm"]["names"].items()}
+    full = native_map.read_database(db, names)
+    assert len(full["images"]) == len(names) and len(full["keypoint_offsets"]) == len(names) + 1
+    assert full["keypoints"].dtype == np.float32 and full["keypoints"].shape[1] == 2
+    assert len(full["pairs"]) == len(full["pair_config"]) == len(full["pair_f"]) == len(full["match_offsets"]) - 1
+    con = sqlite3.connect(str(db))
+    try:
+        rows = con.execute("SELECT pair_id, rows, data FROM two_view_geometries WHERE rows >= 15 AND config NOT IN "
+                           "(0, 1, 7) ORDER BY pair_id").fetchall()
+        assert len(rows) == len(full["pairs"]) >= 5
+        changed = [pid for pid, _r, _d in rows[:4]]
+        for pid, config in zip(changed[:3], (0, 1, 7)):
+            con.execute("UPDATE two_view_geometries SET config = ? WHERE pair_id = ?", (config, pid))
+        pid, _r, data = rows[3]
+        con.execute("UPDATE two_view_geometries SET rows = 14, data = ? WHERE pair_id = ?", (data[:14 * 8], pid))
+        con.commit()
+    finally:
+        con.close()
+    read = native_map.read_database(db, names)
+    assert len(read["pairs"]) == len(full["pairs"]) - 4
+    left_out = names.pop(min(names))  # a photo not in names: neither it nor its pairs
+    fewer = native_map.read_database(db, names)
+    assert left_out not in [image[0] for image in fewer["images"]] and len(fewer["images"]) == len(names)
+    assert len(fewer["pairs"]) < len(read["pairs"])
+    assert fewer["pairs"].max() < len(fewer["images"])
+
+
+@pytest.mark.slow
+def test_the_positions_go_to_the_mapper_from_three(matched_ring, tmp_path):
+    """``gnss_input``: the positions of the photos in the mapper's order, on metric axes less a round offset, the
+    default accuracy for a position without one; None (and an empty report) with fewer than three."""
+    from pyarchinit_photogrammetry.core.camera import Reference
+    from pyarchinit_photogrammetry.engine import native_map
+
+    project, _scene = matched_ring
+    ch = _copy(project, tmp_path).chunk
+    names = [ch.meta["sfm"]["names"][str(c.key)] for c in ch.cameras]
+    gnss, frame = native_map.gnss_input(ch, names)
+    assert len(gnss["image"]) == RING_PHOTOS and sorted(frame) == ["crs", "offset"]
+    assert all(float(v).is_integer() for v in frame["offset"])
+    assert np.abs(gnss["xyz"]).max() < 100.0  # the offset taken out: the ring is 60 m across
+    for cam in ch.cameras[3:]:
+        cam.reference = Reference()
+    ch.cameras[0].reference.accuracy = []
+    gnss, frame = native_map.gnss_input(ch, names)
+    assert gnss["image"].tolist() == [0, 1, 2] and gnss["sigma"][0].tolist() == native_map.DEFAULT_ACCURACY
+    ch.cameras[2].reference = Reference()
+    assert native_map.gnss_input(ch, names) == (None, {})

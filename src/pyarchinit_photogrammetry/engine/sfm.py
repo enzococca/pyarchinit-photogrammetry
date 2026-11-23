@@ -14,6 +14,7 @@ tangential distortion); *Optimize cameras* refines every parameter afterwards.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -1975,6 +1976,8 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
         raise RuntimeError("run match_photos() before align_cameras()")
     _interrupted_names_back(db_path)  # the names a matching that died in COLMAP left aliased: the mapper goes by them
     info = chunk.meta["sfm"]
+    # what a cancel of the native mapper puts back: the record of the alignment as it was before the call
+    kept_info = copy.deepcopy(info) if engine == "native" else None
     root = info["image_root"]
     out = work / "mapper"
     chunk._before_product_write("reconstruction")  # a script runs: the model as it was, for Annulla lo script
@@ -2003,14 +2006,21 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
         mapper = "global"
     elif mapper == "auto":
         mapper = auto_mapper(chunk, n, fixed=bool(fixed), rigs=rigs)
-    priors = None
-    if use_gps is None or use_gps:
-        priors = _write_pose_priors(chunk, db_path, names, info.get("gps_priors") if continuing else None)
-        if priors:
-            log.info("pose priors of %d photos (%s, offset %s)", priors["count"], priors["crs"], priors["offset"])
-        elif use_gps:
-            progress(0.0, "No reference positions of the photos: aligning without them")
-    info["gps_priors"] = priors
+    def pose_priors() -> dict | None:
+        """The positions of the photos as pose priors in the database, for the classic mappers."""
+        written = None
+        if use_gps is None or use_gps:
+            written = _write_pose_priors(chunk, db_path, names, info.get("gps_priors") if continuing else None)
+            if written:
+                log.info("pose priors of %d photos (%s, offset %s)", written["count"], written["crs"],
+                         written["offset"])
+            elif use_gps:
+                progress(0.0, "No reference positions of the photos: aligning without them")
+        info["gps_priors"] = written
+        return written
+
+    # the native mapper takes the positions itself: the database is written only when the classic chain aligns
+    priors = None if native else pose_priors()
     recs = {}
     if native:
         from . import native_map
@@ -2020,8 +2030,11 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
         info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
         why = None
         try:
-            recs = native_map.global_mapping(chunk, db_path, root, out, n, progress.sub(0.0, 0.8), stages)
+            recs = native_map.global_mapping(chunk, db_path, root, out, n, progress.sub(0.0, 0.8), stages,
+                                             tiepoint_limit=tiepoint_limit, use_gps=use_gps)
         except Cancelled:
+            info.clear()  # the project as it was: the record of the alignment before the call
+            info.update(kept_info)
             raise
         except native_map.NativeMapperRejected as exc:
             why = exc.why
@@ -2037,12 +2050,17 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
             info["native_fallback"] = why
             if isinstance(info.get("native_mapper"), dict):
                 info["native_mapper"]["fallback"] = why
+            info.pop("global_check", None)  # the verdict on the block given up: the classic chain judges its own
             shutil.rmtree(out, ignore_errors=True)
             out.mkdir(parents=True)
             recs = {}
             mapper = auto_mapper(chunk, n, fixed=bool(fixed), rigs=rigs) if asked == "auto" else asked
+            priors = pose_priors()
         else:
             info.pop("global_fallback", None)
+            position = (info.get("native_mapper") or {}).get("position") or {}
+            info["gps_priors"] = ({"count": position["positions"], "crs": position.get("crs"),
+                                   "offset": position.get("offset")} if position.get("positions") else None)
     if mapper == "global" and not recs:
         progress(0.0, f"Aligning {n} cameras at once (global)")
         info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
