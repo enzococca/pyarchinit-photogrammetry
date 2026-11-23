@@ -3,7 +3,7 @@
 The matching, the alignment and the depth maps of a chunk (:data:`STEPS`) take an ``engine``. ``classic`` is the
 chain the program has always had (:mod:`.sfm`, :mod:`.dense`), ``native`` the engine of the native core, ``auto``
 the choice of the program. The native engine does the matching (:data:`NATIVE_STEPS`, :mod:`.native_match`) and
-none of the other steps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
+the alignment (its global mapper, :mod:`.native_map`), not the depth maps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
 reason in the record of the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints. ``auto`` is
 the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate: the
 matching is. A method whose engine cannot do the step after all (a failure half way) falls back the same way
@@ -23,8 +23,9 @@ log = logging.getLogger(__name__)
 ENGINES = ("auto", "classic", "native")
 # the steps that take an engine, by the name of their method of Chunk
 STEPS = ("match_photos", "align_cameras", "build_depth_maps")
-# those of them the native engine does: the matching (engine/native_match.py)
-NATIVE_STEPS: frozenset[str] = frozenset({"match_photos"})
+# those of them the native engine does: the matching (engine/native_match.py) and the alignment (its global mapper,
+# engine/native_map.py)
+NATIVE_STEPS: frozenset[str] = frozenset({"match_photos", "align_cameras"})
 # those of them ``auto`` gives to the native engine: a step goes in once it has passed its gate (the session owner
 # adds it, one line, one commit): the matching, since its gate on the large block (2026-11-22: 2.6 times faster than
 # the classic one, the same precision)
@@ -60,9 +61,9 @@ def resolve(step: str, engine: str | None = None) -> Choice:
     :class:`..core.chunk.Chunk`) when ``engine`` is asked for (:func:`check`). ``classic`` is the classic engine.
     ``auto`` takes the native engine for a step only once that step has passed its gate and is in
     :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): the matching; the other steps are classic. ``native``
-    is the native engine for a step it does (:data:`NATIVE_STEPS`: the matching) and, on a step it does not do,
-    falls back to the classic one, with the reason in ``fallback`` and one line in the log: never an error. A name
-    that is not a step raises a ValueError that names it, before anything is done under it."""
+    is the native engine for a step it does (:data:`NATIVE_STEPS`: the matching, the alignment) and, on a step it
+    does not do, falls back to the classic one, with the reason in ``fallback`` and one line in the log: never an
+    error. A name that is not a step raises a ValueError that names it, before anything is done under it."""
     if step not in STEPS:
         raise ValueError(f"unknown step '{step}': the steps that take an engine are "
                          f"{', '.join(STEPS[:-1])} and {STEPS[-1]}")

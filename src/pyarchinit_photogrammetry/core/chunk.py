@@ -506,19 +506,39 @@ class Chunk:
         have them): the GPS positions of the photos hold the block during the incremental
         alignment; ``adaptive_fitting``: Metashape's adaptive camera model fitting; ``reset``
         False registers the photos added since the last alignment into it (see
-        :func:`engine.sfm.align_cameras`); ``engine``: as in :meth:`match_photos`.
+        :func:`engine.sfm.align_cameras`); ``engine``: ``auto``, ``classic`` or ``native`` (None: the
+        ``PPG_ENGINE`` environment variable, ``auto`` by default; :mod:`engine.switch`). ``native``
+        aligns the photos with the global mapper of the native engine (:mod:`engine.native_map`) when
+        nothing keeps it from running - the native core missing, switched off (``PPG_NATIVE=0``) or
+        without the mapper, the ``incremental`` or ``hierarchical`` mapper asked, photos added to an
+        alignment (``reset`` False), rigs, calibrations held fixed, a camera model it does not know -;
+        otherwise the classic alignment runs and the reason is kept. A block the native mapper refuses
+        (photos left out, cameras off the GPS of the photos, a large reprojection error) or a failure of
+        it hands the alignment to the classic chain, which aligns with its own rules, and the reason is
+        kept too; a cancel and a full disk stop the step. ``auto`` is the classic alignment until the
+        native one has passed its gate. What was asked and what was used are kept in
+        ``meta["engine"]``.
 
         A new alignment lives in a new arbitrary frame: the chunk transform is reset and,
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
         chunk is georeferenced/scaled again automatically.
         """
-        from ..engine import sfm, switch
+        from ..engine import native_map, sfm, switch
 
         choice = switch.resolve("align_cameras", engine)
-        switch.classic_only("align_cameras", choice)
+        if choice.requested == "auto" and choice.used == "native" and not native_map.auto_takes(self, mapper):
+            choice = switch.Choice("auto", "classic", None)  # auto chose the classic mapper: not a fallback
+        if choice.used == "native":
+            reason = native_map.cannot_run(self, mapper, reset)
+            if reason is not None:
+                choice = switch.decline(choice, reason, notice=native_map.core_unavailable() is not None)
         n = sfm.align_cameras(self, progress=as_progress(progress), mapper=mapper, reset=reset, use_gps=use_gps,
                               adaptive_fitting=adaptive_fitting, tiepoint_limit=tiepoint_limit,
-                              ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements)
+                              ba_global_ratio=ba_global_ratio, ba_global_refinements=ba_global_refinements,
+                              engine=choice.used)
+        gave_up = (self.meta.get("sfm") or {}).get("native_fallback")
+        if choice.used == "native" and gave_up:  # the native mapper gave up: the classic chain aligned
+            choice = switch.fall_back(choice, gave_up)
         switch.record(self, "align_cameras", choice)  # the alignment is there, whatever its georeference meets
         # a new frame: what was kept in the old one knows it. Also with reset=False (photos added to the block):
         # COLMAP continues from the old model but its mapper scales and moves it again (the cameras of the test

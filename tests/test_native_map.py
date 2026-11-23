@@ -306,3 +306,346 @@ def test_items_and_options_of_the_wrong_kind_are_refused():
     with pytest.raises(RuntimeError, match="per_photo"):
         mapper.tracks(-1, None)
     assert mapper.tracks(500, None)["selected"] > 0  # a refusal of the arguments does not stop the mapper
+
+
+# ------------------------------------------------------------------- the native mapper behind align_cameras
+# The reduced weak ring of these tests (Task 1 measured that 48 photos of 600 x 450 with a focal length of 500 px
+# align; 24 photos, or 400 x 300 with 1000 px, do not overlap enough)
+RING_PHOTOS, RING_SIZE, RING_FOCAL = 48, (600, 450), 500.0
+# the accuracy of the GPS of the ring (its noise, write_weak_ring_dataset's gps_noise): the default of a position
+# without one, 5 m, spreads more than a tenth of the ring's 60 m, and the positions then cannot orient the block (the
+# mapper puts the block of the rays on them by a similarity: frame "similarity")
+RING_ACCURACY = [0.3, 0.3, 0.5]
+
+
+def _with_accuracy(ch, accuracy=RING_ACCURACY):
+    for cam in ch.cameras:
+        cam.reference.accuracy = list(accuracy)
+    return ch
+
+
+def _matched_project(folder, photos, name: str, **match) -> "Path":
+    """A project ``folder/name.ppg`` of a copy of ``photos`` (its folder ``folder/photos``), its targets detected
+    and its photos matched (``match``: the arguments of ``match_photos``); the path of the project."""
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+
+    shutil.copytree(photos, folder / "photos")
+    doc = ppg.Document()
+    ch = doc.add_chunk(name)
+    doc.save(folder / f"{name}.ppg")
+    ch.add_photos([folder / "photos"])
+    ch.detect_markers("aruco_4x4_50")
+    ch.match_photos(**match)
+    doc.save()
+    return folder / f"{name}.ppg"
+
+
+def _copy(project, tmp_path, name: str = "copy"):
+    """The matched project ``project`` copied into ``tmp_path/name`` (the project, its files, its photos) and
+    opened."""
+    import shutil
+
+    import pyarchinit_photogrammetry as ppg
+
+    d = tmp_path / name
+    d.mkdir()
+    shutil.copy2(project, d / project.name)
+    shutil.copytree(project.with_name(project.name + ".files"), d / (project.name + ".files"))
+    shutil.copytree(project.parent / "photos", d / "photos")
+    return ppg.Document.open(d / project.name)
+
+
+@pytest.fixture(scope="module")
+def matched_trench(scene_dir, tmp_path_factory):
+    """The trench of the session, its photos matched once (the engine ``auto`` gives); each test aligns a copy."""
+    return _matched_project(tmp_path_factory.mktemp("native_trench"), scene_dir / "photos", "trench", quality="high")
+
+
+@pytest.fixture(scope="module")
+def matched_ring(tmp_path_factory):
+    """The reduced weak ring (:data:`RING_PHOTOS` photos, a GPS position in the EXIF of each), its photos matched
+    once; ``(project, scene)``. Each test aligns a copy."""
+    from pyarchinit_photogrammetry.testing.synthetic import write_weak_ring_dataset
+
+    root = tmp_path_factory.mktemp("native_ring")
+    scene = write_weak_ring_dataset(root / "set", n=RING_PHOTOS, size=RING_SIZE, focal=RING_FOCAL)
+    (root / "work").mkdir()
+    return _matched_project(root / "work", root / "set" / "photos", "ring", quality="highest"), scene
+
+
+class _Spy:
+    """A stand-in for ``ppg_core.NativeMapper`` (a frozen class: its methods cannot be patched) that runs the real
+    mapper and counts the calls of each method; ``fail`` names a method that raises ``RuntimeError("boom")``."""
+
+    calls: dict = {}
+    fail: str | None = None
+    real: type | None = None  # the class of the core
+
+    def __init__(self, *args, **kwargs):
+        self._real = _Spy.real(*args, **kwargs)
+
+    def __getattr__(self, name):
+        method = getattr(self._real, name)
+
+        def call(*args, **kwargs):
+            _Spy.calls[name] = _Spy.calls.get(name, 0) + 1
+            if name == _Spy.fail:
+                raise RuntimeError("boom")
+            return method(*args, **kwargs)
+
+        return call
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    monkeypatch.setattr(_Spy, "real", _mapper_class())
+    monkeypatch.setattr(_native, "native_mapper", lambda: _Spy)
+    monkeypatch.setattr(_Spy, "calls", {})
+    monkeypatch.setattr(_Spy, "fail", None)
+    return _Spy
+
+
+@pytest.mark.slow
+def test_the_trench_aligned_by_the_native_mapper_keeps_the_metric_gates(processed_native, scene):
+    """The trench matched and aligned by the native engine keeps the metric gates of the project (control < 2 mm,
+    check < 3 mm, DEM median < 3 mm, targets in the orthomosaic < 5 mm); the record says native, the mapper worked
+    in a free frame (no GPS on the photos of the trench)."""
+    import rasterio
+
+    from pyarchinit_photogrammetry.markers.targets import detect
+
+    _doc, ch, report = processed_native
+    assert ch.meta["engine"]["align_cameras"] == {"requested": "native", "used": "native", "fallback": None}
+    native = ch.meta["sfm"]["native_mapper"]
+    assert native["engine"] == "native" and native["position"]["frame"] == "free"
+    assert ch.meta["sfm"]["mapper"] == "global"
+    assert len(ch.aligned_cameras) == len(ch.cameras) == 28
+    assert report["control_rmse"] < 0.002
+    before = np.array(ch.transform, float)
+    for label in ("target 4", "target 5"):
+        ch.marker(label).checkpoint = True
+    try:
+        assert ch.update_transform()["check_rmse"] < 0.003
+    finally:
+        for m in ch.markers:
+            m.checkpoint = False
+        ch.update_transform()
+        ch.transform = before
+    with rasterio.open(ch.dem_path) as src:
+        dem = src.read(1)
+        rows, cols = np.nonzero(dem != src.nodata)
+        sel = np.random.default_rng(1).choice(len(rows), 4000, replace=False)
+        xs, ys = rasterio.transform.xy(src.transform, rows[sel], cols[sel])
+    err = dem[rows[sel], cols[sel]] - scene.world_height(np.array(xs), np.array(ys))
+    assert abs(np.median(err)) < 0.003
+    with rasterio.open(ch.orthomosaic_path) as src:
+        img = np.moveaxis(src.read([3, 2, 1]), 0, -1).copy()
+        tr = src.transform
+    dets = detect(img)
+    assert len(dets) >= 6
+    for d in dets:
+        x, y = rasterio.transform.xy(tr, d["center"][1], d["center"][0])
+        tx, ty, _ = scene.targets[d["code"]]
+        assert np.hypot(x - tx, y - ty) < 0.005
+
+
+@pytest.mark.slow
+def test_the_reduced_weak_ring(matched_ring, tmp_path):
+    """The reduced weak ring aligned by the native mapper: every photo placed, in the frame of the GPS of the photos,
+    the stages of the mapper timed, and the ring keeps its shape (the gate of the weak ring)."""
+    from pyarchinit_photogrammetry.bench import truth
+    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
+
+    project, scene = matched_ring
+    doc = _copy(project, tmp_path)
+    ch = _with_accuracy(doc.chunk)
+    assert ch.align_cameras(engine="native") == RING_PHOTOS
+    assert ch.meta["engine"]["align_cameras"] == {"requested": "native", "used": "native", "fallback": None}
+    native = ch.meta["sfm"]["native_mapper"]
+    assert native["position"]["frame"] == "gnss" and native["report"]["placed"] == RING_PHOTOS
+    stages = ch.meta["timings"]["align_cameras"]["stages"]
+    assert {"view_graph", "rotation_averaging", "track_establishment", "global_positioning", "bundle_adjustment",
+            "write"} <= set(stages)
+    shape = truth.ring_shape(doc, scene)
+    assert shape["truth_targets"] >= 6
+    assert shape["truth_target_shape"] < WEAK_RING_GATE["shape"]
+
+
+@pytest.mark.slow
+def test_what_the_native_mapper_cannot_do_goes_classic(matched_trench, tmp_path, monkeypatch, spy):
+    """Each request the native mapper does not take goes to the classic alignment with its reason, word for word, and
+    the alignment of today places every photo; the native mapper is never built."""
+    def aligned(ch, reason, **kwargs):
+        assert ch.align_cameras(engine="native", **kwargs) == len(ch.cameras), reason
+        assert ch.meta["engine"]["align_cameras"] == {"requested": "native", "used": "classic", "fallback": reason}
+        assert "native_mapper" not in ch.meta["sfm"] and "native_fallback" not in ch.meta["sfm"]
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    aligned(ch, "mapper 'incremental' asked", mapper="incremental")
+    aligned(ch, "mapper 'hierarchical' asked", mapper="hierarchical")
+    aligned(ch, "photos added to an alignment are registered by the classic incremental mapper", reset=False)
+    ch.meta["sfm"]["rigs"] = 1
+    aligned(ch, "rigs are aligned by the classic engine")
+    ch.meta["sfm"]["rigs"] = 0
+    (sensor,) = ch.sensors.values()
+    sensor.fixed = True
+    aligned(ch, "calibrations held fixed are aligned by the classic engine")
+    sensor.fixed = False
+    model, params = sensor.model, list(sensor.params)
+    sensor.model = "OPENCV_FISHEYE"  # aligned as RADIAL_FISHEYE (sfm.mapping_camera)
+    aligned(ch, "camera model RADIAL_FISHEYE is not in the native mapper")
+    sensor.model, sensor.params = model, params
+    monkeypatch.setenv("PPG_NATIVE", "0")
+    aligned(ch, "PPG_NATIVE=0")
+    monkeypatch.delenv("PPG_NATIVE")
+    monkeypatch.setattr(_native, "native_mapper", lambda: None)
+    aligned(ch, f"the native core with the mapper (API {_native.MAPPER_API}) is not installed")
+    assert spy.calls == {}
+
+
+@pytest.mark.slow
+def test_a_rejected_block_goes_to_the_classic_chain(matched_ring, tmp_path, monkeypatch, spy):
+    """A block whose cameras miss the GPS of the photos (patched: 99 m) is refused right after its positioning: the
+    classic chain does the alignment with its own rules (global, refused by the same check, then one photo at a
+    time), the record keeps the reason, and the model on disk is the classic one (the native mapper wrote nothing).
+    A view graph in two parts places half of the ring: refused as well, with the count."""
+    import sqlite3
+
+    from pyarchinit_photogrammetry.engine import sfm
+
+    project, _scene = matched_ring
+    ch = _copy(project, tmp_path, "a").chunk
+    monkeypatch.setattr(sfm, "fits_references", lambda *args, **kwargs: (False, 99.0))
+    n = ch.align_cameras(engine="native")
+    record = ch.meta["engine"]["align_cameras"]
+    assert (record["requested"], record["used"]) == ("native", "classic") and "99 m" in record["fallback"]
+    info = ch.meta["sfm"]
+    assert info["native_fallback"] == record["fallback"]
+    assert info["mapper"] == "incremental" and "99 m" in info["global_fallback"]
+    assert spy.calls.get("position") == 1 and "refine" not in spy.calls and "write_model" not in spy.calls
+    assert sfm.load_reconstruction(ch).num_reg_images() == n >= 0.9 * RING_PHOTOS
+    monkeypatch.undo()  # the check as it is, and a fresh spy
+    monkeypatch.setattr(_Spy, "real", _mapper_class())
+    monkeypatch.setattr(_native, "native_mapper", lambda: _Spy)
+    monkeypatch.setattr(_Spy, "calls", {})
+    # the matches between the two halves of the ring taken out of a copy of its database
+    ch = _copy(project, tmp_path, "b").chunk
+    db = ch.data_dir / "sfm" / "database.db"
+    con = sqlite3.connect(str(db))
+    try:
+        half = {int(i) for i, name in con.execute("SELECT image_id, name FROM images")
+                if int(name.split("_")[-1].split(".")[0]) < RING_PHOTOS // 2}
+        cut = [pid for (pid,) in con.execute("SELECT pair_id FROM two_view_geometries")
+               if (divmod(pid, sfm.COLMAP_MAX_IMAGES)[0] in half) != (divmod(pid, sfm.COLMAP_MAX_IMAGES)[1] in half)]
+        assert cut
+        con.executemany("DELETE FROM two_view_geometries WHERE pair_id = ?", [(p,) for p in cut])
+        con.executemany("DELETE FROM matches WHERE pair_id = ?", [(p,) for p in cut])
+        con.commit()
+    finally:
+        con.close()
+    ch.align_cameras(engine="native")
+    record = ch.meta["engine"]["align_cameras"]
+    assert record["used"] == "classic" and record["fallback"].startswith("placed ")
+    assert f"of {RING_PHOTOS} photos" in record["fallback"]
+    assert "refine" not in _Spy.calls
+
+
+@pytest.mark.slow
+def test_a_failure_of_the_mapper_goes_to_the_classic_chain(matched_trench, tmp_path, spy, caplog):
+    """The native mapper failing half way (its adjustment raises): one WARNING line, the classic chain aligns every
+    photo, the record keeps the failure."""
+    ch = _copy(matched_trench, tmp_path).chunk
+    spy.fail = "refine"
+    with caplog.at_level("WARNING"):
+        assert ch.align_cameras(engine="native") == len(ch.cameras)
+    assert ch.meta["engine"]["align_cameras"] == {"requested": "native", "used": "classic",
+                                                  "fallback": "native mapper failed: boom"}
+    assert spy.calls["refine"] == 1 and "write_model" not in spy.calls
+    assert ch.meta["sfm"]["mapper"] in ("incremental", "global")
+    assert [r for r in caplog.records if "native mapper failed: boom" in r.getMessage()]
+
+
+@pytest.mark.slow
+def test_cancelling_the_native_mapper_leaves_the_project_as_it_was(matched_trench, tmp_path, monkeypatch):
+    """After a native alignment of the trench, a second one cancelled while its global positioning runs: the cancel
+    comes out, the stage ended early (fewer beats of the progress than in the full run), no classic mapper ran, and
+    the model of the first alignment and the database are the same, byte for byte."""
+    import pycolmap
+
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+    from pyarchinit_photogrammetry.engine import native_map, sfm
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    full: list[str] = []
+    ch.align_cameras(progress=lambda value, message: full.append(message), engine="native")
+    assert ch.meta["engine"]["align_cameras"]["used"] == "native"
+    positioning = native_map.PROGRESS_STAGES["positioning"]
+
+    def beats(messages):
+        """The calls of the progress from the start of the positioning to the start of the next stage."""
+        start = messages.index(positioning)
+        rest = [m for m in messages[start + 1:] if m]
+        end = messages.index(rest[0], start + 1) if rest else len(messages)
+        return end - start
+
+    assert beats(full) >= 2  # the beat at its start and the one at its end at least
+    sfm_dir = ch.data_dir / "sfm"
+    files = [sfm_dir / "database.db", *sorted((sfm_dir / "model").iterdir())]
+    before = {p: p.read_bytes() for p in files}
+    classic = []
+    monkeypatch.setattr(sfm, "_global_mapping", lambda *a, **k: classic.append("global"))
+    monkeypatch.setattr(pycolmap, "incremental_mapping", lambda *a, **k: classic.append("incremental"))
+    seen: list[str] = []
+    progress = Progress()
+
+    def callback(value, message):
+        seen.append(message)
+        if message == positioning:
+            progress.cancel()  # on the beat at the start of the stage: the stage is running
+
+    progress.callback = callback
+    with pytest.raises(Cancelled):
+        ch.align_cameras(progress=progress, engine="native")
+    assert classic == []
+    assert positioning in seen and beats(seen) < beats(full)
+    assert seen[-1] == positioning  # nothing after the cancel
+    assert ch.meta["timings"]["align_cameras"]["failed"] == "Cancelled"
+    assert sorted((sfm_dir / "model").iterdir()) == files[1:]
+    for p, data in before.items():
+        assert p.read_bytes() == data, p.name
+
+
+@pytest.mark.slow
+def test_photos_without_gps_are_aligned(matched_ring, tmp_path):
+    """The reduced ring with the GPS of five photos taken out of their references: the native mapper still places
+    every photo, in the frame of the others."""
+    from pyarchinit_photogrammetry.core.camera import Reference
+
+    project, _scene = matched_ring
+    ch = _with_accuracy(_copy(project, tmp_path).chunk)
+    for cam in ch.cameras[::10][:5]:
+        cam.reference = Reference()
+    assert sum(1 for c in ch.cameras if c.reference.location) == RING_PHOTOS - 5
+    assert ch.align_cameras(engine="native") == RING_PHOTOS
+    assert ch.meta["engine"]["align_cameras"]["used"] == "native"
+    assert ch.meta["sfm"]["native_mapper"]["position"]["frame"] == "gnss"
+
+
+@pytest.mark.slow
+def test_the_native_report_holds_no_names(matched_ring, tmp_path):
+    """What the native mapper keeps in the project (``meta["sfm"]["native_mapper"]``) is numbers and words: no name
+    of a photo, no path."""
+    import json
+
+    project, _scene = matched_ring
+    doc = _copy(project, tmp_path)
+    ch = doc.chunk
+    assert ch.align_cameras(engine="native") == RING_PHOTOS
+    text = json.dumps(ch.meta["sfm"]["native_mapper"])
+    for cam in ch.cameras:
+        assert cam.label not in text and str(cam.path) not in text
+    for folder in (doc.path.parent, ch.data_dir, project.parent, tmp_path):
+        assert str(folder) not in text and folder.name not in text
+    assert "WRING" not in text and ".jpg" not in text.lower()

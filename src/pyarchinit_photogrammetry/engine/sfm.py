@@ -1844,8 +1844,10 @@ def auto_mapper(chunk: Chunk, photos: int, fixed: bool = False, rigs: bool = Fal
 
 def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
                   use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
-                  ba_global_ratio: float | None = None, ba_global_refinements: int | None = None) -> int:
-    """Align the photos (see :func:`_align_cameras`). Photos whose sensor has a guessed focal length
+                  ba_global_ratio: float | None = None, ba_global_refinements: int | None = None,
+                  engine: str = "classic") -> int:
+    """Align the photos (see :func:`_align_cameras`; ``engine="native"``: the native global mapper, the classic chain
+    behind it). Photos whose sensor has a guessed focal length
     (:attr:`Sensor.focal_guessed`: the photos say none) that the alignment leaves out are aligned
     again from other focal lengths (:data:`GUESSED_FOCAL_STARTS`); the alignment that places the
     most photos is kept and ``chunk.meta["sfm"]["focal_guess"]`` says what was tried.
@@ -1853,14 +1855,17 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
     The seconds of the step, every attempt included, and those of each stage COLMAP announces (the
     global mapper's: ``rotation_averaging``, ``global_positioning``, ...) are kept in
     ``chunk.meta["timings"]["align_cameras"]`` (:mod:`.timing`), also when the alignment fails or is
-    cancelled: then with the name of the type of the error under ``failed`` (never its text)."""
+    cancelled: then with the name of the type of the error under ``failed`` (never its text). With the native mapper
+    its stages are there under COLMAP's names (``view_graph``, ``rotation_averaging``, ``track_establishment``,
+    ``global_positioning``, ``bundle_adjustment``) and ``write``. The native mapper runs at each start of the focal
+    lengths that are tried."""
     progress = as_progress(progress)
     stages, started = timing.Stages(), time.perf_counter()  # the step, and the stages COLMAP announces
     failed = None  # the type of the error that stops the step, if one does
     try:
         kwargs = dict(mapper=mapper, reset=reset, use_gps=use_gps, adaptive_fitting=adaptive_fitting,
                       tiepoint_limit=tiepoint_limit, ba_global_ratio=ba_global_ratio,
-                      ba_global_refinements=ba_global_refinements, stages=stages)
+                      ba_global_refinements=ba_global_refinements, stages=stages, engine=engine)
         guessed = {k: s.focal_px for k, s in chunk.sensors.items() if s.focal_guessed}
         if not guessed or not reset:
             n = _align_cameras(chunk, progress=progress, **kwargs)
@@ -1911,7 +1916,7 @@ def align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = 
 def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str = "auto", reset: bool = True,
                    use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
                    ba_global_ratio: float | None = None, ba_global_refinements: int | None = None, *,
-                   stages: timing.Stages | None = None) -> int:
+                   stages: timing.Stages | None = None, engine: str = "classic") -> int:
     """Cameras and tie points from the matches of :func:`match_photos`. ``mapper``: ``incremental``
     (one photo after the other, COLMAP), ``global`` (all at once, GLOMAP: much faster with many
     photos), ``hierarchical`` (the photos in overlapping clusters of up to 500, each reconstructed
@@ -1942,12 +1947,26 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     thousand photos sixty times.
 
     ``stages`` (:class:`.timing.Stages`, those of the step, :func:`align_cameras`): the stages COLMAP
-    announces in its log while a mapper runs are marked there (:func:`.colmap_log.relay`)."""
+    announces in its log while a mapper runs are marked there (:func:`.colmap_log.relay`).
+
+    ``engine``: ``classic`` or ``native``. With ``native`` the mapper is the global one, and the native mapper of
+    the native core does it (:func:`.native_map.global_mapping`) in place of COLMAP's. A block it refuses
+    (:class:`.native_map.NativeMapperRejected`) or any failure of it - not a cancel, not a full disk, which stop the
+    step - is kept in ``meta["sfm"]["native_fallback"]`` with one WARNING line, and the classic chain does the
+    alignment with its own rules: the mapper asked (``auto``: :func:`auto_mapper`), the global one judged after its
+    positioning and the incremental one when it is refused. A continuation (``reset`` False after
+    ``match_photos(reset=False)``) is always the classic incremental mapper's."""
+    import errno
+
     import pycolmap
 
+    from ..core.progress import Cancelled
     from ..markers import gcp
 
+    if engine not in ("classic", "native"):
+        raise ValueError(f"unknown engine {engine!r} of the alignment: classic or native")
     progress = as_progress(progress)
+    stages = stages if stages is not None else timing.Stages()
     gcp.preflight(chunk, use_gps)  # what would refuse to place the chunk after the alignment, before it
     work = _sfm_dir(chunk)
     db_path = work / "database.db"
@@ -1966,10 +1985,21 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     rigs = bool(info.get("rigs"))
     if mapper not in ("auto", "incremental", "global", "hierarchical"):
         raise ValueError(f"unknown mapper {mapper!r}")
+    info.pop("native_mapper", None)  # the report and the reason of an earlier native attempt
+    info.pop("native_fallback", None)
     model_dir = work / "model"
     continuing = (not reset) and bool(info.get("continued")) and model_dir.exists()
+    asked = mapper  # what the classic chain starts from when the native mapper gives up
+    native = engine == "native"
     if continuing:
         mapper = "incremental"
+        if native:
+            from .native_map import CONTINUATION_REASON
+
+            log.warning("native mapper: %s", CONTINUATION_REASON)
+            info["native_fallback"], native = CONTINUATION_REASON, False
+    elif native:
+        mapper = "global"
     elif mapper == "auto":
         mapper = auto_mapper(chunk, n, fixed=bool(fixed), rigs=rigs)
     priors = None
@@ -1981,7 +2011,38 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
             progress(0.0, "No reference positions of the photos: aligning without them")
     info["gps_priors"] = priors
     recs = {}
-    if mapper == "global":
+    if native:
+        from . import native_map
+        from .native_match import as_disk_full, disk_full
+
+        progress(0.0, f"Aligning {n} cameras at once (native global mapper)")
+        info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
+        why = None
+        try:
+            recs = native_map.global_mapping(chunk, db_path, root, out, n, progress.sub(0.0, 0.8), stages)
+        except Cancelled:
+            raise
+        except native_map.NativeMapperRejected as exc:
+            why = exc.why
+        except Exception as exc:  # noqa: BLE001 - whatever stopped the native mapper: the classic chain aligns
+            if disk_full(exc):  # a full disk, whichever layer says so: no engine can go on
+                if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+                    raise
+                raise as_disk_full(exc) from exc
+            why = f"native mapper failed: {exc}"
+        if why:
+            log.warning("native mapper: %s: the classic alignment takes over", why)
+            progress(0.05, "The native mapper gave up: the classic alignment takes over")
+            info["native_fallback"] = why
+            if isinstance(info.get("native_mapper"), dict):
+                info["native_mapper"]["fallback"] = why
+            shutil.rmtree(out, ignore_errors=True)
+            out.mkdir(parents=True)
+            recs = {}
+            mapper = auto_mapper(chunk, n, fixed=bool(fixed), rigs=rigs) if asked == "auto" else asked
+        else:
+            info.pop("global_fallback", None)
+    if mapper == "global" and not recs:
         progress(0.0, f"Aligning {n} cameras at once (global)")
         info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
         why = None

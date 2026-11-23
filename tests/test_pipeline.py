@@ -9,11 +9,17 @@ from pyarchinit_photogrammetry.markers.targets import detect
 pytestmark = pytest.mark.slow
 
 
-@pytest.fixture(params=["processed", "processed_auto"], ids=["classic", "auto"])
+@pytest.fixture(params=["processed", "processed_auto", "processed_native"], ids=["classic", "auto", "native"])
 def trench_project(request):
-    """The processed trench of the metric checks, matched by the classic engine (``processed``) and by the engine
-    users get (``processed_auto``: ``auto``, the native matching where the core is installed): the metric gates hold
-    for both."""
+    """The processed trench of the metric checks, matched by the classic engine (``processed``), by the engine users
+    get (``processed_auto``: ``auto``, the native matching where the core is installed) and matched and aligned by the
+    native engine (``processed_native``: the native global mapper, skipped without a core that has it): the metric
+    gates hold for all three."""
+    if request.param == "processed_native":
+        from pyarchinit_photogrammetry import _native
+
+        if _native.native_mapper() is None:
+            pytest.skip("ppg_core has no NativeMapper (API 16)")
     return request.getfixturevalue(request.param)
 
 
