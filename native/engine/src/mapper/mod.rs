@@ -8,9 +8,11 @@
 //! their observations (`triangulate`), the global positioning of the photos and the points with
 //! the positions of the photos inside it (`positioning`), the rounds of adjustment (`rounds`), the
 //! model in COLMAP's binary format (`model_io`), and the `Mapper` that runs every stage in its
-//! order. `synthetic` makes the ring of `ppg-bench map`.
+//! order (`heartbeat` runs one of them on a thread of its own while the caller gives progress).
+//! `synthetic` makes the ring of `ppg-bench map`.
 
 pub mod graph;
+pub mod heartbeat;
 pub mod input;
 pub mod model_io;
 pub mod positioning;

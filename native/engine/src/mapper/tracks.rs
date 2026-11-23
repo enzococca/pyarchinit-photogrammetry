@@ -11,6 +11,8 @@
 //! numbered by their smallest node, every sort breaks ties by index), so that two runs give the
 //! same bits.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::input::Input;
 
 /// The tracks: track `t` is `observations[offsets[t]..offsets[t + 1]]`, each observation
@@ -90,6 +92,12 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 /// `registered` of another length than the photos, or an input whose pairs, matches or key points
 /// are out of range (see `Input::check`), give empty tracks with the reason in `refused`.
 pub fn build(input: &Input, registered: &[bool]) -> Tracks {
+    build_until(input, registered, &AtomicBool::new(false))
+}
+
+/// `build`, ended early when `stop` is raised (by another thread, checked at every pair): the
+/// tracks are then refused with the reason `"cancelled"`.
+pub fn build_until(input: &Input, registered: &[bool], stop: &AtomicBool) -> Tracks {
     let n = input.images.len();
     if registered.len() != n {
         return Tracks::refused(format!("{} registered flags for {n} images", registered.len()));
@@ -108,6 +116,9 @@ pub fn build(input: &Input, registered: &[bool]) -> Tracks {
     let mut parent: Vec<u32> = (0..total as u32).collect();
     let mut used = vec![false; total];
     for (p, pair) in input.pairs.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return Tracks::refused("cancelled".into());
+        }
         if pair.a >= n || pair.b >= n || pair.a == pair.b {
             return Tracks::refused(format!("pair {p}: images {} and {} ({n} images)", pair.a, pair.b));
         }

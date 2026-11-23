@@ -5,11 +5,13 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use super::graph::{calibrate_focals, FocalEstimate, ViewGraph};
 use super::input::Input;
 use super::model_io::{quaternion, write_colmap_binary, ModelCamera, ModelImage, ModelPoint, NO_POINT};
-use super::positioning::{self, Frame, Gnss};
+use super::positioning::{self, Frame, Gnss, Positioned};
 use super::rotation::{self, Rotations};
 use super::rounds::{self, CameraState, RoundReport, State};
 use super::tracks::{self, Tracks};
@@ -88,14 +90,18 @@ pub struct MapperReport {
 ///
 /// `view_graph`, `rotations` and `tracks` call `observe` only between their steps (the relative
 /// poses of all the pairs, the averaging and the union-find run whole); `position` and `refine`
-/// also call it after every iteration of their solves. The bindings (Task 8), which must give
-/// progress at most every 0.5 s, need it inside those steps too.
+/// also call it after every iteration of their solves. The stop flag (`stop_flag`), which another
+/// thread raises, is read inside the steps of every stage too (at every pair of the view graph and
+/// of the tracks, at every iteration of the averaging and of the solves): a stage that finds it up
+/// ends as a cancel. The bindings run a stage on a thread of their own and give progress from the
+/// calling thread (`heartbeat`), raising the flag when the callback raises.
 pub struct Mapper {
     input: Input,
     o: Options,
     cams: Vec<Camera>,
     stage: Stage,
     stopped: Option<String>,
+    stop: Arc<AtomicBool>,
     focals: Vec<FocalEstimate>,
     graph: Option<ViewGraph>,
     rotations: Option<Rotations>,
@@ -131,6 +137,7 @@ impl Mapper {
             cams,
             stage: Stage::New,
             stopped: None,
+            stop: Arc::new(AtomicBool::new(false)),
             focals: Vec::new(),
             graph: None,
             rotations: None,
@@ -168,6 +175,16 @@ impl Mapper {
         Ok(())
     }
 
+    /// The flag that stops the stage running (from another thread): up, a stage ends with
+    /// `Err("cancelled")` as when `observe` says stop. It stays up until it is lowered.
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.stop.clone()
+    }
+
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
     pub fn input(&self) -> &Input {
         &self.input
     }
@@ -176,19 +193,19 @@ impl Mapper {
     /// relative pose of every pair (`ViewGraph::build`).
     pub fn view_graph(&mut self, observe: &mut dyn FnMut() -> bool) -> Result<&ViewGraph, String> {
         self.ready(Stage::ViewGraph)?;
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         let mut cams = self.cams.clone();
         let focals = calibrate_focals(&self.input, &mut cams);
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
-        let graph = ViewGraph::build(&self.input, &cams, &self.o);
+        let graph = ViewGraph::build_until(&self.input, &cams, &self.o, &self.stop);
         if let Some(reason) = &graph.refused {
             return Err(reason.clone());
         }
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         self.cams = cams;
@@ -220,15 +237,15 @@ impl Mapper {
     /// The rotations averaged from the view graph (`rotation::average`).
     pub fn rotations(&mut self, observe: &mut dyn FnMut() -> bool) -> Result<&Rotations, String> {
         self.ready(Stage::Rotations)?;
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         let graph = self.graph.as_ref().expect("a view graph");
-        let rotations = rotation::average(graph, self.input.images.len(), &self.o);
+        let rotations = rotation::average_until(graph, self.input.images.len(), &self.o, &self.stop);
         if let Some(reason) = &rotations.refused {
             return Err(reason.clone());
         }
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         self.report.rotations_placed = rotations.placed;
@@ -242,17 +259,20 @@ impl Mapper {
     /// spread over it (`tracks::build`, `tracks::select`).
     pub fn tracks(&mut self, per_photo: usize, observe: &mut dyn FnMut() -> bool) -> Result<&Tracks, String> {
         self.ready(Stage::Tracks)?;
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         let rotations = self.rotations.as_ref().expect("rotations");
         let registered: Vec<bool> = rotations.world_from_cam.iter().map(Option::is_some).collect();
-        let t = tracks::build(&self.input, &registered);
+        let t = tracks::build_until(&self.input, &registered, &self.stop);
         if let Some(reason) = &t.refused {
             return Err(reason.clone());
         }
+        if self.stopping() {
+            return Err(cancelled());
+        }
         let selected = tracks::select(&t, &self.input, per_photo)?;
-        if !observe() {
+        if self.stopping() || !observe() {
             return Err(cancelled());
         }
         self.report.tracks = t.len();
@@ -263,9 +283,12 @@ impl Mapper {
     }
 
     /// The global positioning with the positions `gnss` (`positioning::position`), and the block the
-    /// rounds start from.
-    pub fn position(&mut self, gnss: Option<&Gnss>, observe: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    /// rounds start from; what the positioning found is returned.
+    pub fn position(&mut self, gnss: Option<&Gnss>, observe: &mut dyn FnMut() -> bool)
+        -> Result<Positioned, String> {
         self.ready(Stage::Position)?;
+        let stop = self.stop.clone();
+        let observe = &mut || !stop.load(Ordering::SeqCst) && observe();
         let (graph, rotations) = (self.graph.as_ref().expect("graph"), self.rotations.as_ref().expect("rotations"));
         let (t, selected) = self.tracks.as_ref().expect("tracks");
         let p = positioning::position(&self.input, &self.cams, graph, rotations, t, selected, gnss, &self.o,
@@ -329,7 +352,7 @@ impl Mapper {
         self.report.placed = (0..n).filter(|&i| state.placed(i)).count();
         self.state = Some(state);
         self.stage = Stage::Position;
-        Ok(())
+        Ok(p)
     }
 
     /// The rounds of adjustment (`rounds::refine`). A failure or a cancel leaves the mapper stopped:
@@ -337,6 +360,8 @@ impl Mapper {
     pub fn refine(&mut self, observe: &mut dyn FnMut() -> bool) -> Result<&[RoundReport], String> {
         self.ready(Stage::Refine)?;
         let mut state = self.state.take().expect("a positioned block");
+        let stop = self.stop.clone();
+        let observe = &mut || !stop.load(Ordering::SeqCst) && observe();
         match rounds::refine(&mut state, &self.input, &self.o, observe) {
             Ok(reports) => {
                 let r = &mut self.report;

@@ -38,6 +38,7 @@
 //! Everything runs on one thread in a fixed order, so that two runs give the same bits.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt::factor::LltRegularization;
@@ -108,6 +109,12 @@ pub struct Rotations {
 /// was refused, or a `max_rotation_error_deg` that is not a positive finite number, is refused
 /// with the reason; a graph without edges places nothing.
 pub fn average(graph: &ViewGraph, n_images: usize, o: &Options) -> Rotations {
+    average_until(graph, n_images, o, &AtomicBool::new(false))
+}
+
+/// `average`, ended early when `stop` is raised (by another thread, checked at every iteration of
+/// the solves): the rotations are then refused with the reason `"cancelled"`.
+pub fn average_until(graph: &ViewGraph, n_images: usize, o: &Options, stop: &AtomicBool) -> Rotations {
     let mut out = Rotations {
         world_from_cam: vec![None; n_images],
         placed: 0,
@@ -142,7 +149,11 @@ pub fn average(graph: &ViewGraph, n_images: usize, o: &Options) -> Rotations {
         };
         let inside: Vec<usize> = (0..edges.len()).filter(|&k| active[k] && contains(&nodes, edges[k].a)).collect();
         let limit = o.max_rotation_error_deg.to_radians();
-        let estimate = average_part(&nodes, edges, &inside, &relative, limit);
+        let estimate = average_part(&nodes, edges, &inside, &relative, limit, stop);
+        if stop.load(Ordering::SeqCst) {
+            out.refused = Some("cancelled".into());
+            return out;
+        }
         rotations = vec![None; n_images];
         for (&i, q) in nodes.iter().zip(estimate) {
             rotations[i] = Some(q);
@@ -232,7 +243,7 @@ fn largest_within(parts: &[Vec<usize>], within: Option<&[usize]>) -> Option<Vec<
 /// The averaged `cam_from_world` rotations of the photos `nodes` (sorted, connected by the edges
 /// `inside`), in their order.
 fn average_part(nodes: &[usize], edges: &[Edge], inside: &[usize], relative: &[Option<UnitQuaternion<f64>>],
-                limit: f64) -> Vec<UnitQuaternion<f64>> {
+                limit: f64, stop: &AtomicBool) -> Vec<UnitQuaternion<f64>> {
     let local = |i: usize| nodes.binary_search(&i).expect("a photo of the part");
     // (a, b, cam_b_from_cam_a, weight) of each edge, in local indices
     let links: Vec<Link> = inside
@@ -245,10 +256,10 @@ fn average_part(nodes: &[usize], edges: &[Edge], inside: &[usize], relative: &[O
         Ok(s) => s,
         Err(_) => return rotations,
     };
-    l1_rounds(&mut system, &links, &mut rotations);
-    irls(&mut system, &links, &mut rotations);
-    if reseat(&links, &mut rotations, limit) > 0 {
-        irls(&mut system, &links, &mut rotations);
+    l1_rounds(&mut system, &links, &mut rotations, stop);
+    irls(&mut system, &links, &mut rotations, stop);
+    if !stop.load(Ordering::Relaxed) && reseat(&links, &mut rotations, limit) > 0 {
+        irls(&mut system, &links, &mut rotations, stop);
     }
     rotations
 }
@@ -471,11 +482,14 @@ fn descend(system: &Normal, links: &[Link], x: &[f64], rotations: &mut [UnitQuat
 /// `min |J w + phi|_1` is solved by the alternating direction method of multipliers (Boyd et al.
 /// 2011, 6.1: its `x` step the normal equations of `J`, factorised once per round), then the
 /// rotations moved along it as far as it lowers the L1 cost of the errors (`descend`).
-fn l1_rounds(system: &mut Normal, links: &[Link], rotations: &mut [UnitQuaternion<f64>]) {
+fn l1_rounds(system: &mut Normal, links: &[Link], rotations: &mut [UnitQuaternion<f64>], stop: &AtomicBool) {
     let m = 3 * links.len();
     let ones = vec![1.0; links.len()];
     let mut iterations = ADMM_FIRST_ITERATIONS;
     for _ in 0..L1_ROUNDS {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let phi = errors(links, rotations);
         system.linearise(&phi);
         if system.factorise(&ones).is_err() {
@@ -485,6 +499,9 @@ fn l1_rounds(system: &mut Normal, links: &[Link], rotations: &mut [UnitQuaternio
         let (mut z, mut u) = (vec![0.0; m], vec![0.0; m]);
         let mut x = vec![0.0; system.unknowns()];
         for _ in 0..iterations {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             let target: Vec<f64> = (0..m).map(|i| b[i] + z[i] - u[i]).collect();
             x = system.solve(&system.transpose_times(&ones, &target));
             let ax = system.times(&x);
@@ -525,10 +542,13 @@ fn geman_mcclure(e2: f64, s2: f64) -> (f64, f64) {
 
 /// The reweighted least squares with the Geman-McClure weights of the norm of the error of each
 /// link, each step taken as far as it lowers the Geman-McClure cost.
-fn irls(system: &mut Normal, links: &[Link], rotations: &mut [UnitQuaternion<f64>]) {
+fn irls(system: &mut Normal, links: &[Link], rotations: &mut [UnitQuaternion<f64>], stop: &AtomicBool) {
     let s2 = IRLS_SIGMA_DEG.to_radians().powi(2);
     let cost = |phi: &[Vector3<f64>]| phi.iter().map(|p| geman_mcclure(p.norm_squared(), s2).1).sum::<f64>();
     for _ in 0..IRLS_ITERATIONS {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let phi = errors(links, rotations);
         let weights: Vec<f64> = phi.iter().map(|p| geman_mcclure(p.norm_squared(), s2).0).collect();
         system.linearise(&phi);

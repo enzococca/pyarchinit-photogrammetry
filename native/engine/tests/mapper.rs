@@ -13,6 +13,8 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use common::{ring, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
@@ -626,3 +628,80 @@ fn a_model_that_does_not_fit_is_refused() {
 }
 
 
+
+/// The stop flag of the mapper (`Mapper::stop_flag`, set by the bindings from another thread when
+/// the progress callback raises) ends `view_graph`, `rotations` and `tracks` from inside their
+/// steps, `observe` saying go on: each stage set going with the flag up is cancelled, and runs once
+/// the flag is down again.
+#[test]
+fn the_stop_flag_cancels_the_stages_from_inside() {
+    let s = ring(40, 240.0, HEIGHT, 101);
+    for stopped in 0..3 {
+        let mut m = Mapper::new(noisy(&s, 102), Options::default()).unwrap();
+        let stop = m.stop_flag();
+        let mut go = never_cancel();
+        for stage in 0..=stopped {
+            let up = stage == stopped;
+            stop.store(up, Ordering::SeqCst);
+            let out = match stage {
+                0 => m.view_graph(&mut go).map(|_| ()),
+                1 => m.rotations(&mut go).map(|_| ()),
+                _ => m.tracks(PER_PHOTO, &mut go).map(|_| ()),
+            };
+            if up {
+                assert_eq!(out, Err("cancelled".to_string()), "stage {stage} with the flag up");
+            } else {
+                out.unwrap();
+            }
+        }
+        stop.store(false, Ordering::SeqCst);
+        match stopped {
+            0 => m.view_graph(&mut go).map(|_| ()),
+            1 => m.rotations(&mut go).map(|_| ()),
+            _ => m.tracks(PER_PHOTO, &mut go).map(|_| ()),
+        }
+        .unwrap();
+    }
+}
+
+/// The flag raised while the relative poses are being estimated ends the view graph long before
+/// it would have ended (the pairs not yet begun are skipped).
+#[test]
+fn the_stop_flag_ends_the_view_graph_early() {
+    let s = ring(120, 240.0, HEIGHT, 111);
+    let input = noisy(&s, 112);
+    let clock = Instant::now();
+    Mapper::new(input.clone(), Options::default()).unwrap().view_graph(&mut never_cancel()).unwrap();
+    let whole = clock.elapsed();
+    let mut m = Mapper::new(input, Options::default()).unwrap();
+    let stop = m.stop_flag();
+    let raiser = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(whole / 10);
+            stop.store(true, Ordering::SeqCst);
+        })
+    };
+    let clock = Instant::now();
+    let out = m.view_graph(&mut never_cancel()).map(|_| ());
+    let stopped = clock.elapsed();
+    raiser.join().unwrap();
+    assert_eq!(out, Err("cancelled".to_string()));
+    assert!(stopped < whole * 6 / 10, "stopped after {stopped:?}, the whole stage takes {whole:?}");
+}
+
+/// The positioning gives what it found (`Positioned`): the frame, the accuracy of the positions.
+#[test]
+fn the_positioning_is_returned() {
+    let s = ring(40, 240.0, HEIGHT, 121);
+    let gnss = gnss_with(&s, 1.0, 2.0, [5.0, 5.0, 10.0], 122, &[]);
+    let mut m = Mapper::new(noisy(&s, 123), Options::default()).unwrap();
+    let mut go = never_cancel();
+    m.view_graph(&mut go).unwrap();
+    m.rotations(&mut go).unwrap();
+    m.tracks(PER_PHOTO, &mut go).unwrap();
+    let p = m.position(Some(&gnss), &mut go).unwrap();
+    assert_eq!(p.frame, Frame::Gnss);
+    assert_eq!((p.sigma_h, p.sigma_v), (Some(5.0), Some(10.0)));
+    assert_eq!(p.centres.len(), 40);
+}
