@@ -52,10 +52,18 @@ sola connessione, dalla US 1 alla US 2). La sua `Description` è l'arco dell'Ext
 | Copre, Coperto da / Covers, Covered by / Liegt über, Liegt unter | Copre | `overlies` |
 | Taglia, Tagliato da / Cuts, Cut by / Schneidet, Wird geschnitten | Taglia | `cuts` |
 | Riempie, Riempito da / Fills, Filled by / Verfüllt, Wird verfüllt durch | Riempie | `fills` |
-| Si appoggia a, Gli si appoggia / Abuts, Supports / Stützt sich auf, Wird gestüzt von | Si appoggia a | `abuts` |
-| Posteriore a, Anteriore a | Posteriore a | `is_after` |
+| Si appoggia a, Gli si appoggia / Abuts, Supports / Stützt sich auf, Wird gestützt von | Si appoggia a | `abuts` |
+| `>`, `<` (qualunque tipo di unità) | `>` | `is_after` |
+| Continuità successiva a, Continuità precedente a / Subsequent continuity of, Prior continuity of / Nachfolgende Kontinuität von, Vorherige Kontinuität von | Continuità successiva a | `is_after` |
+| Posteriore a, Anteriore a (scritti dalle versioni precedenti di questo programma) | Posteriore a | `is_after` |
 | Uguale a / Same as / Entspricht | Uguale a (una volta per coppia) | `equals` |
 | Si lega a / Connected to / Bindet an | Si lega a (una volta per coppia) | `bonded_to` |
+
+Un rapporto temporale resta temporale e uno fisico resta fisico: `>` / `<` dicono soltanto che
+un'unità è posteriore o anteriore, mai che copre; `Si appoggia a` (abuts) è un contatto fisico in cui
+l'unità che si appoggia è la più recente, non due unità dello stesso tempo. `>>` / `<<` legano un'unità
+ai suoi paradati (documenti, estrattori, proprietà): non sono rapporti stratigrafici e non vengono
+scritti. La vecchia grafia *Wird gestüzt von* si legge ancora.
 
 L'esportazione del rilievo con le unità (*Esporta IFC*, unità disegnate o di un sito PyArchInit)
 porta gli stessi identificatori e rapporti; i poligoni di una stessa unità fanno un solo elemento.
