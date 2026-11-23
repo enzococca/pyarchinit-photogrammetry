@@ -786,7 +786,9 @@ loro posto ai termini radiali (3,1 px finché i tangenziali sono liberi) e lasci
 Foto oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
 calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covarianza (una matrice normale che non
 si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
-block gave no covariance`) e nel log c'è un avviso.
+block gave no covariance`) e nel log c'è un avviso. Una focale tenuta così resta alla stima dell'allineamento:
+nessuna deviazione standard non è un verdetto che il blocco non la conosca, e nulla viene pesato contro il valore
+dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`).
 
 Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
 più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti

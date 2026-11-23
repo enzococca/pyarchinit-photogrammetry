@@ -759,7 +759,9 @@ their place (3.1 px while the tangential terms are free) and left the check targ
 around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole calibration is
 refined as before. A group that has no covariance at all (a normal matrix that cannot be inverted) is held
 without having been judged: its note says so in its own words (`not judged, the block gave no covariance`) and
-the log has a warning.
+the log has a warning. A focal length held so stays at the alignment's estimate: no sd is no verdict that the
+block does not know it, and nothing is weighed against the lens prior (`kept at the alignment's estimate, not
+moved towards the lens prior`).
 
 On a nadir grid over flat ground the radial terms trade with a dome of the block - the middle higher or lower
 than the edges -, which control points at its corners do not see: a dome passes through them all (a synthetic

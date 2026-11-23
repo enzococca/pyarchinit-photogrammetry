@@ -98,7 +98,8 @@ voli a due quote determinano la calibrazione, che viene rifinita come prima. Tog
 della calibrazione che il blocco non determina* per rifinire tutto comunque (`ppg optimize --free-undetermined`;
 in un batch, la stessa spunta nel passo). Il controllo gira sul core nativo; senza, la calibrazione viene rifinita
 come prima e il log lo dice. Quando il blocco non dà una covarianza con cui misurare una parte, quella parte resta
-ferma senza essere stata misurata, e nel log c'è un avviso.
+ferma senza essere stata misurata, e nel log c'è un avviso; una focale tenuta così resta dove l'ha messa
+l'allineamento, senza avvicinarla al valore delle foto.
 
 **Punti di controllo solo agli angoli di un blocco piatto.** Un blocco di foto nadirali su terreno piatto può
 piegarsi a cupola - il centro più alto o più basso dei bordi - mentre la distorsione radiale compensa nelle
