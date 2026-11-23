@@ -632,7 +632,8 @@ global mapper), positions the cameras - on the GPS of the photos when three of t
 same metric axes less a round offset as the pose priors of the classic engine; frame `gnss` when the positions
 orient the block, `similarity` when they spread too little for their accuracy and only place it, `free` without
 them - and adjusts the block in rounds (focal length and radial distortion freed from the second, only where the
-block determines them: a camera whose focal length has a marginal posterior sd (every term the last round frees free with it) above
+block determines them: a camera whose focal length has a marginal posterior sd (every term the last round frees free with it: fx and fy, the
+principal point and the decentring terms too where that round widens the camera to OPENCV) above
 0.5 % after the first round - a flat
 nadir block, which cannot tell its focal length from its height - keeps its calibration held, as does one whose
 focal length a freed round moves by more than 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` and the
