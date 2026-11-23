@@ -24,7 +24,7 @@ spiegazioni più lunghe seguono la tabella.
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto); il motore classico o quello nativo (*Il matching nativo*, sotto) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto) o dal mapper globale del motore nativo (*L'allineamento nativo*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; la calibrazione di una camera viene rifinita solo dove il blocco la determina (`hold_undetermined`); restituisce l'errore di riproiezione (px) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina (`hold_undetermined`); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
 | `add_marker(...)`, `add_marker_projection(...)` | marker a mano (come vengono collocati: *Barre di scala*) |
@@ -725,29 +725,38 @@ prima, modello su disco compreso, e il resoconto descrive quello (`reprojection_
 l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resoconto dell'ottimizzazione di prima
 (nessuno quando non c'era).
 
-La calibrazione di una camera viene rifinita solo dove il blocco la determina (`hold_undetermined=True`, il
-predefinito, con entrambi i motori: la regola dei giri dell'allineamento nativo, sopra). Prima della prima
-compensazione si prende lo scarto quadratico medio marginale a posteriori della focale di ogni sensore la cui
-focale verrebbe rifinita, dalla covarianza della compensazione all'allineamento - con liberi insieme tutti gli
-intrinseci che le opzioni liberano (la distorsione, il punto principale con `fit_principal_point`), i punti di
-controllo, le barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con il
-fattore di varianza dei punti di legame (`engine.bundle.focal_sds`, sul core nativo, `ppg_core` API 17). Un
-sensore il cui scarto supera lo 0,5 % della focale (`bundle.FOCAL_SD_HOLD`), o che non ha affatto una
-covarianza, tiene ogni intrinseco come l'ha lasciato l'allineamento: foto nadirali su terreno piatto non
-distinguono la focale dalla quota di volo, qualunque cosa dicano i punti di controllo su quel terreno, e una
-compensazione che lì la rifinisce scivola lungo quello scambio (un anello volato una volta su terreno piatto,
-ottimizzato su sei target: focale dieci volte più lunga, camere 131 m più in alto, target di verifica fuori di
-0,6 m; con la calibrazione tenuta le camere restano alla loro quota, i target di controllo entro 2 mm e quelli
-di verifica entro 2 cm). Una focale che l'ottimizzazione ha rifinito e spostato di più del 20 % dal suo valore
-di partenza (`bundle.FOCAL_MOVE_HOLD`) fa ripartire l'ottimizzazione dall'inizio con quel sensore tenuto.
-`report["intrinsics"]` dice che cosa è stato giudicato, in numeri e con la chiave di ogni sensore: `checked`,
-`variance_factor`, `focal_sd` (`[sensore, scarto]`), `held`, `notes` (`sensor 0: focal held: undetermined, sd
-11.42 %`), e `reason` quando non è stato chiesto nulla - nessuna focale da rifinire (le posizioni tengono il
-blocco, nulla lo colloca, una calibrazione fissa), rig a 360 gradi, o un core che non può dare la covarianza
-(assente, più vecchio dell'API 17, `PPG_NATIVE=0`, un modello di camera che non conosce): la calibrazione viene
-allora rifinita come prima e il log lo dice una volta. `report["focal_held"]` vale allora `"the block does not
-determine the focal length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, l'ultima spunta
-della finestra) rifinisce ogni calibrazione come dicono le altre opzioni, qualunque cosa determini il blocco.
+Ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina
+(`hold_undetermined=True`, il predefinito, con entrambi i motori: la regola dei giri dell'allineamento nativo,
+sopra, presa gruppo per gruppo). Prima della prima compensazione si prendono gli scarti quadratici medi marginali
+a posteriori dalla covarianza della compensazione all'allineamento - con liberi insieme tutti gli intrinseci che
+le opzioni liberano (la distorsione, il punto principale con `fit_principal_point`), i punti di controllo, le
+barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con il fattore di varianza
+dei punti di legame (`engine.bundle.intrinsic_sds`, sul core nativo, `ppg_core` API 17). Una focale il cui scarto
+supera lo 0,5 % (`bundle.FOCAL_SD_HOLD`), o che non ha affatto una covarianza, resta come l'ha lasciata
+l'allineamento: foto nadirali su terreno piatto non distinguono la focale dalla quota di volo, qualunque cosa
+dicano i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola lungo quello scambio
+(un anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte più lunga, camere
+131 m più in alto, target di verifica fuori di 0,6 m). La focale soltanto: la distorsione viene rifinita lo
+stesso, perché un blocco così la determina una volta tenuta la focale (lo stesso anello: il termine radiale
+trovato entro 0,0003 da quello vero, i target di controllo a 1 mm e quelli di verifica a 9 mm). Un punto
+principale chiesto resta fermo quando il suo scarto marginale supera lo 0,5 % del lato della foto
+(`bundle.PRINCIPAL_SD_HOLD`). Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale
+spostata di più del 20 % dal suo valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale
+cambiato di più di 0,5 (`bundle.K1_MOVE_HOLD`), fa ripartire l'ottimizzazione dall'inizio con la focale, o i
+termini radiali, tenuti. La compensazione di COLMAP rifinisce un gruppo per tutte le camere o per nessuna: con
+più sensori, ciò che è tenuto per uno lo è per tutti (la nostra compensazione lo tiene sensore per sensore). Ciò
+che la regola non vede: su una griglia nadirale su terreno piatto i termini radiali si scambiano ancora con una
+cupola del blocco, che i punti di controllo agli angoli non tengono - un punto nel mezzo la mostra (una griglia
+sintetica di 40 foto: da 4 a 6 cm lì, da 11 a 28 cm rifinendo tutto). `report["intrinsics"]` dice che cosa è
+stato giudicato, in numeri e con la chiave di ogni sensore: `checked`, `variance_factor`, `focal_sd` e
+`principal_point_sd` (`[sensore, scarto]`), `held` (i sensori tenuti, per gruppo: `focal`, `principal_point`,
+`radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`), e `reason` quando non è stato chiesto
+nulla - né una focale né un punto principale da rifinire (le posizioni tengono il blocco, nulla lo colloca, una
+calibrazione fissa), rig a 360 gradi, o un core che non può dare la covarianza (assente, più vecchio dell'API 17,
+`PPG_NATIVE=0`, un modello di camera che non conosce): la calibrazione viene allora rifinita come prima e il log
+lo dice una volta. `report["focal_held"]` vale allora `"the block does not determine the focal length"`.
+`hold_undetermined=False` (`ppg optimize --free-undetermined`, l'ultima spunta della finestra) rifinisce ogni
+calibrazione come dicono le altre opzioni, qualunque cosa determini il blocco, e non sorveglia nulla.
 
 Un'ottimizzazione che niente tiene nel suo sistema (nessun punto fisso, posizioni non abbastanza
 accurate da tenere il blocco: il GPS di un drone) lascia che la compensazione fissi a modo suo il
@@ -807,8 +816,9 @@ camera - scipy compensa il blocco, `Result.fallback` dice perché e il log ha un
 `bundle.problem_at(problem, result)` un problema che parte dove un risultato è finito,
 `bundle.intrinsics_variances(problem)` le varianze degli intrinseci liberi di ogni camera ai parametri del
 problema (l'inversa della matrice normale alle loro colonne, dal sistema ridotto; `ppg_core` API 17) e
-`bundle.focal_sds(problem)` lo scarto marginale relativo di ogni focale, scalato con il fattore di varianza dei
-punti di legame (`bundle.tie_variance_factor`): ciò con cui l'ottimizzazione delle camere giudica un blocco. Sui
+`bundle.intrinsic_sds(problem)` lo scarto marginale di ogni focale (relativo) e di ogni punto principale (sul
+lato della foto), scalato con il fattore di varianza dei punti di legame (`bundle.tie_variance_factor`): ciò con
+cui l'ottimizzazione delle camere giudica un blocco. Sui
 problemi sintetici di `testing.bundle_problems` (uno per tipo di residuo e per modello di camera) il risolutore
 nativo raggiunge l'ottimo di scipy - un costo non superiore a quello di scipy, i parametri entro un
 decimo della loro deviazione standard - in poche iterazioni dove scipy fa un centinaio di valutazioni.

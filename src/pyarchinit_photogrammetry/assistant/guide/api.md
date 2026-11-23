@@ -24,7 +24,7 @@ longer explanations follow the table.
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below); the classic or the native engine (*The native matching*, below) |
 | `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below) or by the global mapper of the native engine (*The native alignment*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; the calibration of a camera is refined only where the block determines it (`hold_undetermined`); returns the reprojection error (px) |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; each group of the intrinsics of a camera is refined only where the block determines it (`hold_undetermined`); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
 | `add_marker(...)`, `add_marker_projection(...)` | markers by hand (how they are placed: *Scale bars*) |
@@ -702,28 +702,36 @@ it is put back, the model on disk included, and the report then describes it (`r
 the optimisation stops with an error or is cancelled, with the report of the optimisation before it (none when
 there was none).
 
-The calibration of a camera is refined only where the block determines it (`hold_undetermined=True`, the
-default, with both engines: the rule of the rounds of the native alignment, above). Before the first adjustment
-the marginal posterior sd of the focal length of every sensor whose focal length would be refined is taken from
-the covariance of the adjustment at the alignment - every intrinsic the options free free with it (the
-distortion, the principal point with `fit_principal_point`), the control points, the bars and the positions that
-take part in the adjustment at their accuracy, scaled by the variance factor of the tie points
-(`engine.bundle.focal_sds`, on the native core, `ppg_core` API 17). A sensor whose sd is above 0.5 % of its focal
-length (`bundle.FOCAL_SD_HOLD`), or that has no covariance at all, keeps every intrinsic as the alignment left
-it: nadir photos over flat ground cannot tell the focal length from the flying height, whatever control points
-on that ground say, and an adjustment that refines it there slides along that trade (a ring flown once over flat
-ground, optimised on six targets: the focal length ten times longer, the cameras 131 m higher, the check targets
-0.6 m off; with the calibration held the cameras stay at their height, the control targets within 2 mm and the
-check targets within 2 cm). A focal length that the optimisation did refine and moved by more than 20 % of its
-start (`bundle.FOCAL_MOVE_HOLD`) has the optimisation run again from the start with that sensor held.
-`report["intrinsics"]` says what was judged, in numbers and by the key of each sensor: `checked`,
-`variance_factor`, `focal_sd` (`[sensor, sd]`), `held`, `notes` (`sensor 0: focal held: undetermined, sd 11.42
-%`), and `reason` when nothing was asked - no focal length to refine (the positions hold the block, nothing
-places it, a fixed calibration), 360-degree rigs, or a core that cannot give the covariance (missing, older than
-API 17, `PPG_NATIVE=0`, a camera model it does not know): the calibration is then refined as before and the log
-says so once. `report["focal_held"]` is then `"the block does not determine the focal length"`.
-`hold_undetermined=False` (`ppg optimize --free-undetermined`, the last tick of the dialog) refines every
-calibration as the other options say, whatever the block determines.
+Each group of the intrinsics of a camera is refined only where the block determines it
+(`hold_undetermined=True`, the default, with both engines: the rule of the rounds of the native alignment, above,
+taken group by group). Before the first adjustment the marginal posterior sds are taken from the covariance of
+the adjustment at the alignment - every intrinsic the options free free together (the distortion, the principal
+point with `fit_principal_point`), the control points, the bars and the positions that take part in the
+adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.intrinsic_sds`, on
+the native core, `ppg_core` API 17). A focal length whose sd is above 0.5 % (`bundle.FOCAL_SD_HOLD`), or that
+has no covariance at all, is held as the alignment left it: nadir photos over flat ground cannot tell the focal
+length from the flying height, whatever control points on that ground say, and an adjustment that refines it
+there slides along that trade (a ring flown once over flat ground, optimised on six targets: the focal length
+ten times longer, the cameras 131 m higher, the check targets 0.6 m off). The focal length alone: the distortion
+is still refined, which such a block does determine once its focal length is held (the same ring: the radial
+term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm). A
+principal point that was asked for is held when its marginal sd is above 0.5 % of the side of the photo
+(`bundle.PRINCIPAL_SD_HOLD`). A guard watches what was refined (`bundle.runaways`): a focal length moved by more
+than 20 % of its start (`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5
+(`bundle.K1_MOVE_HOLD`), has the optimisation run again from the start with the focal length, or the radial
+terms, held. COLMAP's adjustment refines a group for every camera or for none: with several sensors, what is
+held for one is held for all (our own adjustment holds it sensor by sensor). What the rule does not see: on a
+nadir grid over flat ground the radial terms still trade with a dome of the block, which control points at its
+corners do not hold - a point in the middle shows it (a synthetic grid of 40 photos: 4 to 6 cm there, 11 to 28 cm
+with everything refined). `report["intrinsics"]` says what was judged, in numbers and by the key of each sensor:
+`checked`, `variance_factor`, `focal_sd` and `principal_point_sd` (`[sensor, sd]`), `held` (the sensors held, by
+group: `focal`, `principal_point`, `radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`), and
+`reason` when nothing was asked - neither a focal length nor a principal point to refine (the positions hold the
+block, nothing places it, a fixed calibration), 360-degree rigs, or a core that cannot give the covariance
+(missing, older than API 17, `PPG_NATIVE=0`, a camera model it does not know): the calibration is then refined as
+before and the log says so once. `report["focal_held"]` is then `"the block does not determine the focal
+length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, the last tick of the dialog) refines
+every calibration as the other options say, whatever the block determines, and guards nothing.
 
 An optimisation that nothing holds in its frame (no fixed points, positions not accurate enough to hold
 the block: the GPS of a drone) lets the adjustment fix the gauge of the block its own way, and it may
@@ -780,8 +788,9 @@ saying so). `bundle.Result` carries the adjusted block and what the solve was: `
 the native engine, `bundle.problem_at(problem, result)` a problem started where a result ended,
 `bundle.intrinsics_variances(problem)` the variances of the free intrinsics of each camera at the parameters of
 the problem (the inverse of the normal matrix at their columns, from the reduced system; `ppg_core` API 17) and
-`bundle.focal_sds(problem)` the relative marginal sd of each focal length, scaled by the variance factor of the
-tie points (`bundle.tie_variance_factor`): what the camera optimisation judges a block by. On the
+`bundle.intrinsic_sds(problem)` the marginal sd of each focal length (relative) and of each principal point (over
+the side of the photo), scaled by the variance factor of the tie points (`bundle.tie_variance_factor`): what the
+camera optimisation judges a block by. On the
 synthetic problems of `testing.bundle_problems` (one per kind of residual and per camera model) the
 native solver reaches scipy's optimum - a cost not above scipy's, the parameters within a tenth of
 their standard deviation - in a few iterations where scipy takes a hundred evaluations.
