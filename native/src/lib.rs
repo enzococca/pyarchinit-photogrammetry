@@ -5,6 +5,7 @@
 
 mod convert;
 mod crinex;
+mod native_map;
 mod native_match;
 mod ppk;
 mod rtklib;
@@ -30,8 +31,9 @@ use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift,
 /// 10: the TIN kernels, 11: raw_to_rinex and convert_cancel, 12: bundle_adjust and bundle_evaluate,
 /// 13: the native matching - native_features, native_preselect, native_match_pairs, the stores,
 /// 14: the options of its second stage - guided, guided_max_ratio, guided_band, 15: the guided check -
-/// a match of the second stage also tested against the rivals the first stage saw, `guided_check`).
-const API: u32 = 15;
+/// a match of the second stage also tested against the rivals the first stage saw, `guided_check`,
+/// 16: the native mapper - NativeMapper, native_mapper_defaults).
+const API: u32 = 16;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -1355,5 +1357,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_match::rescale_as_colmap, m)?)?;
     m.add_class::<native_match::NativeFeatureStore>()?;
     m.add_class::<native_match::NativeMatchStore>()?;
+    m.add_function(wrap_pyfunction!(native_map::native_mapper_defaults, m)?)?;
+    m.add_class::<native_map::NativeMapper>()?;
     Ok(())
 }
