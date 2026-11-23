@@ -57,12 +57,16 @@ FUNCTION_TOLERANCE = 1e-9
 ROBUST_FUNCTION_TOLERANCE = 1e-6
 NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not installed"
 INTRINSICS_MISSING = "the native core with the variances of the intrinsics (API 17) is not installed"
-# the calibration of a camera is refined only where the block determines it (the rule of the rounds of the native
-# mapper, native/engine/src/mapper/rounds.rs, applied by the camera optimisation): the relative marginal sd of its
-# focal length (focal_sds) above FOCAL_SD_HOLD keeps all its intrinsics held; a focal length that an adjustment
-# moves by more than FOCAL_MOVE_HOLD of its start has the adjustment run again with that camera held
+# the camera optimisation refines each group of the intrinsics of a camera only where the block determines it
+# (intrinsic_sds; the rule of the rounds of the native mapper, native/engine/src/mapper/rounds.rs, taken group by
+# group): a focal length whose relative marginal sd is above FOCAL_SD_HOLD is held, the distortion still refined;
+# a principal point that was asked for is held when its marginal sd is above PRINCIPAL_SD_HOLD of the side of the
+# photo. What an adjustment then moves too far is held and the adjustment run again (runaways): a focal length by
+# more than FOCAL_MOVE_HOLD of its start, the first radial term by more than K1_MOVE_HOLD
 FOCAL_SD_HOLD = 0.005
+PRINCIPAL_SD_HOLD = 0.005
 FOCAL_MOVE_HOLD = 0.2
+K1_MOVE_HOLD = 0.5
 # the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
 # many times the extent of the block: a gauge that adds no information the block has (the sd of a focal length is
 # the same to four digits from a tenth of the extent to a hundred times it). Not looser: the rounds of the native
@@ -678,6 +682,28 @@ def focal_move(model: str, start, end) -> float:
     return float(share.max()) if np.all(np.isfinite(share)) else float("inf")
 
 
+def runaways(model: str, start, end, free) -> dict:
+    """The groups of a camera of ``model`` that an adjustment moved too far, from its parameters ``start`` to
+    ``end``, among those it refined (``free``, the indices of its free intrinsics): ``"focal"`` with the largest
+    share by which a focal length moved (fx and fy of a model with two) when that is above
+    :data:`FOCAL_MOVE_HOLD`, ``"radial"`` with the change of the first radial term when that is above
+    :data:`K1_MOVE_HOLD`; infinite for a value that is not a number."""
+    groups, out = intrinsic_groups(model), {}
+    start, end = np.asarray(start, float), np.asarray(end, float)
+    focal = [k for k in groups["focal"] if k in free]
+    if focal:
+        share = np.abs(end[focal] / start[focal] - 1.0)
+        share = float(share.max()) if np.all(np.isfinite(share)) else float("inf")
+        if share > FOCAL_MOVE_HOLD:
+            out["focal"] = share
+    if groups["radial"] and groups["radial"][0] in free:
+        change = abs(float(end[groups["radial"][0]] - start[groups["radial"][0]]))
+        change = change if np.isfinite(change) else float("inf")
+        if change > K1_MOVE_HOLD:
+            out["radial"] = change
+    return out
+
+
 def tie_variance_factor(pb: Problem) -> float:
     """The variance factor of the tie points of ``pb`` at the parameters it holds: ``v^T P v / r`` of their own
     residuals (in units of ``pixel_sigma``), ``r`` their rows less the unknowns they determine - six per free
@@ -756,34 +782,52 @@ def _with_gauge(pb: Problem) -> tuple[Problem, int | None]:
     return out, (flight if out.gnss_bias else None)
 
 
-def focal_sds(pb: Problem) -> tuple[list, float | None]:
-    """The rule of the rounds of the native mapper for an adjustment of ``pb``: per camera, the relative marginal
-    sd of its focal length at the parameters of the problem - the square root of the largest variance of its focal
-    columns (fx and fy of a model with two) over its focal length, every intrinsic the problem frees free with it
-    (a conditional sd, with the terms that trade with the focal length held, is always smaller), the covariance
-    scaled by the variance factor of the tie points (:func:`tie_variance_factor`: it goes into ``pixel_sigma``;
-    the references keep the accuracy they state) and taken with the gauge of :func:`_with_gauge`. None for a
-    camera whose focal length is not free. Returns the sds and the variance factor (None when no focal length is
-    free: the core is not asked). RuntimeError where the core cannot give the variances
-    (:func:`variances_ready`) or the normal matrix cannot be inverted (an intrinsic the block does not hold at
-    all: photos looking straight down on flat ground)."""
+def intrinsic_sds(pb: Problem) -> tuple[list, float | None]:
+    """How well an adjustment of ``pb`` determines the intrinsics it is judged by, per camera, at the parameters
+    of the problem (the rule of the rounds of the native mapper, group by group): ``{"focal": ..,
+    "principal_point": ..}`` - the relative marginal sd of its focal length (the square root of the largest
+    variance of its focal columns, fx and fy of a model with two, over its focal length) and the marginal sd of its
+    principal point over the side of the photo (cx over the width, cy over the height, the larger); None for a
+    group the problem does not free. Marginal: every intrinsic the problem frees is free with them (a conditional
+    sd, with the terms that trade with them held, is always smaller). The covariance is scaled by the variance
+    factor of the tie points (:func:`tie_variance_factor`: it goes into ``pixel_sigma``; the references keep the
+    accuracy they state) and taken with the gauge of :func:`_with_gauge`. Returns the sds and the variance factor
+    (None when neither group is free in any camera: the core is not asked). RuntimeError where the core cannot
+    give the variances (:func:`variances_ready`) or the normal matrix cannot be inverted (an intrinsic the block
+    does not hold at all: photos looking straight down on flat ground)."""
     free = _free_intrinsics(pb)
-    columns = [[j for j, k in enumerate(free[c]) if k in _focal_indices(model)]
-               for c, (model, *_rest) in enumerate(pb.cameras)]
-    if not any(columns):
-        return [None] * len(pb.cameras), None
+    judged = []
+    for c, (model, *_rest) in enumerate(pb.cameras):
+        groups = intrinsic_groups(model)
+        judged.append({name: [(j, k) for j, k in enumerate(free[c]) if k in groups[name]]
+                       for name in ("focal", "principal_point")})
+    if not any(columns for camera in judged for columns in camera.values()):
+        return [{"focal": None, "principal_point": None} for _camera in pb.cameras], None
     probe, flight = _with_gauge(pb)
     factor = tie_variance_factor(probe)
     probe.pixel_sigma = float(probe.pixel_sigma) * float(np.sqrt(factor))
     variances = intrinsics_variances(probe, reference_flight=flight)
     sds = []
-    for c, cols in enumerate(columns):
-        if not cols:
-            sds.append(None)
-            continue
-        worst = max(float(variances[c][j]) for j in cols)
-        sds.append(float(np.sqrt(max(worst, 0.0))) / abs(float(pb.cameras[c][1][0])))
+    for c, camera in enumerate(judged):
+        model, params, width, height = pb.cameras[c]
+        sd = {"focal": None, "principal_point": None}
+        if camera["focal"]:
+            worst = max(float(variances[c][j]) for j, _k in camera["focal"])
+            sd["focal"] = float(np.sqrt(max(worst, 0.0))) / abs(float(params[0]))
+        if camera["principal_point"]:
+            cx = intrinsic_groups(model)["principal_point"][0]
+            sd["principal_point"] = max(float(np.sqrt(max(float(variances[c][j]), 0.0)))
+                                        / float(width if k == cx else height) for j, k in camera["principal_point"])
+        sds.append(sd)
     return sds, factor
+
+
+def focal_sds(pb: Problem) -> tuple[list, float | None]:
+    """The relative marginal sd of the focal length of each camera of ``pb`` (:func:`intrinsic_sds`; None for a
+    camera whose focal length is not free) and the variance factor of the tie points (None when the core was not
+    asked)."""
+    sds, factor = intrinsic_sds(pb)
+    return [sd["focal"] for sd in sds], factor
 
 
 def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers) -> Problem:
@@ -831,6 +875,19 @@ def flights(cameras) -> dict:
 
 # the COLMAP camera models with one focal length (f, cx, cy, ...): the others have two (fx, fy, cx, cy, ...)
 _SINGLE_FOCAL = ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE")
+
+
+# the radial and the tangential terms of the camera models of the native core, by their indices in COLMAP's order
+_RADIAL = {"SIMPLE_RADIAL": (3,), "RADIAL": (3, 4), "OPENCV": (4, 5), "FULL_OPENCV": (4, 5, 8, 9, 10, 11)}
+_TANGENTIAL = {"OPENCV": (6, 7), "FULL_OPENCV": (6, 7)}
+
+
+def intrinsic_groups(model_name: str) -> dict:
+    """The parameters of a COLMAP camera model by group, by their indices: ``focal`` (one or two),
+    ``principal_point``, ``radial`` (the first of them k1) and ``tangential`` - the last two for the six models
+    of the native core (empty for another model): what the camera optimisation holds or refines together."""
+    return {"focal": _focal_indices(model_name), "principal_point": _principal_point(model_name),
+            "radial": _RADIAL.get(model_name, ()), "tangential": _TANGENTIAL.get(model_name, ())}
 
 
 def _principal_point(model_name: str) -> tuple[int, int]:

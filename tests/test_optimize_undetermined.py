@@ -154,6 +154,78 @@ def test_the_marginal_sd_of_the_focal_length_tells_a_pitched_block_from_a_nadir_
     assert nadir[0] > 0.02 > bundle.FOCAL_SD_HOLD
 
 
+def test_the_groups_of_the_intrinsics_of_the_models_of_the_core():
+    """``bundle.intrinsic_groups``: the parameters of a camera model by group, in COLMAP's order - what the camera
+    optimisation holds or refines together."""
+    assert bundle.intrinsic_groups("SIMPLE_PINHOLE") == {"focal": (0,), "principal_point": (1, 2), "radial": (),
+                                                         "tangential": ()}
+    assert bundle.intrinsic_groups("PINHOLE") == {"focal": (0, 1), "principal_point": (2, 3), "radial": (),
+                                                  "tangential": ()}
+    assert bundle.intrinsic_groups("SIMPLE_RADIAL")["radial"] == (3,)
+    assert bundle.intrinsic_groups("RADIAL") == {"focal": (0,), "principal_point": (1, 2), "radial": (3, 4),
+                                                 "tangential": ()}
+    assert bundle.intrinsic_groups("OPENCV") == {"focal": (0, 1), "principal_point": (2, 3), "radial": (4, 5),
+                                                 "tangential": (6, 7)}
+    assert bundle.intrinsic_groups("FULL_OPENCV")["radial"] == (4, 5, 8, 9, 10, 11)
+    for model, params in bundle_problems.MODEL_PARAMS.items():  # every parameter in one group, once
+        indices = sorted(k for group in bundle.intrinsic_groups(model).values() for k in group)
+        assert indices == list(range(len(params))), model
+
+
+def test_what_ran_away_in_an_adjustment():
+    """``bundle.runaways``: the groups of a camera that an adjustment moved too far - a focal length by more than
+    :data:`bundle.FOCAL_MOVE_HOLD` of its start, the first radial term by more than :data:`bundle.K1_MOVE_HOLD` -
+    among those it refined, with by how much."""
+    start = [1000.0, 1000.0, 600.0, 450.0, -0.04, 0.01, 0.0, 0.0]
+    free = [0, 1, 4, 5, 6, 7]
+    assert bundle.FOCAL_MOVE_HOLD == 0.2 and bundle.K1_MOVE_HOLD == 0.5
+    assert bundle.runaways("OPENCV", start, start, free) == {}
+    near = [1150.0, 1150.0, 600.0, 450.0, -0.4, 0.3, 0.0, 0.0]
+    assert bundle.runaways("OPENCV", start, near, free) == {}
+    far = [1000.0, 1300.0, 600.0, 450.0, -0.04, 0.01, 0.0, 0.0]
+    assert bundle.runaways("OPENCV", start, far, free) == {"focal": pytest.approx(0.3)}
+    bent = [1000.0, 1000.0, 600.0, 450.0, -0.64, 0.01, 0.0, 0.0]
+    assert bundle.runaways("OPENCV", start, bent, free) == {"radial": pytest.approx(0.6)}
+    both = [700.0, 700.0, 600.0, 450.0, 0.6, 0.01, 0.0, 0.0]
+    ran = bundle.runaways("OPENCV", start, both, free)
+    assert ran == {"focal": pytest.approx(0.3), "radial": pytest.approx(0.64)}
+    assert bundle.runaways("OPENCV", start, both, [4, 5]) == {"radial": pytest.approx(0.64)}  # the focal was held
+    assert bundle.runaways("OPENCV", start, both, [0, 1]) == {"focal": pytest.approx(0.3)}
+    lost = bundle.runaways("OPENCV", start, [float("nan")] * 8, free)
+    assert lost == {"focal": float("inf"), "radial": float("inf")}
+    radial = [1000.0, 600.0, 450.0, 0.0, 0.0]  # f, cx, cy, k1, k2
+    assert bundle.runaways("RADIAL", radial, [1000.0, 600.0, 450.0, 0.7, 0.0], [0, 3, 4]) == {
+        "radial": pytest.approx(0.7)}
+    pinhole = [1000.0, 1000.0, 600.0, 450.0]
+    assert bundle.runaways("PINHOLE", pinhole, [1000.0, 1000.0, 700.0, 450.0], [0, 1, 2, 3]) == {}
+
+
+@needs_core
+def test_the_sd_of_the_principal_point_is_judged_beside_the_focal_length():
+    """``bundle.intrinsic_sds``: per camera the relative marginal sd of the focal length (what ``focal_sds`` gives)
+    and, when the problem frees it, of the principal point over the side of the photo (cx over the width, cy over
+    the height, the larger) - from the same covariance, every free intrinsic free with them."""
+    pitched = _drone_block(bundle_problems.TILT)
+    sds, factor = bundle.intrinsic_sds(pitched)
+    assert sds == [{"focal": bundle.focal_sds(pitched)[0][0], "principal_point": None}]  # held: not judged
+    with_pp = _drone_block(bundle_problems.TILT, free=[0, 1, 2, 3, 4, 5])
+    sds, factor = bundle.intrinsic_sds(with_pp)
+    assert factor == pytest.approx(NOISE ** 2, rel=0.05)
+    lay = bundle._Layout(with_pp)
+    scaled = dataclasses.replace(with_pp, pixel_sigma=with_pp.pixel_sigma * np.sqrt(factor))
+    dense = _dense_variances(scaled)[lay.camera_cols[0]]  # fx, fy, cx, cy, k1, k2
+    assert sds[0]["focal"] == pytest.approx(np.sqrt(dense[:2].max()) / with_pp.cameras[0][1][0], rel=1e-5)
+    side = np.sqrt(dense[2:4]) / np.array([bundle_problems.W, bundle_problems.H])
+    assert sds[0]["principal_point"] == pytest.approx(side.max(), rel=1e-5)
+    assert 0 < sds[0]["principal_point"] < bundle.PRINCIPAL_SD_HOLD == 0.005
+    assert sds[0]["focal"] > bundle.focal_sds(pitched)[0][0]  # marginal over the principal point too
+    # the principal point alone free: judged without a focal length to judge
+    alone, _factor = bundle.intrinsic_sds(_drone_block(bundle_problems.TILT, free=[2, 3]))
+    assert alone[0]["focal"] is None and 0 < alone[0]["principal_point"] < sds[0]["principal_point"]
+    nothing, factor = bundle.intrinsic_sds(_drone_block(bundle_problems.TILT, free=[4, 5]))
+    assert nothing == [{"focal": None, "principal_point": None}] and factor is None
+
+
 @needs_core
 def test_the_sd_is_marginal_over_what_the_problem_frees():
     """With the distortion and the principal point held the focal length of the nadir block looks far better
