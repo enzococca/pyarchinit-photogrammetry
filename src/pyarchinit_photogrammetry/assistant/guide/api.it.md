@@ -738,19 +738,30 @@ i punti di controllo su quel terreno, e una compensazione che lì la rifinisce s
 anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte più lunga, camere 131 m
 più in alto, target di verifica fuori di 0,6 m).
 
-Resta ferma al valore dell'obiettivo - la focale che dichiarano le foto (il loro EXIF, tenuto con il sensore a
-parte dai parametri che un allineamento sovrascrive: `Sensor.focal_prior`, `sfm.lens_prior`) -, non dove l'ha
-lasciata l'allineamento. Un allineamento che rifinisce la focale di un blocco così la lascia in un punto
-qualunque dello stesso scambio (il mapper di COLMAP su quell'anello: da 750 a 3900 px per un obiettivo da 1000,
-ogni volta altrove; tenuta lì, i target di verifica erano fuori da 20 a 230 mm). L'ottimizzazione prima riporta
-la focale a quel valore a passi di un decimo al massimo, compensando di nuovo il blocco a ogni passo con la
-calibrazione ferma e portata con sé (i termini radiali vanno con il quadrato della focale, le camere con la loro
-distanza da ciò che vedono); il blocco così riportato sostituisce l'allineamento, la calibrazione viene
-giudicata di nuovo da lì, e `report["intrinsics"]["lens_prior"]` dice che cosa è stato riportato (`[sensore, da,
-a, passi]`). Ogni corsa della catena classica su quell'anello finisce allora entro 2 mm sui target di
-controllo e 4 mm su quelli di verifica, con le camere alla quota vera. Un blocco il cui errore di riproiezione
-finirebbe una volta e mezza più grande non segue e resta com'era, con una nota. Una focale che era stata
-ipotizzata, o data a mano, non ha un valore dell'obiettivo: resta dove l'ha lasciata l'allineamento.
+Non resta nemmeno dove l'ha lasciata l'allineamento. Un allineamento che rifinisce la focale di un blocco così la
+lascia in un punto qualunque dello stesso scambio (il mapper di COLMAP su quell'anello: da 750 a 3900 px per un
+obiettivo da 1000, ogni volta altrove; tenuta lì, i target di verifica erano fuori da 20 a 230 mm). Resta ferma
+tra quella stima e il valore dell'obiettivo - la focale che dichiarano le foto (il loro EXIF, tenuto con il
+sensore a parte dai parametri che un allineamento sovrascrive: `Sensor.focal_prior`, `sfm.lens_prior`) -,
+ciascuno pesato con l'inverso della sua varianza (`sfm.lens_target`): la stima ha lo scarto marginale appena
+misurato, il valore dell'obiettivo il 2 % di se stesso (`sfm.LENS_PRIOR_SD`: le focali dell'EXIF sono
+arrotondate, e i fattori di crop variano). Un blocco che della focale non sa quasi nulla finisce sul valore
+dell'obiettivo: quell'anello, le cui stime hanno uno scarto dal 6 al 22 % di se stesse, finisce entro il 2 % (da
+996 a 1018 px). Uno che la determina quasi resta vicino alla propria stima: una griglia appena inclinata, che
+conosce la focale allo 0,6 %, fa un decimo della strada verso un valore delle foto più lungo del 3 % (2,5 px su
+30). L'ottimizzazione prima porta la focale a quel valore a passi di un decimo al massimo, compensando di nuovo
+il blocco a ogni passo con la calibrazione ferma e portata con sé (i termini radiali vanno con il quadrato della
+focale, le camere con la loro distanza da ciò che vedono); il blocco così portato sostituisce l'allineamento, la
+calibrazione viene giudicata di nuovo da lì, e `report["intrinsics"]["lens_prior"]` dice che cosa è stato
+pesato, per sensore: `estimate` e il suo `sd` (relativo), `prior` e `prior_sd`, `target`, `steps`. Il sensore
+ricorda dove è stata messa la sua focale (`Sensor.focal_target`), e un'ottimizzazione che la trova lì la lascia:
+non è più una stima del blocco, e pesata di nuovo con il valore dell'obiettivo gli si avvicinerebbe a ogni
+corsa. Ogni corsa della catena classica su quell'anello finisce allora entro 2 mm sui target di controllo e 5 mm
+su quelli di verifica; le sue camere finiscono lontane dalla quota vera quanto il valore scelto lo è dalla
+focale vera (dallo 0,1 all'1,8 %: da 1 a 27 cm su quell'anello), che è quello che costa dare ascolto alla stima
+di un blocco così. Un blocco il cui errore di riproiezione finirebbe una volta e mezza più grande non segue e
+resta com'era, con una nota. Una focale che era stata ipotizzata, o data a mano, non ha un valore
+dell'obiettivo: resta dove l'ha lasciata l'allineamento.
 
 Poi i termini tangenziali, il punto principale (quando è stato chiesto) e i termini radiali, ciascuno per quello
 che sposta nella foto: un gruppo resta fermo quando lo scarto marginale dello spostamento che causa all'angolo
@@ -761,8 +772,11 @@ meno a un obiettivo vero a ciò che gli serve di più: i termini tangenziali, vi
 degli obiettivi, il punto principale, vicino al centro della foto, i termini radiali per ultimi. Di due gruppi
 che si scambiano tra loro si rinuncia al primo, e il secondo, giudicato senza di lui, può restare libero - anche
 dove il primo da solo era passato: un gruppo successivo che non passa viene giudicato di nuovo senza i gruppi
-precedenti ancora liberi (prima i termini tangenziali, la focale per ultima), e dove allora passa sono loro a
-restare fermi al suo posto. Quell'anello non determina i suoi termini radiali finché la focale è libera (1,6 px
+precedenti ancora liberi (prima i termini tangenziali), e dove allora passa sono loro a restare fermi al suo
+posto. Alla focale si rinuncia così solo per i termini radiali, quando nient'altro basta: è la prima per quello
+che un blocco piatto non sa distinguere, non perché un obiettivo ne possa fare a meno (una griglia appena
+inclinata: la focale passa allo 0,4 %, i termini tangenziali con lei libera no, 0,57 px; restano fermi loro, e
+la focale viene rifinita). Quell'anello non determina i suoi termini radiali finché la focale è libera (1,6 px
 all'angolo) e li determina una volta tenuta la focale (0,12 px): vengono rifiniti, con il termine radiale
 trovato entro 0,0003 da quello vero, i target di controllo a 1 mm e quelli di verifica a 9 mm. Non determina i
 termini tangenziali della nostra formulazione (1,6 px), che restano fermi; su un blocco con molti punti di

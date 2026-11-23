@@ -714,18 +714,28 @@ height, whatever control points on that ground say, and an adjustment that refin
 trade (a ring flown once over flat ground, optimised on six targets: the focal length ten times longer, the
 cameras 131 m higher, the check targets 0.6 m off).
 
-It is held at the lens prior - the focal length its photos state (their EXIF, kept with the sensor apart from the
-parameters an alignment overwrites: `Sensor.focal_prior`, `sfm.lens_prior`) -, not where the alignment left it.
-An alignment that refines the focal length of such a block leaves it anywhere along the same trade (COLMAP's
-mapper on that ring: 750 to 3900 px for a lens of 1000, another place every time; held there, the check targets
-were 20 to 230 mm off). The optimisation first walks the focal length to the prior in steps of a tenth of it at
+It is not held where the alignment left it either. An alignment that refines the focal length of such a block
+leaves it anywhere along the same trade (COLMAP's mapper on that ring: 750 to 3900 px for a lens of 1000, another
+place every time; held there, the check targets were 20 to 230 mm off). It is held between that estimate and the
+lens prior - the focal length its photos state (their EXIF, kept with the sensor apart from the parameters an
+alignment overwrites: `Sensor.focal_prior`, `sfm.lens_prior`) -, each weighed by the inverse of its variance
+(`sfm.lens_target`): the estimate has the marginal sd the check has just taken, the prior 2 % of its value
+(`sfm.LENS_PRIOR_SD`: the focal lengths of the EXIF are rounded, and crop factors vary). A block that hardly
+knows its focal length ends at the prior: that ring, whose estimates have an sd of 6 to 22 % of themselves, ends
+within 2 % of it (996 to 1018 px). One that nearly determines it stays near its estimate: a grid pitched a
+little, which knows its focal length to 0.6 %, moves a tenth of the way to a value of the photos that is 3 % too
+long (2.5 px of 30). The optimisation first walks the focal length to that target in steps of a tenth of it at
 most, the block adjusted again at each with the calibration held and carried along (the radial terms go with the
 square of the focal length, the cameras with their distance from what they see); the walked block replaces the
 alignment, the calibration is judged again from there, and `report["intrinsics"]["lens_prior"]` says what was
-walked (`[sensor, from, to, steps]`). Every run of the classic chain on that ring then ends within 2 mm on the
-control targets and 4 mm on the check targets, the cameras at their true height. A block whose reprojection
-error would end half as large again does not follow and is left as it was, with a note. A focal length that was
-guessed, or given by hand, has no prior: it is held where the alignment left it.
+weighed, per sensor: `estimate` and its `sd` (relative), `prior` and `prior_sd`, `target`, `steps`. The sensor
+keeps where its focal length was put (`Sensor.focal_target`), and an optimisation that finds it there leaves it:
+it is no estimate of the block any more, and weighed against the prior again it would come nearer the prior at
+every run. Every run of the classic chain on that ring then ends within 2 mm on the control targets and 5 mm on
+the check targets; its cameras end as far from their true height as the target is from the true focal length
+(0.1 to 1.8 %: 1 to 27 cm on that ring), which is what listening to the estimate of such a block costs. A block
+whose reprojection error would end half as large again does not follow and is left as it was, with a note. A
+focal length that was guessed, or given by hand, has no prior: it is held where the alignment left it.
 
 Then the tangential terms, the principal point (when it was asked for) and the radial terms, each by what it
 moves in the photo: a group is held when the marginal sd of the displacement it causes at the corner of the photo
@@ -735,8 +745,11 @@ every other group free, as the native alignment judges it; then from what a real
 needs most: the tangential terms, near zero in most lenses, the principal point, near the centre of the photo,
 the radial terms last. Of two groups that trade with each other the earlier is given up, and the later, judged
 without it, may stay - also where the earlier one had passed on its own: a later group that fails is judged
-again without the earlier groups that are still free (the tangential terms first, the focal length last), and
-where it then passes they are held in its place. That ring does not determine its radial terms while its focal
+again without the earlier groups that are still free (the tangential terms first), and where it then passes they
+are held in its place. The focal length goes this way for the radial terms alone, when nothing else is enough:
+it stands first for what a flat block cannot tell, not because a lens can do without it (a grid pitched a
+little: the focal length passes at 0.4 %, the tangential terms fail at 0.57 px with it free; they are held, and
+the focal length is refined). That ring does not determine its radial terms while its focal
 length is free (1.6 px at the corner) and determines them once it is held (0.12 px): they are refined, the radial
 term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm. It does not
 determine the tangential terms of our own formulation (1.6 px), which are held; on a block of many tie points
