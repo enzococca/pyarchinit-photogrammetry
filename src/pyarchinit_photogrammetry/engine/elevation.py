@@ -598,7 +598,7 @@ class FrameSurface:
         self.shape = (int(np.ceil((self.origin[1] - v0) / resolution)) + 1,
                       int(np.ceil((u1 - self.origin[0]) / resolution)) + 1)
         self._inv = np.linalg.inv(chunk.transform)
-        self._reach = (np.zeros(0), np.zeros(0), np.zeros(0))  # u in order, how far the frame goes behind, in front
+        self._reach = (None, np.zeros(0), np.zeros(0), np.zeros(0))  # a frame: u in order, its limits behind, in front
         self._reach_lock = threading.Lock()
 
     def cell_uv(self, r0: int, c0: int, th: int, tw: int):
@@ -625,13 +625,17 @@ class FrameSurface:
     def _frame_reach(self, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """``min_depth_at`` and ``max_depth_at`` of the frame at each ``u``, each value of ``u`` asked of the frame
         once and kept: the columns of a grid come back tile after tile, and again for the relief after the
-        orthophoto, and the frame finds each limit by bisection. NaN for a ``u`` that is not a number."""
+        orthophoto, and the frame finds each limit by bisection. NaN for a ``u`` that is not a number. What is
+        kept is of the frame the surface has: a surface given another frame asks that one (a frame itself is not
+        changed in place: a :class:`WallPath` computes its line when it is made)."""
         values, inverse = np.unique(u.ravel(), return_inverse=True)
         behind, front = np.full(len(values), np.nan), np.full(len(values), np.nan)
         finite = np.isfinite(values)
         want = values[finite]
         with self._reach_lock:  # the tiles are made by several threads
-            known, kept_behind, kept_front = self._reach
+            frame, known, kept_behind, kept_front = self._reach
+            if frame is not self.frame:
+                frame, known, kept_behind, kept_front = self.frame, np.zeros(0), np.zeros(0), np.zeros(0)
             at = np.searchsorted(known, want)
             new = np.ones(len(want), bool)
             inside = at < len(known)
@@ -639,10 +643,10 @@ class FrameSurface:
             if new.any():
                 where, asked = at[new], want[new]
                 known = np.insert(known, where, asked)
-                kept_behind = np.insert(kept_behind, where, self.frame.min_depth_at(asked))
-                kept_front = np.insert(kept_front, where, self.frame.max_depth_at(asked))
-                self._reach = (known, kept_behind, kept_front)
+                kept_behind = np.insert(kept_behind, where, frame.min_depth_at(asked))
+                kept_front = np.insert(kept_front, where, frame.max_depth_at(asked))
                 at = np.searchsorted(known, want)
+            self._reach = (frame, known, kept_behind, kept_front)
             behind[finite], front[finite] = kept_behind[at], kept_front[at]
         inverse = np.ravel(inverse)
         return behind[inverse].reshape(u.shape), front[inverse].reshape(u.shape)

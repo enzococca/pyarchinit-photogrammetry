@@ -259,6 +259,9 @@ def test_the_band_follows_the_limits_of_the_frame(tmp_path):
     lo, hi = grid.band(np.array([mid, 1.0, np.nan, mid]))            # in any order, twice, not a number
     assert np.allclose(hi[[0, 1, 3]], [0.5 - CLEARANCE, 0.5, 0.5 - CLEARANCE], atol=1e-6) and np.isnan(hi[2])
     assert asked == [64, 32, 2] and np.allclose(lo[[0, 1, 3]], -0.5) and np.isnan(lo[2])
+    # the limits kept are those of the frame the surface has: given another one, it asks that one
+    grid.frame = WallPath(ordered(info["face"], "left"), radius=0.3)
+    assert grid.band(np.array([mid]))[1] == pytest.approx([0.3 - CLEARANCE], abs=1e-6)   # in the arc of this one too
 
 
 def test_nothing_is_kept_behind_the_end_of_the_frame(tmp_path):
