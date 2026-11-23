@@ -9,8 +9,16 @@ from pyarchinit_photogrammetry.markers.targets import detect
 pytestmark = pytest.mark.slow
 
 
-def test_alignment_and_georeferencing(processed):
-    doc, ch, report = processed
+@pytest.fixture(params=["processed", "processed_auto"], ids=["classic", "auto"])
+def trench_project(request):
+    """The processed trench of the metric checks, matched by the classic engine (``processed``) and by the engine
+    users get (``processed_auto``: ``auto``, the native matching where the core is installed): the metric gates hold
+    for both."""
+    return request.getfixturevalue(request.param)
+
+
+def test_alignment_and_georeferencing(trench_project):
+    doc, ch, report = trench_project
     assert len(ch.aligned_cameras) == len(ch.cameras) == 28
     assert len(ch.markers) == 8
     assert report["method"] == "markers"
@@ -31,8 +39,8 @@ def test_alignment_with_square_pixels(processed):
     assert cam.model.name == "OPENCV" and list(cam.params) == sensor.params
 
 
-def test_checkpoints(processed):
-    doc, ch, _ = processed
+def test_checkpoints(trench_project):
+    doc, ch, _ = trench_project
     before = np.array(ch.transform, float)
     # use two targets as independent check points
     for label in ("target 4", "target 5"):
@@ -47,8 +55,8 @@ def test_checkpoints(processed):
     ch.transform = before
 
 
-def test_dem_accuracy(processed, scene):
-    _, ch, _ = processed
+def test_dem_accuracy(trench_project, scene):
+    _, ch, _ = trench_project
     with rasterio.open(ch.dem_path) as src:
         dem = src.read(1)
         rows, cols = np.nonzero(dem != src.nodata)
@@ -61,8 +69,8 @@ def test_dem_accuracy(processed, scene):
     assert np.percentile(np.abs(err), 90) < 0.02
 
 
-def test_orthomosaic_positions(processed, scene):
-    _, ch, _ = processed
+def test_orthomosaic_positions(trench_project, scene):
+    _, ch, _ = trench_project
     with rasterio.open(ch.orthomosaic_path) as src:
         img = np.moveaxis(src.read([3, 2, 1]), 0, -1).copy()
         tr = src.transform

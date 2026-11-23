@@ -426,7 +426,8 @@ def test_gpu_matching_shares_the_pairs_and_keeps_the_accuracy(scene_dir, tmp_pat
         pytest.skip("no GPU (wgpu adapter) on this computer")
     _doc, ch = _project(scene_dir, tmp_path)
     seen = []
-    ch.match_photos(quality="high", gpu="auto", progress=lambda f, m: seen.append(m))
+    # the GPU of the classic engine (COLMAP's matcher beside it); the native engine has its own (test_native_match)
+    ch.match_photos(quality="high", gpu="auto", progress=lambda f, m: seen.append(m), engine="classic")
     info = ch.meta["sfm"]
     n = len(ch.cameras)
     assert info["gpu"] and info["gpu_pairs"] > 0 and info["gpu_pairs"] + info["cpu_pairs"] == n * (n - 1) // 2
@@ -434,7 +435,7 @@ def test_gpu_matching_shares_the_pairs_and_keeps_the_accuracy(scene_dir, tmp_pat
     assert ch.align_cameras(mapper="incremental", use_gps=False) == n
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     assert ch.update_transform()["control_rmse"] < 0.002
-    ch.match_photos(quality="high", gpu="off")
+    ch.match_photos(quality="high", gpu="off", engine="classic")
     assert ch.meta["sfm"]["gpu"] is None and ch.meta["sfm"]["gpu_pairs"] == 0
     assert _native.gpu_device("no such adapter") is None  # the CPU alone (ppg doctor says so)
     assert _native.gpu_device("0") == 0 and _native.gpu_device("auto") == -1
@@ -460,7 +461,7 @@ def test_cancelling_the_gpu_matching_stops_it(scene_dir, tmp_path):
 
     progress.callback = watch
     with pytest.raises(Cancelled):
-        ch.match_photos(quality="high", gpu="auto", progress=progress)
+        ch.match_photos(quality="high", gpu="auto", progress=progress, engine="classic")  # the classic GPU streams
     assert sum(m.startswith("Matching photos:") for m in seen) == 1
     assert not any(m.startswith("Verifying") for m in seen)
 
@@ -595,8 +596,8 @@ def test_the_ransac_seed_is_checked(scene_dir, tmp_path, monkeypatch):
         monkeypatch.setenv(sfm.RANSAC_SEED_ENV, text)
         with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
             sfm.verification_options()
-    # the matching refuses it before any point is detected
+    # the classic matching (whose verification takes the seed) refuses it before any point is detected
     _doc, ch = _project(scene_dir, tmp_path)
     with pytest.raises(ValueError, match="PPG_RANSAC_SEED"):
-        ch.match_photos(quality="high")
+        ch.match_photos(quality="high", engine="classic")
     assert not (ch.data_dir / "sfm" / "database.db").exists()

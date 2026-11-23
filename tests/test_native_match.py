@@ -1,4 +1,4 @@
-"""The bindings of the native matching (``ppg_core`` API 14, ``_native.native_match_kernels()``): the
+"""The bindings of the native matching (``ppg_core`` API 15, ``_native.native_match_kernels()``): the
 features step into a feature store, the preselection on the small store, the two-stage matching of
 the pairs into a match store, the stores read and written from Python, and the photos read and
 reduced as COLMAP reads them. Every binding releases the GIL and reports through ``progress(done,
@@ -17,7 +17,7 @@ from pyarchinit_photogrammetry.core.progress import Cancelled
 
 ppg_core = pytest.importorskip("ppg_core")
 pytestmark = pytest.mark.skipif(_native.native_match_kernels() is None,
-                                reason="the native core with the native matching (API 14) is not installed")
+                                reason="the native core with the native matching (API 15) is not installed")
 
 PHOTOS = 28  # the trench of ``scene_dir``: 20 nadir photos and the 8 of the tilted ring, 1200 x 900
 LIMIT = 600  # quality "high": the 1200-pixel photos reduced by two (the CPU SIFT takes tens of ms each)
@@ -73,10 +73,11 @@ def trench_store(scene_dir, tmp_path_factory):
     return root / "features", root / "small", report, [p.name for p in photos], calls
 
 
-def test_the_kernels_are_declared_at_api_14(monkeypatch):
-    """``_native`` names the native matching as a feature of API 14 (13 with the options of its second stage) and
-    gives its bindings as a namespace, None when the extension is switched off."""
-    assert _native.NATIVE_MATCH_API == 14 and _native.api() >= 14
+def test_the_kernels_are_declared_at_api_15(monkeypatch):
+    """``_native`` names the native matching as a feature of API 15 (13 with the options of its second stage at 14,
+    the check of the second stage at 15) and gives its bindings as a namespace, None when the extension is switched
+    off. A core of API 14 matches without the check: it is not taken (``cannot_run`` names the API needed)."""
+    assert _native.NATIVE_MATCH_API == 15 and _native.api() >= 15
     assert _native.has("native_match") and _native.supports("native_match")
     k = _native.native_match_kernels()
     assert k.features is ppg_core.native_features and k.match_pairs is ppg_core.native_match_pairs
@@ -86,6 +87,14 @@ def test_the_kernels_are_declared_at_api_14(monkeypatch):
     assert k.feature_store is ppg_core.NativeFeatureStore and k.match_store is ppg_core.NativeMatchStore
     monkeypatch.setenv("PPG_NATIVE", "0")
     assert _native.native_match_kernels() is None
+    monkeypatch.delenv("PPG_NATIVE")
+    # a core of API 14 (no check of the second stage) is not taken: auto goes classic and says why
+    from pyarchinit_photogrammetry.engine import native_match
+
+    monkeypatch.setattr(_native, "api", lambda: 14)
+    assert _native.native_match_kernels() is None
+    reason = native_match.core_unavailable()
+    assert reason is not None and "(API 14)" in reason and "API 15 is needed" in reason
 
 
 # ------------------------------------------------------------------------------- the photos as COLMAP reads them
@@ -490,12 +499,14 @@ def test_the_second_stage_can_be_switched_off_and_tuned(trench_store, preselecte
 
 
 def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch):
-    """``PPG_NATIVE_DCT`` is off unless set to a value other than 0. ``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO`` and ``PPG_NATIVE_GUIDED_BAND`` reach the options of the
+    """``PPG_NATIVE_DCT`` is off unless set to a value other than 0. ``PPG_NATIVE_GUIDED``, ``PPG_NATIVE_GUIDED_RATIO``,
+    ``PPG_NATIVE_GUIDED_BAND`` and ``PPG_NATIVE_GUIDED_CHECK`` reach the options of the
     pairs stage; the defaults add nothing to them (a core that predates them takes the same dict), the default ratio
     is the matcher's; a value that is not one names its variable."""
     from pyarchinit_photogrammetry.engine import native_match
 
-    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND", "PPG_NATIVE_DCT"):
+    for name in ("PPG_NATIVE_GUIDED", "PPG_NATIVE_GUIDED_RATIO", "PPG_NATIVE_GUIDED_BAND", "PPG_NATIVE_GUIDED_CHECK",
+                 "PPG_NATIVE_DCT"):
         monkeypatch.delenv(name, raising=False)
     # the JPEG decoded whole unless PPG_NATIVE_DCT asks for the DCT scale
     assert native_match.dct_enabled() is False
@@ -504,7 +515,8 @@ def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch)
         assert native_match.dct_enabled() is enabled, value
     monkeypatch.delenv("PPG_NATIVE_DCT")
     defaults = native_match.guided_settings()
-    assert defaults == {"guided": True, "guided_max_ratio": native_match.GUIDED_RATIO, "guided_band": 1.0}
+    assert defaults == {"guided": True, "guided_max_ratio": native_match.GUIDED_RATIO, "guided_band": 1.0,
+                        "guided_check": True}
     assert native_match.MAX_RATIO == inspect.signature(_native.gpu_match).parameters["max_ratio"].default
     plain = native_match.pair_options(8000, defaults)
     assert plain == {"stage1_points": native_match.STAGE1_POINTS, "trust_inliers": native_match.TRUST_INLIERS,
@@ -513,10 +525,11 @@ def test_the_settings_of_the_second_stage_come_from_the_environment(monkeypatch)
     monkeypatch.setenv("PPG_NATIVE_GUIDED", "0")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", " 0.7 ")
     monkeypatch.setenv("PPG_NATIVE_GUIDED_BAND", "1.5")
+    monkeypatch.setenv("PPG_NATIVE_GUIDED_CHECK", "0")
     settings = native_match.guided_settings()
-    assert settings == {"guided": False, "guided_max_ratio": 0.7, "guided_band": 1.5}
+    assert settings == {"guided": False, "guided_max_ratio": 0.7, "guided_band": 1.5, "guided_check": False}
     assert native_match.pair_options(8000, settings) == {**plain, "guided": False, "guided_max_ratio": 0.7,
-                                                         "guided_band": 1.5}
+                                                         "guided_band": 1.5, "guided_check": False}
     for name, value in (("PPG_NATIVE_GUIDED_RATIO", "much"), ("PPG_NATIVE_GUIDED_RATIO", "1.2"),
                         ("PPG_NATIVE_GUIDED_BAND", "0"), ("PPG_NATIVE_GUIDED_BAND", "-2")):
         monkeypatch.setenv(name, value)
@@ -712,8 +725,8 @@ def test_native_matching_feeds_the_classic_mapper_on_the_trench(processed_native
     # the settings of the run read from the environment, in the record (the fixture's DCT, the defaults of the
     # second stage)
     assert info["native_dct"] is False
-    assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"]) == \
-        (True, native_match.GUIDED_RATIO, 1.0)
+    assert (info["native_guided"], info["native_guided_ratio"], info["native_guided_band"],
+            info["native_guided_check"]) == (True, native_match.GUIDED_RATIO, 1.0, True)
     for key in ("image_root", "names", "quality", "pair_selection", "generic", "reference", "neighbours", "masks",
                 "apply_masks", "guided_matching", "stationary_removed", "keypoint_limit", "tiepoint_limit", "added",
                 "gpu", "gpu_shares"):
@@ -1467,7 +1480,7 @@ def test_continuing_with_other_settings_matches_everything_again(scene_dir, tmp_
     assert len(_image_ids(work / "database.db")) == PHOTOS
 
 
-@pytest.mark.parametrize("change", ["ratio", "dct", "record_before_the_settings"])
+@pytest.mark.parametrize("change", ["ratio", "dct", "check", "record_before_the_settings"])
 def test_continuing_with_other_matching_settings_matches_everything_again(scene_dir, tmp_path, monkeypatch, change):
     """A native match and alignment of 24, 4 added, then ``reset=False`` with the stores made under other settings
     of the decoding or of the second stage - another ratio, the DCT scale, or a record written before those
@@ -1480,8 +1493,10 @@ def test_continuing_with_other_matching_settings_matches_everything_again(scene_
         monkeypatch.setenv("PPG_NATIVE_GUIDED_RATIO", "0.7")
     elif change == "dct":
         monkeypatch.setenv("PPG_NATIVE_DCT", "1")
+    elif change == "check":  # stores made before the check of the second stage (or without it)
+        ch.meta["sfm"]["native_guided_check"] = False
     else:
-        for key in ("native_dct", "native_guided", "native_guided_ratio", "native_guided_band"):
+        for key in ("native_dct", "native_guided", "native_guided_ratio", "native_guided_band", "native_guided_check"):
             ch.meta["sfm"].pop(key, None)
     seen = []
     ch.match_photos(quality="high", engine="native", reset=False, progress=lambda _f, m: seen.append(m))
@@ -1490,6 +1505,7 @@ def test_continuing_with_other_matching_settings_matches_everything_again(scene_
     assert info["continued"] is False and info["pairs"] == PHOTOS * (PHOTOS - 1) // 2
     assert info["native_dct"] is (change == "dct")
     assert info["native_guided_ratio"] == (0.7 if change == "ratio" else native_match.GUIDED_RATIO)
+    assert info["native_guided_check"] is True
 
 
 def test_a_full_disk_in_the_database_stops_both_engines_and_keeps_the_block(scene_dir, tmp_path, monkeypatch):
@@ -1816,3 +1832,85 @@ def test_the_verified_pairs_of_two_databases_compare_whatever_their_image_ids(tm
     by_name = database(tmp_path / "native.db", {"IMG_0002.jpg": 1, "IMG_0003.jpg": 2})
     by_thread = database(tmp_path / "classic.db", {"IMG_0003.jpg": 1, "IMG_0002.jpg": 2})
     assert _verified_pairs(by_name) == _verified_pairs(by_thread) == {("IMG_0002.jpg", "IMG_0003.jpg"): (2, 40)}
+
+
+# ------------------------------------------------------------------------------------------- what the step refuses
+@pytest.mark.parametrize("engine", ["native", None], ids=["native", "auto"])
+def test_a_request_the_step_refuses_reaches_the_caller_as_the_classic_step_gives_it(scene_dir, tmp_path, monkeypatch,
+                                                                                     caplog, engine):
+    """An argument the matching does not take (masks, a preselection, a number of neighbours), a preselection that
+    finds no pairs (positions or an alignment missing), a chunk that is not in a project or has no enabled photo: the native step refuses it with the error the classic step gives - the same type and text - and the
+    caller gets it, before any point is detected, with ``native`` as with ``auto``: no fallback to the classic engine, no line saying that the
+    native matching failed, no record of an engine. The seconds of the refused step are kept as the classic step
+    keeps them (the type of the error under ``failed``)."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.engine import sfm
+
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    classic_ran = []
+    real_classic = sfm.match_photos
+
+    def classic(chunk, **kwargs):
+        classic_ran.append(kwargs)
+        return real_classic(chunk, **kwargs)
+
+    monkeypatch.setattr(sfm, "match_photos", classic)
+    (tmp_path / "with").mkdir()
+    _, ch = _project(scene_dir, tmp_path / "with", photos=_photos(scene_dir)[:3])
+    doc = ppg.Document()
+    empty = doc.add_chunk("vuoto")
+    doc.save(tmp_path / "empty.ppg")
+    cases = [(Chunk(key=0, label="x"), {}, RuntimeError, "chunk is not attached to a document"),
+             (empty, {}, RuntimeError, "the chunk has no enabled photos"),
+             (ch, {"apply_masks": "nonsense"}, ValueError, "apply_masks: one of none, keypoints, tiepoints"),
+             (ch, {"pair_selection": "nonsense"}, ValueError, "unknown pair selection 'nonsense'"),
+             (ch, {"generic": False, "reference": "nonsense"}, ValueError, "unknown reference preselection"),
+             # photos without positions (the trench has no GPS) and no alignment: no pairs to match
+             (ch, {"generic": False, "reference": "source"}, RuntimeError,
+              "the source preselection needs camera reference positions"),
+             (ch, {"generic": False, "reference": "estimated"}, RuntimeError,
+              "the estimated preselection needs an alignment"),
+             (ch, {"generic": False, "reference": "sequential", "neighbours": "many"}, ValueError,
+              "invalid literal for int()")]
+    for chunk, kwargs, kind, text in cases:
+        with pytest.raises(kind) as classic_said:
+            chunk.match_photos(quality="high", engine="classic", **kwargs)
+        assert text in str(classic_said.value)
+        classic_ran.clear()
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            with pytest.raises(kind) as said:
+                chunk.match_photos(quality="high", engine=engine, **kwargs)
+        assert type(said.value) is type(classic_said.value) and str(said.value) == str(classic_said.value)
+        assert classic_ran == []  # refused by the native step itself
+        assert not [r for r in caplog.records if "classic used" in r.getMessage()]
+        assert "engine" not in chunk.meta
+        # refused before any work: no point detected by the native step
+        assert chunk.meta["timings"]["match_photos"]["stages"] == {}
+        assert not (chunk.document is not None and (chunk.data_dir / "sfm" / "native").exists())
+    assert ch.meta["timings"]["match_photos"]["failed"] == "ValueError"
+
+
+def test_a_camera_without_its_sensor_is_not_a_reason_to_refuse(scene_dir, tmp_path):
+    """``cannot_run`` answers for any chunk: a camera whose sensor is not in the chunk (a chunk put together by a
+    script) is not the native engine's to refuse, and asking does not fail (it failed on the key)."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:3])
+    ch.cameras[0].sensor_key = max(ch.sensors) + 7
+    assert native_match.cannot_run(ch, "sift", True) is None
+
+
+def test_a_native_matching_removes_the_learned_points_of_the_database_it_replaces(scene_dir, tmp_path):
+    """The learned key points of a classic matching (``sfm/learned``) go with its database: a native matching that
+    writes a new database removes them, as a classic SIFT matching does."""
+    from pyarchinit_photogrammetry.engine import native_match
+
+    _, ch = _project(scene_dir, tmp_path, photos=_photos(scene_dir)[:4])
+    learned = ch.data_dir / "sfm" / "learned" / "disk"
+    learned.mkdir(parents=True)
+    (learned / "points.npz").write_bytes(b"x")
+    native_match.match_photos(ch, quality="high")
+    assert ch.meta["sfm"]["engine"] == "native"
+    assert not (ch.data_dir / "sfm" / "learned").exists()

@@ -261,7 +261,7 @@ fn views(dir: &Path, scene: &Scene) -> (FeatureStore, FeatureView, FeatureView) 
 fn options(stage1_points: usize) -> Options {
     Options { stage1_points, trust_inliers: 40, drop_inliers: 8, max_ratio: 0.8, max_distance: 0.7, cross_check: true,
               max_num_matches: 32768, two_view: two_view::Options::default(), guided: true, guided_max_ratio: 0.8,
-              guided_band: 1.0 }
+              guided_band: 1.0, guided_check: true }
 }
 
 /// The `bests` of the CPU twin, ignoring the keys.
@@ -397,6 +397,57 @@ fn a_good_pair_goes_guided_and_finds_the_true_matches() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A repeated texture: for some true correspondences the point of B is moved off the epipolar line
+/// of its point of A, and a copy of its descriptor is put on that line at another place (a twin at
+/// the wrong depth). In the band the twin is the only candidate and the verification cannot refuse
+/// it (it lies on the line): without the check of the second stage it is matched; with the check
+/// the first stage, which holds every point here, saw the moved point as its equal rival over the
+/// whole photo, and none of the twins is matched, while the true matches stay.
+#[test]
+fn a_twin_on_the_epipolar_line_is_refused_by_the_check() {
+    let dir = folder("guided-twins");
+    let mut scene = pair_scene(11, &camera(), &camera(), 2500, (4.0, 6.0), 500, (8.0, 12.0));
+    let f = scene.fundamental();
+    let mut twins: Vec<[u32; 2]> = Vec::new();
+    let mut moved: HashSet<u32> = HashSet::new();
+    for &[ia, ib] in scene.truth.iter().step_by(25) {
+        let [xa, ya, ..] = scene.a.keypoints[ia as usize];
+        let [xb, yb, scale, angle] = scene.b.keypoints[ib as usize];
+        let l = f * Vector3::new(f64::from(xa), f64::from(ya), 1.0);
+        let norm = (l.x * l.x + l.y * l.y).sqrt();
+        let (nx, ny) = (l.x / norm, l.y / norm); // the normal of the line; along it: (-ny, nx)
+        let d = nx * f64::from(xb) + ny * f64::from(yb) + l.z / norm; // the true point's distance from the line
+        let (tx, ty) = (f64::from(xb) - d * nx - 150.0 * ny, f64::from(yb) - d * ny + 150.0 * nx);
+        let (ox, oy) = (f64::from(xb) + 200.0 * nx, f64::from(yb) + 200.0 * ny);
+        if !inside(tx, ty) || !inside(ox, oy) {
+            continue;
+        }
+        scene.b.keypoints[ib as usize] = [ox as f32, oy as f32, scale, angle];
+        let copy: Vec<u8> = scene.b.descriptors[ib as usize * DIM..(ib as usize + 1) * DIM].to_vec();
+        scene.b.keypoints.push([tx as f32, ty as f32, scale, angle]);
+        scene.b.descriptors.extend(copy);
+        twins.push([ia, scene.b.keypoints.len() as u32 - 1]);
+        moved.insert(ia);
+    }
+    assert!(twins.len() >= 60, "{} twins", twins.len());
+    let (_store, a, b) = views(&dir, &scene);
+    let cam = camera();
+    let o = options(8000); // every point in the first stage
+    let unchecked = Options { guided_check: false, ..o };
+    let off = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, false, &unchecked, &mut cpu).unwrap();
+    let on = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, true, false, &o, &mut cpu).unwrap();
+    assert_eq!((off.route, on.route), (Route::Guided, Route::Guided));
+    // without the check most twins are matched, and kept by the verification (they lie on the line)
+    let twins_off = found(&twins, &off.matches);
+    assert!(twins_off * 100 >= twins.len() * 80, "{twins_off} of {} twins matched without the check", twins.len());
+    assert!(found(&twins, &off.two_view.inliers) * 100 >= twins.len() * 80);
+    // with it none, and the true matches of the points not touched stay
+    assert_eq!(found(&twins, &on.matches), 0);
+    let kept: Vec<[u32; 2]> = scene.truth.iter().copied().filter(|m| !moved.contains(&m[0])).collect();
+    assert!(found(&kept, &on.two_view.inliers) * 100 >= kept.len() * 95);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn the_guided_options_reach_the_second_stage() {
     let dir = folder("guided-options");
@@ -408,10 +459,12 @@ fn the_guided_options_reach_the_second_stage() {
     };
     let (raw_a, raw_b) = (raw(&a), raw(&b));
     let n = scene.truth.len();
+    // the slow band matching of the reference has no rival from the first stage: the check off
+    let unchecked = Options { guided_check: false, ..options(1000) };
     // a stricter ratio and a wider band in the second stage alone: the first stage is unchanged
     // (its ratio is `max_ratio`), the matches are those of the slow band matching at that ratio
     // and width, on the fundamental matrix of the first stage (uncalibrated: the raw key points)
-    let o = Options { guided_max_ratio: 0.6, guided_band: 2.0, ..options(1000) };
+    let o = Options { guided_max_ratio: 0.6, guided_band: 2.0, ..unchecked };
     let result = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &o, &mut cpu).unwrap();
     assert_eq!(result.route, Route::Guided);
     let stage1 = stage1_model(&a, &b, &cam, &cam, false, &o);
@@ -419,20 +472,27 @@ fn the_guided_options_reach_the_second_stage() {
     let e = o.two_view.ransac.max_error;
     let strict = Options { max_ratio: 0.6, ..o };
     assert_eq!(result.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, 2.0 * e, &strict));
-    let default = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &options(1000), &mut cpu)
+    let default = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &unchecked, &mut cpu)
         .unwrap();
-    assert_eq!(default.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, e, &options(1000)));
+    assert_eq!(default.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, e, &unchecked));
     assert!(found(&scene.truth, &result.two_view.inliers) * 100 >= n * 95);
     // the twins of this scene are unambiguous, so those options keep the same matches; a ratio
     // and a band far tighter than the defaults show that each reaches the second stage
-    for (tight, ratio, band) in [(Options { guided_max_ratio: 0.1, ..options(1000) }, 0.1, e),
-                                 (Options { guided_band: 0.02, ..options(1000) }, 0.8, 0.02 * e)] {
+    for (tight, ratio, band) in [(Options { guided_max_ratio: 0.1, ..unchecked }, 0.1, e),
+                                 (Options { guided_band: 0.02, ..unchecked }, 0.8, 0.02 * e)] {
         let r = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &tight, &mut cpu).unwrap();
         assert_eq!(r.route, Route::Guided);
         assert_eq!(r.matches, band_matches(&a, &b, &raw_a, &raw_b, &f, band, &Options { max_ratio: ratio, ..o }));
         assert!(r.matches.len() < default.matches.len(), "{} matches against {}", r.matches.len(),
                 default.matches.len());
     }
+    // with the check (the default) the matches are those of the band less the ones whose rival over the
+    // whole photo, seen by the first stage, fails the ratio test: a subset, nearly all on this scene
+    let checked = pairs::match_pair(&a, &b, "a.jpg", "b.jpg", &cam, &cam, false, false, &options(1000), &mut cpu)
+        .unwrap();
+    assert!(checked.matches.iter().all(|m| default.matches.contains(m)));
+    assert!(checked.matches.len() * 100 >= default.matches.len() * 95, "{} of {}", checked.matches.len(),
+            default.matches.len());
     fs::remove_dir_all(&dir).unwrap();
 }
 

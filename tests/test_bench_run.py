@@ -31,7 +31,7 @@ FILE_NAME = re.compile(r"^t-\d{14}-\d+\.json$")
 STEP_KEYS = {"step", "seconds", "peak_memory_mb", "stages", "engine"}
 SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
             "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band",
-            "max_ratio", "max_distance", "cross_check", "pycolmap", "photo_cache_mb",
+            "native_guided_check", "max_ratio", "max_distance", "cross_check", "pycolmap", "photo_cache_mb",
             "georeferencing", "targets", "mapper_requested", "engine_requested", "ransac_seed"]
 CLASSIC = {"requested": "classic", "used": "classic", "fallback": None}
 
@@ -791,9 +791,11 @@ def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
     assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras"]
     for s in r["steps"]:
         assert set(s) == STEP_KEYS and s["seconds"] > 0 and s["peak_memory_mb"] > 0
-    # the matching with the engine of the run (auto, the default: classic until the native matching has passed its
-    # gate), the alignment classic by the bench's own word
-    assert r["steps"][0]["engine"] == {"requested": "auto", "used": "classic", "fallback": None}
+    # the matching with the engine of the run (auto, the default: the native engine since the native matching passed
+    # its gate, the classic one where the native core is missing), the alignment classic by the bench's own word
+    native = _native.native_match_kernels() is not None
+    used = "native" if native else "classic"
+    assert r["steps"][0]["engine"] == {"requested": "auto", "used": used, "fallback": None}
     assert r["steps"][1]["engine"] == CLASSIC
     assert {"features", "pairs"} <= set(r["steps"][0]["stages"]) and isinstance(r["steps"][1]["stages"], dict)
     assert r["set"] == {"photos": 14, "bytes": sum(p.stat().st_size for p in small_set.iterdir()), "online_only": 0,
@@ -806,16 +808,22 @@ def test_a_small_run_writes_one_record(small_set, tmp_path, monkeypatch):
     assert r["results"]["tie_points_per_photo"] > 100 and r["results"]["tie_points_per_photo"] == \
         round(r["results"]["tie_points_per_photo"], 1)
     assert list(r["settings"]) == SETTINGS
-    # pairs: None when every pair of a small set is matched on the CPU alone (no GPU, as on the CI runners): the
-    # exhaustive matching of COLMAP lists no pairs (engine/sfm.py, the pair step of match_photos)
+    # pairs: None when every pair of a small set is matched on the CPU alone by the classic engine (no GPU, as on the
+    # CI runners): the exhaustive matching of COLMAP lists no pairs (engine/sfm.py, the pair step of match_photos)
     pairs = r["settings"]["pairs"]
     assert r["settings"]["quality"] == "high" and (pairs is None or pairs > 0) and r["settings"]["mapper"]
     # the mapper asked for (the default) beside the one the run used: auto picks incremental on 14 photos without GPS
     assert r["settings"]["mapper_requested"] == "auto" and r["settings"]["mapper"] == "incremental"
-    # the engine asked for beside what the record of the matching says: the classic record names no engine, its
-    # features cpu or gpu, no routes (those are the native matching's)
-    assert r["settings"]["engine_requested"] == "auto" and r["settings"]["engine"] is None
-    assert r["settings"]["features"] in ("cpu", "gpu") and r["settings"]["routes"] is None
+    # the engine asked for beside what the record of the matching says: the native record names its engine, where
+    # the points were found and the routes of the pairs; the classic record names no engine, its features cpu or
+    # gpu, no routes
+    assert r["settings"]["engine_requested"] == "auto"
+    if native:
+        assert r["settings"]["engine"] == "native" and r["settings"]["features"] in ("cpu", "gpu", "gpu+cpu")
+        assert sum(r["settings"]["routes"].values()) > 0
+    else:
+        assert r["settings"]["engine"] is None
+        assert r["settings"]["features"] in ("cpu", "gpu") and r["settings"]["routes"] is None
     assert r["settings"]["max_ratio"] == 0.8 and r["settings"]["cross_check"] is True
     assert isinstance(r["settings"]["pycolmap"], str) and r["settings"]["pycolmap"]
     assert r["settings"]["photo_cache_mb"] is None and r["settings"]["georeferencing"] is None
@@ -836,7 +844,8 @@ def test_a_match_run_on_the_small_set_matches_and_stops(small_set, tmp_path):
     out = tmp_path / "out"
     r = the_record(out, runner.run(small_set, out, name="t", steps="match"))
     assert [s["step"] for s in r["steps"]] == ["match_photos"] and r["error"] is None
-    assert r["steps"][0]["engine"] == {"requested": "auto", "used": "classic", "fallback": None}
+    used = "native" if _native.native_match_kernels() is not None else "classic"  # auto: native since its gate
+    assert r["steps"][0]["engine"] == {"requested": "auto", "used": used, "fallback": None}
     assert list(r["results"]) == ["verified_pairs"] and 14 <= r["results"]["verified_pairs"] <= 91
     assert r["settings"]["engine_requested"] == "auto" and r["settings"]["mapper"] is None  # no alignment ran
     assert list(r["settings"]) == SETTINGS and r["valid"] == (r["invalid_reasons"] == [])

@@ -138,6 +138,23 @@ def test_the_robust_check_of_the_photos_in_common():
     assert not ran and keep.all()
 
 
+def test_the_robust_check_is_not_fooled_by_photos_on_a_line():
+    """Most of the photos in common on one strip (a nadir row) and two beside it, one of the strip absurd: a triple of
+    the strip fits the photos of the strip almost exactly and leaves the turn about it free, so its median residual
+    can beat that of every triple that holds the block, the check then keeps the strip alone, a line, and could not
+    judge (an absurd photo kept: the trench of test_align_cameras_leaves_out_an_absurd_photo, now and then). Triples
+    close to a line are not tried, as the photos the check keeps must not lie on one."""
+    turn = np.array([[np.cos(0.4), -np.sin(0.4), 0.0], [np.sin(0.4), np.cos(0.4), 0.0], [0.0, 0.0, 1.0]])
+    for seed in range(200):
+        rng = np.random.default_rng(seed)
+        strip = np.column_stack([np.arange(5.0), np.zeros(5), np.zeros(5)]) + rng.normal(0, 0.02, (5, 3))
+        src = np.vstack([strip, [[0.5, 3.0, 0.2], [3.5, 3.0, -0.3]]])
+        dst = 1.7 * src @ turn.T + [10.0, -4.0, 2.0] + rng.normal(0, 5e-4, (7, 3))
+        src[3] += [1000.0, 0.0, 0.0]
+        keep, ran = chunks_mod.robust_inliers(src, dst)
+        assert ran and list(np.flatnonzero(~keep)) == [3], seed
+
+
 @pytest.mark.slow
 def test_a_robust_check_that_cannot_run_is_said(doc, monkeypatch, caplog):
     import logging

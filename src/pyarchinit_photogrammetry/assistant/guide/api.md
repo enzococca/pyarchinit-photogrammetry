@@ -143,27 +143,35 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 ### The native matching
 
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
-`auto` stays the classic engine until the native matching has passed its gate) does the step with the
-native engine of the core (`engine.native_match`, `ppg_core` API 14): its own SIFT (following VLFeat's,
-as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
+`auto`, the default, is the native engine for this step since it passed its gate - the classic one for the
+alignment and the depth maps) does the step with the native engine of the core (`engine.native_match`,
+`ppg_core` API 15): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
 `database.db` as the classic step writes it, so `align_cameras` runs the classic mapper on it. The
 arguments are those of the classic step; `guided_matching` is ignored (the native matching always
-follows the epipolar lines).
+follows the epipolar lines). `PPG_RANSAC_SEED` (the seed of COLMAP's geometric verification, `ppg bench run
+--seed`) applies to the classic matching only: the native step does not read it.
 
 When the native engine cannot do the step - the core missing, switched off (`PPG_NATIVE=0`) or older
-than API 14, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
+than API 15, a learned `matcher`, rigs of 360-degree photos, processing nodes, a camera model it does
 not know - or fails half way, the classic step runs with the same arguments, a line in the log says
-why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. A cancel
-and a full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it
-(the system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was.
+why, and `meta["engine"]["match_photos"]` keeps `requested`, `used` and the `fallback` reason. With
+`auto` a request the native engine does not take (the list above, not a failure) is the program's
+choice of the classic step: no reason kept, and no line in the log but one INFO line when the core is
+missing, switched off or too old (`switch.decline`). A cancel and a
+full disk stop the step instead: a full disk is an `OSError` of ENOSPC whichever layer says it (the
+system, sqlite, pycolmap; `native_match.disk_full`), and the project is left as it was. So does a
+request the step refuses - an `apply_masks`, a preselection or a number of neighbours it does not take, a
+reference preselection that finds no pairs, a chunk without enabled photos or not in a project: the
+caller gets the error the classic step gives, whichever engine runs, before any point is detected.
 
 `meta["sfm"]` has the keys of the classic record plus `engine` (`native`), `features` (`gpu`, `cpu` or
 `gpu+cpu`: who detected the points), `routes` (the pairs by route: `guided`, `brute_force`,
 `dropped`), `preselection_size` and the settings read from the environment (`native_dct`,
-`native_guided`, `native_guided_ratio`, `native_guided_band`, below; a benchmark record keeps them); `gpu`
+`native_guided`, `native_guided_ratio`, `native_guided_band`, `native_guided_check`, below; a benchmark record
+keeps them); `gpu`
 and the keys of `gpu_shares` name the adapters as the classic record does, `gpu_shares`, `gpu_pairs` and `cpu_pairs` count the pairs whose first stage each did (with a GPU the CPU threads take their first stage from it, so `cpu_pairs` counts the pairs of a GPU lost or of none). `meta["timings"]["match_photos"]` has the stages `features`,
 `preselection`, `pairs` and `export`.
 
@@ -171,13 +179,19 @@ Environment variables: `PPG_NATIVE_DCT=1` decodes a JPEG at the DCT scale its re
 chosen for the larger of its two reductions - the matching's and the preselection's - so that one
 decoding gives both (by default every JPEG is decoded whole and reduced as COLMAP reduces it: the DCT
 scale is a little faster but gives another raster and fewer tie points); `PPG_NATIVE_CPU_SHARE=0` leaves the photos
-and the pairs to the GPUs when there is one (by default the CPU threads work beside them: on the pairs they do the second stage and the verification, with the first stage from the GPU). Three tune the second stage of a pair, the matching along
+and the pairs to the GPUs when there is one (by default the CPU threads work beside them: on the pairs they do the second stage and the verification, with the first stage from the GPU). Four tune the second stage of a pair, the matching along
 the epipolar lines of the model of the first: `PPG_NATIVE_GUIDED=0` matches the trusted pairs point
 against point instead (the first stage still decides which pairs are trusted, kept or dropped),
 `PPG_NATIVE_GUIDED_RATIO` (a number above 0, at most 1; by default 0.6: a point there is
 compared with fewer points than in the first stage) is the ratio test of the second, where a point is compared only with the points of its band, and
 `PPG_NATIVE_GUIDED_BAND` (above 0; by default 1.0) is the half-width of the band as a multiple of the
-verification's threshold. A value that is not one stops the step with an error naming the variable. A GPU lost in the middle of the step gives its work back
+verification's threshold, and `PPG_NATIVE_GUIDED_CHECK=0` (for trials; on by default) leaves out the
+check of the second stage: a match must also pass the first stage's ratio test (0.8) against the rival
+each of its points had in the first stage, over the whole photo (every point of a photo with at most
+8,000; its largest scales otherwise), so that a candidate alone in its band whose descriptor has a twin
+elsewhere - a repetitive texture, which the verification cannot refuse along the line and which becomes a
+tie point at the wrong depth - is not matched. Stores made without the check are not continued
+(`reset=False` matches every photo again). A value that is not one stops the step with an error naming the variable. A GPU lost in the middle of the step gives its work back
 to the others; when it was the last one, the CPU takes what is left, also with `PPG_NATIVE_CPU_SHARE=0`.
 A photo or a pair that fails on a device and then on the CPU too is given up (the photo without points, the pair dropped)
 with a line in the log. A photo whose reduction - or whose preselection image - is under 8 x 8 pixels

@@ -1044,7 +1044,7 @@ fn distance(score: u32) -> f32 {
     (score as f32 / (512.0 * 512.0)).min(1.0).acos()
 }
 
-fn passes(best: u32, second: u32, max_ratio: f32, max_distance: f32) -> bool {
+pub(crate) fn passes(best: u32, second: u32, max_ratio: f32, max_distance: f32) -> bool {
     let d1 = distance(best);
     d1 <= max_distance && d1 < max_ratio * distance(second)
 }
