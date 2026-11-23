@@ -598,6 +598,8 @@ class FrameSurface:
         self.shape = (int(np.ceil((self.origin[1] - v0) / resolution)) + 1,
                       int(np.ceil((u1 - self.origin[0]) / resolution)) + 1)
         self._inv = np.linalg.inv(chunk.transform)
+        self._reach = (np.zeros(0), np.zeros(0), np.zeros(0))  # u in order, how far the frame goes behind, in front
+        self._reach_lock = threading.Lock()
 
     def cell_uv(self, r0: int, c0: int, th: int, tw: int):
         cc, rr = np.meshgrid(np.arange(tw), np.arange(th))
@@ -616,8 +618,34 @@ class FrameSurface:
         u = np.asarray(u, np.float64)
         lo, hi = np.full(u.shape, self.dmin), np.full(u.shape, self.dmax)
         if hasattr(self.frame, "max_depth_at"):
-            lo, hi = np.maximum(lo, self.frame.min_depth_at(u)), np.minimum(hi, self.frame.max_depth_at(u))
+            behind, front = self._frame_reach(u)
+            lo, hi = np.maximum(lo, behind), np.minimum(hi, front)
         return lo, hi
+
+    def _frame_reach(self, u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``min_depth_at`` and ``max_depth_at`` of the frame at each ``u``, each value of ``u`` asked of the frame
+        once and kept: the columns of a grid come back tile after tile, and again for the relief after the
+        orthophoto, and the frame finds each limit by bisection. NaN for a ``u`` that is not a number."""
+        values, inverse = np.unique(u.ravel(), return_inverse=True)
+        behind, front = np.full(len(values), np.nan), np.full(len(values), np.nan)
+        finite = np.isfinite(values)
+        want = values[finite]
+        with self._reach_lock:  # the tiles are made by several threads
+            known, kept_behind, kept_front = self._reach
+            at = np.searchsorted(known, want)
+            new = np.ones(len(want), bool)
+            inside = at < len(known)
+            new[inside] = known[at[inside]] != want[inside]
+            if new.any():
+                where, asked = at[new], want[new]
+                known = np.insert(known, where, asked)
+                kept_behind = np.insert(kept_behind, where, self.frame.min_depth_at(asked))
+                kept_front = np.insert(kept_front, where, self.frame.max_depth_at(asked))
+                self._reach = (known, kept_behind, kept_front)
+                at = np.searchsorted(known, want)
+            behind[finite], front[finite] = kept_behind[at], kept_front[at]
+        inverse = np.ravel(inverse)
+        return behind[inverse].reshape(u.shape), front[inverse].reshape(u.shape)
 
     def depth_at(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
         """Depth ``d`` of the surface at frame points ``(u, v)`` (NaN where no surface in the band, and where

@@ -202,6 +202,18 @@ def test_the_band_follows_the_limits_of_the_frame(tmp_path):
     well = E.FrameSurface(ch, rc, E.Cylinder([a[0] - 1.0, a[1] + 1.0, 0.0], [0, 0, 1], 0.8, inside=True), RES, lock,
                           (-0.5, 2.0), (0.0, 100.0, 1.0, 101.0))
     assert np.array_equal(well.band(np.array([0.3]))[1], [0.8])     # from inside a ray starts on the axis at most
+    # each u is asked of the frame once: the columns of a grid come back tile after tile, and for the relief
+    asked = []
+    limit = frame.max_depth_at
+    frame.max_depth_at = lambda u: (asked.append(len(u)), limit(u))[1]
+    grid = E.FrameSurface(ch, rc, frame, RES, lock, (-0.5, 0.5), (0.0, 100.0, frame.length, 102.0))
+    first = grid.tile(0, 300, 20, 64)
+    assert asked == [64] and np.array_equal(grid.tile(0, 300, 20, 64), first, equal_nan=True) and asked == [64]
+    grid.tile(10, 332, 20, 64)
+    assert asked == [64, 32]                                         # the 32 columns that are new
+    lo, hi = grid.band(np.array([mid, 1.0, np.nan, mid]))            # in any order, twice, not a number
+    assert np.allclose(hi[[0, 1, 3]], [0.5 - CLEARANCE, 0.5, 0.5 - CLEARANCE], atol=1e-6) and np.isnan(hi[2])
+    assert asked == [64, 32, 2] and np.allclose(lo[[0, 1, 3]], -0.5) and np.isnan(lo[2])
 
 
 def test_u_is_the_length_on_the_face(model):
