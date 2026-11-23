@@ -631,7 +631,11 @@ averages the rotations, establishes the tracks (`tiepoint_limit / 4` per photo, 
 global mapper), positions the cameras - on the GPS of the photos when three of them or more have one, on the
 same metric axes less a round offset as the pose priors of the classic engine; frame `gnss` when the positions
 orient the block, `similarity` when they spread too little for their accuracy and only place it, `free` without
-them - and adjusts the block in rounds (focal length and radial distortion freed from the second). The model is
+them - and adjusts the block in rounds (focal length and radial distortion freed from the second, only where the
+block determines them: a camera whose focal length has a posterior sd above 0.5 % after the first round - a flat
+nadir block, which cannot tell its focal length from its height - keeps its calibration held, as does one whose
+focal length a freed round moves by more than 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` and the
+notes say so). The model is
 written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, stays the
 classic alignment until the native one has passed its gate.
 

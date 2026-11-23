@@ -652,7 +652,10 @@ media le rotazioni, stabilisce le tracce (`tiepoint_limit / 4` per foto, almeno 
 classico), posiziona le camere - sul GPS delle foto quando almeno tre ce l'hanno, sugli stessi assi metrici
 meno un offset tondo dei prior di posa del motore classico; sistema `gnss` quando le posizioni orientano il
 blocco, `similarity` quando si spargono troppo poco per la loro accuratezza e lo collocano soltanto, `free`
-senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo). Il modello viene
+senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo, solo dove il blocco le determina: una camera la
+cui focale ha uno scarto a posteriori sopra lo 0,5 % dopo il primo turno - un blocco nadirale piatto, che non
+distingue la focale dalla quota - tiene la calibrazione ferma, come una la cui focale un turno libero sposta di
+più del 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` e le note lo dicono). Il modello viene
 scritto nel formato di COLMAP e l'allineamento prosegue come con i mapper classici. `auto`, il predefinito,
 resta l'allineamento classico finché quello nativo non ha superato il suo collaudo.
 
