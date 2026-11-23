@@ -32,24 +32,28 @@ K1, K2 = -0.05, 0.01
 ORIGIN = np.array([500000.0, 4500000.0, 60.0])  # the internal frame is the projected system less this
 
 
-def _look_down(yaw: float) -> np.ndarray:
-    """world -> camera of a photo looking straight down, turned by ``yaw``."""
+def _look_down(yaw: float, pitch: float = 0.0) -> np.ndarray:
+    """world -> camera of a photo looking straight down, turned by ``yaw`` and leaning forward by ``pitch``."""
     down = np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]])
     c, s = np.cos(yaw), np.sin(yaw)
-    return np.array([[c, s, 0], [-s, c, 0], [0, 0, 1.0]]) @ down
+    turned = np.array([[c, s, 0], [-s, c, 0], [0, 0, 1.0]]) @ down
+    c, s = np.cos(pitch), np.sin(pitch)
+    return np.array([[c, 0, s], [0, 1.0, 0], [-s, 0, c]]) @ turned
 
 
-def _rtk_block(folder, seed: int = 0, accuracy=(0.02, 0.02, 0.02), status: str | None = "fix"):
+def _rtk_block(folder, seed: int = 0, accuracy=(0.02, 0.02, 0.02), status: str | None = "fix", pitch: float = 0.0):
     """A drone block as an alignment leaves it: 5 strips of 8 nadir photos 40 m above ground with 3 dm of relief
     (EPSG:32632 less :data:`ORIGIN`), its COLMAP model (6000 points, observations with 0.5 px of noise, the radial
     distortion of the lens) and every photo with a position 1 cm (per axis) off its camera, of the given accuracy
-    and RTK ``status``. Returns the document and the chunk."""
+    and RTK ``status``. ``pitch``: the photos lean forward by so many radians (a gimbal pitched on a flight flown
+    one way and back: the strips look opposite ways, which tells the focal length from the height). Returns the
+    document and the chunk."""
     rng = np.random.default_rng(seed)
     rotations, centres = [], []
     for row in range(5):
         xs = (np.arange(8) - 3.5) * 8.0
         for x in (xs if row % 2 == 0 else xs[::-1]):  # flown one way and back
-            rotations.append(_look_down(np.pi * (row % 2)))
+            rotations.append(_look_down(np.pi * (row % 2), pitch))
             centres.append([x, (row - 2) * 12.0, 40.0])
     xy = rng.uniform([-52.0, -45.0], [52.0, 45.0], (6000, 2))
     points = np.column_stack([xy, 0.3 * np.sin(xy[:, 0] / 15.0) + 0.2 * np.cos(xy[:, 1] / 11.0)])
@@ -250,7 +254,7 @@ def test_unconstrained_bend_is_reverted(tmp_path, monkeypatch, caplog, gnss):
         return _BendingAdjuster(rec)
 
     if gnss == "off":
-        monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+        monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _dome(rec))
     else:
         monkeypatch.setattr(pycolmap, "create_pose_prior_bundle_adjuster", adjuster)
     with caplog.at_level(logging.WARNING):
@@ -279,14 +283,16 @@ def test_unconstrained_bend_is_reverted(tmp_path, monkeypatch, caplog, gnss):
 def test_gnss_off_keeps_todays_behaviour(tmp_path, monkeypatch):
     """``gnss="off"`` is the adjustment of before: COLMAP's free bundle adjustment, never the pose-prior one. On
     photos whose positions are not accurate (a drone without RTK: 5/5/10 m) the default is the same, with the same
-    result, and there is nothing for the safety net to judge."""
+    result, and there is nothing for the safety net to judge. The calibration is refined here whatever the block
+    determines (``hold_undetermined=False``, the optimisation of before): looking straight down over flat ground
+    this block does not determine it, and the default holds it (tests/test_optimize_undetermined.py)."""
     doc, ch = _rtk_block(tmp_path / "rtk")
     built, free = [], []
     real_adjuster, real_free = pycolmap.create_pose_prior_bundle_adjuster, pycolmap.bundle_adjustment
     monkeypatch.setattr(pycolmap, "create_pose_prior_bundle_adjuster",
                         lambda *args: built.append(1) or real_adjuster(*args))
     monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda *args, **kwargs: free.append(1) or real_free(*args, **kwargs))
-    ch.optimize_cameras(gnss="off")
+    ch.optimize_cameras(gnss="off", hold_undetermined=False)
     assert built == [] and free == [1]
     rep = ch.meta["sfm"]["optimize"]
     gnss = rep.get("gnss") or rep["undone"]["gnss"]  # a free adjustment that bent the block is undone
@@ -301,7 +307,7 @@ def test_gnss_off_keeps_todays_behaviour(tmp_path, monkeypatch):
     names = ch.meta["sfm"]["names"]
     built.clear()
     free.clear()
-    ch.optimize_cameras()
+    ch.optimize_cameras(hold_undetermined=False)
     assert built == [] and free == [1]
     rep = ch.meta["sfm"]["optimize"]
     assert rep["gnss"] == {"mode": "auto", "photos": 0, "states": {}} and rep["focal_held"] is None
@@ -332,7 +338,7 @@ def test_cli_optimize_gnss_option(tmp_path, monkeypatch):
     assert np.abs(_offsets(saved)[:, 2]).max() <= 0.05
 
     with monkeypatch.context() as bending:  # an optimisation the net undoes: the way out, in English
-        bending.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+        bending.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _dome(rec))
         result = run(app, ["optimize", str(doc.path), "--gnss", "off"])
     assert result.exit_code == 0, result.output
     said = " ".join(result.output.split())
@@ -439,7 +445,7 @@ def test_dialog_says_how_many_photos_hold_the_block(tmp_path, monkeypatch):
         assert "blocco tenuto dalle posizioni GNSS di 40 foto (fix)" in log
         assert "scarto delle camere dalle posizioni GNSS" in log and not warned
         # a free adjustment that bends the block: the alignment of before comes back, the window says so
-        monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+        monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _dome(rec))
         answer["gnss"] = "off"
         w.optimize_cameras()
         w.runner.wait()
@@ -486,18 +492,25 @@ def test_control_points_in_another_height_datum_are_kept(tmp_path):
     """Control points whose heights are 30 m off the GNSS heights of the photos (orthometric against ellipsoidal):
     the optimisation on them fits a new georeference, 30 m higher, and the safety net judges the shape of the block
     against its positions (``placed``), so it does not undo a sound optimisation. The fixed points hold the block,
-    so the GNSS positions take no part - the dialog's verdict and the engine's agree."""
+    so the GNSS positions take no part - the dialog's verdict and the engine's agree. The control points lie on
+    the flat ground the photos look straight down on: they do not tell the focal length from the height either,
+    and the calibration of the alignment is kept."""
     doc, ch = _rtk_block(tmp_path)
     _add_control_points(ch, height_offset=30.0)
     assert sfm.fixed_points_hold(ch) and sfm.gnss_hold(ch)["why"] == "markers"
-    lifted = ch.transform[2, 3]
+    lifted, heights = ch.transform[2, 3], _world_centres(ch)[:, 2]
     ch.optimize_cameras()
     rep = ch.meta["sfm"]["optimize"]
     assert rep["reverted"] is False, rep["camera_offsets"]
     assert rep["camera_offsets"]["placed"] is True and rep["camera_offsets"]["after"] < 0.05, rep["camera_offsets"]
     assert rep["control_points"] == 5 and rep["after"]["control"] < 0.01
-    assert rep["gnss"]["photos"] == 0 and rep["focal_held"] is None
-    assert ch.transform[2, 3] - lifted == pytest.approx(30.0, abs=0.05)  # the new georeference stays
+    assert rep["gnss"]["photos"] == 0
+    if rep["intrinsics"]["checked"]:  # the calibration kept: the cameras rise with the control points, 30 m
+        assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+        assert float(np.mean(_world_centres(ch)[:, 2] - heights)) == pytest.approx(30.0, abs=0.05)
+    else:  # without the core that judges the block the focal length is refined, and slides with the height
+        assert rep["focal_held"] is None
+        assert ch.transform[2, 3] - lifted == pytest.approx(30.0, abs=0.05)  # the new georeference stays
 
 
 def test_everything_the_optimisation_changed_is_put_back(tmp_path, monkeypatch):
@@ -521,7 +534,7 @@ def test_everything_the_optimisation_changed_is_put_back(tmp_path, monkeypatch):
         for cam in ch.cameras:
             cam.meta["rolling_shutter"] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", everything)
+    monkeypatch.setattr(sfm, "_adjust", everything)
     ch.optimize_cameras(use_markers=False, gnss="off")
     assert ch.meta["sfm"]["optimize"]["reverted"] is True
     assert ch.crs == kept["crs"] and np.allclose(ch.transform, kept["transform"])
@@ -550,7 +563,7 @@ def test_a_cancelled_optimisation_puts_the_alignment_back(tmp_path, monkeypatch)
         _dome(rec)
         running["progress"].cancel()  # pressed while the adjustment ran: the next report of progress stops the step
 
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", bend_then_cancel)
+    monkeypatch.setattr(sfm, "_adjust", bend_then_cancel)
     for previous in (None, {"reprojection_error": 0.5, "control_points": 0, "steps": 0}):
         if previous is not None:
             ch.meta["sfm"]["optimize"] = dict(previous)
@@ -572,7 +585,7 @@ def test_a_copy_that_cannot_be_made_leaves_nothing(tmp_path, monkeypatch):
     doc, ch = _rtk_block(tmp_path)
     model = _model_centres(ch)
     ran = []
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda *args, **kwargs: ran.append(1))
+    monkeypatch.setattr(sfm, "_adjust", lambda *args, **kwargs: ran.append(1))
 
     def half_copy(src, dst, *args, **kwargs):
         (dst / "cameras.bin").parent.mkdir(parents=True)
@@ -640,8 +653,10 @@ def test_bias_mode_judges_each_position_less_the_bias_of_its_flight(tmp_path, mo
 
 def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     """Our adjustment under ``gnss="auto"``: the accurate positions hold the block with the focal length of the
-    alignment kept, as with COLMAP; ``"plain"`` asked for refines it; with fixed points (the same rule as the
-    dialog's) the positions take no part."""
+    alignment kept, as with COLMAP; ``"plain"`` asked for leaves it to the adjustment, which refines it where the
+    block determines it - this one, looking straight down over flat ground, does not, and keeps its calibration
+    unless ``hold_undetermined=False`` says to refine it whatever the block determines; with fixed points (the same
+    rule as the dialog's) the positions take no part."""
     from pyarchinit_photogrammetry.engine import bundle
 
     seen = []
@@ -658,16 +673,22 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     assert rep["gnss"]["mode"] == "plain" and rep["gnss"]["photos"] == 40
     assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS
     assert seen[-1].free_intrinsics[0] == [4, 5, 6, 7]  # OPENCV: the distortion refined, fx, fy (and cx, cy) held
-    ch.optimize_cameras(engine="ppg", gnss="plain")
+    ch.optimize_cameras(engine="ppg", gnss="plain", hold_undetermined=False)
     rep = ch.meta["sfm"]["optimize"]
     assert rep["focal_held"] is None and seen[-1].free_intrinsics[0] == [0, 1, 4, 5, 6, 7]
+    checked = bundle.variances_ready(seen[-1]) is None  # the core that judges the block is there
+    ch.optimize_cameras(engine="ppg", gnss="plain")
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["intrinsics"]["checked"] is checked
+    assert rep["focal_held"] == (sfm.FOCAL_HELD_UNDETERMINED if checked else None)
+    assert seen[-1].free_intrinsics[0] == ([] if checked else [0, 1, 4, 5, 6, 7])
 
     _add_control_points(ch)
     assert sfm.gnss_hold(ch)["why"] == "markers"
-    ch.optimize_cameras(engine="ppg")
+    ch.optimize_cameras(engine="ppg", hold_undetermined=False)
     rep = ch.meta["sfm"]["optimize"]
     assert rep["gnss"]["mode"] == "off" and rep["gnss"]["photos"] == 0 and rep["focal_held"] is None
-    assert seen[-1].gnss == [] and len(seen[-1].gcps) == 5
+    assert seen[-1].gnss == [] and len(seen[-1].gcps) == 5 and seen[-1].free_intrinsics[0] == [0, 1, 4, 5, 6, 7]
 
 
 @pytest.mark.parametrize("solver", SOLVERS)
@@ -736,7 +757,7 @@ def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):
     assert ("Focale dell'allineamento tenuta", "no") in rows(ch, "it")
 
     kept = _mean_reprojection_error(ch)
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _dome(rec))
+    monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _dome(rec))
     ch.optimize_cameras(gnss="off")
     english = rows(ch, "en")
     assert [label for label, _value in english] == ["Reprojection error (px)", "Undone by the safety net"]
@@ -765,7 +786,7 @@ def test_a_negligible_drift_is_not_followed(tmp_path, monkeypatch):
     stay as they were."""
     doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
     transform = ch.transform.copy()
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _tiny(rec))
+    monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _tiny(rec))
     ch.optimize_cameras()
     assert ch.meta["sfm"]["optimize"]["internal_frame"]["followed"] is False
     assert np.array_equal(ch.transform, transform)
@@ -787,7 +808,7 @@ def test_products_after_a_followed_frame(tmp_path, monkeypatch, caplog):
     ch.meta["built_in"]["orthomosaic"] = old.tolist()
     ch.meta["built_in"]["orthomosaic"][0][3] += 5.0  # built in another transform: stale
     ch.meta["relief"] = {"hillshade": stamps.stamp_entry(ch, {"file": "relief.tif"})}
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _drift(rec))
     with caplog.at_level(logging.WARNING):
         ch.optimize_cameras()
     assert not np.allclose(ch.transform, old)
@@ -835,7 +856,7 @@ def test_an_undone_bend_after_a_followed_frame_puts_the_drawings_back(tmp_path, 
     doc, ch = _rtk_block(tmp_path)
     free_drawings.add(ch, "line", [[500000.0, 4500000.0, 60.0], [500010.0, 4500000.0, 60.0]])
     drawings = json_copy(ch.meta["drawings"])
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: (_drift(rec, 1.5), _dome(rec)))
+    monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: (_drift(rec, 1.5), _dome(rec)))
     ch.optimize_cameras(gnss="off")
     rep = ch.meta["sfm"]["optimize"]
     assert rep["reverted"] is True and rep["undone"]["internal_frame"]["followed"] is True
@@ -855,7 +876,7 @@ def test_a_drifting_free_adjustment_leaves_the_cameras_in_place(tmp_path, monkey
     by how much the frame changed (without it the photos were out of place until ``update_transform``)."""
     doc, ch = _rtk_block(tmp_path, accuracy=(5.0, 5.0, 10.0), status=None)
     before = _world_centres(ch)
-    monkeypatch.setattr(pycolmap, "bundle_adjustment", lambda rec, *args, **kwargs: _drift(rec))
+    monkeypatch.setattr(sfm, "_adjust", lambda rec, *args, **kwargs: _drift(rec))
     ch.optimize_cameras()
     assert np.abs(_world_centres(ch) - before).max() < 1e-6
     frame = ch.meta["sfm"]["optimize"]["internal_frame"]

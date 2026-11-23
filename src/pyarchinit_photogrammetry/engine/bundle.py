@@ -656,6 +656,25 @@ def intrinsics_variances(pb: Problem, loss: str = "none", loss_scale: float = 1.
     return [np.asarray(v, float) for v in fn(_to_native(pb), loss, float(loss_scale), flight)]
 
 
+def _free_intrinsics(pb: Problem) -> list:
+    """The free intrinsics of each camera of ``pb`` (every parameter when the problem names none)."""
+    return pb.free_intrinsics if pb.free_intrinsics is not None else [list(range(len(c[1]))) for c in pb.cameras]
+
+
+def focal_free(pb: Problem) -> list[bool]:
+    """Per camera of ``pb``, whether an adjustment of it refines its focal length (fx or fy of a model with two)."""
+    free = _free_intrinsics(pb)
+    return [any(k in _focal_indices(model) for k in free[c]) for c, (model, *_rest) in enumerate(pb.cameras)]
+
+
+def focal_move(model: str, start, end) -> float:
+    """The largest share by which a focal length of a camera of ``model`` moved from the parameters ``start`` to
+    ``end`` (fx and fy of a model with two); infinite when one of them is not a number."""
+    index = list(_focal_indices(model))
+    share = np.abs(np.asarray(end, float)[index] / np.asarray(start, float)[index] - 1.0)
+    return float(share.max()) if np.all(np.isfinite(share)) else float("inf")
+
+
 def tie_variance_factor(pb: Problem) -> float:
     """The variance factor of the tie points of ``pb`` at the parameters it holds: ``v^T P v / r`` of their own
     residuals (in units of ``pixel_sigma``), ``r`` their rows less the unknowns they determine - six per free
@@ -710,7 +729,7 @@ def focal_sds(pb: Problem) -> tuple[list, float | None]:
     free: the core is not asked). RuntimeError where the core cannot give the variances
     (:func:`variances_ready`) or the normal matrix cannot be inverted (an intrinsic the block does not hold at
     all: photos looking straight down on flat ground)."""
-    free = pb.free_intrinsics if pb.free_intrinsics is not None else [list(range(len(c[1]))) for c in pb.cameras]
+    free = _free_intrinsics(pb)
     columns = [[j for j, k in enumerate(free[c]) if k in _focal_indices(model)]
                for c, (model, *_rest) in enumerate(pb.cameras)]
     if not any(columns):

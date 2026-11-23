@@ -2705,6 +2705,10 @@ BEND_MARGIN_M = 0.3  # many times the offsets before, and this much more, is und
 # why optimize_cameras kept the focal length of the alignment: report["focal_held"] (None when it was refined)
 FOCAL_HELD_BY_POSITIONS = "the camera positions hold the block"
 FOCAL_HELD_NO_REFERENCES = "no references: the focal length cannot be told from the depth"
+FOCAL_HELD_UNDETERMINED = "the block does not determine the focal length"  # the check of _focal_check, or its guard
+# why that check asked nothing of the core though it was wanted (report["intrinsics"]["reason"]): the optimisation
+# refines no focal length (the positions hold the block, nothing places it, every calibration is fixed)
+FOCAL_NOT_REFINED = "no focal length is refined"
 
 
 def accurate_gnss(camera) -> bool:
@@ -3037,8 +3041,110 @@ def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: P
     return err
 
 
+def _camera_sensors(chunk: Chunk, rec, camera_ids) -> list:
+    """The key of the sensor of each COLMAP camera of ``camera_ids`` in ``rec`` (the sensor of its first photo in
+    the chunk; None for a camera no photo of the chunk uses)."""
+    names = {v: int(k) for k, v in chunk.meta["sfm"]["names"].items()}
+    sensors: dict[int, int] = {}
+    for image in rec.images.values():
+        key = names.get(image.name)
+        if key is not None and image.camera_id not in sensors:
+            sensors[image.camera_id] = int(chunk.camera(key).sensor_key)
+    return [sensors.get(c) for c in camera_ids]
+
+
+def _focal_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool) -> tuple[dict, dict]:
+    """The calibrations an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine:
+    the rule of the rounds of the native mapper, applied to the camera optimisation. The calibration of a camera
+    is refined only where the block determines it: the relative marginal sd of its focal length
+    (:func:`.bundle.focal_sds`: every intrinsic the adjustment frees free with it, the covariance scaled by the
+    variance factor of the tie points) must be within :data:`.bundle.FOCAL_SD_HOLD`, 0.5 %; a camera above it -
+    nadir photos over flat ground, which cannot tell the focal length from the height, whatever control points on
+    that ground say - or without a covariance at all keeps every intrinsic as the alignment left it. Nothing is
+    asked with ``hold_undetermined`` False (the calibrations are refined whatever the block determines), where
+    the adjustment refines no focal length (:data:`FOCAL_NOT_REFINED`), and where the core cannot give the
+    covariance (:func:`.bundle.variances_ready`: every calibration is refined as before, one line of the log at
+    INFO says that the check needs the native core).
+
+    Returns the record of the check, ``report["intrinsics"]`` of the optimisation - ``hold_undetermined``,
+    ``checked`` (the core was asked), ``reason`` (why not), ``variance_factor``, ``focal_sd`` ([sensor, sd] of
+    every camera whose focal length would be refined; sd None without a covariance), ``held`` (the sensors held)
+    and ``notes`` (``sensor 3: focal held: undetermined, sd 11.42 %``): numbers and fixed words, the key of a
+    sensor and never a name - and ``{index of the camera in pb: sensor}`` of the cameras to hold."""
+    from . import bundle
+
+    record = _check_record(hold_undetermined)
+    if not hold_undetermined:
+        return record, {}
+    refined = bundle.focal_free(pb)
+    if not any(refined):
+        record["reason"] = FOCAL_NOT_REFINED
+        return record, {}
+    reason = bundle.variances_ready(pb)
+    if reason is not None:
+        record["reason"] = reason
+        log.info("camera optimisation: every calibration is refined, whatever the block determines - the check of "
+                 "the focal lengths needs the native core (%s)", reason)
+        return record, {}
+    record["checked"] = True
+    sensors = _camera_sensors(chunk, rec, ids["cameras"])
+    try:
+        sds, factor = bundle.focal_sds(pb)
+        why = None
+    except RuntimeError as exc:  # no covariance: an intrinsic the block does not hold at all
+        sds, factor, why = [None] * len(pb.cameras), None, str(exc)
+    record["variance_factor"] = None if factor is None else float(factor)
+    held = {}
+    for c, free in enumerate(refined):
+        if not free:
+            continue
+        sd, missing = sds[c], why
+        if sd is not None and not np.isfinite(sd):
+            sd, missing = None, "the variance of the focal length is not a number"
+        record["focal_sd"].append([sensors[c], sd])
+        if sd is None:
+            note = f"focal held: undetermined, no covariance ({missing})"
+        elif sd > bundle.FOCAL_SD_HOLD:
+            note = f"focal held: undetermined, sd {100 * sd:.2f} %"
+        else:
+            continue
+        held[c] = sensors[c]
+        _hold_sensor(record, sensors[c], note)
+    return record, held
+
+
+def _check_record(hold_undetermined: bool, reason: str | None = None) -> dict:
+    """The record of a check of the focal lengths (:func:`_focal_check`) that asked nothing of the core."""
+    return {"hold_undetermined": bool(hold_undetermined), "checked": False, "reason": reason,
+            "variance_factor": None, "focal_sd": [], "held": [], "notes": []}
+
+
+def _hold_sensor(record: dict, sensor, note: str) -> None:
+    """``sensor`` among the sensors the check of :func:`_focal_check` holds, with its note (also in the log)."""
+    if sensor not in record["held"]:
+        record["held"].append(sensor)
+    record["notes"].append(f"sensor {sensor}: {note}")
+    log.info("camera optimisation: %s", record["notes"][-1])
+
+
+def _moved_note(share: float) -> str:
+    """The note of a camera held by the guard of :func:`_focal_check`: its focal length moved by ``share``."""
+    return f"focal held: moved {100 * share:.1f} % in the optimisation, run again with it held"
+
+
+def _focal_held(reason: str | None, record: dict) -> str | None:
+    """``report["focal_held"]`` of an optimisation whose check of the focal lengths is ``record``: the ``reason``
+    the optimisation already has, else :data:`FOCAL_HELD_UNDETERMINED` when that check held a sensor (with how
+    many of those it judged when it did not hold them all), else None."""
+    if reason is not None or not record["held"]:
+        return reason
+    held, judged = len(record["held"]), len(record["focal_sd"])
+    return FOCAL_HELD_UNDETERMINED if held >= judged else f"{FOCAL_HELD_UNDETERMINED} of {held} of {judged} sensors"
+
+
 def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gnss: str, rolling_shutter: bool,
-                  progress: Progress, hold_focal: bool = False, *, solver: str = "auto") -> float:
+                  progress: Progress, hold_focal: bool = False, *, solver: str = "auto",
+                  hold_undetermined: bool = True) -> float:
     """:func:`optimize_cameras` with our own adjustment (:mod:`.bundle`): control points weighted by
     their accuracy, scale bars as distances, GNSS positions of the photos (with a bias per flight),
     rolling shutter; ``hold_focal``: the focal length of the alignment kept (the positions hold the block).
@@ -3046,7 +3152,10 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     control points and fewer than three positions) the focal length is kept whatever was asked - photos of
     flat ground from one height cannot tell it from the depth, and the native solver walks that valley -
     and ``report["focal_held"]`` says why it was kept (None when it was refined); ``solver``: the one of
-    :func:`bundle.adjust` (``report["solver"]`` says which ran)."""
+    :func:`bundle.adjust` (``report["solver"]`` says which ran). ``hold_undetermined``: the calibration of a
+    camera is refined only where the block determines it (:func:`_focal_check`, ``report["intrinsics"]``), and
+    an adjustment that moves a focal length it refined by more than :data:`bundle.FOCAL_MOVE_HOLD` of its start
+    runs again from the same start with that camera held."""
     from ..markers import gcp
     from . import bundle
 
@@ -3066,7 +3175,21 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
         focal_held = FOCAL_HELD_NO_REFERENCES
     else:
         focal_held = FOCAL_HELD_BY_POSITIONS if hold_focal else None
-    res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
+    check, undetermined = _focal_check(chunk, rec, pb, ids, hold_undetermined)
+    while True:  # once, or again from the same start with the cameras whose focal length ran away held
+        for c in undetermined:
+            pb.free_intrinsics[c] = []
+        res = bundle.adjust(pb, max_iterations=200, progress=progress.sub(0.05, 0.85), solver=solver)
+        moved = {c: bundle.focal_move(pb.cameras[c][0], pb.cameras[c][1], res.camera_params[c])
+                 for c, free in enumerate(bundle.focal_free(pb)) if free} if check["checked"] else {}
+        moved = {c: share for c, share in moved.items() if share > bundle.FOCAL_MOVE_HOLD}
+        if not moved:
+            break
+        sensors = _camera_sensors(chunk, rec, ids["cameras"])
+        for c, share in moved.items():
+            undetermined[c] = sensors[c]
+            _hold_sensor(check, sensors[c], _moved_note(share))
+    focal_held = _focal_held(focal_held, check)
     bundle.write_back(chunk, rec, ids, res)
     rec.update_point_3d_errors()
     chunk._before_product_write("reconstruction")
@@ -3086,7 +3209,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
               "control_points": len(pb.gcps), "scale_bars": len(pb.bars), "gnss_positions": len(pb.gnss),
               "gnss_bias": {str(f): [float(v) for v in lin @ b] for f, b in res.bias.items()},
               "gnss": {"mode": gnss, "photos": len(held), "states": _gnss_states(held)},
-              "focal_held": focal_held}
+              "focal_held": focal_held, "intrinsics": check}
     if res.rolling_shutter is not None:
         speed = np.linalg.norm(lin @ res.rolling_shutter[:, :3].T, axis=0)
         report["rolling_shutter_m"] = {"median": float(np.median(speed)), "max": float(speed.max())}
@@ -3108,7 +3231,8 @@ def resolve_optimize_engine(engine: str) -> str:
 
 def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_markers: bool = True,
                      marker_weight: int = 4, progress: Progress | None = None, engine: str = "auto",
-                     gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto") -> float:
+                     gnss: str = "auto", rolling_shutter: bool = False, *, solver: str = "auto",
+                     hold_undetermined: bool = True) -> float:
     """Global bundle adjustment of poses, calibration and tie points.
 
     With ``use_markers`` the control points and the control scale bars take part in it, as in
@@ -3170,7 +3294,27 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     ``engine="auto"`` (the default, as for the other steps of the program): the formulation the program chooses,
     :data:`OPTIMIZE_AUTO_ENGINE` (COLMAP's until measurements say otherwise; the native solver is the default under
     ``"ppg"``), with the restrictions of the one it is; ``report["engine_choice"]`` says which was asked and which
-    ran."""
+    ran.
+
+    ``hold_undetermined`` (True by default, either engine): the calibration of a camera is refined only where the
+    block determines it, the rule of the rounds of the native mapper (:func:`_focal_check`). Before the first
+    adjustment the relative marginal sd of the focal length of every camera whose focal length would be refined is
+    taken from the covariance of the adjustment at the alignment - every intrinsic the options free free with it
+    (the distortion, the principal point when asked), the control points, the bars and the positions that take
+    part in it at their accuracy, scaled by the variance factor of the tie points; a camera whose sd is above
+    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %), or that has no covariance at all, keeps every intrinsic as the
+    alignment left it: nadir photos over flat ground cannot tell the focal length from the height, whatever
+    control points on that ground say, and an adjustment that refines it there slides along that trade (a ring
+    flown once over flat ground: the focal length ten times longer, the cameras 131 m higher, the check targets
+    0.6 m off). A focal length that the optimisation refined and moved by more than
+    :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its start has the optimisation run again from the start with that
+    camera held. ``report["intrinsics"]`` says what was judged, in numbers and by the key of each sensor
+    (``checked``, ``variance_factor``, ``focal_sd``, ``held``, ``notes``: ``sensor 0: focal held: undetermined, sd
+    11.42 %``; ``reason`` when nothing was asked: no focal length to refine, or a core that cannot give the
+    covariance - missing, older than API 17, a camera model it does not know: the calibration is then refined as
+    before and the log says so once), ``report["focal_held"]`` is then :data:`FOCAL_HELD_UNDETERMINED`.
+    ``hold_undetermined=False``: every calibration is refined as the other options say, whatever the block
+    determines (the optimisation of before)."""
     from .bundle import SOLVERS
 
     progress = as_progress(progress)
@@ -3196,9 +3340,10 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
                         _held_positions(chunk, chunk.aligned_cameras)[0])
                     mode, hold_focal = ("plain", True) if held else ("off", False)
                 err = _optimize_own(chunk, fit_principal_point, use_markers, mode, rolling_shutter, progress,
-                                    hold_focal=hold_focal, solver=solver)
+                                    hold_focal=hold_focal, solver=solver, hold_undetermined=hold_undetermined)
             else:
-                err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress)
+                err = _optimize_colmap(chunk, fit_principal_point, use_markers, marker_weight, gnss, progress,
+                                       hold_undetermined=hold_undetermined)
             chunk.meta.setdefault("sfm", {}).setdefault("optimize", {})["engine_choice"] = {"requested": requested,
                                                                                             "used": engine}
             _follow_internal_frame(chunk, frame)
@@ -3307,15 +3452,65 @@ FRAME_FOLLOW_TOL = 1e-6  # the frame is followed when its scale, rotation (rad) 
 INTERNAL_PRODUCTS = ("point_cloud", "model", "model_textured")  # products written in the internal frame of the chunk
 
 
+def _before_adjusting(chunk: Chunk) -> dict:
+    """What COLMAP's formulation changes in ``chunk`` before it writes the adjusted model (the georeference and
+    the markers fitted again after its free pass; the cameras, the calibration and the tie points, which are those
+    of the model on disk): kept for :func:`_back_to_the_start`."""
+    return {"transform": np.array(chunk.transform, float), "crs": chunk.crs, "levelled": "levelled" in chunk.meta,
+            "markers": {m.key: None if m.position is None else np.array(m.position, float) for m in chunk.markers}}
+
+
+def _back_to_the_start(chunk: Chunk, start: dict) -> None:
+    """``chunk`` as it was when :func:`_before_adjusting` kept ``start``: the cameras, the calibration and the tie
+    points from the model on disk (which an optimisation writes only at its end), the georeference and the markers
+    from ``start``."""
+    import_reconstruction(chunk, load_reconstruction(chunk))
+    chunk.transform = np.array(start["transform"], float)
+    chunk.crs = start["crs"]
+    if not start["levelled"]:
+        chunk.meta.pop("levelled", None)
+    for m in chunk.markers:
+        if m.key in start["markers"]:
+            m.position = start["markers"][m.key]
+
+
+def _colmap_focal_check(chunk: Chunk, rec, *, hold_undetermined: bool, refined: bool, use_markers: bool,
+                        fit_principal_point: bool, marker_weight: int) -> tuple[dict, dict]:
+    """:func:`_focal_check` for COLMAP's adjustment of ``rec`` (its cameras as that adjustment has them: one focal
+    length, :func:`_square_pixels`): on the problem of our own formulation that frees what COLMAP frees - the focal
+    length, the distortion and, when asked, the principal point of every camera that is not fixed -, with
+    ``use_markers`` the control points by their accuracy, the control bars and their measured markers, each
+    measurement weighing ``marker_weight`` tie point observations as COLMAP's fixed points do, without the
+    positions of the photos (where they hold the block the focal length is not refined: ``refined`` False, nothing
+    is asked). A reconstruction with rigs is not judged (the faces of 360-degree photos are fixed cameras).
+    Returns the record and ``{COLMAP camera: sensor}`` of the cameras to hold."""
+    from . import bundle
+
+    if not hold_undetermined:
+        return _check_record(False), {}
+    if not refined:
+        return _check_record(True, FOCAL_NOT_REFINED), {}
+    try:
+        pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss="off",
+                                            fit_principal_point=fit_principal_point)
+    except ValueError as exc:  # rigs: our formulation does not take them
+        return _check_record(True, str(exc)), {}
+    pb.marker_sigma = pb.pixel_sigma / float(np.sqrt(max(1, int(marker_weight))))
+    record, held = _focal_check(chunk, rec, pb, ids, True)
+    return record, {ids["cameras"][c]: sensor for c, sensor in held.items()}
+
+
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,
-                     progress: Progress) -> float:
-    """:func:`optimize_cameras` with COLMAP's adjustment."""
+                     progress: Progress, hold_undetermined: bool = True) -> float:
+    """:func:`optimize_cameras` with COLMAP's adjustment. ``hold_undetermined``: the calibration of a camera is
+    refined only where the block determines it (:func:`_colmap_focal_check`, once, before the first adjustment:
+    the cameras it holds are fixed cameras of every adjustment of the run, ``report["intrinsics"]``); a run that
+    moves a focal length it refined by more than :data:`.bundle.FOCAL_MOVE_HOLD` of its start is run again from
+    the start (:func:`_back_to_the_start`) with that camera held."""
     import pycolmap
 
     from ..markers import gcp
-
-    rec = load_reconstruction(chunk)
-    drop_missing_points(rec)  # models written from imported poses by earlier versions
+    from . import bundle
 
     def errors():
         out = {}
@@ -3332,62 +3527,87 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     bars = gcp.control_scalebars(chunk) if use_markers else []
     with_gcps = use_markers and len(controls) >= 3
     constrained = fixed_points_hold(chunk, use_markers)  # fewer control points do not place the chunk
-    if constrained:
-        gcp.update_transform(chunk)  # the reference coordinates and the bars in the internal frame
-    before = errors() if constrained else {}
-    priors, held = ([], []) if gnss == "off" or constrained else _gnss_priors(chunk, rec)
-    solver = None
-    progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else "")
-             + (f" held by the GNSS positions of {len(priors)} photos" if priors else ""))
-    _square_pixels(chunk, rec)
-    opts = pycolmap.BundleAdjustmentOptions()
-    try:
-        opts.refine_principal_point = fit_principal_point
-    except AttributeError:  # pragma: no cover - option name differs between versions
-        pass
-    fixed_cams = _rec_fixed_cameras(chunk, rec)
-    if constrained:  # the block first finds its own shape and calibration, then bends to the references
-        _adjust(rec, _at_most(opts, FREE_PASS_ITERATIONS), fixed_cameras=fixed_cams)
-        _restore_sensor_models(chunk, rec)
-        import_reconstruction(chunk, rec)
-        gcp.update_transform(chunk)
+    start = _before_adjusting(chunk) if hold_undetermined else None
+    check = None  # the record of the check of the focal lengths (report["intrinsics"]), made once
+    undetermined: dict = {}  # {COLMAP camera: sensor} held by that check, then by its guard
+    while True:  # once, or again from the start with the cameras whose focal length ran away held
+        rec = load_reconstruction(chunk)
+        drop_missing_points(rec)  # models written from imported poses by earlier versions
+        if constrained:
+            gcp.update_transform(chunk)  # the reference coordinates and the bars in the internal frame
+        before = errors() if constrained else {}
+        priors, held = ([], []) if gnss == "off" or constrained else _gnss_priors(chunk, rec)
+        solver = None
+        progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else "")
+                 + (f" held by the GNSS positions of {len(priors)} photos" if priors else ""))
         _square_pixels(chunk, rec)
-        progress(0.5, "Optimizing camera alignment on the control points and scale bars")
-    copies = max(1, int(marker_weight))
-    points = []
-    if constrained:
-        fixed = _control_markers(chunk) if with_gcps else {}
-        anchors = bar_anchors(chunk, bars, fixed) if bars else {}
-        points = [(chunk.marker_by_key(k), X) for k, X in {**fixed, **anchors}.items()]
-    pids, used = _fixed_points(chunk, rec, copies, points) if points else ([], set())
-    placed = np.array([rec.points3D[pid].xyz for pid in pids[::copies]]) if pids else np.zeros((0, 3))
-    steps = 0
-    if len(placed) >= 3 and gcp._non_collinear(placed):
-        starts = [m.position for m, _ in points if m.key in used]  # where the block sees them now
-        observations = sum(p.track.length() for p in rec.points3D.values())
-        if observations > SUBSET_OBSERVATIONS:  # the continuation on the strongest tracks, then everything
-            sub = _subset(rec, pids, SUBSET_OBSERVATIONS)
-            steps = _adjust_towards(sub, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.3))
-            _transfer_poses(sub, rec)
-            for pid in pids:
-                rec.points3D[pid].xyz = sub.points3D[pid].xyz
-            del sub
-            progress(0.8, "Adjustment of all the tie points on the control points")
-            _retriangulate(rec, skip=pids)  # the other points follow the cameras before the adjustment
-            rec.update_point_3d_errors()
-            dropped = _drop_stale_points(rec, STALE_POINT_PX, skip=pids)  # what no longer fits the cameras
-            log.info("control points: %d steps, %d tie points dropped, %d kept", steps, dropped, rec.num_points3D())
-            _adjust(rec, _at_most(opts, FINAL_PASS_ITERATIONS), constant_points=pids, fixed_cameras=fixed_cams)
+        opts = pycolmap.BundleAdjustmentOptions()
+        try:
+            opts.refine_principal_point = fit_principal_point
+        except AttributeError:  # pragma: no cover - option name differs between versions
+            pass
+        if check is None:
+            check, undetermined = _colmap_focal_check(
+                chunk, rec, hold_undetermined=hold_undetermined, refined=not priors, use_markers=constrained,
+                fit_principal_point=fit_principal_point, marker_weight=marker_weight)
+        fixed_cams = _rec_fixed_cameras(chunk, rec) | set(undetermined)
+        focals = {cid: (cam.model.name, list(cam.params)) for cid, cam in rec.cameras.items()}
+        if constrained:  # the block first finds its own shape and calibration, then bends to the references
+            _adjust(rec, _at_most(opts, FREE_PASS_ITERATIONS), fixed_cameras=fixed_cams)
+            _restore_sensor_models(chunk, rec)
+            import_reconstruction(chunk, rec)
+            gcp.update_transform(chunk)
+            _square_pixels(chunk, rec)
+            progress(0.5, "Optimizing camera alignment on the control points and scale bars")
+        copies = max(1, int(marker_weight))
+        points = []
+        if constrained:
+            fixed = _control_markers(chunk) if with_gcps else {}
+            anchors = bar_anchors(chunk, bars, fixed) if bars else {}
+            points = [(chunk.marker_by_key(k), X) for k, X in {**fixed, **anchors}.items()]
+        pids, used = _fixed_points(chunk, rec, copies, points) if points else ([], set())
+        placed = np.array([rec.points3D[pid].xyz for pid in pids[::copies]]) if pids else np.zeros((0, 3))
+        steps = 0
+        if len(placed) >= 3 and gcp._non_collinear(placed):
+            starts = [m.position for m, _ in points if m.key in used]  # where the block sees them now
+            observations = sum(p.track.length() for p in rec.points3D.values())
+            if observations > SUBSET_OBSERVATIONS:  # the continuation on the strongest tracks, then everything
+                sub = _subset(rec, pids, SUBSET_OBSERVATIONS)
+                steps = _adjust_towards(sub, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.3))
+                _transfer_poses(sub, rec)
+                for pid in pids:
+                    rec.points3D[pid].xyz = sub.points3D[pid].xyz
+                del sub
+                progress(0.8, "Adjustment of all the tie points on the control points")
+                _retriangulate(rec, skip=pids)  # the other points follow the cameras before the adjustment
+                rec.update_point_3d_errors()
+                dropped = _drop_stale_points(rec, STALE_POINT_PX, skip=pids)  # what no longer fits the cameras
+                log.info("control points: %d steps, %d tie points dropped, %d kept", steps, dropped,
+                         rec.num_points3D())
+                _adjust(rec, _at_most(opts, FINAL_PASS_ITERATIONS), constant_points=pids, fixed_cameras=fixed_cams)
+            else:
+                steps = _adjust_towards(rec, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.45))
         else:
-            steps = _adjust_towards(rec, opts, pids, copies, starts, fixed_cams, progress.sub(0.5, 0.45))
-    else:
-        pids, points = _drop_points(rec, pids), []
-        if constrained and gnss != "off":  # the markers could not be fixed: the positions hold the block
-            priors, held = _gnss_priors(chunk, rec)
-        if priors:
-            solver = _solver_outcome(_adjust_with_priors(rec, opts, priors, fixed_cams), len(priors))
-        else:
-            _adjust(rec, opts, fixed_cameras=fixed_cams)
+            pids, points = _drop_points(rec, pids), []
+            if constrained and gnss != "off":  # the markers could not be fixed: the positions hold the block
+                priors, held = _gnss_priors(chunk, rec)
+            if priors:
+                solver = _solver_outcome(_adjust_with_priors(rec, opts, priors, fixed_cams), len(priors))
+            else:
+                _adjust(rec, opts, fixed_cameras=fixed_cams)
+        moved = {}
+        if check["checked"]:  # the guard: a focal length the run refined and moved too far
+            moved = {cid: bundle.focal_move(model, params, rec.cameras[cid].params)
+                     for cid, (model, params) in focals.items()
+                     if cid not in fixed_cams and rec.cameras[cid].model.name == model}
+            moved = {cid: share for cid, share in moved.items() if share > bundle.FOCAL_MOVE_HOLD}
+        if not moved:
+            break
+        sensors = dict(zip(moved, _camera_sensors(chunk, rec, list(moved))))
+        for cid, share in moved.items():
+            undetermined[cid] = sensors[cid]
+            _hold_sensor(check, sensors[cid], _moved_note(share))
+        _back_to_the_start(chunk, start)
     pids = _drop_points(rec, pids)
     _restore_sensor_models(chunk, rec)
     rec.update_point_3d_errors()  # the adjustment does not refresh the stored errors
@@ -3402,7 +3622,8 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     holding = bool(solver and solver["usable"])  # a solve that cannot be used held nothing
     report["gnss"] = {"mode": gnss, "photos": len(priors) if holding else 0,
                       "states": _gnss_states(held) if holding else {}, **(solver or {})}
-    report["focal_held"] = FOCAL_HELD_BY_POSITIONS if holding else None
+    report["focal_held"] = _focal_held(FOCAL_HELD_BY_POSITIONS if holding else None, check)
+    report["intrinsics"] = check
     if points or gcp.control_scalebars(chunk):
         gcp.update_transform(chunk)  # the bars and the control points on the adjusted block
     else:

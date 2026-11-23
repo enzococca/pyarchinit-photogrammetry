@@ -557,7 +557,8 @@ class Chunk:
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
                          progress: ProgressCallback | None = None, engine: str = "auto", gnss: str = "auto",
-                         rolling_shutter: bool = False, solver: str = "auto") -> float:
+                         rolling_shutter: bool = False, solver: str = "auto",
+                         hold_undetermined: bool = True) -> float:
         """Global bundle adjustment; with 3 or more control points, or 2 or more control scale
         bars, they are part of it (the block bends to fit them), else ``gnss="auto"`` holds the
         block to the accurate GNSS positions of the photos (fix, float, PPK; ``"off"``: not used);
@@ -565,14 +566,18 @@ class Chunk:
         :func:`engine.sfm.optimize_cameras`; ``engine="ppg"``: our own adjustment, with the GNSS
         positions of the photos - ``gnss`` "plain" or "bias" - the rolling shutter and its ``solver``:
         ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
-        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Returns
-        the mean reprojection error in pixels; the control/check point, scale bar and GNSS report
-        is in ``meta["sfm"]["optimize"]``."""
+        default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). The calibration of
+        a camera is refined only where the block determines it (``hold_undetermined``, True by default: a camera
+        whose focal length the block does not determine - nadir photos over flat ground - keeps the calibration of
+        the alignment, ``meta["sfm"]["optimize"]["intrinsics"]`` says which sensors and why; False refines every
+        calibration whatever the block determines). Returns the mean reprojection error in pixels; the
+        control/check point, scale bar and GNSS report is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 
         err = sfm.optimize_cameras(self, fit_principal_point=fit_principal_point, use_markers=use_markers,
                                    marker_weight=marker_weight, progress=as_progress(progress), engine=engine,
-                                   gnss=gnss, rolling_shutter=rolling_shutter, solver=solver)
+                                   gnss=gnss, rolling_shutter=rolling_shutter, solver=solver,
+                                   hold_undetermined=hold_undetermined)
         if any(m.projections for m in self.markers) and sfm.resolve_optimize_engine(engine) != "ppg":
             # ours adjusts them with the block
             self.triangulate_markers()
