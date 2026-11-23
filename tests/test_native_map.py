@@ -795,6 +795,32 @@ def test_a_cancel_before_the_mapper_starts_puts_the_record_back(matched_trench, 
     assert {k: v for k, v in ch.meta.items() if k != "timings"} == before
 
 
+class _Panic(BaseException):
+    """What pyo3 raises for a panic of the engine (``PanicException``): no Exception."""
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, _Panic])
+def test_an_interrupt_or_a_panic_in_the_mapper_puts_the_record_back(matched_trench, tmp_path, monkeypatch, stop):
+    """Whatever stops the native alignment beyond an Exception (an interrupt, a panic of the engine): it comes out
+    as it is, and the record of the alignment before is as it was - as after a cancel."""
+    import copy
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    ch.align_cameras(engine="native")
+    before = {k: copy.deepcopy(v) for k, v in ch.meta.items() if k != "timings"}
+
+    def stopped(*args, **kwargs):
+        raise stop("stopped")
+
+    from pyarchinit_photogrammetry.engine import native_map
+
+    monkeypatch.setattr(native_map, "global_mapping", stopped)
+    with pytest.raises(stop):
+        ch.align_cameras(engine="native")
+    assert {k: v for k, v in ch.meta.items() if k != "timings"} == before
+
+
 @pytest.mark.slow
 def test_without_gps_and_with_gps_the_database_is_the_matchings(matched_ring, tmp_path):
     """``use_gps=False``: the native mapper positions the ring without the positions of the photos (a free frame, no

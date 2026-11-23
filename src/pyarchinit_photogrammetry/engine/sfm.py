@@ -2045,6 +2045,10 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
                     raise
                 raise as_disk_full(exc) from exc
             why = f"native mapper failed: {exc}"
+        except BaseException:  # an interrupt, a panic of the engine (pyo3's PanicException): as a cancel
+            info.clear()
+            info.update(kept_info)
+            raise
         if why:
             log.info("native mapper: %s: the classic alignment takes over", why)  # the WARNING is the switch's
             progress(0.05, "The native mapper gave up: the classic alignment takes over")
