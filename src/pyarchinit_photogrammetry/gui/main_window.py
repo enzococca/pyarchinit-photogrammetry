@@ -7835,7 +7835,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 ("auto", "automatico: quelle accurate (fix, float, PPK) tengono il blocco"), ("off", "non usate"),
                 ("plain", "usate con la loro accuratezza (motore proprio)"),
                 ("bias", "usate, con un bias per volo (motore proprio)")]),
-            Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False)],
+            Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False),
+            Field("hold", "Tieni la calibrazione delle camere di cui il blocco non determina la focale", True)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o più punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
                      "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
@@ -7858,7 +7859,11 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 "stesso: se l'ottimizzazione allontana le camere dalle loro posizioni accurate (oltre 3 volte lo "
                 "scarto di prima e 30 cm in più), si rimette l'allineamento di prima - o piegava il blocco, o le "
                 "posizioni non concordano con i punti di controllo; per tenerla, togli la spunta alle camere nel "
-                "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
+                "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + tr(
+                "La calibrazione di una camera viene affinata solo dove il blocco la determina: con sole foto "
+                "nadirali su terreno piatto la focale non si distingue dalla quota di volo (lo scarto della focale "
+                "supera lo 0,5 %), e la calibrazione resta quella dell'allineamento; il risultato dice per quali "
+                "sensori. Togli l'ultima spunta per affinarla comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
@@ -7870,7 +7875,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 gnss = "auto"
             err = ch.optimize_cameras(fit_principal_point=v["pp"], use_markers=v["markers"],
                                       marker_weight=int(v["weight"]), progress=p, engine=engine,
-                                      gnss=gnss, rolling_shutter=bool(v.get("rolling")) and own)
+                                      gnss=gnss, rolling_shutter=bool(v.get("rolling")) and own,
+                                      hold_undetermined=bool(v.get("hold", True)))
             if any(m.reference.location for m in ch.markers) or ch.scalebars:
                 self.last_report = ch.update_transform()
             return err
@@ -7916,7 +7922,11 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             elif held.get("termination") and not held.get("usable"):
                 text += tr("; la compensazione con le posizioni GNSS non è riuscita ({0}): il blocco resta come "
                            "l'ha lasciato l'allineamento", held["termination"])
-            if rep.get("focal_held"):
+            judged = rep.get("intrinsics") or {}
+            if judged.get("held"):  # the sensors whose focal length the block does not determine
+                text += tr("; calibrazione dell'allineamento tenuta: il blocco non determina la focale ({0} "
+                           "sensori su {1})", len(judged["held"]), len(judged.get("focal_sd") or judged["held"]))
+            elif rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
             if offsets:
                 text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),

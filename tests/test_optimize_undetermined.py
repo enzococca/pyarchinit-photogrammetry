@@ -525,6 +525,65 @@ def test_the_command_says_which_sensors_were_held(tmp_path):
     assert "sensor 0: focal held: undetermined, sd " in said
 
 
+def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path, monkeypatch):
+    """*Ottimizza camere* has a tick, on by default, for the calibrations the block does not determine; the answer
+    reaches the chunk, and the log of the window says for how many sensors the calibration was kept."""
+    pytest.importorskip("PySide6")
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("PPG_RENDERER", "software")
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication
+
+    from pyarchinit_photogrammetry.core.chunk import Chunk
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    app = QApplication.instance() or QApplication([])
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
+    doc, _ch = _block(tmp_path)
+    w = mw.MainWindow(doc, autoconnect=False)
+    w.runner.show_dialog = False
+    asked, calls = [], []
+    answer = {"markers": True, "weight": 4, "pp": False, "engine": "colmap", "gnss": "auto", "rolling": False}
+
+    def ask(cls, parent, title, fields, intro=""):
+        asked.append(({f.name: f for f in fields}, intro))
+        return dict(answer)
+
+    def optimise(self, **kwargs):
+        calls.append(kwargs["hold_undetermined"])
+        self.meta.setdefault("sfm", {})["optimize"] = {
+            "reprojection_error": 0.5, "focal_held": sfm.FOCAL_HELD_UNDETERMINED if kwargs["hold_undetermined"]
+            else None, "intrinsics": {"hold_undetermined": kwargs["hold_undetermined"], "checked": True,
+                                      "focal_sd": [[0, 0.11]], "held": [0] if kwargs["hold_undetermined"] else [],
+                                      "notes": []}}
+        return 0.5
+
+    monkeypatch.setattr(mw.ParamDialog, "ask", classmethod(ask))
+    monkeypatch.setattr(Chunk, "optimize_cameras", optimise)
+    try:
+        for hold in (None, False, True):  # a dialog that does not answer it (an older one): held
+            answer.pop("hold", None)
+            if hold is not None:
+                answer["hold"] = hold
+            w.optimize_cameras()
+            w.runner.wait()
+            app.processEvents()
+        fields, intro = asked[-1]
+        assert fields["hold"].default is True and "focale" in fields["hold"].label
+        assert "solo dove il blocco la determina" in intro
+        assert calls == [True, False, True]
+        said = [e[2] for e in w.log_pane.entries if "Errore di riproiezione" in e[2]]  # the line of each result
+        kept = "calibrazione dell'allineamento tenuta: il blocco non determina la focale (1 sensori su 1)"
+        assert [kept in line for line in said] == [True, False, True]
+        assert not any("focale dell'allineamento tenuta" in line for line in said)
+    finally:
+        w.setWindowModified(False)
+        w.close()
+
+
 # ------------------------------------------------------------------- the weak ring and the trench
 @pytest.fixture(scope="module")
 def weak_ring(tmp_path_factory):
