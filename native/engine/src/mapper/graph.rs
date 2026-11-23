@@ -9,7 +9,7 @@
 //! results are gathered in the order of the pairs and every sum runs in a fixed order, so that
 //! two runs give the same bits.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use rayon::prelude::*;
@@ -285,12 +285,25 @@ impl ViewGraph {
     /// `build`, ended early when `stop` is raised (by another thread): the pairs not begun are
     /// skipped and the graph is refused with the reason `"cancelled"`.
     pub fn build_until(input: &Input, cams: &[Camera], o: &Options, stop: &AtomicBool) -> ViewGraph {
+        ViewGraph::build_counting(input, cams, o, stop, &AtomicUsize::new(0))
+    }
+
+    /// `build_until` with the pairs begun counted in `begun` (a pair is counted once it has read
+    /// the flag down, before its estimation): what a cancel left undone, for the tests.
+    pub fn build_counting(input: &Input, cams: &[Camera], o: &Options, stop: &AtomicBool, begun: &AtomicUsize)
+        -> ViewGraph {
         if let Err(reason) = check_cameras(input, cams) {
             return ViewGraph { edges: Vec::new(), left_out: 0, too_few: 0, refused: Some(reason) };
         }
         let outcomes: Vec<Outcome> = (0..input.pairs.len())
             .into_par_iter()
-            .map(|p| if stop.load(Ordering::Relaxed) { Outcome::LeftOut } else { relative_pose(input, cams, o, p) })
+            .map(|p| {
+                if stop.load(Ordering::SeqCst) {
+                    return Outcome::LeftOut;
+                }
+                begun.fetch_add(1, Ordering::SeqCst);
+                relative_pose(input, cams, o, p)
+            })
             .collect();
         if stop.load(Ordering::SeqCst) {
             return ViewGraph { edges: Vec::new(), left_out: 0, too_few: 0, refused: Some("cancelled".into()) };

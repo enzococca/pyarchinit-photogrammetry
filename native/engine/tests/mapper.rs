@@ -13,12 +13,12 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::{ring, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
-use ppg_engine::camera::Model;
+use ppg_engine::camera::{Camera, Model};
+use ppg_engine::mapper::graph::ViewGraph;
 use ppg_engine::mapper::input::Input;
 use ppg_engine::mapper::model_io::{quaternion, write_colmap_binary, ModelCamera, ModelImage, ModelPoint, NO_POINT};
 use ppg_engine::mapper::positioning::{Frame, Gnss};
@@ -664,30 +664,32 @@ fn the_stop_flag_cancels_the_stages_from_inside() {
     }
 }
 
-/// The flag raised while the relative poses are being estimated ends the view graph long before
-/// it would have ended (the pairs not yet begun are skipped).
+/// The flag raised while the relative poses are being estimated ends the view graph without
+/// beginning the pairs left: counted, not timed (`ViewGraph::build_counting`), at most one pair per
+/// thread of the pool begins after the flag is up (those that read it just before).
 #[test]
 fn the_stop_flag_ends_the_view_graph_early() {
     let s = ring(120, 240.0, HEIGHT, 111);
     let input = noisy(&s, 112);
-    let clock = Instant::now();
-    Mapper::new(input.clone(), Options::default()).unwrap().view_graph(&mut never_cancel()).unwrap();
-    let whole = clock.elapsed();
-    let mut m = Mapper::new(input, Options::default()).unwrap();
-    let stop = m.stop_flag();
-    let raiser = {
-        let stop = stop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(whole / 10);
+    let cams: Vec<Camera> =
+        input.cameras.iter().map(|c| Camera::new(&c.model, &c.params, c.width, c.height).unwrap()).collect();
+    let (stop, begun) = (AtomicBool::new(false), AtomicUsize::new(0));
+    let (graph, at_stop) = std::thread::scope(|scope| {
+        let raiser = scope.spawn(|| {
+            while begun.load(Ordering::SeqCst) == 0 {
+                std::hint::spin_loop();
+            }
             stop.store(true, Ordering::SeqCst);
-        })
-    };
-    let clock = Instant::now();
-    let out = m.view_graph(&mut never_cancel()).map(|_| ());
-    let stopped = clock.elapsed();
-    raiser.join().unwrap();
-    assert_eq!(out, Err("cancelled".to_string()));
-    assert!(stopped < whole * 6 / 10, "stopped after {stopped:?}, the whole stage takes {whole:?}");
+            begun.load(Ordering::SeqCst)
+        });
+        let graph = ViewGraph::build_counting(&input, &cams, &Options::default(), &stop, &begun);
+        (graph, raiser.join().unwrap())
+    });
+    assert_eq!(graph.refused.as_deref(), Some("cancelled"));
+    let begun = begun.load(Ordering::SeqCst);
+    let threads = rayon::current_num_threads();
+    assert!(begun <= at_stop + threads, "{begun} pairs begun, {at_stop} when the flag went up, {threads} threads");
+    assert!(begun < input.pairs.len(), "{begun} of {} pairs begun", input.pairs.len());
 }
 
 /// The positioning gives what it found (`Positioned`): the frame, the accuracy of the positions.
