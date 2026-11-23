@@ -1,6 +1,7 @@
-"""Orthophotos and DEMs on a plane or a cylinder: elevations of walls, wells, apses, towers.
+"""Orthophotos and DEMs on a plane, a cylinder or the line of a wall: elevations of walls, wells, apses, towers.
 
-A frame - :class:`Plane` or :class:`Cylinder`, in world coordinates (the chunk CRS, metres) - maps
+A frame - :class:`Plane`, :class:`Cylinder` or :class:`WallPath` (a wall traced on the plan and followed round
+its corners, :mod:`.wall_path`), in world coordinates (the chunk CRS, metres) - maps
 a raster cell ``(u, v)`` (``u`` along the surface, left to right as seen by the viewer, ``v`` up) and
 a depth ``d`` (towards the viewer) to the world. The surface of a cell is where a ray from the
 viewer side meets the model; the orthophoto is the orthomosaic engine on that surface (same photo
@@ -25,6 +26,7 @@ import numpy as np
 from ..core import stamps
 from ..core.chunk import Chunk
 from ..core.progress import Progress, as_progress
+from .wall_path import DEFAULT_RADIUS, WallPath, _interp
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
@@ -75,18 +77,6 @@ class Plane:
     def to_dict(self) -> dict:
         return {"kind": "plane", "origin": self.origin.tolist(), "u_axis": self.u_axis.tolist(),
                 "v_axis": self.v_axis.tolist()}
-
-
-def _interp(x, xp, fp) -> np.ndarray:
-    """Piecewise linear ``fp(xp)`` at ``x``, prolonged past both ends by the end segments (``x`` any shape,
-    a scalar too)."""
-    x = np.asarray(x, np.float64)
-    flat = np.atleast_1d(x).ravel()
-    y = np.interp(flat, xp, fp)
-    lo, hi = flat < xp[0], flat > xp[-1]
-    y[lo] = fp[0] + (flat[lo] - xp[0]) * (fp[1] - fp[0]) / (xp[1] - xp[0])
-    y[hi] = fp[-1] + (flat[hi] - xp[-1]) * (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
-    return y.reshape(x.shape)
 
 
 @dataclass
@@ -185,10 +175,18 @@ class Cylinder:
 
 
 def frame_from_dict(d: dict):
-    if d.get("kind") == "cylinder":
+    """The frame of its ``to_dict``, by its ``kind``: ``"path"``, ``"cylinder"`` or ``"plane"`` (a dict without
+    a kind is a plane); any other kind is an error, not a plane."""
+    kind = d.get("kind") or "plane"
+    if kind == "path":
+        return WallPath(d["vertices"], radius=d.get("radius", DEFAULT_RADIUS), radii=d.get("radii"),
+                        u_map=d.get("u_map"), clicked=d.get("clicked"))
+    if kind == "cylinder":
         return Cylinder(d["centre"], d["axis"], d["radius"], bool(d.get("inside")), d.get("start"),
                         tilt=d.get("tilt"), u_map=d.get("u_map"))
-    return Plane(d["origin"], d["u_axis"], d["v_axis"])
+    if kind == "plane":
+        return Plane(d["origin"], d["u_axis"], d["v_axis"])
+    raise ValueError(f"unknown frame kind {kind!r}")
 
 
 # ---------------------------------------------------------------- frames from what the user draws
