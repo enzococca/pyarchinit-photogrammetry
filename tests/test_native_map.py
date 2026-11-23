@@ -382,6 +382,7 @@ class _Spy:
     calls: dict = {}
     fail: str | None = None
     options: dict = {}  # the options of the last mapper built
+    fail_report: bool = False  # report() raises too
     real: type | None = None  # the class of the core
 
     def __init__(self, *args, **kwargs):
@@ -393,8 +394,8 @@ class _Spy:
 
         def call(*args, **kwargs):
             _Spy.calls[name] = _Spy.calls.get(name, 0) + 1
-            if name == _Spy.fail:
-                raise RuntimeError("boom")
+            if name == _Spy.fail or (name == "report" and _Spy.fail_report):
+                raise RuntimeError("boom" if name == _Spy.fail else "the report broke")
             return method(*args, **kwargs)
 
         return call
@@ -406,6 +407,7 @@ def spy(monkeypatch):
     monkeypatch.setattr(_native, "native_mapper", lambda: _Spy)
     monkeypatch.setattr(_Spy, "calls", {})
     monkeypatch.setattr(_Spy, "fail", None)
+    monkeypatch.setattr(_Spy, "fail_report", False)
     return _Spy
 
 
@@ -472,6 +474,9 @@ def test_the_reduced_weak_ring(matched_ring, tmp_path):
             "write"} <= set(stages)
     report = native["report"]
     assert report["intrinsics_held"] == [cam[0] for cam in report["focal_sd"]]  # the flat ring: focal held (R16)
+    # the marginal sd (R18: every term the last round frees free with it; 17.6 % measured), not the conditional
+    # one with them held (1.8 %)
+    assert report["focal_sd"][0][1] > 0.05
     assert any(note.startswith("camera 0: focal held: ") for note in report["notes"])
     shape = truth.ring_shape(doc, scene)
     assert shape["truth_targets"] >= 6
@@ -748,3 +753,63 @@ def test_the_positions_go_to_the_mapper_from_three(matched_ring, tmp_path):
     assert gnss["image"].tolist() == [0, 1, 2] and gnss["sigma"][0].tolist() == native_map.DEFAULT_ACCURACY
     ch.cameras[2].reference = Reference()
     assert native_map.gnss_input(ch, names) == (None, {})
+
+
+@pytest.mark.slow
+def test_a_broken_report_hides_neither_a_failure_nor_a_cancel(matched_trench, tmp_path, spy):
+    """``report()`` failing on the way out of the mapper (``_keep_report``): the failure that stopped the mapper is
+    still the reason of the fallback, and the report keeps the type of the error of ``report()``."""
+    from pyarchinit_photogrammetry.engine import native_map
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    spy.fail, spy.fail_report = "refine", True
+    assert ch.align_cameras(engine="native") == len(ch.cameras)
+    assert ch.meta["engine"]["align_cameras"]["fallback"] == "native mapper failed: boom"
+    assert ch.meta["sfm"]["native_mapper"]["report"] == {"error": "RuntimeError"}
+
+    class Broken:
+        def report(self):
+            raise RuntimeError("no")
+
+    kept = {}
+    native_map._keep_report(kept, Broken())
+    assert kept == {"report": {"error": "RuntimeError"}}
+
+
+@pytest.mark.slow
+def test_a_cancel_before_the_mapper_starts_puts_the_record_back(matched_trench, tmp_path):
+    """A cancel already asked when the native alignment begins: it comes out, and the record of the alignment before
+    (the report of the earlier native mapper among it) is as it was."""
+    import copy
+
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+
+    ch = _copy(matched_trench, tmp_path).chunk
+    ch.align_cameras(engine="native")
+    assert "native_mapper" in ch.meta["sfm"]
+    before = {k: copy.deepcopy(v) for k, v in ch.meta.items() if k != "timings"}
+    progress = Progress()
+    progress.cancel()
+    with pytest.raises(Cancelled):
+        ch.align_cameras(progress=progress, engine="native")
+    assert {k: v for k, v in ch.meta.items() if k != "timings"} == before
+
+
+@pytest.mark.slow
+def test_without_gps_and_with_gps_the_database_is_the_matchings(matched_ring, tmp_path):
+    """``use_gps=False``: the native mapper positions the ring without the positions of the photos (a free frame, no
+    pose priors recorded). With them it positions on them and leaves ``database.db`` as the matching wrote it (the
+    pose priors are the classic mappers', written only when the classic chain aligns)."""
+    project, _scene = matched_ring
+    ch = _copy(project, tmp_path, "free").chunk
+    assert ch.align_cameras(engine="native", use_gps=False) == RING_PHOTOS
+    position = ch.meta["sfm"]["native_mapper"]["position"]
+    assert position["frame"] == "free" and position["positions"] == 0
+    assert ch.meta["sfm"]["gps_priors"] is None
+    ch = _with_accuracy(_copy(project, tmp_path, "gps").chunk)
+    db = ch.data_dir / "sfm" / "database.db"
+    data = db.read_bytes()
+    assert ch.align_cameras(engine="native") == RING_PHOTOS
+    assert ch.meta["sfm"]["native_mapper"]["position"]["frame"] == "gnss"
+    assert ch.meta["sfm"]["gps_priors"]["count"] == RING_PHOTOS
+    assert db.read_bytes() == data

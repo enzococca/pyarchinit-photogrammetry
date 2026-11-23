@@ -2026,10 +2026,11 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
         from . import native_map
         from .native_match import as_disk_full, disk_full
 
-        progress(0.0, f"Aligning {n} cameras at once (native global mapper)")
         info.pop("global_check", None)  # the record of this attempt's check, once the block is positioned
         why = None
         try:
+            # inside: a cancel asked before the mapper starts puts the record back as well
+            progress(0.0, f"Aligning {n} cameras at once (native global mapper)")
             recs = native_map.global_mapping(chunk, db_path, root, out, n, progress.sub(0.0, 0.8), stages,
                                              tiepoint_limit=tiepoint_limit, use_gps=use_gps)
         except Cancelled:
