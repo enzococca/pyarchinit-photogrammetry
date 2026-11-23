@@ -28,8 +28,8 @@
 //! - after the solve of round 1 on positions, the accuracy of the positions is estimated again
 //!   (`estimate_sigmas`) and round 1 is solved once more with it.
 //! - an intrinsic is freed only where the block determines it (ruling R16): after round 1 the
-//!   posterior sd of each camera's focal length is taken (`focal_sds`: its column free, the
-//!   covariance scaled by the variance factors); a camera whose sd is above
+//!   marginal posterior sd of each camera's focal length is taken (`focal_sds`: every group the
+//!   last round frees, the covariance scaled by the variance factors); a camera whose sd is above
 //!   `FOCAL_SD_HOLD` of its focal length (a flat nadir block, which cannot tell its focal length
 //!   from its height), or whose sd cannot be computed, keeps all its intrinsics held in every later
 //!   round. A round that moves the focal length of a freed camera by more than `FOCAL_MOVE_HOLD`
@@ -760,22 +760,27 @@ fn scaled_problem(state: &State, b: &Built, [ft, fh, fv]: [f64; 3]) -> Problem {
 }
 
 /// Ruling R16: per camera, the relative posterior sd of its focal length at the state after round
-/// 1 (`b`, `sol`: its last solve): the problem of the state with the focal length of every
-/// camera free (its column only, as the ruling asks: a radial term that would trade with it in a
-/// freed round is caught by the guard on the move, `moved_too_far`), its sigmas scaled by the
-/// variance factors of round 1, and the largest sd of the focal columns over the focal length. Without positions the
+/// 1 (`b`, `sol`: its last solve): the problem of the state with every intrinsic of every camera
+/// that the last round would free (`intrinsics` of that round: the focal length, the radial terms
+/// and, on a block held by its positions, the principal point and the decentring terms of an
+/// OPENCV sensor), its sigmas scaled by the variance factors of round 1, and the largest marginal
+/// sd of the focal columns over the focal length (ruling R18: a conditional sd, with the terms
+/// that trade with the focal length held, is always smaller). Without positions the
 /// gauge of the scale is held by a position of the photo farthest from the held one, its sigma
 /// `GAUGE_SIGMA_EXTENTS` times that distance. `Err` (for every camera) when the covariance cannot
 /// be computed.
-fn focal_sds(state: &State, input: &Input, o: &Options, b: &Built, sol: &Solution) -> Result<Vec<f64>, String> {
+fn focal_sds(
+    state: &State,
+    input: &Input,
+    o: &Options,
+    positions: bool,
+    b: &Built,
+    sol: &Solution,
+) -> Result<Vec<f64>, String> {
     let factors = variance_factors(state, b, sol);
-    let free: Vec<Vec<usize>> = state
-        .cameras
-        .iter()
-        .map(|cam| {
-            groups(cam.model)[0].to_vec()
-        })
-        .collect();
+    // every group the last round would free (ruling R18): the sd of the focal length is then its
+    // marginal one, whatever trades with it (radial terms, principal point)
+    let (free, _) = intrinsics(state, o.rounds.max(2), o.rounds, positions);
     let opened = build(state, input, &free, false);
     let mut pb = scaled_problem(state, &opened, factors);
     if pb.gnss.is_empty() && pb.centres.len() >= 2 {
@@ -797,10 +802,10 @@ fn focal_sds(state: &State, input: &Input, o: &Options, b: &Built, sol: &Solutio
         .enumerate()
         .map(|(c, cam)| {
             let focal_cols: Vec<usize> = groups(cam.model)[0].to_vec();
-            let positions = &free[c];
+            let freed = &free[c];
             let worst = focal_cols
                 .iter()
-                .filter_map(|col| positions.iter().position(|p| p == col))
+                .filter_map(|col| freed.iter().position(|p| p == col))
                 .filter_map(|j| variances[c].get(j).copied())
                 .fold(0.0f64, f64::max);
             worst.max(0.0).sqrt() / cam.params[0].abs()
@@ -867,10 +872,10 @@ fn adjust_state(
 
 /// Ruling R16, after round 1: the sd of each camera's focal length into the state, and the cameras
 /// the block does not determine held from then on, with a note each.
-fn hold_undetermined(state: &mut State, input: &Input, o: &Options, b: &Built, sol: &Solution) {
+fn hold_undetermined(state: &mut State, input: &Input, o: &Options, positions: bool, b: &Built, sol: &Solution) {
     let k = state.cameras.len();
     state.intrinsics_held.resize(k, false);
-    match focal_sds(state, input, o, b, sol) {
+    match focal_sds(state, input, o, positions, b, sol) {
         Ok(sds) => {
             state.focal_sd = sds.iter().map(|&sd| sd.is_finite().then_some(sd)).collect();
             for (c, sd) in sds.into_iter().enumerate() {
@@ -1017,7 +1022,7 @@ pub fn refine(
         let (free, names, (cost_initial, cost, observations, b, sol)) = guarded_adjustment(
             state, input, o, round, rounds, positions, false, last_adjustment(o, round), &after_round_1, observe)?;
         if round == 1 && rounds >= 2 {
-            hold_undetermined(state, input, o, &b, &sol);
+            hold_undetermined(state, input, o, positions, &b, &sol);
             after_round_1 = state.cameras.iter().map(|cam| cam.params[0]).collect();
         }
         drop((b, sol));
@@ -1145,5 +1150,52 @@ mod tests {
         record_covariance(&mut state, Ok((vec![(2, [[0.04; 3]; 3])], [0.25, 1.0, 1.0])));
         assert_eq!(state.bias_covariance, vec![(2, [[0.04; 3]; 3])]);
         assert_eq!(state.variance_factors, Some([0.25, 1.0, 1.0]));
+    }
+
+    /// Ruling R18: the guard of ruling R16 on a forced move. The positioned state of a synthetic
+    /// ring after round 1, then round 2 run through `guarded_adjustment` with the focal length after
+    /// round 1 said to be 30 % shorter than it is: the freed round "moves" it by more than
+    /// `FOCAL_MOVE_HOLD`, so the state goes back to what it was, the camera is held from then on with
+    /// a note, and the round runs again with its intrinsics held (the focal length as before it).
+    #[test]
+    fn a_round_that_moves_the_focal_length_too_far_runs_again_with_it_held() {
+        use crate::mapper::{synthetic, Mapper};
+
+        let ring = synthetic::ring(24, 200, 5).expect("a ring");
+        let o = Options::default();
+        let mut m = Mapper::new(ring.input.clone(), o.clone()).expect("a mapper");
+        let mut go = || true;
+        m.view_graph(&mut go).unwrap();
+        m.rotations(&mut go).unwrap();
+        m.tracks(500, &mut go).unwrap();
+        m.position(Some(&ring.gnss), &mut go).unwrap();
+        let input = ring.input.clone();
+        let mut state = m.state().expect("a positioned state").clone();
+        state.opencv_sensor = vec![false; input.cameras.len()];
+        state.intrinsics_held = vec![false; input.cameras.len()];
+        let positions = !positions_used(&state).is_empty();
+        filter(&mut state, &input, &o, POSITIONED_FILTER_SCALE).unwrap();
+        guarded_adjustment(&mut state, &input, &o, 1, o.rounds, positions, false, false, &[], &mut go).unwrap();
+        let focal = state.cameras[0].params[0];
+        let notes = state.notes.len();
+        let (free, names, _) =
+            guarded_adjustment(&mut state, &input, &o, 2, o.rounds, positions, false, false, &[0.7 * focal], &mut go)
+                .unwrap();
+        assert_eq!(state.intrinsics_held, vec![true]);
+        assert!(free.iter().all(|f| f.is_empty()) && names.is_empty(), "{free:?} {names:?}");
+        assert_eq!(state.cameras[0].params[0], focal, "the round run again with the focal length held");
+        assert_eq!(state.notes.len(), notes + 1);
+        assert!(state.notes[notes].starts_with("camera 0: focal held: moved 4"), "{:?}", state.notes);
+        // the same state and an honest focal length after round 1: nothing held
+        let mut honest = m.state().unwrap().clone();
+        honest.opencv_sensor = vec![false];
+        honest.intrinsics_held = vec![false];
+        filter(&mut honest, &input, &o, POSITIONED_FILTER_SCALE).unwrap();
+        guarded_adjustment(&mut honest, &input, &o, 1, o.rounds, positions, false, false, &[], &mut go).unwrap();
+        let f1 = honest.cameras[0].params[0];
+        let (free, _, _) =
+            guarded_adjustment(&mut honest, &input, &o, 2, o.rounds, positions, false, false, &[f1], &mut go).unwrap();
+        assert_eq!(honest.intrinsics_held, vec![false]);
+        assert!(!free[0].is_empty());
     }
 }

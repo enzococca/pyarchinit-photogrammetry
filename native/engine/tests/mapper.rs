@@ -391,6 +391,10 @@ fn photos_without_gps_are_placed_within_a_metre() {
     }
 }
 
+/// The relief (m) of the ground of the principal-point ring: enough for the block to determine its
+/// focal length (ruling R18).
+const RELIEF_THAT_TELLS_THE_FOCAL: f64 = 8.0;
+
 /// The ring of 60 photos seen through an OPENCV sensor whose principal point is 20 px off the
 /// centre of the photo, the adjustment starting at the centre (a RADIAL camera of the mapper).
 fn shifted_principal_point(s: &Scene, seed: u64) -> (Input, [f64; 2]) {
@@ -408,7 +412,9 @@ fn shifted_principal_point(s: &Scene, seed: u64) -> (Input, [f64; 2]) {
 
 #[test]
 fn the_principal_point_is_freed_only_on_a_block_held_by_gnss() {
-    let s = ring(60, 360.0, HEIGHT, 51);
+    // a ground of 8 m of relief under the 40 m of the flight (ruling R18): a block that determines
+    // its focal length; on the 2 m of `ring` its marginal sd is 0.51 % and the intrinsics are held
+    let s = ring_with_relief(60, 360.0, HEIGHT, RELIEF_THAT_TELLS_THE_FOCAL, 51);
     let o = Options { opencv_sensor: vec![true], ..Options::default() };
     let gnss = gnss_with(&s, 0.3, 0.5, [0.3, 0.3, 0.5], 52, &[]);
 
@@ -752,21 +758,4 @@ fn a_convergent_block_frees_and_recovers_its_focal_length() {
     assert!(sd < ppg_engine::mapper::rounds::FOCAL_SD_HOLD, "{sd}");
     assert_eq!(report.rounds[1].intrinsics, vec!["focal".to_string()]);
     assert!((focal / common::FOCAL - 1.0).abs() < 0.005, "{focal}");
-}
-
-/// Ruling R16, the guard: on a ground with no relief at all the covariance after round 1 says the
-/// focal length is determined, but the freed round runs away with it (the plane trades the focal
-/// length with the height and the tilt); the round is run again with the camera held, and the
-/// note says so.
-#[test]
-fn a_focal_length_that_runs_away_is_held_again() {
-    let s = ring_with_relief(48, 240.0, HEIGHT, 0.0, 121);
-    let gnss = gnss_with(&s, 2.0, 4.0, [5.0, 5.0, 10.0], 122, &[]);
-    let (m, report) = mapped(&s, 123, Options::default(), Some(&gnss), None);
-    eprintln!("plane: focal sd {:?}, held {:?}, notes {:?}", report.focal_sd, report.intrinsics_held, report.notes);
-    assert_eq!(report.intrinsics_held, vec![true]);
-    assert!(report.focal_sd[0].expect("a covariance") <= ppg_engine::mapper::rounds::FOCAL_SD_HOLD);
-    assert!(report.notes.iter().any(|n| n.starts_with("camera 0: focal held: moved ")), "{:?}", report.notes);
-    assert!(report.rounds.iter().all(|r| r.intrinsics.is_empty()), "{:?}", report.rounds);
-    assert_eq!(m.state().unwrap().cameras[0].params[0], common::FOCAL);
 }
