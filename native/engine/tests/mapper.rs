@@ -759,3 +759,44 @@ fn a_convergent_block_frees_and_recovers_its_focal_length() {
     assert_eq!(report.rounds[1].intrinsics, vec!["focal".to_string()]);
     assert!((focal / common::FOCAL - 1.0).abs() < 0.005, "{focal}");
 }
+
+/// Ruling R16, the guard on a scene (R18): on a ground with no relief at all the marginal sd of the
+/// focal length after round 1 passes the threshold (the linearisation says the block determines
+/// it), but the freed round runs away with it (the plane trades the focal length with the height
+/// and the tilt, far from the linear regime): the round is run again with the camera held, and the
+/// note says so.
+#[test]
+fn a_focal_length_that_runs_away_is_held_again() {
+    let s = ring_with_relief(48, 240.0, HEIGHT, 0.0, 121);
+    let gnss = gnss_with(&s, 2.0, 4.0, [5.0, 5.0, 10.0], 122, &[]);
+    let (m, report) = mapped(&s, 123, Options::default(), Some(&gnss), None);
+    eprintln!("plane: focal sd {:?}, held {:?}, notes {:?}", report.focal_sd, report.intrinsics_held, report.notes);
+    // measured, not required: the covariance lets the focal length go, so the guard is what holds it
+    let sd = report.focal_sd[0].expect("a covariance");
+    assert!(sd <= ppg_engine::mapper::rounds::FOCAL_SD_HOLD, "the covariance already holds it ({sd}): no guard");
+    assert_eq!(report.intrinsics_held, vec![true]);
+    assert!(report.notes.iter().any(|n| n.starts_with("camera 0: focal held: moved ")), "{:?}", report.notes);
+    assert!(report.rounds.iter().all(|r| r.intrinsics.is_empty()), "{:?}", report.rounds);
+    assert_eq!(m.state().unwrap().cameras[0].params[0], common::FOCAL);
+}
+
+/// Ruling R18: the marginal sd, not the conditional one. On the principal-point ring over the 2 m
+/// of `ring` (an OPENCV sensor, positions of 0.3 / 0.5 m), the sd of the focal length with the
+/// other terms of the last round held is under the threshold (0.45 % measured) and the marginal one,
+/// with them free, is over it: the camera is held for that reason, not by the guard.
+#[test]
+fn the_marginal_sd_of_the_focal_length_decides() {
+    let s = ring(60, 360.0, HEIGHT, 51);
+    let o = Options { opencv_sensor: vec![true], ..Options::default() };
+    let gnss = gnss_with(&s, 0.3, 0.5, [0.3, 0.3, 0.5], 52, &[]);
+    let (input, _) = shifted_principal_point(&s, 53);
+    let mut m = Mapper::new(input, o).unwrap();
+    let report = run(&mut m, Some(&gnss), None);
+    eprintln!("marginal: focal sd {:?}, notes {:?}", report.focal_sd, report.notes);
+    let sd = report.focal_sd[0].expect("a covariance");
+    assert!(sd > ppg_engine::mapper::rounds::FOCAL_SD_HOLD, "{sd}");
+    assert_eq!(report.intrinsics_held, vec![true]);
+    assert!(report.notes.iter().any(|n| n.starts_with("camera 0: focal held: undetermined, sd ")), "{:?}",
+            report.notes);
+}
+

@@ -760,10 +760,11 @@ fn scaled_problem(state: &State, b: &Built, [ft, fh, fv]: [f64; 3]) -> Problem {
 }
 
 /// Ruling R16: per camera, the relative posterior sd of its focal length at the state after round
-/// 1 (`b`, `sol`: its last solve): the problem of the state with every intrinsic of every camera
-/// that the last round would free (`intrinsics` of that round: the focal length, the radial terms
-/// and, on a block held by its positions, the principal point and the decentring terms of an
-/// OPENCV sensor), its sigmas scaled by the variance factors of round 1, and the largest marginal
+/// 1 (`b`, `sol`: its last solve): the problem of the state with its cameras as the last round has
+/// them (a camera of an OPENCV sensor widened to OPENCV on a block held by its positions, as
+/// `refine` widens it) and every intrinsic that round frees (`intrinsics` of that round: the focal
+/// lengths - fx and fy of a widened camera -, the radial terms and, widened, the principal point
+/// and the decentring terms), its sigmas scaled by the variance factors of round 1, and the largest marginal
 /// sd of the focal columns over the focal length (ruling R18: a conditional sd, with the terms
 /// that trade with the focal length held, is always smaller). Without positions the
 /// gauge of the scale is held by a position of the photo farthest from the held one, its sigma
@@ -778,11 +779,24 @@ fn focal_sds(
     sol: &Solution,
 ) -> Result<Vec<f64>, String> {
     let factors = variance_factors(state, b, sol);
+    // the cameras as the last round has them (ruling R18, M3): widened to OPENCV where it widens them,
+    // so that fx and fy, the principal point and the decentring terms are free as they will be
+    let last = o.rounds.max(2);
+    let mut probe = state.clone();
+    if last == o.rounds && positions && probe.frame == Frame::Gnss {
+        for c in 0..probe.cameras.len() {
+            if probe.opencv_sensor.get(c).copied().unwrap_or(false) {
+                if let Some(w) = probe.cameras[c].widened() {
+                    probe.cameras[c] = w;
+                }
+            }
+        }
+    }
     // every group the last round would free (ruling R18): the sd of the focal length is then its
-    // marginal one, whatever trades with it (radial terms, principal point)
-    let (free, _) = intrinsics(state, o.rounds.max(2), o.rounds, positions);
-    let opened = build(state, input, &free, false);
-    let mut pb = scaled_problem(state, &opened, factors);
+    // marginal one, whatever trades with it
+    let (free, _) = intrinsics(&probe, last, o.rounds, positions);
+    let opened = build(&probe, input, &free, false);
+    let mut pb = scaled_problem(&probe, &opened, factors);
     if pb.gnss.is_empty() && pb.centres.len() >= 2 {
         let first = Vector3::from(pb.centres[0]);
         let (far, extent) = pb
@@ -796,7 +810,7 @@ fn focal_sds(
         pb.gnss_bias = false;
     }
     let variances = bundle::intrinsics_variances(&pb, scaled_loss(o, pb.pixel_sigma))?;
-    Ok(state
+    Ok(probe
         .cameras
         .iter()
         .enumerate()
