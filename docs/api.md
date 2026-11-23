@@ -704,34 +704,45 @@ there was none).
 
 Each group of the intrinsics of a camera is refined only where the block determines it
 (`hold_undetermined=True`, the default, with both engines: the rule of the rounds of the native alignment, above,
-taken group by group). Before the first adjustment the marginal posterior sds are taken from the covariance of
-the adjustment at the alignment - every intrinsic the options free free together (the distortion, the principal
-point with `fit_principal_point`), the control points, the bars and the positions that take part in the
-adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.intrinsic_sds`, on
-the native core, `ppg_core` API 17). A focal length whose sd is above 0.5 % (`bundle.FOCAL_SD_HOLD`), or that
-has no covariance at all, is held as the alignment left it: nadir photos over flat ground cannot tell the focal
+taken group by group and on one scale). Before the first adjustment the marginal posterior sds are taken from the
+covariance of the adjustment at the alignment - every intrinsic the options free free together (the distortion,
+the principal point with `fit_principal_point`), the control points, the bars and the positions that take part in
+the adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.judge_intrinsics`,
+on the native core, `ppg_core` API 18). The focal length is judged first: one whose relative sd is above 0.5 %
+(`bundle.FOCAL_SD_HOLD`) is held as the alignment left it. Nadir photos over flat ground cannot tell the focal
 length from the flying height, whatever control points on that ground say, and an adjustment that refines it
 there slides along that trade (a ring flown once over flat ground, optimised on six targets: the focal length
-ten times longer, the cameras 131 m higher, the check targets 0.6 m off). The focal length alone: the distortion
-is still refined, which such a block does determine once its focal length is held (the same ring: the radial
-term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm). A
-principal point that was asked for is held when its marginal sd is above 0.5 % of the side of the photo
-(`bundle.PRINCIPAL_SD_HOLD`). A guard watches what was refined (`bundle.runaways`): a focal length moved by more
-than 20 % of its start (`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5
-(`bundle.K1_MOVE_HOLD`), has the optimisation run again from the start with the focal length, or the radial
-terms, held. COLMAP's adjustment refines a group for every camera or for none: with several sensors, what is
-held for one is held for all (our own adjustment holds it sensor by sensor). What the rule does not see: on a
-nadir grid over flat ground the radial terms still trade with a dome of the block, which control points at its
-corners do not hold - a point in the middle shows it (a synthetic grid of 40 photos: 4 to 6 cm there, 11 to 28 cm
-with everything refined). `report["intrinsics"]` says what was judged, in numbers and by the key of each sensor:
-`checked`, `variance_factor`, `focal_sd` and `principal_point_sd` (`[sensor, sd]`), `held` (the sensors held, by
-group: `focal`, `principal_point`, `radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`), and
-`reason` when nothing was asked - neither a focal length nor a principal point to refine (the positions hold the
-block, nothing places it, a fixed calibration), 360-degree rigs, or a core that cannot give the covariance
-(missing, older than API 17, `PPG_NATIVE=0`, a camera model it does not know): the calibration is then refined as
-before and the log says so once. `report["focal_held"]` is then `"the block does not determine the focal
-length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, the last tick of the dialog) refines
-every calibration as the other options say, whatever the block determines, and guards nothing.
+ten times longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the
+principal point (when it was asked for) and the radial terms, each by what it moves in the photo: a group is
+held when the marginal sd of the displacement it causes at the corner of the photo is above half a pixel
+(`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it leave it - the
+covariance is taken again without what was held -, the radial terms last. That ring does not determine its
+radial terms while its focal length is free (1.6 px at the corner) and determines them once it is held (0.12
+px): they are refined, the radial term found within 0.0003 of the true one, the control targets at 1 mm and the
+check targets at 9 mm; it does not determine the tangential terms of our own formulation (1.6 px), which are
+held. On a nadir grid over flat ground the radial terms trade with a dome of the block, which control points at
+its corners do not see (a synthetic grid of 40 photos: 3.2 px): they are held as well, and a point in the middle
+of that grid ends 3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined.
+Oblique photos around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole
+calibration is refined as before. A group that has no covariance at all (a normal matrix that cannot be
+inverted) is held.
+
+A guard watches what was refined (`bundle.runaways`): a focal length moved by more than 20 % of its start
+(`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5 (`bundle.K1_MOVE_HOLD`), has the
+optimisation run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment
+refines a group for every camera or for none, and the distortion whole or not at all: with several sensors, what
+is held for one is held for all, and either kind of distortion term takes the other with it (our own adjustment
+holds each group sensor by sensor). `report["intrinsics"]` says what was judged, in numbers and by the key of
+each sensor: `checked`, `variance_factor`, `focal_sd` (relative), `tangential_sd`, `principal_point_sd` and
+`radial_sd` (pixels at the corner of the photo; each a list of `[sensor, sd]`), `held` (the sensors held, by
+group: `focal`, `tangential`, `principal_point`, `radial`), `notes` (`sensor 0: focal held: undetermined, sd
+11.42 %`, `sensor 0: radial held: undetermined, sd 3.16 px at the image corner`), and `reason` when nothing was
+asked - no intrinsic to refine (a fixed calibration), 360-degree rigs, or a core that cannot give the covariance
+(missing, older than API 18, `PPG_NATIVE=0`, a camera model it does not know): the calibration is then refined
+as before and the log says so once. Where the rule holds a focal length, `report["focal_held"]` is `"the block
+does not determine the focal length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, the last
+tick of the dialog) refines every calibration as the other options say, whatever the block determines, and
+guards nothing.
 
 An optimisation that nothing holds in its frame (no fixed points, positions not accurate enough to hold
 the block: the GPS of a drone) lets the adjustment fix the gauge of the block its own way, and it may
@@ -786,11 +797,12 @@ saying so). `bundle.Result` carries the adjusted block and what the solve was: `
 `gradient_max`, `solver`, `fallback`, `seconds`, `linear_solver` (`dense`, `sparse`, `pcg`),
 `termination`; `bundle.evaluate(problem)` gives the residuals, gradient and Jacobian of a problem by
 the native engine, `bundle.problem_at(problem, result)` a problem started where a result ended,
-`bundle.intrinsics_variances(problem)` the variances of the free intrinsics of each camera at the parameters of
-the problem (the inverse of the normal matrix at their columns, from the reduced system; `ppg_core` API 17) and
-`bundle.intrinsic_sds(problem)` the marginal sd of each focal length (relative) and of each principal point (over
-the side of the photo), scaled by the variance factor of the tie points (`bundle.tie_variance_factor`): what the
-camera optimisation judges a block by. On the
+`bundle.intrinsics_covariance(problem)` the covariance of the free intrinsics of the cameras at the parameters
+of the problem (the block of the inverse of the normal matrix at their columns, from the reduced system;
+`ppg_core` API 18) and `bundle.judge_intrinsics(problem)` the marginal sd of each group of the intrinsics of each
+camera - the focal length (relative), the tangential terms, the principal point and the radial terms (what each
+moves at the corner of the photo, in pixels) - with the groups to hold, scaled by the variance factor of the tie
+points (`bundle.tie_variance_factor`): what the camera optimisation judges a block by. On the
 synthetic problems of `testing.bundle_problems` (one per kind of residual and per camera model) the
 native solver reaches scipy's optimum - a cost not above scipy's, the parameters within a tenth of
 their standard deviation - in a few iterations where scipy takes a hundred evaluations.

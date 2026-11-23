@@ -727,36 +727,47 @@ l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resocon
 
 Ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina
 (`hold_undetermined=True`, il predefinito, con entrambi i motori: la regola dei giri dell'allineamento nativo,
-sopra, presa gruppo per gruppo). Prima della prima compensazione si prendono gli scarti quadratici medi marginali
-a posteriori dalla covarianza della compensazione all'allineamento - con liberi insieme tutti gli intrinseci che
-le opzioni liberano (la distorsione, il punto principale con `fit_principal_point`), i punti di controllo, le
-barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con il fattore di varianza
-dei punti di legame (`engine.bundle.intrinsic_sds`, sul core nativo, `ppg_core` API 17). Una focale il cui scarto
-supera lo 0,5 % (`bundle.FOCAL_SD_HOLD`), o che non ha affatto una covarianza, resta come l'ha lasciata
-l'allineamento: foto nadirali su terreno piatto non distinguono la focale dalla quota di volo, qualunque cosa
-dicano i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola lungo quello scambio
-(un anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte più lunga, camere
-131 m più in alto, target di verifica fuori di 0,6 m). La focale soltanto: la distorsione viene rifinita lo
-stesso, perché un blocco così la determina una volta tenuta la focale (lo stesso anello: il termine radiale
-trovato entro 0,0003 da quello vero, i target di controllo a 1 mm e quelli di verifica a 9 mm). Un punto
-principale chiesto resta fermo quando il suo scarto marginale supera lo 0,5 % del lato della foto
-(`bundle.PRINCIPAL_SD_HOLD`). Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale
-spostata di più del 20 % dal suo valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale
-cambiato di più di 0,5 (`bundle.K1_MOVE_HOLD`), fa ripartire l'ottimizzazione dall'inizio con la focale, o i
-termini radiali, tenuti. La compensazione di COLMAP rifinisce un gruppo per tutte le camere o per nessuna: con
-più sensori, ciò che è tenuto per uno lo è per tutti (la nostra compensazione lo tiene sensore per sensore). Ciò
-che la regola non vede: su una griglia nadirale su terreno piatto i termini radiali si scambiano ancora con una
-cupola del blocco, che i punti di controllo agli angoli non tengono - un punto nel mezzo la mostra (una griglia
-sintetica di 40 foto: da 4 a 6 cm lì, da 11 a 28 cm rifinendo tutto). `report["intrinsics"]` dice che cosa è
-stato giudicato, in numeri e con la chiave di ogni sensore: `checked`, `variance_factor`, `focal_sd` e
-`principal_point_sd` (`[sensore, scarto]`), `held` (i sensori tenuti, per gruppo: `focal`, `principal_point`,
-`radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`), e `reason` quando non è stato chiesto
-nulla - né una focale né un punto principale da rifinire (le posizioni tengono il blocco, nulla lo colloca, una
-calibrazione fissa), rig a 360 gradi, o un core che non può dare la covarianza (assente, più vecchio dell'API 17,
+sopra, presa gruppo per gruppo e su una sola scala). Prima della prima compensazione si prendono gli scarti
+quadratici medi marginali a posteriori dalla covarianza della compensazione all'allineamento - con liberi insieme
+tutti gli intrinseci che le opzioni liberano (la distorsione, il punto principale con `fit_principal_point`), i
+punti di controllo, le barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con
+il fattore di varianza dei punti di legame (`engine.bundle.judge_intrinsics`, sul core nativo, `ppg_core` API
+18). La focale viene giudicata per prima: quella il cui scarto relativo supera lo 0,5 % (`bundle.FOCAL_SD_HOLD`)
+resta come l'ha lasciata l'allineamento. Foto nadirali su terreno piatto non distinguono la focale dalla quota di
+volo, qualunque cosa dicano i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola
+lungo quello scambio (un anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte
+più lunga, camere 131 m più in alto, target di verifica fuori di 0,6 m). Poi i termini tangenziali, il punto
+principale (quando è stato chiesto) e i termini radiali, ciascuno per quello che sposta nella foto: un gruppo
+resta fermo quando lo scarto marginale dello spostamento che causa all'angolo della foto supera mezzo pixel
+(`bundle.GROUP_SD_HOLD_PX`). Ogni gruppo viene giudicato nella compensazione come la lasciano i gruppi già
+tenuti - la covarianza viene ripresa senza ciò che è stato tenuto -, i termini radiali per ultimi. Quell'anello
+non determina i suoi termini radiali finché la focale è libera (1,6 px all'angolo) e li determina una volta
+tenuta la focale (0,12 px): vengono rifiniti, con il termine radiale trovato entro 0,0003 da quello vero, i
+target di controllo a 1 mm e quelli di verifica a 9 mm; non determina i termini tangenziali della nostra
+formulazione (1,6 px), che restano fermi. Su una griglia nadirale su terreno piatto i termini radiali si
+scambiano con una cupola del blocco, che i punti di controllo agli angoli non vedono (una griglia sintetica di 40
+foto: 3,2 px): restano fermi anche loro, e un punto nel mezzo di quella griglia finisce a 3 mm - da 4 a 6 cm
+rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. Foto oblique intorno a un rilievo determinano ogni
+gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera calibrazione viene rifinita come prima. Un gruppo che
+non ha affatto una covarianza (una matrice normale che non si può invertire) resta fermo.
+
+Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale spostata di più del 20 % dal suo
+valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale cambiato di più di 0,5
+(`bundle.K1_MOVE_HOLD`), fa ripartire l'ottimizzazione dall'inizio con la focale, o i termini radiali, tenuti. La
+compensazione di COLMAP rifinisce un gruppo per tutte le camere o per nessuna, e la distorsione tutta o per
+niente: con più sensori, ciò che è tenuto per uno lo è per tutti, e ciascun tipo di termine di distorsione porta
+con sé l'altro (la nostra compensazione tiene ogni gruppo sensore per sensore). `report["intrinsics"]` dice che
+cosa è stato giudicato, in numeri e con la chiave di ogni sensore: `checked`, `variance_factor`, `focal_sd`
+(relativo), `tangential_sd`, `principal_point_sd` e `radial_sd` (pixel all'angolo della foto; ciascuno una lista
+di `[sensore, scarto]`), `held` (i sensori tenuti, per gruppo: `focal`, `tangential`, `principal_point`,
+`radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`, `sensor 0: radial held: undetermined, sd
+3.16 px at the image corner`), e `reason` quando non è stato chiesto nulla - nessun intrinseco da rifinire (una
+calibrazione fissa), rig a 360 gradi, o un core che non può dare la covarianza (assente, più vecchio dell'API 18,
 `PPG_NATIVE=0`, un modello di camera che non conosce): la calibrazione viene allora rifinita come prima e il log
-lo dice una volta. `report["focal_held"]` vale allora `"the block does not determine the focal length"`.
-`hold_undetermined=False` (`ppg optimize --free-undetermined`, l'ultima spunta della finestra) rifinisce ogni
-calibrazione come dicono le altre opzioni, qualunque cosa determini il blocco, e non sorveglia nulla.
+lo dice una volta. Dove la regola tiene una focale, `report["focal_held"]` vale `"the block does not determine
+the focal length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, l'ultima spunta della
+finestra) rifinisce ogni calibrazione come dicono le altre opzioni, qualunque cosa determini il blocco, e non
+sorveglia nulla.
 
 Un'ottimizzazione che niente tiene nel suo sistema (nessun punto fisso, posizioni non abbastanza
 accurate da tenere il blocco: il GPS di un drone) lascia che la compensazione fissi a modo suo il
@@ -814,11 +825,12 @@ camera - scipy compensa il blocco, `Result.fallback` dice perché e il log ha un
 `solver`, `fallback`, `seconds`, `linear_solver` (`dense`, `sparse`, `pcg`), `termination`;
 `bundle.evaluate(problem)` dà residui, gradiente e jacobiano di un problema con il motore nativo,
 `bundle.problem_at(problem, result)` un problema che parte dove un risultato è finito,
-`bundle.intrinsics_variances(problem)` le varianze degli intrinseci liberi di ogni camera ai parametri del
-problema (l'inversa della matrice normale alle loro colonne, dal sistema ridotto; `ppg_core` API 17) e
-`bundle.intrinsic_sds(problem)` lo scarto marginale di ogni focale (relativo) e di ogni punto principale (sul
-lato della foto), scalato con il fattore di varianza dei punti di legame (`bundle.tie_variance_factor`): ciò con
-cui l'ottimizzazione delle camere giudica un blocco. Sui
+`bundle.intrinsics_covariance(problem)` la covarianza degli intrinseci liberi delle camere ai parametri del
+problema (il blocco dell'inversa della matrice normale alle loro colonne, dal sistema ridotto; `ppg_core` API 18)
+e `bundle.judge_intrinsics(problem)` lo scarto marginale di ogni gruppo di intrinseci di ogni camera - la focale
+(relativo), i termini tangenziali, il punto principale e i termini radiali (quello che ciascuno sposta all'angolo
+della foto, in pixel) - con i gruppi da tenere, scalato con il fattore di varianza dei punti di legame
+(`bundle.tie_variance_factor`): ciò con cui l'ottimizzazione delle camere giudica un blocco. Sui
 problemi sintetici di `testing.bundle_problems` (uno per tipo di residuo e per modello di camera) il risolutore
 nativo raggiunge l'ottimo di scipy - un costo non superiore a quello di scipy, i parametri entro un
 decimo della loro deviazione standard - in poche iterazioni dove scipy fa un centinaio di valutazioni.
