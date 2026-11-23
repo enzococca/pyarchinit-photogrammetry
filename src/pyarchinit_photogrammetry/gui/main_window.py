@@ -2027,6 +2027,10 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             # has changes the user chose not to save: what came from RustGIS would go with them, so it stays there
             self._rustgis_leave(unsaved_stay=True)
             self._settle_removals(shown)
+            wall = getattr(self, "wall_pane", None)
+            if wall is not None:  # the line of a wall is of a chunk of the project left (keys repeat across projects)
+                wall.set_trace(None)
+                self.ortho_view.remove_layer(TRACE_PREVIEW_LAYER)
             pane = getattr(self, "assistant", None)
             if pane is not None:  # an action of the assistant waiting or running for the project left: stopped
                 pane.project_changed()
@@ -9623,6 +9627,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 return
             kind, idx = v["source"]
             if kind == "path":  # the pane takes the answers and the line is traced on the plan
+                if v.get("type") == "section":
+                    self._warn(tr("Su un muro tracciato in pianta non si fa una sezione: viene costruito il "
+                                  "prospetto del muro."))
                 self.wall_pane.set_values(v)
                 self.show_wall_path_pane()
                 self.wall_trace_start()

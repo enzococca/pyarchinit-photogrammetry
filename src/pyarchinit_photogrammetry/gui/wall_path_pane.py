@@ -12,7 +12,7 @@ import contextlib
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QRadioButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from ..engine.wall_trace import SNAP_BAND
 from .i18n import number, tr
@@ -35,7 +35,17 @@ def _spin(lo: float, hi: float, value: float, decimals: int = 2, step: float = 0
     s.setValue(value)
     if suffix:
         s.setSuffix(suffix)
+    _narrow(s)
     return s
+
+
+def _narrow(widget, width: int = 80) -> None:
+    """A field that takes the width the dock gives it, down to ``width`` pixels: the pane fits the right dock."""
+    widget.setMinimumWidth(width)
+    if isinstance(widget, QComboBox):
+        widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        widget.setMinimumContentsLength(8)
+    widget.setSizePolicy(QSizePolicy.Policy.Ignored, widget.sizePolicy().verticalPolicy())
 
 
 def line_length(points) -> float:
@@ -50,7 +60,7 @@ class WallPathPane(QWidget):
     def __init__(self, window, parent=None):
         super().__init__(parent)
         self.window = window
-        self.chunk_key = None  # the chunk the line was traced on
+        self.chunk = None  # the chunk the line was traced on (the object: keys repeat across projects)
         self.clicked: np.ndarray | None = None
         self.snapped: np.ndarray | None = None
         self.report: dict | None = None  # of the snap: shift, median_shift, max_shift, snapped
@@ -110,6 +120,7 @@ class WallPathPane(QWidget):
         row.addStretch(1)
         sl.addLayout(row)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.s_band = _spin(0.1, 20.0, SNAP_BAND)
         self.s_band.setToolTip(tr("Quanto lontano dalla linea cliccata, davanti e dietro, si cerca la faccia del muro. "
                                   "In una trincea o in un corridoio stretto usa una fascia più piccola della loro "
@@ -129,11 +140,8 @@ class WallPathPane(QWidget):
         self.g_line.addButton(self.r_clicked)
         self.b_snap = QPushButton(tr("Aggancia di nuovo"))
         self.b_snap.setToolTip(tr("La linea cliccata agganciata di nuovo con la fascia, la smussatura e il lato scelti"))
-        row.addWidget(self.r_snapped)
-        row.addWidget(self.r_clicked)
-        row.addStretch(1)
-        sl.addLayout(row)
-        row = QHBoxLayout()
+        sl.addWidget(self.r_snapped)
+        sl.addWidget(self.r_clicked)
         row.addWidget(self.b_snap)
         row.addStretch(1)
         sl.addLayout(row)
@@ -147,7 +155,9 @@ class WallPathPane(QWidget):
         body = QWidget()
         form = QFormLayout(body)
         form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)  # a narrow dock: the label over its field
         self.side = QComboBox()
+        _narrow(self.side)
         for key, text in SIDES:
             self.side.addItem(tr(text), key)
         form.addRow(tr("Lato da cui guardare"), self.side)
@@ -173,10 +183,12 @@ class WallPathPane(QWidget):
         body = QWidget()
         form = QFormLayout(body)
         form.setContentsMargins(0, 0, 0, 0)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)  # a narrow dock: the label over its field
         self.s_resolution = _spin(0.0, 10.0, 0.0, 4, 0.001, " m/pixel")
         self.s_resolution.setSpecialValueText(tr("automatica"))
         form.addRow(tr("Risoluzione"), self.s_resolution)
         self.c_blending = QComboBox()
+        _narrow(self.c_blending)
         self.c_blending.addItem(tr("Mosaico senza cuciture"), "mosaic")
         self.c_blending.addItem(tr("Nessuna (una foto per cella)"), "disabled")
         form.addRow(tr("Fusione"), self.c_blending)
@@ -184,6 +196,7 @@ class WallPathPane(QWidget):
         self.c_colour.setChecked(True)
         form.addRow("", self.c_colour)
         self.e_name = QLineEdit()
+        _narrow(self.e_name)
         self.e_name.setPlaceholderText(tr("Prospetto del muro"))
         form.addRow(tr("Nome"), self.e_name)
         self.b_build = QPushButton(icon("elevation"), tr("Costruisci il prospetto"))
@@ -236,11 +249,10 @@ class WallPathPane(QWidget):
         self.report = report
         self.built = None
         if self.clicked is None:
-            self.chunk_key = None
+            self.chunk = None
             self.votes = None
         else:
-            ch = getattr(self.window, "chunk", None)
-            self.chunk_key = getattr(ch, "key", None)
+            self.chunk = getattr(self.window, "chunk", None)
         if heights is not None:
             self.s_v0.setValue(float(heights[0]))
             self.s_v1.setValue(float(heights[1]))
@@ -255,7 +267,7 @@ class WallPathPane(QWidget):
     def refresh(self) -> None:
         """The pane as the active chunk has it: emptied when the line was traced on another chunk."""
         ch = getattr(self.window, "chunk", None)
-        if self.clicked is not None and (ch is None or ch.key != self.chunk_key):
+        if self.clicked is not None and (ch is None or ch is not self.chunk):
             self.set_trace(None)
             with contextlib.suppress(AttributeError, RuntimeError):
                 self.window._draw_trace_preview()

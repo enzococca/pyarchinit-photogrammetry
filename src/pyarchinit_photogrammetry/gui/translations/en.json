@@ -4008,7 +4008,8 @@
   "Quota più bassa": "Lowest height",
   "Quota più alta": "Highest height",
   "Prolunga prima": "Extend before",
-  "Prolunga dopo": "Extend after"
+  "Prolunga dopo": "Extend after",
+  "Su un muro tracciato in pianta non si fa una sezione: viene costruito il prospetto del muro.": "No section is made on a wall traced on the plan: the elevation of the wall is built."
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",

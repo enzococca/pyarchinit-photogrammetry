@@ -116,7 +116,7 @@ class WallPathActions:
         if pane.clicked is None:
             self._warn(tr("Traccia prima la linea del muro sulla pianta."))
             return False
-        if ch is None or ch.key != pane.chunk_key:
+        if ch is None or ch is not pane.chunk:
             self._warn(tr("La linea del muro è stata tracciata su un altro chunk: tracciala di nuovo su questo."))
             pane.refresh()
             return False
@@ -294,10 +294,8 @@ class WallPathActions:
                 entry = E.build_elevation(ch, frame, v["resolution"], v["name"] or None, (-v["back"], v["front"]),
                                           v["blending"], bool(v["colour"]), progress=p, extend=extend,
                                           heights=(v["v0"], v["v1"]))
-            except ValueError as exc:
-                if str(exc).startswith("no surface"):
-                    return {"no_surface": exc}
-                raise
+            except E.NoSurface as exc:
+                return {"no_surface": exc}
             return {"entry": entry}
 
         def done(out):
@@ -336,13 +334,13 @@ class WallPathActions:
         pane = getattr(self, "wall_pane", None)
         if pane is None or pane.clicked is None or pane.built is not None or not self._on_plan():
             return
-        if self.chunk.key != pane.chunk_key:
+        if self.chunk is not pane.chunk:
             return
         with view.batch():
             view.add_line(pane.clicked, COLOUR_CLICKED, tr("cliccata"), layer=TRACE_PREVIEW_LAYER,
                           attrs={"linea": "cliccata"}, width=2.0, dash=True)
-            if pane.snapped is not None and pane.r_snapped.isEnabled():
-                view.add_line(pane.snapped, COLOUR_SNAPPED, tr("agganciata"), layer=TRACE_PREVIEW_LAYER,
+            if pane.snapped is not None and pane.r_snapped.isEnabled():  # its name at the other end
+                view.add_line(pane.snapped[::-1], COLOUR_SNAPPED, tr("agganciata"), layer=TRACE_PREVIEW_LAYER,
                               attrs={"linea": "agganciata"}, width=2.0)
 
     def _draw_traces(self) -> None:

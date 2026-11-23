@@ -105,7 +105,18 @@ def test_trace_snap_side_heights_and_build(make):
     assert pane.state("trace") == "done" and "3 vertici" in pane.state_text("trace")
     assert pane.state("snap") == "done" and pane.r_snapped.isChecked()
     assert pane.s_v0.value() == pytest.approx(100.0, abs=0.05) and pane.s_v1.value() == pytest.approx(102.0, abs=0.05)
-    assert "cm" in pane.shifts.text()  # how far the snap moved each vertex
+    from pyarchinit_photogrammetry.engine import wall_trace
+    from pyarchinit_photogrammetry.gui.i18n import number
+
+    real = wall_trace.snap_trace(w.chs[0], _clicked(w), "right")  # the report the pane shows, number by number
+    assert pane.report["max_shift"] == pytest.approx(real["max_shift"], abs=1e-9)
+    assert pane.report["max_shift"] == pytest.approx(np.hypot(0.3, 0.3), abs=0.01)  # the corner moved most
+    assert f"al massimo di {number(100 * real['max_shift'], 1)} cm" in pane.state_text("snap")
+    for i, shift in enumerate(real["shift"]):  # how far the snap moved each vertex
+        assert f"{i + 1}: {number(100 * shift, 1)} cm" in pane.shifts.text()
+    labels = [lab for _i, lab, _a in w.ortho_view.layers[TRACE_PREVIEW_LAYER]["features"]]
+    a, b = (lab.pos() for lab in labels)  # the two names apart, not one over the other
+    assert np.hypot(a.x() - b.x(), a.y() - b.y()) > 50
     assert len(w.ortho_view.features(TRACE_PREVIEW_LAYER)) == 2  # clicked and snapped
 
     assert w.wall_build()
@@ -200,6 +211,14 @@ def test_the_dialog_offers_the_wall_and_opens_the_pane(make, monkeypatch):
     assert pane.s_front.value() == pytest.approx(0.8) and pane.s_back.value() == pytest.approx(0.4)
     assert pane.c_blending.currentData() == "disabled" and pane.e_name.text() == "Muro est"
     assert w.requests == ["line"]
+    assert not w.said  # an elevation: nothing to say
+
+    # a section asked on the traced wall: said, the elevation made instead
+    monkeypatch.setattr(mw.ParamDialog, "ask", lambda parent, title, fields, intro="": {
+        "source": ("path", None), "type": "section", "side": "auto", "front": 0.5, "back": 0.5, "resolution": None,
+        "blending": "mosaic", "colour": True, "name": ""})
+    w.build_elevation()
+    assert len(_texts(w)) == 1 and "sezione" in _texts(w)[0].lower() and w.requests == ["line", "line"]
 
 
 def test_traces_on_the_plan_open_their_elevation_and_go_to_qgis(make):
@@ -376,7 +395,7 @@ def test_no_surface_along_the_line_is_said_with_its_rule(make, recorded, monkeyp
     _trace(w)
 
     def build(*a, **k):
-        raise ValueError("no surface in the depth band along the trace (a column is of the face when the model is met "
+        raise E.NoSurface("no surface in the depth band along the trace (a column is of the face when the model is met "
                          "at 10% of its heights at least): the length on the face needs the wall")
 
     monkeypatch.setattr(E, "build_elevation", build)
@@ -384,3 +403,74 @@ def test_no_surface_along_the_line_is_said_with_its_rule(make, recorded, monkeyp
     w.runner.wait()
     assert "10 %" in _texts(w)[-1] and "superficie" in _texts(w)[-1]
     assert w.wall_pane.state("build") == "todo" and not [k for k, _t in w.said if k == "error"]
+
+
+def test_the_real_engine_without_surface_is_said(make):
+    """Heights far over the wall: the engine finds no face along the line (its own error type), the window says why."""
+    from pyarchinit_photogrammetry.engine import elevation as E
+
+    assert issubclass(E.NoSurface, ValueError)
+    w = make()
+    _trace(w)
+    w.wall_pane.s_resolution.setValue(RES)
+    w.wall_pane.s_v0.setValue(150.0)
+    w.wall_pane.s_v1.setValue(151.0)
+    w.wall_build()
+    w.runner.wait()
+    assert "10 %" in _texts(w)[-1] and not [k for k, _t in w.said if k == "error"]
+    assert not w.chs[0].meta.get("elevations")
+
+
+def test_the_line_does_not_follow_into_another_project(make, recorded, wall_dataset, tmp_path):
+    """Chunk keys start at 0 in every project: the line of project A is not the line of chunk 0 of project B."""
+    from pyarchinit_photogrammetry.gui.wall_path_actions import TRACE_PREVIEW_LAYER
+
+    w = make()
+    _trace(w)
+    assert w.wall_pane.clicked is not None
+    doc_b, (ch_b,), _info = wall_doc(tmp_path / "b", wall_dataset, plan=True)
+    assert ch_b.key == w.chs[0].key
+    w.set_document(doc_b)
+    w.runner.wait()
+    pane = w.wall_pane
+    assert pane.clicked is None and pane.state("trace") == "todo" and pane.state_text("trace") == ""
+    w._show_raster("ortho")
+    assert TRACE_PREVIEW_LAYER not in w.ortho_view.layers
+    assert not w.wall_build() and recorded["builds"] == []
+    # the line kept on the chunk object itself: the same key in a new document is not enough
+    _trace(w)
+    assert pane.state("trace") == "done"
+
+
+def test_the_traces_are_drawn_once_per_raster_load(make, monkeypatch, qapp, wall_dataset, tmp_path):
+    from pyarchinit_photogrammetry.engine import elevation as E
+
+    w = make()
+    calls = []
+    real = E.trace_layer
+    monkeypatch.setattr(E, "trace_layer", lambda ch: calls.append(1) or real(ch))
+    w._show_raster("ortho")
+    qapp.processEvents()
+    assert len(calls) == 1
+    calls.clear()
+    w.refresh_all()  # the window shown again: the plan loaded once, its traces drawn once
+    qapp.processEvents()
+    assert len(calls) == 1
+    calls.clear()
+    doc_b, _chs, _info = wall_doc(tmp_path / "b", wall_dataset, chunks=2, plan=True)
+    w.set_document(doc_b)  # another project
+    qapp.processEvents()
+    assert len(calls) == 1
+    calls.clear()
+    w._activate_chunk(doc_b.chunks[1])  # another chunk
+    qapp.processEvents()
+    assert len(calls) == 1
+
+
+def test_the_pane_fits_the_right_dock(make, qapp):
+    w = make()
+    _trace(w)
+    pane = w.wall_pane
+    w.show_wall_path_pane()
+    qapp.processEvents()
+    assert pane.minimumSizeHint().width() <= 260
