@@ -70,7 +70,10 @@ INTRINSICS_MISSING = "the native core with the covariance of the intrinsics (API
 # later group that fails is judged again without the earlier groups that are still free, and where it then
 # passes they are held in its place (the tangential terms of a ring flown once pass at 0.5 px on a block of many
 # tie points while its radial terms, judged with them free, fail at 0.9 px: the tangential terms go, the radial
-# terms are refined). An order by how far each group is beyond its limit, the worst first, was tried and
+# terms are refined). Only what a lens needs less goes this way: the focal length for the radial terms alone,
+# never for the tangential terms or the principal point (a grid pitched a little: the focal length passes at
+# 0.4 % and the tangential terms fail at 0.57 px with it free - they are held, the focal length is refined). An
+# order by how far each group is beyond its limit, the worst first, was tried and
 # dropped: on that ring, with the focal length held, it gave up the radial terms (3.07 px) in place of the
 # tangential ones (1.63 px), left k1 at zero for a true -0.04 and the check targets at 17 mm - 9 mm in this
 # order. What an adjustment then moves too far is held and the adjustment run again (runaways): a focal length
@@ -868,10 +871,12 @@ def judge_intrinsics(pb: Problem, together: bool = False,
     tangential terms of a ring flown once are less far beyond theirs than its radial terms are while they are
     free, and are the ones to give up).
 
-    An earlier group that passed is given up as well for a later one that fails: the later group is judged again
-    without the earlier groups of its camera that are still free - the tangential terms first, then the
-    principal point too, the focal length only when nothing else is enough - and where it then passes they are
-    held in its place and it is refined; where it fails even without them it is held, and they stay free.
+    An earlier group that passed is given up as well for a later one that fails, where a lens needs it less: the
+    later group is judged again without the earlier groups of its camera that are still free - the tangential
+    terms first, then the principal point too - and where it then passes they are held in its place and it is
+    refined; where it fails even without them it is held, and they stay free. The focal length stands first for
+    what a flat block cannot tell, not because a lens can do without it: it is given up for the radial terms
+    alone, when nothing else is enough, and never for the tangential terms or the principal point.
 
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment
     refines a group for all its cameras or for none), and a later group is refined only where giving up the
@@ -971,8 +976,12 @@ def judge_intrinsics(pb: Problem, together: bool = False,
             sds[c][group] = sd
             if sd > limit:
                 failing[c] = sd
-        # the earlier groups that go for it, the first to go first: what a lens needs least, the focal length last
-        earlier = [g for g in JUDGED[:position] if g != "focal"] + [g for g in JUDGED[:position] if g == "focal"]
+        # the earlier groups that go for it, the first to go first, and only those a lens needs less than this
+        # one: the focal length - first in the order for what a flat block cannot tell, not because a lens can
+        # do without it - goes for the radial terms alone, and last
+        earlier = [g for g in JUDGED[:position] if g != "focal"]
+        if group == JUDGED[-1]:
+            earlier += [g for g in JUDGED[:position] if g == "focal"]
         saved = without_earlier(group, failing, earlier) if failing and matrix is not None else {}
         given_up: dict = {}  # {camera: [earlier groups held in place of this one]}
         for c, sd in failing.items():

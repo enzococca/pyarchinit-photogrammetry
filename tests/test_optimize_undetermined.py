@@ -401,6 +401,31 @@ def test_the_focal_length_is_the_last_to_be_given_up_for_a_later_group(monkeypat
 
 
 @needs_core
+def test_the_focal_length_is_not_given_up_for_what_a_lens_needs_less(tmp_path):
+    """An earlier group goes for a later one only where a lens needs it less. The focal length stands first in the
+    order because a flat block cannot tell it from its height, not because a lens can do without it: it is given
+    up for the radial terms alone, never for the tangential terms or the principal point. A grid pitched a
+    little, our formulation: the focal length passes (0.40 %); the tangential terms, judged with it free, fail
+    (0.57 px) and would pass without it (0.42 px). They are held, and the focal length is refined."""
+    _doc, ch = _block(tmp_path, pitch=0.25)
+    rec = sfm.load_reconstruction(ch)
+    pb, _ids = bundle.problem_from_chunk(ch, rec, use_markers=True, gnss="off")
+    sds, held, _factor = bundle.judge_intrinsics(pb)
+    assert held[0] == {"tangential": ("sd", sds[0]["tangential"])}
+    assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and bundle.GROUP_SD_HOLD_PX < sds[0]["tangential"] < 0.7
+    assert 0 < sds[0]["radial"] < 0.3  # judged without the tangential terms
+    before = _calibration(ch)
+    ch.optimize_cameras(engine="ppg")
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert check["held"] == {**NOTHING_HELD, "tangential": [0]}
+    assert check["notes"] == [f"sensor 0: tangential held: undetermined, sd {sds[0]['tangential']:.2f} px at the "
+                              "image corner"]
+    after = _calibration(ch)
+    assert after[0][0] != before[0][0] and after[0][0] == pytest.approx(F, rel=0.01)  # the focal length refined
+    assert after[0][6:] == before[0][6:] and after[0][4] != before[0][4]
+
+
+@needs_core
 def test_what_is_held_leaves_the_adjustment_before_the_next_group_is_judged():
     """The radial terms of a block that cannot tell its focal length from its height: judged with the focal length
     free they look as lost as it is - they trade with it -, judged once it is held they are what the block gives
