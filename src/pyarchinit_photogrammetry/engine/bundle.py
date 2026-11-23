@@ -57,6 +57,15 @@ FUNCTION_TOLERANCE = 1e-9
 ROBUST_FUNCTION_TOLERANCE = 1e-6
 NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not installed"
 INTRINSICS_MISSING = "the native core with the variances of the intrinsics (API 17) is not installed"
+# the calibration of a camera is refined only where the block determines it (the rule of the rounds of the native
+# mapper, native/engine/src/mapper/rounds.rs, applied by the camera optimisation): the relative marginal sd of its
+# focal length (focal_sds) above FOCAL_SD_HOLD keeps all its intrinsics held; a focal length that an adjustment
+# moves by more than FOCAL_MOVE_HOLD of its start has the adjustment run again with that camera held
+FOCAL_SD_HOLD = 0.005
+FOCAL_MOVE_HOLD = 0.2
+# the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
+# many times the extent of the block: a gauge that adds no information the block has
+GAUGE_SIGMA_EXTENTS = 100.0
 
 
 @dataclass
@@ -633,7 +642,7 @@ def intrinsics_variances(pb: Problem, loss: str = "none", loss_scale: float = 1.
     its ``free_intrinsics``, in their order - the diagonal of the inverse of the normal matrix at their columns,
     taken from the system reduced to the cameras; ``loss`` with ``loss_scale`` on the tie points, as
     :func:`adjust` takes them. The accuracies of ``pb`` are taken as they are: a variance factor goes into them
-    first. ``reference_flight``: with ``gnss_bias``, the flight whose bias is held at
+    first (:func:`focal_sds` does). ``reference_flight``: with ``gnss_bias``, the flight whose bias is held at
     zero - without control points the biases of all the flights and a shift of the block trade off. A normal
     matrix that cannot be inverted (a gauge left free, an intrinsic the observations do not hold) is a
     RuntimeError: nothing is regularised."""
@@ -645,6 +654,79 @@ def intrinsics_variances(pb: Problem, loss: str = "none", loss_scale: float = 1.
     fn = _native.kernel("bundle_intrinsics_variances")
     flight = None if reference_flight is None else int(reference_flight)
     return [np.asarray(v, float) for v in fn(_to_native(pb), loss, float(loss_scale), flight)]
+
+
+def tie_variance_factor(pb: Problem) -> float:
+    """The variance factor of the tie points of ``pb`` at the parameters it holds: ``v^T P v / r`` of their own
+    residuals (in units of ``pixel_sigma``), ``r`` their rows less the unknowns they determine - six per free
+    photo, the free intrinsics, three per point. Observations behind their camera are left out; 1 when there is
+    nothing to estimate it from (no redundancy, no residual). The square of what the tie points are worth against
+    the accuracy the problem states for them: the factor the covariance of an adjustment is scaled by."""
+    model = _Model(pb)
+    rot, cen, params, pts, _mks, rs, _bias = model.unpack(model.start())
+    uv = model._project(rot, cen, params, rs, pb.obs_image, pts[pb.obs_point], pb.obs_xy)
+    r = (uv - pb.obs_xy) / pb.pixel_sigma
+    seen = np.isfinite(r).all(axis=1)
+    lay = model.lay
+    unknowns = 6 * len(lay.free_images) + sum(len(f) for f in lay.free_intrinsics) + 3 * len(pb.points)
+    redundancy = 2 * int(seen.sum()) - unknowns
+    total = float(np.sum(r[seen] ** 2))
+    return total / redundancy if redundancy > 0 and total > 0 else 1.0
+
+
+def _with_gauge(pb: Problem) -> tuple[Problem, int | None]:
+    """``pb`` as the covariance of its adjustment is taken (:func:`focal_sds`): without the tie points that cannot
+    be adjusted (:func:`_adjustable`) and with a gauge that adds nothing the block does not have. A block its
+    references do not place (:attr:`Problem.absolute` False) has its first photo held, its place and its
+    orientation, and, without scale bars, a position of the photo farthest from it whose sigma is
+    :data:`GAUGE_SIGMA_EXTENTS` times their distance, its size - the two photos :func:`problem_from_chunk` holds
+    for the solvers are more than a gauge, and a sd taken with them is too small. Positions with a bias per flight
+    and no control point: the bias of one flight is held at zero (the frame of the positions; the biases of all
+    the flights and a shift of the block would trade off). Returns the problem and that flight (None: none)."""
+    keep = _adjustable(pb)
+    out = replace(pb, gnss=list(pb.gnss)) if keep.all() else replace(_without_held(pb, keep), gnss=list(pb.gnss))
+    flight = None
+    if not out.absolute and len(out.centres) >= 2:
+        distance = np.linalg.norm(out.centres - out.centres[0], axis=1)
+        far = int(np.argmax(distance))
+        out.fixed_images = {0}
+        if not out.bars:
+            flight = min((g[3] for g in out.gnss), default=1) - 1  # a flight of its own, without a bias
+            sigma = GAUGE_SIGMA_EXTENTS * max(float(distance[far]), 1e-3)
+            out.gnss.append((far, np.array(out.centres[far], float), np.full(3, sigma), flight))
+    if out.gnss_bias and not out.gcps and flight is None and out.gnss:
+        flight = min(g[3] for g in out.gnss)
+    return out, (flight if out.gnss_bias else None)
+
+
+def focal_sds(pb: Problem) -> tuple[list, float | None]:
+    """The rule of the rounds of the native mapper for an adjustment of ``pb``: per camera, the relative marginal
+    sd of its focal length at the parameters of the problem - the square root of the largest variance of its focal
+    columns (fx and fy of a model with two) over its focal length, every intrinsic the problem frees free with it
+    (a conditional sd, with the terms that trade with the focal length held, is always smaller), the covariance
+    scaled by the variance factor of the tie points (:func:`tie_variance_factor`: it goes into ``pixel_sigma``;
+    the references keep the accuracy they state) and taken with the gauge of :func:`_with_gauge`. None for a
+    camera whose focal length is not free. Returns the sds and the variance factor (None when no focal length is
+    free: the core is not asked). RuntimeError where the core cannot give the variances
+    (:func:`variances_ready`) or the normal matrix cannot be inverted (an intrinsic the block does not hold at
+    all: photos looking straight down on flat ground)."""
+    free = pb.free_intrinsics if pb.free_intrinsics is not None else [list(range(len(c[1]))) for c in pb.cameras]
+    columns = [[j for j, k in enumerate(free[c]) if k in _focal_indices(model)]
+               for c, (model, *_rest) in enumerate(pb.cameras)]
+    if not any(columns):
+        return [None] * len(pb.cameras), None
+    probe, flight = _with_gauge(pb)
+    factor = tie_variance_factor(probe)
+    probe.pixel_sigma = float(probe.pixel_sigma) * float(np.sqrt(factor))
+    variances = intrinsics_variances(probe, reference_flight=flight)
+    sds = []
+    for c, cols in enumerate(columns):
+        if not cols:
+            sds.append(None)
+            continue
+        worst = max(float(variances[c][j]) for j in cols)
+        sds.append(float(np.sqrt(max(worst, 0.0))) / abs(float(pb.cameras[c][1][0])))
+    return sds, factor
 
 
 def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers) -> Problem:
