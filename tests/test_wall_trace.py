@@ -496,6 +496,13 @@ def test_the_vertices_keep_the_order_clicked(tmp_path):
     near = T._moved(v, fits=np.array([[-0.5, 0.0], [-0.5, 0.0]]), **legs)           # half a metre behind it
     assert np.allclose(near, [[0.0, 0.5], [0.5, 0.5], [0.5, 1.0]])
     assert T._moved(v, fits=np.zeros((2, 2)), **{**legs, "found": np.array([False, False])}) is None
+    # a turn of 120 degrees whose two lines meet behind the first point: the corner goes between them - at a
+    # right angle and over, half way between where each line alone would put it
+    turn = np.array([[0.0, 0.0], [1.0, 0.0], [0.5, np.sqrt(0.75)]])
+    wide = dict(length=np.array([1.0, 1.0]), t=np.array([[1.0, 0.0], [-0.5, np.sqrt(0.75)]]),
+                towards=np.array([[0.0, -1.0], [np.sqrt(0.75), 0.5]]), found=np.array([True, True]))
+    out = T._moved(turn, fits=np.array([[-0.2, 0.0], [-2.0, 0.0]]), **wide)
+    assert np.allclose(out, [[0.0, 0.2], [0.134, -0.4], [-1.232, -0.134]], atol=1e-3)
 
 
 def test_projected_and_local_coordinates_snap_alike(model_outside, tmp_path):
