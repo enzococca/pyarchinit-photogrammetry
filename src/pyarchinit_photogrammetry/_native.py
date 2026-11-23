@@ -48,8 +48,8 @@ FEATURES = {
     "bundle": "bundle_adjust",  # the bundle adjustment of the native engine (API 12)
     "native_match": "native_match_pairs",  # the matching step of the native engine: features, pairs, stores (API 15)
     "native_mapper": "NativeMapper",  # the global mapper of the native engine, one method per stage (API 16)
-    # the variances of the free intrinsics of a bundle problem, from the reduced system (API 17)
-    "intrinsics_variances": "bundle_intrinsics_variances",
+    # the covariance of the free intrinsics of a bundle problem, from the reduced system (API 18)
+    "intrinsics_covariance": "bundle_intrinsics_covariance",
 }
 TIN_API = 10  # tin_triangulate, tin_rasterize, tin_contours, tin_volume
 CONVBIN_API = 11  # raw_to_rinex, convert_cancel
@@ -58,7 +58,7 @@ NATIVE_MATCH_API = 15  # native_features, native_preselect, native_match_pairs, 
 # 14: the options of the second stage (guided, guided_max_ratio, guided_band); 15: the check of the second stage
 # (guided_check, on: a core of API 14 matches without it and is not taken)
 MAPPER_API = 16  # NativeMapper, native_mapper_defaults
-INTRINSICS_API = 17  # bundle_intrinsics_variances
+INTRINSICS_API = 18  # bundle_intrinsics_covariance (17 gave its diagonal alone, bundle_intrinsics_variances)
 
 # the bindings of the native matching, by the name they have in native_match_kernels() (``native_`` in front of
 # each in ppg_core), and the two store handles (classes of ppg_core)
@@ -73,8 +73,8 @@ def supports(model: str) -> bool:
     API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10;
     ``"convbin"``: raw receiver logs converted to RINEX, API 11; ``"bundle"``: the bundle adjustment
     of the native engine, API 12; ``"native_match"``: the matching step of the native engine, API 15;
-    ``"native_mapper"``: the global mapper of the native engine, API 16; ``"intrinsics_variances"``: the
-    variances of the free intrinsics of a bundle problem, API 17)."""
+    ``"native_mapper"``: the global mapper of the native engine, API 16; ``"intrinsics_covariance"``: the
+    covariance of the free intrinsics of a bundle problem, API 18)."""
     core = _core() if enabled() else None
     if core is None:
         return False

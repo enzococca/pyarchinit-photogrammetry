@@ -569,9 +569,10 @@ class Chunk:
         default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Each group of the
         intrinsics of a camera is refined only where the block determines it (``hold_undetermined``, True by
         default: a focal length the block does not determine - nadir photos over flat ground - stays that of the
-        alignment while the distortion is still refined, a principal point asked for is held when the block does
-        not determine it, ``meta["sfm"]["optimize"]["intrinsics"]`` says which sensors and why; False refines
-        every calibration whatever the block determines). Returns the mean reprojection error in pixels; the
+        alignment, and so do the tangential terms, a principal point asked for and the radial terms whose effect
+        at the corner of the photo the block determines to worse than half a pixel;
+        ``meta["sfm"]["optimize"]["intrinsics"]`` says which groups of which sensors and why; False refines every
+        calibration whatever the block determines). Returns the mean reprojection error in pixels; the
         control/check point, scale bar and GNSS report is in ``meta["sfm"]["optimize"]``."""
         from ..engine import sfm
 

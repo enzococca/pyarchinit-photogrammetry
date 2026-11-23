@@ -677,7 +677,7 @@ def test_our_engine_holds_the_focal_length_under_auto(tmp_path, monkeypatch):
     ch.optimize_cameras(engine="ppg", gnss="plain", hold_undetermined=False)
     rep = ch.meta["sfm"]["optimize"]
     assert rep["focal_held"] is None and seen[-1].free_intrinsics[0] == [0, 1, 4, 5, 6, 7]
-    checked = bundle.variances_ready(seen[-1]) is None  # the core that judges the block is there
+    checked = bundle.covariance_ready(seen[-1]) is None  # the core that judges the block is there
     ch.optimize_cameras(engine="ppg", gnss="plain")
     rep = ch.meta["sfm"]["optimize"]
     assert rep["intrinsics"]["checked"] is checked
@@ -698,8 +698,9 @@ def test_a_block_without_references_holds_its_focal_length(tmp_path, monkeypatch
     own adjustment keeps the focal length of every sensor exactly, by either solver and whatever was asked
     (``gnss="plain"`` with no position to use, the principal point fitted): seen from one height over flat
     ground, the focal length and the depth of the scene scale together at the same cost, and a Newton solver
-    walks that valley. The report says why it was held; the distortion is still refined; the first photo and
-    the farthest from it hold the block."""
+    walks that valley. The report says why it was held; the rest of the calibration is refined where the block
+    determines it (photos looking straight down do not determine the radial terms either: with the core that
+    judges the block they stay as well); the first photo and the farthest from it hold the block."""
     from pyarchinit_photogrammetry.engine import bundle
 
     doc, ch = _rtk_block(tmp_path)
@@ -717,9 +718,20 @@ def test_a_block_without_references_holds_its_focal_length(tmp_path, monkeypatch
     assert rep["gnss"] == {"mode": "off", "photos": 0, "states": {}}
     assert rep["control_points"] == rep["scale_bars"] == rep["gnss_positions"] == 0
     assert tuple(ch.sensors[0].params[:2]) == focal  # exactly
-    assert ch.sensors[0].params[4] == pytest.approx(K1, abs=0.002)  # the distortion is refined, near the true one
+    assert ch.sensors[0].params[4] == pytest.approx(K1, abs=0.002)  # the distortion near the true one
+
+    def refined(asked):
+        """What the adjustment frees of ``asked``: the groups the check of the calibrations does not hold."""
+        held = rep["intrinsics"]["held"]
+        gone = {k for group, columns in (("principal_point", (2, 3)), ("radial", (4, 5)), ("tangential", (6, 7)))
+                if held[group] for k in columns}
+        return [[k for k in asked if k not in gone]]
+
     pb = seen[-1]
-    assert not pb.absolute and pb.free_intrinsics == [[4, 5, 6, 7]]  # OPENCV: fx, fy (and cx, cy) held
+    assert not pb.absolute and pb.free_intrinsics == refined([4, 5, 6, 7])  # OPENCV: fx, fy (and cx, cy) held
+    assert rep["intrinsics"]["held"]["focal"] == []  # the reason is that nothing places the block
+    if rep["intrinsics"]["checked"]:
+        assert rep["intrinsics"]["held"]["radial"] == [0] and pb.free_intrinsics == [[6, 7]]
     far = int(np.argmax(np.linalg.norm(pb.centres - pb.centres[0], axis=1)))
     assert pb.fixed_images == {0, far}
     assert "reverted" not in rep and "camera_offsets" not in rep  # nothing for the safety net to judge
@@ -729,7 +741,7 @@ def test_a_block_without_references_holds_its_focal_length(tmp_path, monkeypatch
     rep = ch.meta["sfm"]["optimize"]
     assert rep["gnss"]["mode"] == "plain" and rep["gnss_positions"] == 0  # asked for, with no position to use
     assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
-    assert seen[-1].free_intrinsics == [[2, 3, 4, 5, 6, 7]] and tuple(ch.sensors[0].params[:2]) == focal
+    assert seen[-1].free_intrinsics == refined([2, 3, 4, 5, 6, 7]) and tuple(ch.sensors[0].params[:2]) == focal
 
 
 def test_the_report_names_the_rows_of_the_optimisation(tmp_path, monkeypatch):

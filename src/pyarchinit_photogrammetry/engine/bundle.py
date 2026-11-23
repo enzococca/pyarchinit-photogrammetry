@@ -56,15 +56,19 @@ LOSSES = ("none", "huber", "cauchy")  # on the tie points; the scale in the unit
 FUNCTION_TOLERANCE = 1e-9
 ROBUST_FUNCTION_TOLERANCE = 1e-6
 NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not installed"
-INTRINSICS_MISSING = "the native core with the variances of the intrinsics (API 17) is not installed"
+INTRINSICS_MISSING = "the native core with the covariance of the intrinsics (API 18) is not installed"
 # the camera optimisation refines each group of the intrinsics of a camera only where the block determines it
-# (intrinsic_sds; the rule of the rounds of the native mapper, native/engine/src/mapper/rounds.rs, taken group by
-# group): a focal length whose relative marginal sd is above FOCAL_SD_HOLD is held, the distortion still refined;
-# a principal point that was asked for is held when its marginal sd is above PRINCIPAL_SD_HOLD of the side of the
-# photo. What an adjustment then moves too far is held and the adjustment run again (runaways): a focal length by
-# more than FOCAL_MOVE_HOLD of its start, the first radial term by more than K1_MOVE_HOLD
+# (judge_intrinsics; the rule of the rounds of the native mapper, native/engine/src/mapper/rounds.rs, taken group
+# by group and on one scale): a focal length whose relative marginal sd is above FOCAL_SD_HOLD is held; each other
+# group - the tangential terms, the principal point, the radial terms - is held when the marginal sd of the
+# displacement it causes at the corner of the photo is above GROUP_SD_HOLD_PX pixels. The groups are judged in the
+# order of JUDGED, each in the adjustment as it is left by what was held before it (the radial terms last: they
+# are what a block most needs, and what the others trade with). What an adjustment then moves too far is held
+# and the adjustment run again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first
+# radial term by more than K1_MOVE_HOLD
 FOCAL_SD_HOLD = 0.005
-PRINCIPAL_SD_HOLD = 0.005
+GROUP_SD_HOLD_PX = 0.5
+JUDGED = ("focal", "tangential", "principal_point", "radial")
 FOCAL_MOVE_HOLD = 0.2
 K1_MOVE_HOLD = 0.5
 # the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
@@ -628,13 +632,13 @@ def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evalua
     return Evaluation(float(cost), np.asarray(residuals, float), np.asarray(gradient, float), jacobian)
 
 
-def variances_ready(pb: Problem) -> str | None:
-    """``None`` when the native core can give the variances of the free intrinsics of ``pb``
-    (:func:`intrinsics_variances`), else why not: the core switched off, missing or older than API 17, or a camera
+def covariance_ready(pb: Problem) -> str | None:
+    """``None`` when the native core can give the covariance of the free intrinsics of ``pb``
+    (:func:`intrinsics_covariance`), else why not: the core switched off, missing or older than API 18, or a camera
     model that is not among the six of its projection kernels."""
     if not _native.enabled():
         return "the native core is switched off by PPG_NATIVE=0"
-    if not _native.has("intrinsics_variances") or (_native.api() or 0) < _native.INTRINSICS_API:
+    if not _native.has("intrinsics_covariance") or (_native.api() or 0) < _native.INTRINSICS_API:
         return INTRINSICS_MISSING
     for model, *_ in pb.cameras:
         if not _native.supports(model):
@@ -642,25 +646,28 @@ def variances_ready(pb: Problem) -> str | None:
     return None
 
 
-def intrinsics_variances(pb: Problem, loss: str = "none", loss_scale: float = 1.0,
-                         reference_flight: int | None = None) -> list[np.ndarray]:
-    """The variance of each free intrinsic of each camera of ``pb`` at the parameters it holds, by the native
-    engine (API 17; RuntimeError where it cannot run, :func:`variances_ready`): per camera, one value per entry of
-    its ``free_intrinsics``, in their order - the diagonal of the inverse of the normal matrix at their columns,
-    taken from the system reduced to the cameras; ``loss`` with ``loss_scale`` on the tie points, as
-    :func:`adjust` takes them. The accuracies of ``pb`` are taken as they are: a variance factor goes into them
-    first (:func:`focal_sds` does). ``reference_flight``: with ``gnss_bias``, the flight whose bias is held at
-    zero - without control points the biases of all the flights and a shift of the block trade off. A normal
-    matrix that cannot be inverted (a gauge left free, an intrinsic the observations do not hold) is a
-    RuntimeError: nothing is regularised."""
+def intrinsics_covariance(pb: Problem, loss: str = "none", loss_scale: float = 1.0,
+                          reference_flight: int | None = None) -> tuple[np.ndarray, list[int]]:
+    """The covariance of the free intrinsics of the cameras of ``pb`` at the parameters it holds, by the native
+    engine (API 18; RuntimeError where it cannot run, :func:`covariance_ready`): the ``k x k`` block of the inverse
+    of the normal matrix at their columns, taken from the system reduced to the cameras, in the order of the
+    cameras and, within each, of its ``free_intrinsics`` - and how many of those columns each camera has. Its
+    diagonal is the variance of each intrinsic; the other terms are what a function of several intrinsics needs -
+    the displacement of a pixel by the radial terms together. ``loss`` with
+    ``loss_scale`` on the tie points, as :func:`adjust` takes them. The accuracies of ``pb`` are taken as they
+    are: a variance factor goes into them first (:func:`judge_intrinsics` does). ``reference_flight``: with
+    ``gnss_bias``, the flight whose bias is held at zero - without control points the biases of all the flights
+    and a shift of the block trade off. A normal matrix that cannot be inverted (a gauge left free, an intrinsic
+    the observations do not hold) is a RuntimeError: nothing is regularised."""
     if loss not in LOSSES:
         raise ValueError(f"loss {loss!r}: none, huber or cauchy")
-    reason = variances_ready(pb)
+    reason = covariance_ready(pb)
     if reason is not None:
         raise RuntimeError(reason)
-    fn = _native.kernel("bundle_intrinsics_variances")
+    fn = _native.kernel("bundle_intrinsics_covariance")
     flight = None if reference_flight is None else int(reference_flight)
-    return [np.asarray(v, float) for v in fn(_to_native(pb), loss, float(loss_scale), flight)]
+    matrix, counts = fn(_to_native(pb), loss, float(loss_scale), flight)
+    return np.asarray(matrix, float), [int(n) for n in counts]
 
 
 def _free_intrinsics(pb: Problem) -> list:
@@ -735,14 +742,14 @@ def _held_markers(pb: Problem) -> Problem:
 
 
 def _with_gauge(pb: Problem) -> tuple[Problem, int | None]:
-    """``pb`` as the covariance of its adjustment is taken (:func:`focal_sds`): the same block, with nothing in it
-    that the observations do not hold - the normal matrix must invert - and a gauge that adds nothing the block
-    does not have. The tie points that cannot be adjusted are left out (:func:`_adjustable`), as are the markers
-    nothing holds (:func:`_held_markers`); a photo with fewer than three observations has no pose of its own and
-    is held as it is. What places the block is counted by what the photos see: three control points whose markers
-    two photos or more measure, or three positions of photos that are not held (:attr:`Problem.absolute` counts
-    what is stated). A block that nothing places has its first photo held, its place and its orientation, and -
-    without a scale bar between measured markers - a position of the photo farthest from it whose sigma is
+    """``pb`` as the covariance of its adjustment is taken (:func:`judge_intrinsics`): the same block, with nothing
+    in it that the observations do not hold - the normal matrix must invert - and a gauge that adds nothing the
+    block does not have. The tie points that cannot be adjusted are left out (:func:`_adjustable`), as are the
+    markers nothing holds (:func:`_held_markers`); a photo with fewer than three observations has no pose of its
+    own and is held as it is. What places the block is counted by what the photos see: three control points whose
+    markers two photos or more measure, or three positions of photos that are not held (:attr:`Problem.absolute`
+    counts what is stated). A block that nothing places has its first photo held, its place and its orientation,
+    and - without a scale bar between measured markers - a position of the photo farthest from it whose sigma is
     :data:`GAUGE_SIGMA_EXTENTS` times their distance, its size: the two photos :func:`problem_from_chunk` holds
     for the solvers are more than a gauge, and a sd taken with them is too small. Positions with a bias per flight
     and no measured control point: the bias of one flight is held at zero (the frame of the positions; the biases
@@ -774,52 +781,133 @@ def _with_gauge(pb: Problem) -> tuple[Problem, int | None]:
     return out, (flight if out.gnss_bias else None)
 
 
-def intrinsic_sds(pb: Problem) -> tuple[list, float | None]:
-    """How well an adjustment of ``pb`` determines the intrinsics it is judged by, per camera, at the parameters
-    of the problem (the rule of the rounds of the native mapper, group by group): ``{"focal": ..,
-    "principal_point": ..}`` - the relative marginal sd of its focal length (the square root of the largest
-    variance of its focal columns, fx and fy of a model with two, over its focal length) and the marginal sd of its
-    principal point over the side of the photo (cx over the width, cy over the height, the larger); None for a
-    group the problem does not free. Marginal: every intrinsic the problem frees is free with them (a conditional
-    sd, with the terms that trade with them held, is always smaller). The covariance is scaled by the variance
-    factor of the tie points (:func:`tie_variance_factor`: it goes into ``pixel_sigma``; the references keep the
-    accuracy they state) and taken with the gauge of :func:`_with_gauge`. Returns the sds and the variance factor
-    (None when neither group is free in any camera: the core is not asked). RuntimeError where the core cannot
-    give the variances (:func:`variances_ready`) or the normal matrix cannot be inverted (an intrinsic the block
-    does not hold at all: photos looking straight down on flat ground)."""
-    free = _free_intrinsics(pb)
-    judged = []
-    for c, (model, *_rest) in enumerate(pb.cameras):
-        groups = intrinsic_groups(model)
-        judged.append({name: [(j, k) for j, k in enumerate(free[c]) if k in groups[name]]
-                       for name in ("focal", "principal_point")})
-    if not any(columns for camera in judged for columns in camera.values()):
-        return [{"focal": None, "principal_point": None} for _camera in pb.cameras], None
+def corner_jacobians(model: str, params, width: float, height: float, indices) -> np.ndarray:
+    """How the pixels at the four corners of a photo move with the parameters ``indices`` of its camera (``model``,
+    ``params`` in COLMAP's order): ``d(u, v) / d(params[indices])`` at each corner, 4 x 2 x n, in the order
+    ``(0, 0)``, ``(width, 0)``, ``(0, height)``, ``(width, height)`` - by central differences on COLMAP's
+    projection of the rays that the camera without distortion sees there."""
+    import pycolmap
+
+    params = np.asarray(params, float)
+    groups = intrinsic_groups(model)
+    fx, fy = params[groups["focal"][0]], params[groups["focal"][-1]]
+    cx, cy = (params[k] for k in groups["principal_point"])
+    rays = np.array([[(u - cx) / fx, (v - cy) / fy, 1.0] for v in (0.0, height) for u in (0.0, width)])
+
+    def pixels(values) -> np.ndarray:
+        cam = pycolmap.Camera(model=model, width=int(width), height=int(height), params=[float(v) for v in values])
+        return np.asarray(cam.img_from_cam(rays), float)[:, :2]
+
+    out = np.zeros((4, 2, len(indices)))
+    for j, k in enumerate(indices):
+        step = 1e-6 * max(1.0, abs(float(params[k])))
+        up, down = params.copy(), params.copy()
+        up[k] += step
+        down[k] -= step
+        out[:, :, j] = (pixels(up) - pixels(down)) / (2.0 * step)
+    return out
+
+
+def corner_sd(model: str, params, width: float, height: float, indices, covariance) -> float:
+    """The sd, in pixels, of the displacement that the parameters ``indices`` of a camera cause at a corner of its
+    photo, ``covariance`` theirs: the square root of the trace of ``J C J^T`` (:func:`corner_jacobians`), at the
+    corner where it is largest - the radial terms move the four corners alike, the tangential ones do not."""
+    worst = max(float(np.trace(jac @ covariance @ jac.T))
+                for jac in corner_jacobians(model, params, width, height, indices))
+    return float(np.sqrt(max(worst, 0.0)))
+
+
+def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, float | None]:
+    """Which groups of the intrinsics of each camera an adjustment of ``pb`` determines, at the parameters of the
+    problem (the rule of the rounds of the native mapper, group by group and on one scale). Per camera and per
+    group of :data:`JUDGED` that the problem frees, the marginal sd of the group in the adjustment:
+
+    * ``focal``: the relative sd of the focal length - the square root of the largest variance of its focal
+      columns (fx and fy of a model with two) over its focal length; held above :data:`FOCAL_SD_HOLD`;
+    * ``tangential``, ``principal_point``, ``radial``: the sd, in pixels, of the displacement the group causes at
+      the corner of the photo (:func:`corner_sd`, from the covariance of the terms of the group); held above
+      :data:`GROUP_SD_HOLD_PX`.
+
+    Marginal: every intrinsic that is still to be refined is free with the group (a conditional sd, with the
+    terms that trade with it held, is always smaller). The groups are judged in the order of :data:`JUDGED`, and
+    what is held leaves the adjustment before the next group is judged - the covariance is taken again without
+    it: the radial terms of a block that cannot tell its focal length from its height are determined once that
+    focal length is held, and judged with it free they would look as lost as it is. ``together``: a group held
+    for one camera is held for every camera that would refine it (COLMAP's adjustment refines a group for all its
+    cameras or for none). Without a covariance (a normal matrix that cannot be inverted: an intrinsic the block
+    does not hold at all) the group being judged is held for every camera, and the next one is judged without it.
+
+    The covariance is scaled by the variance factor of the tie points (:func:`tie_variance_factor`: it goes into
+    ``pixel_sigma``; the references keep the accuracy they state) and taken with the gauge of
+    :func:`_with_gauge`. Returns, per camera, ``{group: sd}`` (None for a group the problem does not free, or
+    without a covariance) and ``{group: why}`` for the groups to hold - ``("sd", sd)``, ``("no covariance",
+    message)`` or ``("with", camera)`` -, and the variance factor (None when the problem frees nothing that is
+    judged: the core is not asked). RuntimeError where the core cannot give a covariance at all
+    (:func:`covariance_ready`)."""
+    n = len(pb.cameras)
+    groups = [intrinsic_groups(model) for model, *_rest in pb.cameras]
+    free = [list(f) for f in _free_intrinsics(pb)]
+    sds = [dict.fromkeys(JUDGED) for _camera in range(n)]
+    held: list = [{} for _camera in range(n)]
+
+    def refined(c: int, group: str) -> list:
+        return [k for k in free[c] if k in groups[c][group]]
+
+    if not any(refined(c, group) for c in range(n) for group in JUDGED):
+        return sds, held, None
+    reason = covariance_ready(pb)
+    if reason is not None:
+        raise RuntimeError(reason)
     probe, flight = _with_gauge(pb)
     factor = tie_variance_factor(probe)
     probe.pixel_sigma = float(probe.pixel_sigma) * float(np.sqrt(factor))
-    variances = intrinsics_variances(probe, reference_flight=flight)
-    sds = []
-    for c, camera in enumerate(judged):
-        model, params, width, height = pb.cameras[c]
-        sd = {"focal": None, "principal_point": None}
-        if camera["focal"]:
-            worst = max(float(variances[c][j]) for j, _k in camera["focal"])
-            sd["focal"] = float(np.sqrt(max(worst, 0.0))) / abs(float(params[0]))
-        if camera["principal_point"]:
-            cx = intrinsic_groups(model)["principal_point"][0]
-            sd["principal_point"] = max(float(np.sqrt(max(float(variances[c][j]), 0.0)))
-                                        / float(width if k == cx else height) for j, k in camera["principal_point"])
-        sds.append(sd)
-    return sds, factor
 
+    def covariance():
+        """The covariance of what is still free with the column of each ``(camera, parameter)``, or None with why."""
+        probe.free_intrinsics = [list(f) for f in free]
+        try:
+            matrix, _counts = intrinsics_covariance(probe, reference_flight=flight)
+        except RuntimeError as exc:
+            return None, str(exc)
+        return matrix, {(c, k): j for j, (c, k) in enumerate((c, k) for c in range(n) for k in free[c])}
 
-def focal_sds(pb: Problem) -> tuple[list, float | None]:
-    """The relative marginal sd of the focal length of each camera of ``pb`` (:func:`intrinsic_sds`; None for a
-    camera whose focal length is not free) and the variance factor of the tie points (None when the core was not
-    asked)."""
-    sds, factor = intrinsic_sds(pb)
-    return [sd["focal"] for sd in sds], factor
+    matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
+    for group in JUDGED:
+        for c in range(n):
+            terms = refined(c, group)
+            if not terms:
+                continue
+            if matrix is None:
+                held[c][group] = ("no covariance", str(columns))
+                continue
+            index = [columns[(c, k)] for k in terms]
+            block = matrix[np.ix_(index, index)]
+            model, params, width, height = pb.cameras[c]
+            if group == "focal":
+                sd = float(np.sqrt(max(float(block.diagonal().max()), 0.0))) / abs(float(params[0]))
+                limit = FOCAL_SD_HOLD
+            else:
+                sd = corner_sd(model, params, float(width), float(height), terms, block)
+                limit = GROUP_SD_HOLD_PX
+            if not np.isfinite(sd):
+                held[c][group] = ("no covariance", "its variance is not a number")
+                continue
+            sds[c][group] = sd
+            if sd > limit:
+                held[c][group] = ("sd", sd)
+        holders = [c for c in range(n) if group in held[c]]
+        if not holders:
+            continue
+        if together:
+            for c in range(n):
+                if refined(c, group) and group not in held[c]:
+                    held[c][group] = ("with", holders[0])
+        for c in range(n):
+            if group in held[c]:
+                free[c] = [k for k in free[c] if k not in groups[c][group]]
+        if any(refined(c, later) for c in range(n) for later in JUDGED[JUDGED.index(group) + 1:]):
+            matrix, columns = covariance()  # what is still to judge, in the adjustment without what was held
+    return sds, held, factor
 
 
 def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers) -> Problem:

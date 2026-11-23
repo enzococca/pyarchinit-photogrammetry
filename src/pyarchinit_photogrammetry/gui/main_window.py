@@ -7836,7 +7836,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 ("plain", "usate con la loro accuratezza (motore proprio)"),
                 ("bias", "usate, con un bias per volo (motore proprio)")]),
             Field("rolling", "Rolling shutter: la camera si muove mentre legge l'immagine (motore proprio)", False),
-            Field("hold", "Tieni la focale delle camere dove il blocco non la determina", True)],
+            Field("hold", "Tieni le parti della calibrazione che il blocco non determina", True)],
             intro=tr("Bundle adjustment globale di posizioni, orientamenti e calibrazione. Con 3 o più punti di "
                      "controllo i GCP entrano nel calcolo come punti fissi alle loro coordinate: il blocco si piega "
                      "per passarci (corregge anche deformazioni come la cupola di una distorsione sbagliata, non "
@@ -7862,9 +7862,10 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + tr(
                 "Ogni parte della calibrazione di una camera viene affinata solo dove il blocco la determina: con "
                 "sole foto nadirali su terreno piatto la focale non si distingue dalla quota di volo (il suo scarto "
-                "supera lo 0,5 %) e resta quella dell'allineamento, mentre la distorsione viene affinata lo stesso; "
-                "il punto principale, se chiesto, resta fermo quando il blocco non lo determina. Il risultato dice "
-                "per quanti sensori. Togli l'ultima spunta per affinare tutto comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
+                "supera lo 0,5 %) e resta quella dell'allineamento; la distorsione e il punto principale, se "
+                "chiesto, restano fermi quando il blocco determina il loro effetto all'angolo della foto peggio di "
+                "mezzo pixel. Il risultato dice che cosa è rimasto fermo. Togli l'ultima spunta per affinare tutto "
+                "comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
 
@@ -7930,10 +7931,12 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                            len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
             elif rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
-            if held.get("principal_point"):
-                text += tr("; punto principale tenuto: il blocco non lo determina")
-            if held.get("radial"):
-                text += tr("; distorsione radiale tenuta: scappava durante l'ottimizzazione")
+            others = [name for group, name in (("tangential", tr("distorsione tangenziale")),
+                                               ("principal_point", tr("punto principale")),
+                                               ("radial", tr("distorsione radiale"))) if held.get(group)]
+            if others:
+                text += tr("; parti della calibrazione tenute ferme perché il blocco non le determina: {0}",
+                           ", ".join(others))
             if offsets:
                 text += tr("; scarto delle camere dalle posizioni GNSS {0} -> {1}", _length(offsets["before"]),
                            _length(offsets["after"]))
