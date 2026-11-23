@@ -23,7 +23,7 @@ longer explanations follow the table.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | the raw files of the photos developed again: missing copies, raws that changed, other settings; returns `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below); the classic or the native engine (*The native matching*, below) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below) or by the global mapper of the native engine (*The native alignment*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto")` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
@@ -149,7 +149,7 @@ alignment and the depth maps) does the step with the native engine of the core (
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
-`database.db` as the classic step writes it, so `align_cameras` runs the classic mapper on it. The
+`database.db` as the classic step writes it, so `align_cameras` runs either engine's mapper on it. The
 arguments are those of the classic step; `guided_matching` is ignored (the native matching always
 follows the epipolar lines). `PPG_RANSAC_SEED` (the seed of COLMAP's geometric verification, `ppg bench run
 --seed`) applies to the classic matching only: the native step does not read it.
@@ -621,6 +621,42 @@ adjustments of the incremental mapper, which by default adjusts the whole block 
 grows by 10 % with up to 5 refinements each (`meta["sfm"]["ba_schedule"]`): on a block of a thousand
 photos that is most of the alignment time. `mapper="hierarchical"` is COLMAP's hierarchical
 pipeline: clusters of photos aligned on the cores, then merged.
+
+### The native alignment
+
+`align_cameras(engine="native")` (or `PPG_ENGINE=native`) aligns the photos with the global mapper of the
+native engine (`engine.native_map`, `ppg_core` API 16) in place of COLMAP's: it reads the cameras, the key
+points and the verified pairs of `database.db` (whichever engine matched them), builds the view graph,
+averages the rotations, establishes the tracks (`tiepoint_limit / 4` per photo, 500 at least, as the classic
+global mapper), positions the cameras - on the GPS of the photos when three of them or more have one, on the
+same metric axes less a round offset as the pose priors of the classic engine; frame `gnss` when the positions
+orient the block, `similarity` when they spread too little for their accuracy and only place it, `free` without
+them - and adjusts the block in rounds (focal length and radial distortion freed from the second). The model is
+written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, stays the
+classic alignment until the native one has passed its gate.
+
+What the native mapper does not do stays classic, with the reason in the log and in
+`meta["engine"]["align_cameras"]["fallback"]`: the native core missing or older than API 16
+(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, the `incremental` or
+`hierarchical` mapper asked, photos added to an alignment (`reset=False`), 360-degree rigs, calibrations held
+fixed, a camera model it does not know (a fisheye one).
+
+The block is judged as the classic global one is: right after the rotations (it must place 90 % of the photos),
+right after the positioning (its cameras must sit on the GPS of the photos, `meta["sfm"]["global_check"]`), and
+on the model written (a median reprojection error of 2 px at most, half of the observations kept at least). A
+block that fails, or a failure of the mapper, hands the alignment to the classic chain, which aligns with its
+own rules (the mapper asked, `auto` included: the global one with its own check, the incremental one when it is
+refused); `meta["sfm"]["native_fallback"]` and the record of the engine keep the reason (`placed 24 of 48
+photos`, `built a block whose cameras miss the GPS of the photos by 99 m`, `native mapper failed: ...`). A cancel
+and a full disk stop the step and leave the model and the database as they were.
+
+`meta["sfm"]["native_mapper"]` reports each stage in numbers and words (never a name of a photo or a path):
+`input`, `view_graph`, `rotations`, `tracks`, `position` (with `frame`, `placed`, `positions`, `crs`,
+`offset`), `refine` (the rounds), `report` (the whole report of the mapper: `median_reprojection_px`,
+`tracks_kept_share`, `sigma_h`, `sigma_v`, the biases of the flights...). `meta["timings"]["align_cameras"]`
+has the stages `view_graph` (the database read included), `rotation_averaging`, `track_establishment`,
+`global_positioning`, `bundle_adjustment` and `write`. For trials: `PPG_NATIVE_TRACKS_PER_PHOTO` (the tracks
+kept per photo) and `PPG_NATIVE_FINAL_ALL_TRACKS=0` (no last round with every track).
 
 ### Camera optimisation
 

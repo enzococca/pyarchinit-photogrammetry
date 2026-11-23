@@ -23,7 +23,7 @@ spiegazioni più lunghe seguono la tabella.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | i file raw delle foto sviluppati di nuovo: copie mancanti, raw cambiati, altre impostazioni; restituisce `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto); il motore classico o quello nativo (*Il matching nativo*, sotto) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto) o dal mapper globale del motore nativo (*L'allineamento nativo*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto")` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
@@ -152,7 +152,7 @@ immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
 `database.db` di COLMAP come lo scrive il passo classico, così `align_cameras` vi fa girare il mapper
-classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
+dell'uno o dell'altro motore. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
 nativo segue sempre le linee epipolari). `PPG_RANSAC_SEED` (il seme della verifica geometrica di COLMAP,
 `ppg bench run --seed`) vale solo per il matching classico: il passo nativo non lo legge.
 
@@ -642,6 +642,43 @@ globali del mapper incrementale, che per impostazione compensa l'intero blocco o
 10 % con fino a 5 raffinamenti ciascuna (`meta["sfm"]["ba_schedule"]`): su un blocco di mille foto è la
 gran parte del tempo di allineamento. `mapper="hierarchical"` è la pipeline gerarchica di COLMAP:
 gruppi di foto allineati sui core, poi uniti.
+
+### L'allineamento nativo
+
+`align_cameras(engine="native")` (o `PPG_ENGINE=native`) allinea le foto con il mapper globale del motore
+nativo (`engine.native_map`, `ppg_core` API 16) al posto di quello di COLMAP: legge le camere, i punti chiave e
+le coppie verificate di `database.db` (qualunque motore le abbia abbinate), costruisce il grafo delle viste,
+media le rotazioni, stabilisce le tracce (`tiepoint_limit / 4` per foto, almeno 500, come il mapper globale
+classico), posiziona le camere - sul GPS delle foto quando almeno tre ce l'hanno, sugli stessi assi metrici
+meno un offset tondo dei prior di posa del motore classico; sistema `gnss` quando le posizioni orientano il
+blocco, `similarity` quando si spargono troppo poco per la loro accuratezza e lo collocano soltanto, `free`
+senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo). Il modello viene
+scritto nel formato di COLMAP e l'allineamento prosegue come con i mapper classici. `auto`, il predefinito,
+resta l'allineamento classico finché quello nativo non ha superato il suo collaudo.
+
+Ciò che il mapper nativo non fa resta classico, con il motivo nel log e in
+`meta["engine"]["align_cameras"]["fallback"]`: il core nativo assente o più vecchio dell'API 16
+(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, il mapper `incremental` o
+`hierarchical` richiesto, foto aggiunte a un allineamento (`reset=False`), rig a 360 gradi, calibrazioni tenute
+fisse, un modello di camera che non conosce (uno fisheye).
+
+Il blocco viene giudicato come quello globale classico: subito dopo le rotazioni (deve collocare il 90 % delle
+foto), subito dopo il posizionamento (le sue camere devono stare sul GPS delle foto,
+`meta["sfm"]["global_check"]`) e sul modello scritto (errore di riproiezione mediano al più 2 px, almeno metà
+delle osservazioni tenute). Un blocco che non passa, o un errore del mapper, passa l'allineamento alla catena
+classica, che allinea con le sue regole (il mapper richiesto, `auto` compreso: quello globale con il suo
+controllo, quello incrementale quando viene rifiutato); `meta["sfm"]["native_fallback"]` e il registro del
+motore tengono il motivo (`placed 24 of 48 photos`, `built a block whose cameras miss the GPS of the photos by
+99 m`, `native mapper failed: ...`). Un annullamento e un disco pieno fermano il passo e lasciano il modello e il
+database com'erano.
+
+`meta["sfm"]["native_mapper"]` riporta ogni fase in numeri e parole (mai un nome di foto o un percorso):
+`input`, `view_graph`, `rotations`, `tracks`, `position` (con `frame`, `placed`, `positions`, `crs`,
+`offset`), `refine` (i turni), `report` (il rapporto intero del mapper: `median_reprojection_px`,
+`tracks_kept_share`, `sigma_h`, `sigma_v`, gli scarti dei voli...). `meta["timings"]["align_cameras"]` ha le
+fasi `view_graph` (lettura del database compresa), `rotation_averaging`, `track_establishment`,
+`global_positioning`, `bundle_adjustment` e `write`. Per le prove: `PPG_NATIVE_TRACKS_PER_PHOTO` (le tracce
+tenute per foto) e `PPG_NATIVE_FINAL_ALL_TRACKS=0` (niente ultimo turno con tutte le tracce).
 
 ### Ottimizzazione delle camere
 
