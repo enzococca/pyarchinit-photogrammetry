@@ -7862,7 +7862,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + tr(
                 "Ogni parte della calibrazione di una camera viene affinata solo dove il blocco la determina: con "
                 "sole foto nadirali su terreno piatto la focale non si distingue dalla quota di volo (il suo scarto "
-                "supera lo 0,5 %) e resta quella dell'allineamento; la distorsione e il punto principale, se "
+                "supera lo 0,5 %) e resta quella dichiarata dalle foto, o quella dell'allineamento se le foto non ne "
+                "dichiarano una; la distorsione e il punto principale, se "
                 "chiesto, restano fermi quando il blocco determina il loro effetto all'angolo della foto peggio di "
                 "mezzo pixel. Il risultato dice che cosa è rimasto fermo. Togli l'ultima spunta per affinare tutto "
                 "comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
@@ -7926,9 +7927,17 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                            "l'ha lasciato l'allineamento", held["termination"])
             judged = rep.get("intrinsics") or {}
             held = judged.get("held") or {}  # what the block does not determine, by group: the sensors held
-            if held.get("focal"):
+            walked = judged.get("lens_prior") or []  # [sensor, from, to, steps]: back at what the photos state
+            if held.get("focal") and walked:
+                text += tr("; focale riportata al valore dichiarato dalle foto ({0}) e tenuta: il blocco non la "
+                           "determina ({1} sensori su {2})", ", ".join(f"{row[2]:.0f} px" for row in walked),
+                           len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
+            elif held.get("focal"):
                 text += tr("; focale dell'allineamento tenuta: il blocco non la determina ({0} sensori su {1})",
                            len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
+            elif rep.get("focal_held") and walked:
+                text += tr("; focale riportata al valore dichiarato dalle foto ({0}) e tenuta",
+                           ", ".join(f"{row[2]:.0f} px" for row in walked))
             elif rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
             others = [name for group, name in (("tangential", tr("distorsione tangenziale")),

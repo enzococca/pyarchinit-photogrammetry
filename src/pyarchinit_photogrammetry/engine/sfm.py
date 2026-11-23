@@ -2709,6 +2709,25 @@ FOCAL_HELD_UNDETERMINED = "the block does not determine the focal length"  # _ca
 # why that check asked nothing of the core though it was wanted (report["intrinsics"]["reason"]): the optimisation
 # refines no intrinsic at all (every calibration is fixed)
 NOTHING_TO_JUDGE = "no intrinsic is refined"
+# a focal length the block does not determine is held at the lens prior - the focal length the photos state,
+# kept with the sensor apart from its parameters (lens_prior) -, not where a free alignment left it: an alignment
+# that refines it on such a block leaves it anywhere along the valley it shares with the height of the cameras
+# (a ring flown once: 750 to 3900 px for a lens of 1000). The focal length is walked to the prior in steps of
+# LENS_PRIOR_STEP of its value at most, the block adjusted again at each with its calibration held
+# (_to_lens_prior, LENS_PRIOR_ITERATIONS iterations a step). A block whose mean reprojection error then ends
+# above LENS_PRIOR_WORSE times the one it started with (and LENS_PRIOR_SLACK_PX more) does not follow: it is
+# left as it was. A focal length within LENS_PRIOR_TOLERANCE of its prior, relative, is at it
+LENS_PRIOR_STEP = 0.1
+LENS_PRIOR_ITERATIONS = 15
+LENS_PRIOR_WORSE = 1.5
+LENS_PRIOR_SLACK_PX = 0.1
+LENS_PRIOR_TOLERANCE = 1e-9
+# along the valley of a block that cannot tell its focal length from the height of its cameras, the other terms of
+# a camera go with the focal length to these powers of its ratio - the same lens, pixel for pixel, seen from as
+# many times as far: {model: {index of the parameter: power}} for the models of the native core
+_VALLEY_POWERS = {"SIMPLE_PINHOLE": {}, "PINHOLE": {}, "SIMPLE_RADIAL": {3: 2}, "RADIAL": {3: 2, 4: 4},
+                  "OPENCV": {4: 2, 5: 4, 6: 1, 7: 1},
+                  "FULL_OPENCV": {4: 2, 5: 4, 6: 1, 7: 1, 8: 6, 9: 2, 10: 4, 11: 6}}
 
 
 def accurate_gnss(camera) -> bool:
@@ -3041,6 +3060,159 @@ def _undo_a_bend(chunk: Chunk, before: dict, kept: dict, err: float, progress: P
     return err
 
 
+def lens_prior(chunk: Chunk, sensor) -> float | None:
+    """The focal length, in pixels, that the photos of ``sensor`` state (their EXIF: a ``focal_source`` of
+    ``exif`` or ``exif_mm``): the one kept with the sensor (``focal_prior``) or, for a project of an older
+    version, the one the EXIF kept with each of its photos says again (it is then kept). None for a focal length
+    that was guessed - also once an alignment has estimated it - or given by hand: there the alignment's is all
+    there is."""
+    from ..io import exif
+
+    if sensor.focal_source not in ("exif", "exif_mm"):
+        return None
+    if sensor.focal_prior:
+        return float(sensor.focal_prior)
+    for cam in chunk.cameras:
+        if cam.sensor_key == sensor.key:
+            focal, _source = exif.focal_px(cam.meta or {})
+            if focal:
+                sensor.focal_prior = float(focal)
+                return sensor.focal_prior
+    return None
+
+
+def _along_the_valley(model: str, params, ratio: float) -> list:
+    """The parameters of a camera whose focal length becomes ``ratio`` times what it is, the same lens pixel for
+    pixel (:data:`_VALLEY_POWERS`): the radial terms by its even powers, the tangential ones by the ratio itself,
+    the principal point as it is."""
+    from . import bundle
+
+    out = [float(v) for v in params]
+    for k in bundle.intrinsic_groups(model)["focal"]:
+        out[k] *= ratio
+    for k, power in _VALLEY_POWERS[model].items():
+        out[k] *= ratio ** power
+    return out
+
+
+def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, cameras) -> dict:
+    """{sensor key: its lens prior} for the cameras ``cameras`` (indices in ``pb``) whose sensor has a lens prior
+    (:func:`lens_prior`) that its focal length is not at."""
+    out = {}
+    for c in cameras:
+        key = sensors[c]
+        if key is None or pb.cameras[c][0] not in _VALLEY_POWERS:
+            continue
+        prior = lens_prior(chunk, chunk.sensors[key])
+        if prior and abs(prior / float(pb.cameras[c][1][0]) - 1.0) > LENS_PRIOR_TOLERANCE:
+            out[key] = prior
+    return out
+
+
+def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
+    """Ruling R24: the focal lengths of the sensors of ``priors`` ({sensor key: lens prior, pixels}) walked from
+    where the alignment left them to their prior, and the block with them. In steps of :data:`LENS_PRIOR_STEP`
+    of the focal length at most: the calibration carried along the valley (:func:`_along_the_valley`), the
+    photos of the sensor moved along their axes to as many times their distance from what they see, and the block
+    adjusted again - poses and tie points, every intrinsic held: nothing is refined that the check of the
+    calibrations has not judged. The tie points are then put back where they were by one similarity, so that the
+    georeference of the chunk and its markers still fit the ground. The walked model is written and imported
+    into the chunk: it is the alignment the optimisation starts from, and stays if the optimisation stops.
+
+    A block whose mean reprojection error ends above :data:`LENS_PRIOR_WORSE` times the one it started with does
+    not follow (a prior that is wrong on a block that resists it): nothing is written. Returns, per sensor that
+    was off its prior, ``{"sensor", "from", "to", "steps", "reprojection": [before, after], "followed"}``; []
+    when none was, or for a reconstruction our adjustment does not take (rigs)."""
+    from dataclasses import replace
+
+    from ..core import geometry
+    from . import bundle
+
+    rec = load_reconstruction(chunk)
+    drop_missing_points(rec)
+    try:
+        pb, ids = bundle.problem_from_reconstruction(rec)
+    except ValueError:  # rigs: the faces of 360-degree photos
+        return []
+    sensors = _camera_sensors(chunk, rec, ids["cameras"])
+    todo = {}
+    for c, (model, params, *_size) in enumerate(pb.cameras):
+        prior = priors.get(sensors[c])
+        if prior and model in _VALLEY_POWERS and abs(prior / float(params[0]) - 1.0) > LENS_PRIOR_TOLERANCE:
+            todo[c] = (float(params[0]), float(prior))
+    if not todo:
+        return []
+    steps = max(max(1, int(np.ceil(abs(np.log(prior / focal)) / np.log1p(LENS_PRIOR_STEP) - 1e-9)))
+                for focal, prior in todo.values())
+    rec.update_point_3d_errors()
+    before = float(rec.compute_mean_reprojection_error())
+    start = pb.points.copy()
+    order = np.argsort(pb.obs_image, kind="stable")  # the observations photo by photo
+    bounds = np.searchsorted(pb.obs_image[order], np.arange(len(pb.centres) + 1))
+    pb.free_intrinsics = [[] for _camera in pb.cameras]
+    res = None
+    for step in range(steps):
+        cameras, centres = list(pb.cameras), pb.centres.copy()
+        axes = pb.rotations[:, 2, :]  # where each photo looks, in the frame of the block
+        depth = np.einsum("ij,ij->i", pb.points[pb.obs_point] - centres[pb.obs_image], axes[pb.obs_image])
+        for c, (focal, prior) in todo.items():
+            ratio = (prior / focal) ** (1.0 / steps)
+            model, params, width, height = cameras[c]
+            cameras[c] = (model, _along_the_valley(model, params, ratio), width, height)
+            for i in np.flatnonzero(pb.image_camera == c):
+                seen = depth[order[bounds[i]:bounds[i + 1]]]
+                seen = seen[np.isfinite(seen) & (seen > 0)]
+                if len(seen):  # as many times as far from what it sees, along its axis
+                    centres[i] = centres[i] - (ratio - 1.0) * float(np.median(seen)) * axes[i]
+        pb = replace(pb, cameras=cameras, centres=centres)
+        res = bundle.adjust(pb, max_iterations=LENS_PRIOR_ITERATIONS, progress=progress.sub(step / steps, 1.0 / steps))
+        pb = bundle.problem_at(pb, res)
+    cameras = list(pb.cameras)
+    for c, (_focal, prior) in todo.items():  # the prior itself, not the product of the steps
+        model, params, width, height = cameras[c]
+        params = [float(v) for v in params]
+        for k in bundle.intrinsic_groups(model)["focal"]:
+            params[k] = prior
+        cameras[c] = (model, params, width, height)
+    # the ground back where it was: one similarity puts the tie points on their places of before
+    moved = np.all(np.isfinite(pb.points), axis=1) & np.all(np.isfinite(start), axis=1)
+    back = geometry.umeyama(pb.points[moved], start[moved], with_scale=True) if moved.sum() >= 3 else np.eye(4)
+    scale = float(np.cbrt(np.linalg.det(back[:3, :3])))
+    turn = back[:3, :3] / scale
+    walked = replace(res, rotations=np.array([r @ turn.T for r in pb.rotations]),
+                     centres=geometry.apply(back, pb.centres), points=geometry.apply(back, pb.points),
+                     camera_params=[list(params) for _model, params, _width, _height in cameras])
+    bundle.write_back(chunk, rec, ids, walked)
+    rec.update_point_3d_errors()
+    after = float(rec.compute_mean_reprojection_error())
+    followed = bool(np.isfinite(after) and after <= LENS_PRIOR_WORSE * before + LENS_PRIOR_SLACK_PX)
+    out = [{"sensor": sensors[c], "from": focal, "to": prior, "steps": steps, "reprojection": [before, after],
+            "followed": followed} for c, (focal, prior) in todo.items()]
+    if followed:
+        chunk._before_product_write("reconstruction")
+        rec.write(str(chunk.product_path("reconstruction")))
+        import_reconstruction(chunk, rec)
+    return out
+
+
+def _note_lens_prior(record: dict, walked: list) -> None:
+    """What :func:`_to_lens_prior` did, at the head of the notes of ``record`` (:func:`_calibration_check`) and,
+    for the focal lengths that were walked, in its ``lens_prior``: [sensor, from, to, steps]."""
+    notes = []
+    for w in walked:
+        before, after = w["reprojection"]
+        if w["followed"]:
+            record["lens_prior"].append([w["sensor"], float(w["from"]), float(w["to"]), int(w["steps"])])
+            notes.append(f"sensor {w['sensor']}: focal walked to the lens prior: {w['from']:.2f} -> {w['to']:.2f} px "
+                         f"in {w['steps']} steps (reprojection {before:.3f} -> {after:.3f} px)")
+            log.info("camera optimisation: %s", notes[-1])
+        else:
+            notes.append(f"sensor {w['sensor']}: focal left at {w['from']:.2f} px: the block does not follow to the "
+                         f"lens prior {w['to']:.2f} px (reprojection {before:.3f} -> {after:.3f} px)")
+            log.warning("camera optimisation: %s", notes[-1])
+    record["notes"][:0] = notes
+
+
 def _camera_sensors(chunk: Chunk, rec, camera_ids) -> list:
     """The key of the sensor of each COLMAP camera of ``camera_ids`` in ``rec`` (the sensor of its first photo in
     the chunk; None for a camera no photo of the chunk uses)."""
@@ -3062,7 +3234,7 @@ _WHOLE_OR_NOT = "COLMAP's adjustment refines the distortion whole or not at all"
 
 
 def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool, together: bool = False,
-                       marker_weight: float | None = None) -> tuple[dict, dict]:
+                       marker_weight: float | None = None) -> tuple[dict, dict, dict]:
     """What an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine of each
     calibration: each group of intrinsics only where the block determines it - the rule of the rounds of the
     native mapper, applied to the camera optimisation group by group and on one scale
@@ -3099,13 +3271,14 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
     ``notes`` (``sensor 3: focal held: undetermined, sd 11.42 %``, ``sensor 3: radial held: undetermined, sd 3.16
     px at the image corner``, ``sensor 3: tangential held: given up for the radial terms (0.91 px at the image
     corner with it free, 0.04 px without)``, ``sensor 3: focal held: not judged, the block gave no covariance
-    (...)``): numbers and fixed words, the key of a sensor and never a name - and ``{index of the camera in pb:
-    groups to hold}``."""
+    (...)``): numbers and fixed words, the key of a sensor and never a name -, ``{index of the camera in pb:
+    groups to hold}`` and, for the focal lengths the block does not determine that are not at their lens prior,
+    ``{sensor: lens prior}`` (ruling R24: :func:`_to_lens_prior` walks them there)."""
     from . import bundle
 
     record = _check_record(hold_undetermined)
     if not hold_undetermined:
-        return record, {}
+        return record, {}, {}
     free = bundle._free_intrinsics(pb)
     judged = []
     for c, (model, *_rest) in enumerate(pb.cameras):
@@ -3113,13 +3286,13 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
         judged.append({name: any(k in groups[name] for k in free[c]) for name in bundle.JUDGED})
     if not any(flag for camera in judged for flag in camera.values()):
         record["reason"] = NOTHING_TO_JUDGE
-        return record, {}
+        return record, {}, {}
     reason = bundle.covariance_ready(pb)
     if reason is not None:
         record["reason"] = reason
         log.info("camera optimisation: every calibration is refined, whatever the block determines - the check of "
                  "the calibrations needs the native core (%s)", reason)
-        return record, {}
+        return record, {}, {}
     record["checked"] = True
     sensors = _camera_sensors(chunk, rec, ids["cameras"])
     sds, verdicts, factor = bundle.judge_intrinsics(pb, together=together, marker_weight=marker_weight)
@@ -3150,14 +3323,17 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
                           level=logging.WARNING)
                     continue
                 _hold(record, group, sensors[c], note)
-    return record, held
+    undetermined = [c for c in range(len(judged))
+                    if judged[c]["focal"] and verdicts[c].get("focal", (None,))[0] in ("sd", "no covariance")]
+    return record, held, _off_the_lens_prior(chunk, sensors, pb, undetermined)
 
 
 def _check_record(hold_undetermined: bool, reason: str | None = None) -> dict:
     """The record of a check of the calibrations (:func:`_calibration_check`) that asked nothing of the core."""
     return {"hold_undetermined": bool(hold_undetermined), "checked": False, "reason": reason,
             "variance_factor": None, "focal_sd": [], "tangential_sd": [], "principal_point_sd": [], "radial_sd": [],
-            "held": {"focal": [], "tangential": [], "principal_point": [], "radial": []}, "notes": []}
+            "held": {"focal": [], "tangential": [], "principal_point": [], "radial": []}, "lens_prior": [],
+            "notes": []}
 
 
 def _hold(record: dict, group: str, sensor, note: str, level: int = logging.INFO) -> None:
@@ -3220,15 +3396,34 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     if referenced:
         gcp.update_transform(chunk)  # references, bars and GNSS positions in the internal frame
     before = _marker_report(chunk) if use_markers else {}
-    pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
-                                        rolling_shutter=rolling_shutter, fit_principal_point=fit_principal_point,
-                                        hold_focal=hold_focal)
-    if not pb.absolute:  # nothing places the block: the focal length and the depth scale together at the same cost
-        bundle.hold_focal_length(pb)
-        focal_held = FOCAL_HELD_NO_REFERENCES
-    else:
-        focal_held = FOCAL_HELD_BY_POSITIONS if hold_focal else None
-    check, undetermined = _calibration_check(chunk, rec, pb, ids, hold_undetermined)
+
+    def judged(rec):
+        """The problem of the block as ``rec`` has it, why its focal length is held whatever the block says, what
+        the check of the calibrations holds of it, and the focal lengths to walk to their lens prior."""
+        pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
+                                            rolling_shutter=rolling_shutter,
+                                            fit_principal_point=fit_principal_point, hold_focal=hold_focal)
+        refined = [c for c, (model, *_rest) in enumerate(pb.cameras)
+                   if any(k in bundle.intrinsic_groups(model)["focal"] for k in pb.free_intrinsics[c])]
+        if not pb.absolute:  # nothing places the block: the focal length and the depth scale together at one cost
+            bundle.hold_focal_length(pb)
+            why = FOCAL_HELD_NO_REFERENCES
+        else:
+            why = FOCAL_HELD_BY_POSITIONS if hold_focal else None
+        check, undetermined, lost = _calibration_check(chunk, rec, pb, ids, hold_undetermined)
+        if check["checked"] and not pb.absolute:  # held as undetermined, without a verdict: at the lens prior too
+            lost.update(_off_the_lens_prior(chunk, _camera_sensors(chunk, rec, ids["cameras"]), pb, refined))
+        return pb, ids, why, check, undetermined, lost
+
+    pb, ids, focal_held, check, undetermined, lost = judged(rec)
+    walked = _to_lens_prior(chunk, lost, progress.sub(0.0, 0.05)) if lost else []
+    if any(w["followed"] for w in walked):  # judged again where the block now is
+        rec = load_reconstruction(chunk)
+        drop_missing_points(rec)
+        if referenced:
+            gcp.update_transform(chunk)
+        pb, ids, focal_held, check, undetermined, _lost = judged(rec)
+    _note_lens_prior(check, walked)
     while True:  # once, or again from the same start with what ran away held
         for c, groups in undetermined.items():
             index = bundle.intrinsic_groups(pb.cameras[c][0])
@@ -3358,10 +3553,18 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     marginal sds are taken from the covariance of the adjustment at the alignment - every intrinsic still to be
     refined free together, the control points, the bars and the positions that take part in it at their accuracy,
     scaled by the variance factor of the tie points. A focal length whose relative sd is above
-    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %) is held as the alignment left it: nadir photos over flat ground cannot
-    tell the focal length from the height, whatever control points on that ground say, and an adjustment that
-    refines it there slides along that trade (a ring flown once over flat ground: the focal length ten times
-    longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the principal
+    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %) is held: nadir photos over flat ground cannot tell the focal length from
+    the height, whatever control points on that ground say, and an adjustment that refines it there slides along
+    that trade (a ring flown once over flat ground: the focal length ten times longer, the cameras 131 m higher,
+    the check targets 0.6 m off). It is held at the lens prior - the focal length its photos state
+    (:func:`lens_prior`: their EXIF, kept with the sensor apart from its parameters) -, not where the alignment
+    left it: an alignment that refined it leaves it anywhere along that trade (COLMAP's mapper on that ring: 750
+    to 3900 px for a lens of 1000, the check targets 20 to 230 mm off once it is held there). The focal length is
+    first walked to the prior in steps of a tenth at most, the block adjusted again at each with its calibration
+    held and carried along (:func:`_to_lens_prior`), and the calibration judged again from there
+    (``report["intrinsics"]["lens_prior"]``: [sensor, from, to, steps]; the walked block is written as the
+    alignment before the optimisation goes on); a focal length that was guessed, or given by hand, has no prior
+    and stays where the alignment left it. Then the tangential terms, the principal
     point (when asked: ``fit_principal_point``) and the radial terms, each judged by the displacement it causes at
     the corner of the photo: held when the marginal sd of that displacement is above
     :data:`.bundle.GROUP_SD_HOLD_PX` (half a pixel). Each group is judged in the adjustment as the holds before
@@ -3579,7 +3782,7 @@ def _whole_distortion(record: dict, held: set, tangential: dict, radial: dict) -
 
 
 def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, positions: bool, use_markers: bool,
-                              fit_principal_point: bool, marker_weight: int) -> tuple[dict, set]:
+                              fit_principal_point: bool, marker_weight: int) -> tuple[dict, set, dict]:
     """:func:`_calibration_check` for COLMAP's adjustment of ``rec`` (its cameras as that adjustment has them: one
     focal length, :func:`_square_pixels`): on the problem of our own formulation that frees what COLMAP frees - the
     focal length, the distortion and, when asked, the principal point of every camera that is not fixed -, with
@@ -3589,18 +3792,19 @@ def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, pos
     focal length held, as that adjustment holds it. A reconstruction with rigs is not judged (the faces of
     360-degree photos are fixed cameras). COLMAP refines a group for every camera or for none, and the distortion
     - radial and tangential terms - whole or not at all: what is held for one sensor is held for all, and either
-    kind of distortion term takes the other with it. Returns the record and the groups to hold."""
+    kind of distortion term takes the other with it. Returns the record, the groups to hold and the focal
+    lengths to walk to their lens prior ({sensor: prior}, :func:`_calibration_check`)."""
     from . import bundle
 
     if not hold_undetermined:
-        return _check_record(False), set()
+        return _check_record(False), set(), {}
     try:
         pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss="plain" if positions else "off",
                                             fit_principal_point=fit_principal_point, hold_focal=positions)
     except ValueError as exc:  # rigs: our formulation does not take them
-        return _check_record(True, str(exc)), set()
-    record, held = _calibration_check(chunk, rec, pb, ids, True, together=True,
-                                      marker_weight=max(1, int(marker_weight)))
+        return _check_record(True, str(exc)), set(), {}
+    record, held, lost = _calibration_check(chunk, rec, pb, ids, True, together=True,
+                                            marker_weight=max(1, int(marker_weight)))
     groups = {group for held_groups in held.values() for group in held_groups}
     if groups & {"radial", "tangential"}:
         sensors = _camera_sensors(chunk, rec, ids["cameras"])
@@ -3608,7 +3812,7 @@ def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, pos
         would = {kind: {sensors[c]: any(k in bundle.intrinsic_groups(model)[kind] for k in free[c])
                         for c, (model, *_rest) in enumerate(pb.cameras)} for kind in ("tangential", "radial")}
         groups = _whole_distortion(record, groups, would["tangential"], would["radial"])
-    return record, groups
+    return record, groups, lost
 
 
 def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool, marker_weight: int, gnss: str,
@@ -3642,12 +3846,15 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     start = _before_adjusting(chunk) if hold_undetermined else None
     check = None  # the record of the check of the calibrations (report["intrinsics"]), made once
     undetermined: set = set()  # the groups held by that check, then by its guard
+    walked = None  # the focal lengths walked to their lens prior (ruling R24), once
+    first = None  # the errors before the optimisation
     while True:  # once, or again from the start with what ran away held
         rec = load_reconstruction(chunk)
         drop_missing_points(rec)  # models written from imported poses by earlier versions
         if constrained:
             gcp.update_transform(chunk)  # the reference coordinates and the bars in the internal frame
         before = errors() if constrained else {}
+        first = before if first is None else first
         priors, held = ([], []) if gnss == "off" or constrained else _gnss_priors(chunk, rec)
         solver = None
         progress(0.1, "Optimizing camera alignment" + (" on the control points and scale bars" if constrained else "")
@@ -3655,9 +3862,15 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
         _square_pixels(chunk, rec)
         opts = pycolmap.BundleAdjustmentOptions()
         if check is None:
-            check, undetermined = _colmap_calibration_check(
+            check, undetermined, lost = _colmap_calibration_check(
                 chunk, rec, hold_undetermined=hold_undetermined, positions=bool(priors), use_markers=constrained,
                 fit_principal_point=fit_principal_point, marker_weight=marker_weight)
+            if walked is None:
+                walked = _to_lens_prior(chunk, lost, progress.sub(0.0, 0.08)) if lost else []
+                if any(w["followed"] for w in walked):  # the block is elsewhere now: from there, judged again
+                    start, check = _before_adjusting(chunk), None
+                    continue
+            _note_lens_prior(check, walked)
         try:
             opts.refine_principal_point = fit_principal_point and "principal_point" not in undetermined
         except AttributeError:  # pragma: no cover - option name differs between versions
@@ -3758,7 +3971,7 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
     else:
         chunk.triangulate_markers()
     if points:
-        report.update({"before": before, "after": errors()})
+        report.update({"before": first, "after": errors()})
     chunk.meta.setdefault("sfm", {})["reprojection_error"] = err
     chunk.meta["sfm"]["optimize"] = report
     progress(1.0, f"Mean reprojection error {err:.3f} px")

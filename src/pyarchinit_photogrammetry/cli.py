@@ -1290,10 +1290,10 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
              hold_undetermined: bool = typer.Option(
                  True, "--hold-undetermined/--free-undetermined",
                  help="keep each part of the calibration of a camera where the block does not determine it: the "
-                      "focal length (photos looking straight down over flat ground: its marginal sd above 0.5 %), "
-                      "the distortion and a principal point asked for (above half a pixel at the corner of the "
-                      "photo); the report says so per sensor. --free-undetermined refines every calibration "
-                      "whatever the block determines"),
+                      "focal length (photos looking straight down over flat ground: its marginal sd above 0.5 %; "
+                      "held at the value the photos state), the distortion and a principal point asked for (above "
+                      "half a pixel at the corner of the photo); the report says so per sensor. "
+                      "--free-undetermined refines every calibration whatever the block determines"),
              chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
     held by the accurate GNSS positions of the photos; an optimisation that takes the cameras away from those

@@ -15,7 +15,7 @@ import logging
 
 import numpy as np
 import pytest
-from test_optimize_gnss import K1, _add_control_points, _rtk_block
+from test_optimize_gnss import K1, K2, F, _add_control_points, _rtk_block
 
 from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.engine import bundle, sfm
@@ -786,7 +786,8 @@ def test_freeing_what_the_block_does_not_determine_is_the_users_choice(tmp_path,
     rep = ch.meta["sfm"]["optimize"]
     assert rep["intrinsics"] == sfm._check_record(False) == {
         "hold_undetermined": False, "checked": False, "reason": None, "variance_factor": None, "focal_sd": [],
-        "tangential_sd": [], "principal_point_sd": [], "radial_sd": [], "held": NOTHING_HELD, "notes": []}
+        "tangential_sd": [], "principal_point_sd": [], "radial_sd": [], "held": NOTHING_HELD, "lens_prior": [],
+        "notes": []}
     assert rep["focal_held"] is None and asked == []
     assert _calibration(ch)[0][0] != before[0][0]
     if engine == "colmap":
@@ -957,14 +958,15 @@ def test_colmap_refines_the_distortion_whole_or_not_at_all(tmp_path, monkeypatch
     verdict = ([{"focal": 0.001, "tangential": 1.62, "principal_point": None, "radial": 0.12}],
                [{"tangential": ("sd", 1.62)}], 0.25)
     monkeypatch.setattr(bundle, "judge_intrinsics", lambda pb, **kwargs: verdict)
-    record, groups = sfm._colmap_calibration_check(ch, rec, hold_undetermined=True, positions=False,
-                                                   use_markers=True, fit_principal_point=False, marker_weight=4)
+    record, groups, _lost = sfm._colmap_calibration_check(ch, rec, hold_undetermined=True, positions=False,
+                                                          use_markers=True, fit_principal_point=False,
+                                                          marker_weight=4)
     assert groups == {"tangential", "radial"}
     assert record["held"] == {"focal": [], "tangential": [0], "principal_point": [], "radial": [0]}
     assert record["notes"] == ["sensor 0: tangential held: undetermined, sd 1.62 px at the image corner",
                                "sensor 0: radial held: with the tangential terms (COLMAP's adjustment refines "
                                "the distortion whole or not at all)"]
-    monkeypatch.setattr(sfm, "_colmap_calibration_check", lambda *args, **kwargs: (record, set(groups)))
+    monkeypatch.setattr(sfm, "_colmap_calibration_check", lambda *args, **kwargs: (record, set(groups), {}))
     calls = _spy_on_colmap(monkeypatch)
     ch.optimize_cameras(engine="colmap")
     assert calls and all(call[:3] == (True, False, False) for call in calls)
@@ -1244,6 +1246,145 @@ def test_a_block_our_formulation_does_not_take_is_optimised_as_before(tmp_path, 
     assert rep["intrinsics"]["checked"] is False and "rigs" in rep["intrinsics"]["reason"]
     assert rep["focal_held"] is None and _calibration(ch)[0][0] != before[0][0]
 
+# ------------------------------------------------------------------- the lens prior (ruling R24)
+def test_a_sensor_keeps_the_focal_length_its_photos_state(tmp_path):
+    """The focal length the photos state (their EXIF) is kept with the sensor apart from its parameters, which an
+    alignment overwrites: ``Sensor.focal_prior``, in pixels, saved with the project. A focal length that was
+    guessed has none, and a project of an older version loads without it."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.camera import Sensor
+
+    doc = ppg.Document()
+    ch = doc.add_chunk("priors")
+    stated = ch._sensor_for({"make": "A", "model": "B", "width": 1200, "height": 900, "focal_length_35mm": 30.0})
+    assert stated.focal_source == "exif" and stated.focal_prior == stated.params[0] == 1000.0
+    guessed = ch._sensor_for({"make": "A", "model": "C", "width": 1200, "height": 900})
+    assert guessed.focal_source == "guess" and guessed.focal_prior is None
+    stated.params[0] = stated.params[1] = 2430.4  # an alignment overwrites the parameters
+    doc.save(tmp_path / "priors.ppg")
+    again = ppg.Document.open(tmp_path / "priors.ppg").chunk.sensors[stated.key]
+    assert again.focal_prior == 1000.0 and again.params[0] == 2430.4 and again.focal_source == "exif"
+    older = {k: v for k, v in stated.to_dict().items() if k != "focal_prior"}
+    assert Sensor.from_dict(older).focal_prior is None
+
+
+def test_the_lens_prior_of_a_sensor():
+    """``sfm.lens_prior``: the focal length the photos of a sensor state, in pixels - the one kept with the sensor
+    or, for a project of an older version, the one the EXIF kept with each photo says again; None for a focal
+    length that was guessed (also once an alignment has estimated it) or given by hand, whatever is kept."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.camera import Camera
+
+    ch = ppg.Document().add_chunk("priors")
+    sensor = ch._sensor_for({"make": "A", "model": "B", "width": 1200, "height": 900, "focal_length_35mm": 30.0})
+    assert sfm.lens_prior(ch, sensor) == 1000.0
+    sensor.focal_prior = None  # as a project of an older version has it
+    assert sfm.lens_prior(ch, sensor) is None  # no photo to say it again
+    ch.cameras.append(Camera(key=0, label="p", path="p.jpg", sensor_key=sensor.key,
+                             meta={"width": 1200, "height": 900, "focal_length_35mm": 30.0}))
+    assert sfm.lens_prior(ch, sensor) == 1000.0 and sensor.focal_prior == 1000.0  # kept from now on
+    for source in ("guess", "aligned", None):
+        sensor.focal_source = source
+        assert sfm.lens_prior(ch, sensor) is None
+    sensor.focal_source = "exif_mm"
+    assert sfm.lens_prior(ch, sensor) == 1000.0
+
+
+def _slide_along_the_valley(ch, factor: float) -> None:
+    """``ch`` (the nadir block of :func:`_block`) as an alignment that slid along the valley of a flat nadir block
+    leaves it: the focal length ``factor`` times longer, the cameras as many times higher above the ground, the
+    radial terms by its square and its fourth power - the same photos, the same ground. The model on disk, the
+    chunk and its georeference follow."""
+    rec = sfm.load_reconstruction(ch)
+    for cam in rec.cameras.values():
+        f, _fy, cx, cy, k1, k2, p1, p2 = cam.params
+        cam.params = [f * factor, f * factor, cx, cy, k1 * factor ** 2, k2 * factor ** 4, p1 * factor, p2 * factor]
+    for image in rec.images.values():
+        r = np.asarray(image.cam_from_world().matrix())[:3, :3]
+        c = -r.T @ np.asarray(image.cam_from_world().matrix())[:3, 3]
+        c = c - (factor - 1.0) * c[2] * r[2] / r[2][2]  # along its axis, to factor times its height
+        rec.frames[image.frame_id].set_cam_from_world(image.camera_id,
+                                                      pycolmap.Rigid3d(pycolmap.Rotation3d(r), -r @ c))
+    rec.write(str(ch.product_path("reconstruction")))
+    sfm.import_reconstruction(ch, rec)
+    gcp.update_transform(ch)
+
+
+def _heights(ch) -> np.ndarray:
+    """The heights of the cameras of ``ch`` above its control points, in the coordinate system."""
+    ground = np.mean([m.reference.location[2] for m in ch.markers])
+    return np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras]) - ground
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_an_undetermined_focal_length_is_held_at_the_lens_prior(tmp_path, engine):
+    """A block that does not determine its focal length keeps the one its photos state, not the one a free
+    alignment left (ruling R24). The nadir grid slid along its valley - the focal length 1.3 times too long, the
+    cameras 12 m too high: the optimisation walks the focal length back to the lens prior in steps of a tenth at
+    most, the block adjusted again at each with its calibration held, then holds it there and goes on as on a
+    block that was never off. Without a prior (a focal length that was guessed, or given by hand) the focal
+    length stays where the alignment left it, as before."""
+    _doc, ch = _block(tmp_path / "prior")
+    _slide_along_the_valley(ch, 1.3)
+    assert _calibration(ch)[0][0] == pytest.approx(1.3 * F) and _heights(ch).mean() == pytest.approx(52.0, abs=0.5)
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", F
+    ch.optimize_cameras(engine=engine)
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    after = _calibration(ch)[0]
+    assert after[0] == F and after[1] == F  # exactly the prior
+    assert check["lens_prior"] == [[0, pytest.approx(1.3 * F), F, 3]]
+    assert check["notes"][0].startswith("sensor 0: focal walked to the lens prior: 1300.00 -> 1000.00 px in 3 steps "
+                                        "(reprojection ")
+    assert check["held"] == {**NOTHING_HELD, "focal": [0], "radial": [0]}  # judged again where the block now is
+    assert check["notes"][1].startswith("sensor 0: focal held: undetermined, sd ")
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    assert after[4] == pytest.approx(K1, rel=1e-6) and after[5] == pytest.approx(K2, rel=1e-6)  # carried back
+    assert _heights(ch).mean() == pytest.approx(40.0, abs=0.2)
+    assert rep["control_points"] == 4 and rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.013
+
+    _doc, ch = _block(tmp_path / "guessed")
+    _slide_along_the_valley(ch, 1.3)
+    for source in ("aligned", None):
+        ch.sensors[0].focal_source, ch.sensors[0].focal_prior = source, F
+        ch.optimize_cameras(engine=engine)
+        check = ch.meta["sfm"]["optimize"]["intrinsics"]
+        assert check["lens_prior"] == [] and check["held"]["focal"] == [0]
+        assert _calibration(ch)[0][0] == pytest.approx(1.3 * F, rel=1e-9)  # where the alignment left it
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_focal_length_the_block_determines_is_not_brought_to_the_prior(tmp_path, engine):
+    """The prior is for what the block does not determine: pitched photos determine their focal length, which is
+    refined as before whatever the photos state (here a value a tenth short)."""
+    _doc, ch = _block(tmp_path, pitch=PITCH)
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", 0.9 * F
+    ch.optimize_cameras(engine=engine)
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert check["lens_prior"] == [] and check["held"] == NOTHING_HELD
+    assert _calibration(ch)[0][0] == pytest.approx(F, rel=0.01)
+
+
+@needs_core
+def test_a_block_nothing_places_keeps_the_focal_length_of_its_lens(tmp_path):
+    """Our adjustment of a block that nothing places holds its focal length, which cannot be told from the depth:
+    at the lens prior too, when the alignment left it elsewhere."""
+    _doc, ch = _block(tmp_path)
+    _slide_along_the_valley(ch, 1.3)
+    for marker in ch.markers:
+        marker.reference.enabled = False
+    for cam in ch.cameras:
+        cam.reference.enabled = False
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", F
+    ch.optimize_cameras(engine="ppg")
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
+    assert rep["intrinsics"]["lens_prior"] == [[0, pytest.approx(1.3 * F), F, 3]]
+    assert _calibration(ch)[0][:2] == [F, F]
+
+
 # ------------------------------------------------------------------- the option, at every door
 def test_the_option_holds_by_default_and_reaches_both_formulations(tmp_path, monkeypatch):
     """``hold_undetermined`` is True by default in the engine, on the chunk and on the command line
@@ -1345,7 +1486,7 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
     doc, _ch = _block(tmp_path)
     w = mw.MainWindow(doc, autoconnect=False)
     w.runner.show_dialog = False
-    asked, calls = [], []
+    asked, calls, walked = [], [], []
     answer = {"markers": True, "weight": 4, "pp": False, "engine": "colmap", "gnss": "auto", "rolling": False}
 
     def ask(cls, parent, title, fields, intro=""):
@@ -1356,7 +1497,7 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
         calls.append(kwargs["hold_undetermined"])
         record = sfm._check_record(kwargs["hold_undetermined"])
         if kwargs["hold_undetermined"]:
-            record.update(checked=True, focal_sd=[[0, 0.11]],
+            record.update(checked=True, focal_sd=[[0, 0.11]], lens_prior=list(walked),
                           held={"focal": [0], "tangential": [0], "principal_point": [0], "radial": [0]})
         self.meta.setdefault("sfm", {})["optimize"] = {
             "reprojection_error": 0.5, "focal_held": sfm.FOCAL_HELD_UNDETERMINED if kwargs["hold_undetermined"]
@@ -1384,6 +1525,16 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
                   "tangenziale, punto principale, distorsione radiale")
         assert [others in line for line in said] == [True, False, True]
         assert not any(line.count("focale dell'allineamento tenuta") > 1 for line in said)
+        assert not any("valore dichiarato dalle foto" in line for line in said)
+        # a focal length walked back to the one the photos state: said as such, with its value
+        walked.append([0, 2430.4, 1000.0, 10])
+        w.optimize_cameras()
+        w.runner.wait()
+        app.processEvents()
+        last = [e[2] for e in w.log_pane.entries if "Errore di riproiezione" in e[2]][-1]
+        assert ("focale riportata al valore dichiarato dalle foto (1000 px) e tenuta: il blocco non la determina "
+                "(1 sensori su 1)") in last
+        assert "focale dell'allineamento tenuta" not in last and others in last
     finally:
         w.setWindowModified(False)
         w.close()
@@ -1569,6 +1720,75 @@ def test_the_weak_ring_with_many_tie_points_gives_up_its_tangential_terms_for_th
     errors = _marker_rmse(ch)
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
+
+
+@pytest.fixture(scope="module")
+def classic_ring(tmp_path_factory):
+    """The weak ring matched by the classic engine and not yet aligned: the path of the project (each test aligns
+    copies of it with the classic alignment, which leaves the focal length somewhere else along its valley every
+    time), and the scene."""
+    import os
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.bench import steps
+    from pyarchinit_photogrammetry.testing.synthetic import write_weak_ring_dataset
+
+    root = tmp_path_factory.mktemp("classic_ring")
+    scene = write_weak_ring_dataset(root / "set")
+    doc = ppg.Document()
+    ch = doc.add_chunk("ring")
+    doc.save(root / "ring.ppg")
+    ch.add_photos([root / "set" / "photos"])
+    ch.detect_markers(steps.DEFAULT_TARGETS)
+    previous = os.environ.get(sfm.RANSAC_SEED_ENV)
+    os.environ[sfm.RANSAC_SEED_ENV] = "7"
+    try:
+        ch.match_photos(engine="classic", **steps.ARGUMENTS["match_photos"])
+    finally:
+        if previous is None:
+            os.environ.pop(sfm.RANSAC_SEED_ENV, None)
+        else:
+            os.environ[sfm.RANSAC_SEED_ENV] = previous
+    doc.save()
+    return doc.path, scene, root / "set" / "gcp.csv"
+
+
+@needs_core
+@pytest.mark.slow
+@pytest.mark.parametrize("run", [1, 2, 3])
+def test_the_classic_weak_ring_meets_the_lines_of_the_gate(classic_ring, tmp_path, run):
+    """The classic chain on the weak ring (ruling R24): COLMAP's incremental mapper refines the focal length of a
+    block that does not determine it and leaves it anywhere along its valley (750 to 3900 px for a lens of 1000,
+    another place each time). The optimisation judges it undetermined, walks it back to the focal length the
+    photos state and holds it there: the control targets end within ``WEAK_RING_GATE["control_m"]`` and the check
+    targets within ``WEAK_RING_GATE["check_m"]``, whatever the alignment left - where the focal length held as the
+    alignment left it gave 3 to 24 mm and 20 to 230 mm."""
+    from pyarchinit_photogrammetry.bench import steps, truth
+    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
+
+    project, scene, reference = classic_ring
+    doc = _copy_of(project, tmp_path / f"run{run}")
+    ch = doc.chunk
+    assert ch.align_cameras(engine="classic") == 80
+    assert ch.meta["engine"]["align_cameras"]["used"] == "classic"
+    ch.import_reference(reference, crs=scene.crs)
+    steps.set_check(ch, [str(code) for code in truth.WEAK_RING_CHECK])
+    ch.update_transform()
+    sensor = next(iter(ch.sensors.values()))
+    left = sensor.params[0]
+    assert sensor.focal_source == "exif" and sfm.lens_prior(ch, sensor) == 1000.0
+    ch.optimize_cameras()
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    assert rep["engine_choice"]["used"] == "colmap" and check["held"]["focal"] == [sensor.key]
+    if abs(left / 1000.0 - 1.0) > 1e-6:  # the mapper never leaves it at the prior: measured 716 to 3909 px
+        assert check["lens_prior"] == [[sensor.key, pytest.approx(left), 1000.0, check["lens_prior"][0][3]]]
+        assert check["notes"][0].startswith(f"sensor {sensor.key}: focal walked to the lens prior: {left:.2f} -> "
+                                            "1000.00 px in ")
+    assert sensor.params[0] == 1000.0
+    errors = _marker_rmse(ch)
+    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.2 to 1.5 mm measured
+    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 3.5 to 3.7 mm measured
 
 
 @needs_core

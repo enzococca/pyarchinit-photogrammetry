@@ -367,7 +367,8 @@ class Chunk:
                         label=f"{sig[0] or ''} {sig[1] or ''}".strip() or "camera",
                         width=w, height=h, model="OPENCV_FISHEYE" if fisheye else "OPENCV",
                         params=[f_px, f_px, w / 2.0, h / 2.0, 0.0, 0.0, 0.0, 0.0],
-                        focal_length_mm=info.get("focal_length_mm"), focal_source=source)
+                        focal_length_mm=info.get("focal_length_mm"), focal_source=source,
+                        focal_prior=None if source == "guess" else float(f_px))
         self.sensors[sensor.key] = sensor
         return sensor
 
@@ -568,9 +569,10 @@ class Chunk:
         ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
         default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Each group of the
         intrinsics of a camera is refined only where the block determines it (``hold_undetermined``, True by
-        default: a focal length the block does not determine - nadir photos over flat ground - stays that of the
-        alignment, and so do the tangential terms, a principal point asked for and the radial terms whose effect
-        at the corner of the photo the block determines to worse than half a pixel;
+        default: a focal length the block does not determine - nadir photos over flat ground - is held at the one
+        its photos state, or where the alignment left it when they state none; the tangential terms, a principal
+        point asked for and the radial terms whose effect at the corner of the photo the block determines to worse
+        than half a pixel stay those of the alignment;
         ``meta["sfm"]["optimize"]["intrinsics"]`` says which groups of which sensors and why; False refines every
         calibration whatever the block determines). Returns the mean reprojection error in pixels; the
         control/check point, scale bar and GNSS report is in ``meta["sfm"]["optimize"]``."""
