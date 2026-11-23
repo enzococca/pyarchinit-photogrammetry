@@ -534,18 +534,21 @@ impl NativeMapper {
 
     /// The model written into the folder ``folder`` (which exists) in COLMAP's binary format; the
     /// number of photos written. Before ``refine`` has run, or once the mapper stopped, a
-    /// RuntimeError; an error of the disk an OSError.
+    /// RuntimeError; an error of the disk an OSError; a panic of the engine a RuntimeError, and the
+    /// mapper stops (as in a stage).
     fn write_model(&self, py: Python<'_>, folder: &str) -> PyResult<usize> {
         self.not_stopped("write_model")?;
         let guard = self.free("write_model")?;
         let mapper: &Mapper = &guard;
-        py.detach(|| mapper.write_model(Path::new(folder))).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::Other {
-                refused(e.to_string())
-            } else {
-                PyErr::from(e)
+        match py.detach(|| catch_unwind(AssertUnwindSafe(|| mapper.write_model(Path::new(folder))))) {
+            Ok(Ok(written)) => Ok(written),
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::Other => Err(refused(e.to_string())),
+            Ok(Err(e)) => Err(PyErr::from(e)),
+            Err(payload) => {
+                lock(&self.seen).stopped = Some("the engine panicked in write_model".into());
+                Err(refused(format!("write_model: {}", panic_text(&*payload))))
             }
-        })
+        }
     }
 
     /// What the stages did (the engine's `MapperReport`) in plain types.
