@@ -256,3 +256,53 @@ def test_the_switch_and_the_api(monkeypatch):
     monkeypatch.delenv("PPG_NATIVE")
     monkeypatch.setattr(_native, "api", lambda: 15)
     assert _native.native_mapper() is None
+
+
+def test_the_callback_may_read_the_report_but_not_run_the_mapper():
+    """Inside a stage, ``report()`` answers (what the stages ended so far said) and does not stop the
+    stage; any other method is a RuntimeError that says the callback must not call the mapper, and
+    that exception, raised by the callback, stops the mapper as any other."""
+    mapper = _mapper_class()(**strip_arrays())
+    reports = []
+    mapper.view_graph(lambda *_: reports.append(mapper.report()))
+    assert reports and reports[0]["photos"] == 12 and reports[0]["edges"] == 0  # before the view graph ended
+    assert mapper.report()["edges"] > 0
+    rotations = mapper.rotations(lambda *_: reports.append(mapper.report()))
+    assert rotations["registered"] == 12 and reports[-1]["rotations_placed"] == 12
+
+    def runs_a_stage(*_):
+        mapper.tracks(500, None)
+
+    with pytest.raises(RuntimeError, match="progress callback must not call the mapper") as raised:
+        mapper.tracks(500, runs_a_stage)
+    assert "report()" in str(raised.value)
+    with pytest.raises(RuntimeError, match="stopped"):
+        mapper.tracks(500, None)
+
+
+def test_items_and_options_of_the_wrong_kind_are_refused():
+    cls = _mapper_class()
+    arrays = strip_arrays()
+    images = list(arrays["images"])
+    images[4] = ("photo_004.jpg", -5, 0)
+    with pytest.raises(RuntimeError, match=r"images\[4\]"):
+        cls(**{**arrays, "images": images})
+    images[4] = ("photo_004.jpg", 5, -1)
+    with pytest.raises(RuntimeError, match=r"images\[4\]"):
+        cls(**{**arrays, "images": images})
+    camera = list(arrays["cameras"][0])
+    camera[0] = -1
+    with pytest.raises(RuntimeError, match=r"cameras\[0\]"):
+        cls(**{**arrays, "cameras": [tuple(camera)]})
+    with pytest.raises(RuntimeError, match=r"cameras\[0\]"):
+        cls(**{**arrays, "cameras": [("SIMPLE_PINHOLE",)]})
+    for key, value in (("rounds", "three"), ("rounds", -1), ("max_rotation_error_deg", "wide"),
+                       ("opencv_sensor", 1)):
+        with pytest.raises(RuntimeError, match=f"option {key}"):
+            cls(**{**arrays, "options": {key: value}})
+    mapper = cls(**arrays)
+    mapper.view_graph(None)
+    mapper.rotations(None)
+    with pytest.raises(RuntimeError, match="per_photo"):
+        mapper.tracks(-1, None)
+    assert mapper.tracks(500, None)["selected"] > 0  # a refusal of the arguments does not stop the mapper

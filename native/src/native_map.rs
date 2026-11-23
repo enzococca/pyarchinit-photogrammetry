@@ -16,16 +16,22 @@
 //! mapper, which every stage reads inside its steps, and comes out as it was; the mapper is then
 //! stopped: every later stage and `write_model` is a RuntimeError (`report` still answers). A
 //! stage the engine refuses (out of its order, an input it cannot use) is a RuntimeError with the
-//! engine's message; a failure of `refine` stops the mapper in the engine itself.
+//! engine's message; a failure of `refine` stops the mapper in the engine itself. The callback may
+//! read `report()` (the report of the stages ended so far, kept apart from the mapper the stage
+//! holds); any other method called from it is a RuntimeError saying the callback must not call the
+//! mapper. An item of `images` or `cameras` of the wrong kind (a negative id), an option or an
+//! argument of the wrong type is a RuntimeError naming it.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
 use numpy::ndarray::Array2;
 use numpy::{Element, IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::conversion::FromPyObjectOwned;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -103,12 +109,28 @@ fn ranges(offsets: &[i64], count: usize, len: usize, name: &str, what: &str) -> 
     Ok(offsets.windows(2).map(|w| w[0] as usize..w[1] as usize).collect())
 }
 
+/// The items of the list `list` (named `name`), each extracted as `T` (described as `shape`); an
+/// item of another kind (a negative id, a word for a number) is a RuntimeError naming it.
+fn items<'py, T: FromPyObjectOwned<'py>>(list: &Bound<'py, PyAny>, name: &str, shape: &str) -> PyResult<Vec<T>> {
+    let mut out = Vec::new();
+    for (k, item) in list.try_iter().map_err(|e| refused(format!("{name} must be a list: {e}")))?.enumerate() {
+        let item = item?;
+        out.push(item.extract::<T>().map_err(|e| {
+            refused(format!("{name}[{k}] must be {shape}, not {item}: {}", Into::<PyErr>::into(e)))
+        })?);
+    }
+    Ok(out)
+}
+
 /// The input of the mapper from the arrays of the constructor (see `NativeMapper::new`).
 #[allow(clippy::too_many_arguments)]
-fn input(images: Vec<ImageArg>, cameras: Vec<CameraArg>, keypoints: &Bound<'_, PyAny>,
+fn input(images: &Bound<'_, PyAny>, cameras: &Bound<'_, PyAny>, keypoints: &Bound<'_, PyAny>,
          keypoint_offsets: &Bound<'_, PyAny>, pairs: &Bound<'_, PyAny>, pair_config: &Bound<'_, PyAny>,
          pair_f: &Bound<'_, PyAny>, matches: &Bound<'_, PyAny>, match_offsets: &Bound<'_, PyAny>)
     -> PyResult<Input> {
+    let images: Vec<ImageArg> = items(images, "images", "(name, image_id, camera index), ids and indices 0 or more")?;
+    let cameras: Vec<CameraArg> =
+        items(cameras, "cameras", "(camera_id, model, params, width, height, prior_focal), the id 0 or more")?;
     let keypoints = rows::<f32, 2>(&array2::<f32>(keypoints, "keypoints", "float32", 2)?);
     let keypoint_offsets = values(&array1::<i64>(keypoint_offsets, "keypoint_offsets", "int64")?);
     let pairs = rows::<i64, 2>(&array2::<i64>(pairs, "pairs", "int64", 2)?);
@@ -158,26 +180,33 @@ fn input(images: Vec<ImageArg>, cameras: Vec<CameraArg>, keypoints: &Bound<'_, P
     Ok(Input { images, cameras, keypoints, pairs, matches })
 }
 
+/// The value of the option `key`, which must be `what`: a value of another kind is a RuntimeError
+/// naming the option.
+fn option<'py, T: FromPyObjectOwned<'py>>(key: &str, value: &Bound<'py, PyAny>, what: &str) -> PyResult<T> {
+    value.extract::<T>().map_err(|e| refused(format!("option {key} must be {what}, not {value}: {}",
+                                                     Into::<PyErr>::into(e))))
+}
+
 /// The options of the mapper from `d`, every key a field of `Options`; a key that is not one is a
-/// ValueError.
+/// ValueError, a value of the wrong kind a RuntimeError naming the option.
 fn options(d: &Bound<'_, PyDict>) -> PyResult<Options> {
     let mut o = Options::default();
     for (key, value) in d.iter() {
         let key: String = key.extract()?;
         match key.as_str() {
-            "min_inliers" => o.min_inliers = value.extract()?,
-            "max_epipolar_error_px" => o.max_epipolar_error_px = value.extract()?,
-            "min_pair_parallax_deg" => o.min_pair_parallax_deg = value.extract()?,
-            "max_relpose_trials" => o.max_relpose_trials = value.extract()?,
-            "max_rotation_error_deg" => o.max_rotation_error_deg = value.extract()?,
-            "max_normalized_reprojection" => o.max_normalized_reprojection = value.extract()?,
-            "min_triangulation_deg" => o.min_triangulation_deg = value.extract()?,
-            "positioning_huber" => o.positioning_huber = value.extract()?,
-            "rounds" => o.rounds = value.extract()?,
-            "ba_loss_scale_px" => o.ba_loss_scale_px = value.extract()?,
-            "ba_loss_cauchy" => o.ba_loss_cauchy = value.extract()?,
-            "final_all_tracks" => o.final_all_tracks = value.extract()?,
-            "opencv_sensor" => o.opencv_sensor = value.extract()?,
+            "min_inliers" => o.min_inliers = option(&key, &value, "an integer, 0 or more")?,
+            "max_epipolar_error_px" => o.max_epipolar_error_px = option(&key, &value, "a number")?,
+            "min_pair_parallax_deg" => o.min_pair_parallax_deg = option(&key, &value, "a number")?,
+            "max_relpose_trials" => o.max_relpose_trials = option(&key, &value, "an integer, 0 or more")?,
+            "max_rotation_error_deg" => o.max_rotation_error_deg = option(&key, &value, "a number")?,
+            "max_normalized_reprojection" => o.max_normalized_reprojection = option(&key, &value, "a number")?,
+            "min_triangulation_deg" => o.min_triangulation_deg = option(&key, &value, "a number")?,
+            "positioning_huber" => o.positioning_huber = option(&key, &value, "a number")?,
+            "rounds" => o.rounds = option(&key, &value, "an integer, 0 or more")?,
+            "ba_loss_scale_px" => o.ba_loss_scale_px = option(&key, &value, "a number")?,
+            "ba_loss_cauchy" => o.ba_loss_cauchy = option(&key, &value, "a bool")?,
+            "final_all_tracks" => o.final_all_tracks = option(&key, &value, "a bool")?,
+            "opencv_sensor" => o.opencv_sensor = option(&key, &value, "a list of bools, one per camera")?,
             _ => {
                 let known = options_dict(d.py(), &Options::default())?.keys();
                 return Err(PyValueError::new_err(format!("{key} is not an option of the mapper (options: {known})")));
@@ -290,24 +319,41 @@ fn rounds_list<'py>(py: Python<'py>, rounds: &[RoundReport]) -> PyResult<Vec<Bou
 /// NaN when there is none; ``matches`` uint32 (r, 2), key point indices within each photo, those of
 /// pair ``p`` the rows ``match_offsets[p]:match_offsets[p + 1]`` (int64, q + 1); ``options`` a dict of
 /// the keys of :func:`native_mapper_defaults`.
-#[pyclass(name = "NativeMapper", module = "ppg_core")]
+///
+/// A progress callback may call ``report()`` (it answers with what the stages ended so far said);
+/// any other method called from it, while a stage runs, is a RuntimeError saying so, which, raised
+/// by the callback, stops the mapper as any exception of the callback does.
+#[pyclass(name = "NativeMapper", module = "ppg_core", frozen)]
 pub(crate) struct NativeMapper {
-    mapper: Mapper,
-    /// Why the mapper was stopped by the bindings (its progress callback raised, or a panic).
+    /// The engine's mapper, held by the stage that runs.
+    mapper: Mutex<Mapper>,
+    /// What the mapper said after its last stage, readable while a stage runs.
+    seen: Mutex<Seen>,
+    /// The id of each camera of the input.
+    camera_ids: Vec<u32>,
+}
+
+/// The report of the mapper after its last stage and why the bindings stopped it (its progress
+/// callback raised, or the engine panicked).
+struct Seen {
+    report: MapperReport,
     stopped: Option<String>,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl NativeMapper {
     /// The stage `f` (number `index`, named `message`) of the mapper run without the GIL beside its
     /// progress (see the module).
-    fn stage<T: Send>(&mut self, py: Python<'_>, progress: Option<Py<PyAny>>, index: usize, message: &'static str,
+    fn stage<T: Send>(&self, py: Python<'_>, progress: Option<Py<PyAny>>, index: usize, message: &'static str,
                       f: impl FnOnce(&mut Mapper) -> Result<T, String> + Send) -> PyResult<T> {
-        if let Some(why) = &self.stopped {
-            return Err(refused(format!("the mapper was stopped ({why}): {message} cannot run")));
-        }
-        let stop = self.mapper.stop_flag();
+        self.not_stopped(message)?;
+        let mut guard = self.free(message)?;
+        let stop = guard.stop_flag();
         stop.store(false, Ordering::SeqCst);
-        let mapper = &mut self.mapper;
+        let mapper: &mut Mapper = &mut guard;
         let mut raised: Option<PyErr> = None;
         let outcome = py.detach(|| {
             let mut beat = |finished: bool| -> bool {
@@ -321,10 +367,18 @@ impl NativeMapper {
                     }
                 })
             };
-            catch_unwind(AssertUnwindSafe(|| run_with_heartbeat(BEAT, &stop, || f(mapper), &mut beat)))
+            // the report of the stage kept before its last beat, which may read it
+            let stage = || {
+                let out = f(&mut *mapper);
+                lock(&self.seen).report = mapper.report();
+                out
+            };
+            catch_unwind(AssertUnwindSafe(|| run_with_heartbeat(BEAT, &stop, stage, &mut beat)))
         });
+        let mut seen = lock(&self.seen);
+        seen.report = guard.report();
         if let Some(e) = raised {
-            self.stopped = Some(format!("its progress callback raised in {message}"));
+            seen.stopped = Some(format!("its progress callback raised in {message}"));
             if let Err(payload) = &outcome {
                 // the user's exception is the error; the panic goes with it (add_note, Python 3.11+)
                 let _ = e.value(py).call_method1("add_note", (format!("{message}: {}", panic_text(&**payload)),));
@@ -336,14 +390,34 @@ impl NativeMapper {
             Ok(Err(problem)) => Err(refused(format!("{message}: {problem}"))),
             Err(payload) => {
                 let text = format!("{message}: {}", panic_text(&*payload));
-                self.stopped = Some(format!("the engine panicked in {message}"));
+                seen.stopped = Some(format!("the engine panicked in {message}"));
                 Err(refused(text))
             }
         }
     }
 
     fn camera_id(&self, index: usize) -> u32 {
-        self.mapper.input().cameras[index].camera_id
+        self.camera_ids[index]
+    }
+
+    /// `Ok` unless the bindings stopped the mapper (then a RuntimeError saying why `what` cannot run).
+    fn not_stopped(&self, what: &str) -> PyResult<()> {
+        match &lock(&self.seen).stopped {
+            Some(why) => Err(refused(format!("the mapper was stopped ({why}): {what} cannot run"))),
+            None => Ok(()),
+        }
+    }
+
+    /// The mapper, unless a stage holds it: then `what` is called from that stage's progress
+    /// callback (the only Python code that runs meanwhile), a RuntimeError that says so.
+    fn free(&self, what: &str) -> PyResult<MutexGuard<'_, Mapper>> {
+        match self.mapper.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::Poisoned(e)) => Ok(e.into_inner()),
+            Err(TryLockError::WouldBlock) => Err(refused(format!(
+                "{what}: the mapper is running a stage; its progress callback must not call the mapper but \
+                 report()"))),
+        }
     }
 }
 
@@ -353,7 +427,7 @@ impl NativeMapper {
     #[pyo3(signature = (images, cameras, keypoints, keypoint_offsets, pairs, pair_config, pair_f, matches,
                         match_offsets, options=None))]
     #[allow(clippy::too_many_arguments)]
-    fn new(py: Python<'_>, images: Vec<ImageArg>, cameras: Vec<CameraArg>, keypoints: &Bound<'_, PyAny>,
+    fn new(py: Python<'_>, images: &Bound<'_, PyAny>, cameras: &Bound<'_, PyAny>, keypoints: &Bound<'_, PyAny>,
            keypoint_offsets: &Bound<'_, PyAny>, pairs: &Bound<'_, PyAny>, pair_config: &Bound<'_, PyAny>,
            pair_f: &Bound<'_, PyAny>, matches: &Bound<'_, PyAny>, match_offsets: &Bound<'_, PyAny>,
            options: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -368,14 +442,16 @@ impl NativeMapper {
             .detach(|| catch_unwind(AssertUnwindSafe(|| Mapper::new(input, o))))
             .map_err(|payload| refused(format!("the mapper: {}", panic_text(&*payload))))?
             .map_err(refused)?;
-        Ok(NativeMapper { mapper, stopped: None })
+        let camera_ids = mapper.input().cameras.iter().map(|c| c.camera_id).collect();
+        let seen = Mutex::new(Seen { report: mapper.report(), stopped: None });
+        Ok(NativeMapper { mapper: Mutex::new(mapper), seen, camera_ids })
     }
 
     /// The view graph (the focal lengths that were guessed calibrated, the relative pose of every
     /// pair): ``edges``, ``left_out`` (pairs whose estimation failed), ``too_few`` (pairs with too few
     /// matches), ``focals`` (``(camera_id, before, after)`` of every camera calibrated).
     #[pyo3(signature = (progress=None))]
-    fn view_graph<'py>(&mut self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
+    fn view_graph<'py>(&self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
         let (edges, left_out, too_few) = self.stage(py, progress, 0, "view graph", |m| {
             m.view_graph(&mut || true).map(|g| (g.edges.len(), g.left_out, g.too_few))
         })?;
@@ -384,7 +460,7 @@ impl NativeMapper {
         d.set_item("left_out", left_out)?;
         d.set_item("too_few", too_few)?;
         let focals: Vec<(u32, f64, f64)> =
-            self.mapper.report().focals.iter().map(|f| (self.camera_id(f.camera), f.before, f.after)).collect();
+            lock(&self.seen).report.focals.iter().map(|f| (self.camera_id(f.camera), f.before, f.after)).collect();
         d.set_item("focals", focals)?;
         Ok(d)
     }
@@ -392,7 +468,7 @@ impl NativeMapper {
     /// The rotations averaged: ``registered`` (the photos placed), ``dropped`` (the edges dropped),
     /// ``components`` (the sizes of the connected parts, largest first).
     #[pyo3(signature = (progress=None))]
-    fn rotations<'py>(&mut self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
+    fn rotations<'py>(&self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
         let (registered, dropped, components) = self.stage(py, progress, 1, "rotations", |m| {
             m.rotations(&mut || true).map(|r| (r.placed, r.dropped.len(), r.components.clone()))
         })?;
@@ -406,14 +482,17 @@ impl NativeMapper {
     /// The tracks of the photos placed and the ``per_photo`` longest of each photo: ``tracks``,
     /// ``selected``, ``observations`` (of all the tracks), ``dropped_conflicts``.
     #[pyo3(signature = (per_photo, progress=None))]
-    fn tracks<'py>(&mut self, py: Python<'py>, per_photo: usize, progress: Option<Py<PyAny>>)
+    fn tracks<'py>(&self, py: Python<'py>, per_photo: &Bound<'py, PyAny>, progress: Option<Py<PyAny>>)
         -> PyResult<Bound<'py, PyDict>> {
+        let per_photo: usize = per_photo
+            .extract()
+            .map_err(|e: PyErr| refused(format!("per_photo must be an integer, 0 or more, not {per_photo}: {e}")))?;
         let (tracks, observations, dropped) = self.stage(py, progress, 2, "tracks", |m| {
             m.tracks(per_photo, &mut || true).map(|t| (t.len(), t.observations.len(), t.dropped_conflicts))
         })?;
         let d = PyDict::new(py);
         d.set_item("tracks", tracks)?;
-        d.set_item("selected", self.mapper.report().selected)?;
+        d.set_item("selected", lock(&self.seen).report.selected)?;
         d.set_item("observations", observations)?;
         d.set_item("dropped_conflicts", dropped)?;
         Ok(d)
@@ -427,7 +506,7 @@ impl NativeMapper {
     /// (empty here: the deviations of the biases are estimated by ``refine``, see ``report``);
     /// ``gnss_outliers`` (photo indices).
     #[pyo3(signature = (gnss=None, progress=None))]
-    fn position<'py>(&mut self, py: Python<'py>, gnss: Option<&Bound<'py, PyDict>>, progress: Option<Py<PyAny>>)
+    fn position<'py>(&self, py: Python<'py>, gnss: Option<&Bound<'py, PyDict>>, progress: Option<Py<PyAny>>)
         -> PyResult<Bound<'py, PyDict>> {
         let gnss = gnss.map(self::gnss).transpose()?;
         let p = self.stage(py, progress, 3, "positioning", |m| m.position(gnss.as_ref(), &mut || true))?;
@@ -446,7 +525,7 @@ impl NativeMapper {
     /// The rounds of adjustment: ``rounds``, a dict per round (``round``, ``intrinsics``,
     /// ``cost_initial``, ``cost``, ``observations``, ``filtered``, ``added``, ``seconds``).
     #[pyo3(signature = (progress=None))]
-    fn refine<'py>(&mut self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
+    fn refine<'py>(&self, py: Python<'py>, progress: Option<Py<PyAny>>) -> PyResult<Bound<'py, PyDict>> {
         let rounds = self.stage(py, progress, 4, "refinement", |m| m.refine(&mut || true).map(<[_]>::to_vec))?;
         let d = PyDict::new(py);
         d.set_item("rounds", rounds_list(py, &rounds)?)?;
@@ -457,10 +536,9 @@ impl NativeMapper {
     /// number of photos written. Before ``refine`` has run, or once the mapper stopped, a
     /// RuntimeError; an error of the disk an OSError.
     fn write_model(&self, py: Python<'_>, folder: &str) -> PyResult<usize> {
-        if let Some(why) = &self.stopped {
-            return Err(refused(format!("the mapper was stopped ({why}): nothing to write")));
-        }
-        let mapper = &self.mapper;
+        self.not_stopped("write_model")?;
+        let guard = self.free("write_model")?;
+        let mapper: &Mapper = &guard;
         py.detach(|| mapper.write_model(Path::new(folder))).map_err(|e| {
             if e.kind() == std::io::ErrorKind::Other {
                 refused(e.to_string())
@@ -472,7 +550,8 @@ impl NativeMapper {
 
     /// What the stages did (the engine's `MapperReport`) in plain types.
     fn report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let r: MapperReport = self.mapper.report();
+        let seen = lock(&self.seen);
+        let r: &MapperReport = &seen.report;
         let d = PyDict::new(py);
         d.set_item("photos", r.photos)?;
         d.set_item("edges", r.edges)?;
@@ -503,7 +582,7 @@ impl NativeMapper {
         d.set_item("variance_factors", r.variance_factors.map(|v| (v[0], v[1], v[2])))?;
         d.set_item("rounds", rounds_list(py, &r.rounds)?)?;
         d.set_item("notes", r.notes.clone())?;
-        d.set_item("stopped", self.stopped.clone())?;
+        d.set_item("stopped", seen.stopped.clone())?;
         Ok(d)
     }
 }
