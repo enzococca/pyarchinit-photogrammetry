@@ -401,6 +401,40 @@ def test_a_narrow_room_painted_from_its_texture_shows_each_wall_once(tmp_path):
         assert (cells[3] == 255).all() and np.abs(cells[:3].T.astype(int) - colour).max() < 12
 
 
+def test_a_ray_along_the_end_of_the_wall_adds_no_length(tmp_path):
+    """The column on the very end of a wall may find any depth: its rays run along the return of the wall. With a
+    sliver 0.2 m behind the face that the last column alone sees, and with a first column of the wall that answers
+    0.3 m, the wall is as long as its face and ``u`` does not jump where the wall starts."""
+    scene = make_wall_scene()
+    k = len(scene.vertices)
+    scene.vertices = np.vstack([scene.vertices, [[5.8, 4.0005, 0.0], [5.8, 4.0015, 0.0], [5.8, 4.0015, 2.0],
+                                                 [5.8, 4.0005, 2.0]]])
+    scene.faces = np.vstack([scene.faces, [[k, k + 1, k + 2], [k, k + 2, k + 3]]]).astype(scene.faces.dtype)
+    _doc, ch, info = model_doc(tmp_path, scene)
+    face = np.asarray(info["face"]) + [[0.0, 0.0], [0.0, 0.0], [0.0, 0.001]]     # the trace ends 1 mm past the wall
+    frame = WallPath(face, radii=corner_radii(face))
+    rc, lock = raycaster_for_chunk(ch), threading.Lock()
+    surf = E.FrameSurface(ch, rc, frame, RES, lock, (-0.5, 0.5), (0.0, 100.0, frame.length, 102.0))
+    ends = surf.depth_at(np.array([frame.length - 0.005, frame.length]), np.array([101.0, 101.0]))
+    assert ends == pytest.approx([0.0, -0.2], abs=1e-4)             # the face, then the sliver
+    assert abs(E.face_map(surf)[-1][1] - 10.001) < 0.002
+    # the first column of the wall, in a part prolonged before it: s = 0 is one of its columns
+    plain = path_of(info)
+    part = E.FrameSurface(ch, rc, plain, RES, lock, (-0.5, 0.5), (-1.0, 100.0, 9.0, 102.0))
+    real = part.depth_at
+
+    def grazing(u, v):
+        d = real(u, v)
+        d[np.abs(u) < 1e-9] = -0.3
+        return d
+
+    part.depth_at = grazing
+    pairs = np.array(E.face_map(part))
+    assert (part.depth_at(np.zeros(1), np.full(1, 101.0)) == -0.3).all()
+    want = [-1.0, 0.0, 3.0, 9.0 + (10.0 - plain.length)]
+    assert np.abs(np.interp([-1.0, 0.0, 3.0, 9.0], pairs[:, 0], pairs[:, 1]) - want).max() < 0.002
+
+
 def test_the_face_line_bows_with_the_wall_not_with_its_roughness():
     """Between two points the simplification keeps, the face line is as long as the wall that curves between
     them, and as long as their chord where the face only has a bump."""

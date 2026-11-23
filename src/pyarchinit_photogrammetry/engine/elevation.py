@@ -789,7 +789,9 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     the heights of the bounds (``samples`` of them at most: a drainpipe or a bush in front does not pull the
     column); a column without surface - a hole in the model, the trace prolonged past the wall - takes the depth
     interpolated between the nearest columns with one on either side, past the last of them the depth of that
-    one: there the face is the line of the frame carried on, and ``u`` does not jump. The face points are the
+    one: there the face is the line of the frame carried on, and ``u`` does not jump. The column on the edge of
+    a stretch of surface takes the depth of the one next to it: on the very end of a wall a ray runs along its
+    return and finds any depth, which would be a step of the face that is not there. The face points are the
     points of the line moved by that depth along its normal; the face line goes through those of them that
     their simplification within :data:`FACE_TOLERANCE` keeps (the roughness of the masonry adds no length, a
     corner stays), bowed between them as the face is (:func:`_along_face`: a curved wall keeps its length), and
@@ -821,8 +823,14 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
 
     s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
     d = depths(s)
-    if not np.isfinite(d).any():
+    ok = np.isfinite(d)
+    if not ok.any():
         raise ValueError("no surface in the depth band along the trace: the length on the face needs the wall")
+    # the column on the edge of a stretch of surface - the end of the wall, the side of a hole, the end of the part -
+    # takes the depth of the column next to it: a ray along the return of a wall finds any depth there
+    before, after = np.concatenate([[False], ok[:-1]]), np.concatenate([ok[1:], [False]])
+    d = np.where(ok & after & ~before, np.concatenate([d[1:], [np.nan]]),
+                 np.where(ok & before & ~after, np.concatenate([[np.nan], d[:-1]]), d))
     for _ in range(FACE_HALVINGS):
         points = _face_points(frame, s, d)
         gap = np.hypot(*np.diff(points, axis=0).T)
