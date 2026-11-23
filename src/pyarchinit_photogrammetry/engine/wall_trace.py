@@ -22,10 +22,11 @@ from .wall_path import (CLEARANCE, DEFAULT_FRONT, TraceRefused, WallPath, _MIN_S
                         corner_radii, ordered, smooth_trace)
 
 SNAP_BAND = 2.5  # m in front of the clicked line and behind it where the face is looked for
-MIN_SNAP_SHARE = 0.3  # the share of the columns of a segment that must see a surface for it to be moved
+MIN_SNAP_SHARE = 0.3  # the share of the columns of a segment that must lie on its line for it to be moved
 MIN_FIT = 0.5  # m of face a line is fitted to: a shorter stretch gives a shift alone
 FIT_MAD = 3.0  # a column further than this many median deviations from the line fitted is left out of it
 FIT_COLUMNS = 400  # at most, for the slope of the first line (the slopes between them two by two)
+FIT_NEAR = 0.1  # m: a column within this of the line of its segment lies on it
 SAME_WALL_DEG = 5.0  # two fitted lines that turn less are one wall going on: no corner to put where they meet
 STRAIGHT = 0.01  # m: a vertex this near the line between its neighbours is a click on a straight wall, not a turn
 
@@ -94,25 +95,40 @@ def side_of(chunk: Chunk, points, side="auto") -> str:
 
 # ---------------------------------------------------------------- the snap
 def _heights_near(chunk: Chunk, line: np.ndarray, band: float) -> tuple[float, float] | None:
-    """The 1st and the 99th percentile of the height of the vertices of the model within ``band`` of the polyline
-    ``line`` on the plan (a spike of the mesh does not stretch them); None when no vertex is there, or all at one
-    height."""
+    """The heights of the model along the polyline ``line``: the 1st and the 99th percentile of the height of its
+    vertices within ``band`` of the line on the plan, each counted for the surface it stands for - a third of
+    the area of every triangle it belongs to. A ground meshed finer than the wall does not outweigh it, and a
+    spike of the mesh does not stretch them. None when no vertex is there, or all at one height."""
     from ..io.mesh_ply import read_mesh
 
-    xyz = chunk.to_world(read_mesh(chunk.product_path("model")).xyz)
+    mesh = read_mesh(chunk.product_path("model"))
+    xyz = chunk.to_world(mesh.xyz)
     lo, hi = line.min(axis=0) - band, line.max(axis=0) + band
-    box = (xyz[:, 0] >= lo[0]) & (xyz[:, 0] <= hi[0]) & (xyz[:, 1] >= lo[1]) & (xyz[:, 1] <= hi[1])
-    xy, z = xyz[box, :2] - line[0], xyz[box, 2]
-    near = np.zeros(len(z), bool)
+    box = np.nonzero((xyz[:, 0] >= lo[0]) & (xyz[:, 0] <= hi[0]) & (xyz[:, 1] >= lo[1]) & (xyz[:, 1] <= hi[1]))[0]
+    xy = xyz[box, :2] - line[0]
+    near = np.zeros(len(box), bool)
     for a, b in zip(line[:-1] - line[0], line[1:] - line[0]):
         rest = np.nonzero(~near)[0]
+        low, high = np.minimum(a, b) - band, np.maximum(a, b) + band  # the box of this segment first
+        p = xy[rest]
+        rest = rest[(p[:, 0] >= low[0]) & (p[:, 0] <= high[0]) & (p[:, 1] >= low[1]) & (p[:, 1] <= high[1])]
         step = b - a
         w = xy[rest] - a
         tau = np.clip(w @ step / (step @ step), 0.0, 1.0)
         near[rest] = ((w - tau[:, None] * step) ** 2).sum(axis=1) <= band * band
-    if not near.any():
+    rows = box[near]
+    there = np.zeros(len(xyz), bool)
+    there[rows] = True
+    faces = np.asarray(mesh.faces)
+    faces = faces[there[faces].any(axis=1)]
+    a, b, c = (xyz[faces[:, k]] for k in range(3))
+    area = np.linalg.norm(np.cross(b - a, c - a), axis=1) / 2.0
+    weight = np.bincount(faces.ravel(), weights=np.repeat(area / 3.0, 3), minlength=len(xyz))[rows]
+    if not weight.sum() > 0.0:
         return None
-    v0, v1 = np.percentile(z[near], [1.0, 99.0])
+    order = np.argsort(xyz[rows, 2])
+    height, share = xyz[rows, 2][order], np.cumsum(weight[order]) / weight.sum()
+    v0, v1 = height[np.searchsorted(share, 0.01)], height[min(np.searchsorted(share, 0.99), len(height) - 1)]
     return (float(v0), float(v1)) if v1 > v0 else None
 
 
@@ -243,25 +259,26 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     seen from ``side`` (:func:`side_of`), as the model of ``chunk`` has it.
 
     Each clicked segment looks at the model through its own vertical plane, from ``band`` metres in front of
-    the line to ``band`` behind it (the first surface met from the viewer's side: a click on the crest of the
-    wall, or behind it, finds the face all the same; what stands in front of the wall within the band is met
-    first - give a narrower band in a narrow room). In columns ``step`` wide along the segment the depth of the
-    face is the median of the surface over ``samples`` heights between the two of ``heights`` (default: the 1st
-    and the 99th percentile of the height of the vertices of the model within ``band`` of the line); a column
-    with surface at fewer than a tenth of them sees nothing. A line is fitted to the columns of the segment
-    (:func:`_fit`: twice, the second time without the columns far from the first; a shift alone under
-    :data:`MIN_FIT`). A segment with fewer than :data:`MIN_SNAP_SHARE` of its columns on a surface has no line.
+    the line to ``band`` behind it, and takes the first surface met from the viewer's side: a click on the crest
+    of the wall, or behind it, finds the face all the same. What stands in front of the wall within the band is
+    met first - the other side of a narrow room, the ground where the wall stands in a trench: give a narrower
+    ``band`` there. In columns ``step`` wide along the segment the depth of the face is the median of the surface
+    over ``samples`` heights between the two of ``heights`` (default: those of the model along the line,
+    :func:`_heights_near`); a column with surface at fewer than a tenth of them sees nothing. A line is fitted to
+    the columns (:func:`_fit`: twice, the second time without the columns far from the first; a shift alone under
+    :data:`MIN_FIT`), and the segment has that line when :data:`MIN_SNAP_SHARE` of its columns lie on it, within
+    :data:`FIT_NEAR` - not when it sees the wall for a short stretch, or rubble and bushes at any depth.
 
-    A vertex between two segments goes where their lines meet (between the two lines where they are one wall
-    going on, or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its
-    segment along its normal. A segment without a line keeps the direction clicked and goes with its vertices:
-    each is moved by the other segment it belongs to, an end that belongs to no other as the vertex next to it.
+    A vertex between two segments goes where their lines meet (between the two where they are one wall going on,
+    or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its segment
+    along its normal. A segment without a line keeps the direction clicked and goes with its vertices: each is
+    moved by the other segment it belongs to, an end that belongs to no other as the vertex next to it.
 
     Returns ``points`` (N, 2: the line snapped, in the order clicked), ``snapped`` (whether it was moved),
-    ``shift`` (N: how far each vertex went, metres), ``median_shift``, ``max_shift`` and ``segments``, for each
-    clicked segment ``offset`` (the depth of its fitted line at its first point, towards the viewer), ``slope``
-    (per metre along the direction clicked) and ``share`` (of its columns that see a surface); ``offset`` and
-    ``slope`` are 0 for a segment without a line. ``snapped`` is False, and the points are those clicked, when
+    ``shift`` (N: how far each vertex went, metres), ``median_shift``, ``max_shift`` and ``segments``: for each
+    clicked segment ``offset`` (the depth of its line at its first point, towards the viewer), ``slope`` (per
+    metre along the direction clicked) and ``share`` (of its columns, those that lie on that line); ``offset``
+    and ``slope`` are 0 for a segment without a line. ``snapped`` is False and the points are those clicked when
     no segment has a line, and when the lines found cannot keep the vertices in the order clicked.
 
     :class:`~.wall_path.TraceRefused` as :func:`side_of`; ``RuntimeError`` without a model."""
@@ -307,13 +324,15 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
             surface = FrameSurface(chunk, raycaster, plane, step, lock, (-band, band),
                                    (0.0, heights[0], float(length[i]), heights[1]))
             x, d = _columns(surface, line[i], t[i], float(length[i]), step, heights, samples)
-            share[i] = np.isfinite(d).mean()
-            if share[i] >= MIN_SNAP_SHARE:
-                fits[i] = _fit(x, d, float(length[i]) / len(x))
+            if np.isfinite(d).any():
+                a, b = _fit(x, d, float(length[i]) / len(x))
+                share[i] = (np.abs(d - (a + b * x)) <= FIT_NEAR).mean()
+                if share[i] >= MIN_SNAP_SHARE:
+                    fits[i] = a, b
             progress((i + 1) / len(length))
     progress(1.0)
     moved = _moved(v, length, t, towards, fits, share >= MIN_SNAP_SHARE)
-    out = clicked.copy() if moved is None else (line[0] + moved)[place]
+    out = clicked if moved is None else (line[0] + moved)[place]
     shift = np.hypot(*(out - clicked).T)
     segments = [{"offset": 0.0, "slope": 0.0, "share": 0.0} if place[i] == place[i + 1] else
                 {"offset": float(fits[place[i], 0]), "slope": float(fits[place[i], 1]),
@@ -329,8 +348,8 @@ def _without_straight(points, front: float, back: float, tolerance: float = STRA
     (:class:`~.wall_path.WallPath`): a click 30 cm from a corner leaves it an arc of 15 cm, and the depth the
     frame keeps there shrinks with it. A vertex next to a corner whose arc (:func:`~.wall_path.corner_radii` of
     ``front`` and ``back``) is short of room on that side is left out when the line does without it: when every
-    vertex left out between two kept stands within ``tolerance`` of the line between them. The one nearest that
-    line goes first, until no corner is short of room or no vertex can go. The two ends stay."""
+    vertex left out between two kept stands within ``tolerance`` of the line between them. One goes at a time,
+    until no corner is short of room or no vertex can go. The two ends stay."""
     p = _plan_points(points)
     kept = list(range(len(p)))
     while len(kept) > 2:
@@ -340,19 +359,17 @@ def _without_straight(points, front: float, back: float, tolerance: float = STRA
         short_before = np.zeros(len(q), bool)  # a corner whose arc asks more than half the segment before it
         short_after = np.zeros(len(q), bool)  # ... than half the segment after it
         short_before[1:-1], short_after[1:-1] = need > length[:-1] / 2.0, need > length[1:] / 2.0
-        best = None
         for k in range(1, len(q) - 1):
             if not (short_after[k - 1] or short_before[k + 1]):
                 continue
             a, step = p[kept[k - 1]], p[kept[k + 1]] - p[kept[k - 1]]
             w = p[kept[k - 1] + 1:kept[k + 1]] - a
             tau = np.clip(w @ step / (step @ step), 0.0, 1.0)
-            off = float(np.hypot(*(w - tau[:, None] * step).T).max())
-            if off <= tolerance and (best is None or off < best[0]):
-                best = (off, k)
-        if best is None:
+            if np.hypot(*(w - tau[:, None] * step).T).max() <= tolerance:
+                del kept[k]
+                break
+        else:
             break
-        del kept[best[1]]
     return p[kept]
 
 
