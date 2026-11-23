@@ -7,8 +7,11 @@ The job names the local photos, the work folder, the chain (``align``, ``all``, 
 mapper of the alignment (one of :data:`MAPPERS`), the engine of the matching and the engine of the alignment (each
 one of :data:`ENGINES`; the depth maps run classic whatever the job asks) and, when the set has them,
 the targets to detect, the reference to import and the labels of its markers that are check points (``check``), and
-the steps after which the project is kept as it was (``after``: :func:`snapshot_hooks`). The child makes a project
-in the work folder, adds the photos and runs public methods of :class:`..core.chunk.Chunk` only, in the order
+the steps after which the project is kept as it was (``after``: :func:`snapshot_hooks`); for the real sets the kept
+run whose matches it reuses (``matches_from``: :func:`reuse_matches`), the project whose markers it copies before the
+alignment (``markers``: :func:`copy_markers`) and the formulation and solver of the optimization (``optimize``,
+``solver``). The child makes a project in the work folder (or copies the kept run's), adds the photos and runs public
+methods of :class:`..core.chunk.Chunk` only, in the order
 ``ppg process`` runs them (:data:`ALL_STEPS`; a test keeps the two equal) with the defaults of today written out
 (:data:`ARGUMENTS`), so that a record says what ran. It rewrites ``result.json`` when a step starts and when it ends,
 so that a child that dies leaves the step it died in: the seconds of each step as the child measures them around it,
@@ -89,6 +92,14 @@ PROJECT = "project.ppg"
 SNAPSHOT = "project.after-{step}.ppg"
 RESULT = "result.json"
 CHUNK_LABEL = "Chunk 1"
+# the words of --optimize (the formulation of optimize_cameras in the chain ``optimize``), the first its default: the
+# published optimization (engine.sfm.OPTIMIZE_AUTO_ENGINE; a test compares them); its solver the program's (auto)
+OPTIMIZE_ENGINES = ("colmap", "ppg")
+# the step a run on the matches of a kept run starts at (``matches_from`` of the job): the steps before it are not run
+REUSED_FROM = "align_cameras"
+# the database of the matching, and the native stores beside it, in the sfm folder of a chunk
+DATABASE = pairs.DATABASE
+NATIVE_STORES = "native"
 
 
 def match_settings() -> dict:
@@ -235,6 +246,121 @@ def snapshot_hooks(work: Path, names) -> dict:
     return {str(step): functools.partial(keep, str(step)) for step in names or ()}
 
 
+def kept_run(folder: Path) -> tuple[Path, Path]:
+    """The project file and the database of the matching of the kept run ``folder`` (a work folder kept by
+    ``--keep``: exactly one :data:`PROJECT` under it, with one chunk, whose sfm folder holds :data:`DATABASE`).
+    Refused with a ValueError that names what is missing, never the path. Nothing is written: the project file is
+    read as text."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise ValueError(f"--matches-from is not a folder: give the kept work folder of a run (OUT/<name>-<i>, "
+                         f"--keep)")
+    found = sorted(p for p in folder.rglob(PROJECT) if p.is_file())
+    if len(found) != 1:
+        raise ValueError(f"--matches-from holds {len(found)} {PROJECT} files: exactly one is needed, the project of "
+                         f"a run kept with --keep")
+    project = found[0]
+    try:
+        chunks = json.loads(project.read_text(encoding="utf-8"))["chunks"]
+        keys = [int(c["key"]) for c in chunks]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"--matches-from: its {PROJECT} cannot be read ({type(exc).__name__})") from None
+    if len(keys) != 1:
+        raise ValueError(f"--matches-from: its {PROJECT} has {len(keys)} chunks, a run of the bench has one")
+    database = project.with_name(project.name + ".files") / f"chunk_{keys[0]}" / "sfm" / DATABASE
+    if not database.is_file():
+        raise ValueError(f"--matches-from: its project has no {DATABASE} (the matching of the run): it was not "
+                         f"matched, or its files were not kept")
+    return project, database
+
+
+def kept_photos(project: Path) -> set[str]:
+    """The file names of the photos of the one chunk of the kept project ``project`` (read as text)."""
+    (chunk,) = json.loads(Path(project).read_text(encoding="utf-8"))["chunks"]
+    return {Path(c.get("path_abs") or c["path"]).name for c in chunk.get("cameras") or []}
+
+
+def reuse_matches(kept: Path, work: Path, photos) -> object:
+    """The project of the kept run ``kept`` (:func:`kept_run`) copied into ``work`` as :data:`PROJECT` with its
+    database and its native stores (when they exist; the copies keep the times of the files), opened, its alignment
+    and every product dropped, saved: its chunk, ready for ``align_cameras``. The kept folder is only read. A
+    ValueError when the photos of the kept project are not ``photos``, the photos of this run."""
+    project, database = kept_run(kept)
+    shutil.copy2(project, work / PROJECT)
+    doc = Document.open(work / PROJECT)
+    chunk = doc.chunks[0]
+    asked = {Path(p).resolve() for p in photos}
+    if {Path(c.path).resolve() for c in chunk.cameras} != asked:
+        raise ValueError("the photos of the kept run are not the photos of this run")
+    sfm_dir = chunk.data_dir / "sfm"
+    sfm_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(database, sfm_dir / DATABASE)
+    if (database.parent / NATIVE_STORES).is_dir():
+        shutil.copytree(database.parent / NATIVE_STORES, sfm_dir / NATIVE_STORES)
+    chunk.reset_alignment()
+    chunk.forget_precision()
+    chunk.products.clear()  # their files were not copied: what the steps after the matching made, made again
+    info = chunk.meta.get("sfm")
+    if isinstance(info, dict):
+        info.pop("optimize", None)
+    for key in ("timings", "engine"):  # the records of the steps of the kept run: the matching's alone stays
+        records = chunk.meta.get(key)
+        if isinstance(records, dict):
+            chunk.meta[key] = {k: v for k, v in records.items() if k == "match_photos"}
+    doc.save()
+    return chunk
+
+
+def markers_chunk(doc) -> object:
+    """The chunk of the project ``doc`` the markers are taken from: its active chunk, refused (ValueError) when no
+    marker of it is measured on a photo."""
+    chunk = doc.chunk
+    if chunk is None or not any(m.projections for m in chunk.markers):
+        raise ValueError("--markers: the active chunk of the project has no marker measured on a photo")
+    return chunk
+
+
+def copy_markers(chunk, project: Path) -> tuple[dict, int]:
+    """Every marker of the chunk of the project ``project`` (:func:`markers_chunk`; opened, never saved) copied into
+    ``chunk``: its label, code, reference (location, accuracy, whether it is used), check flag and its projections
+    by the **label** of their camera; a marker of ``chunk`` with the same label is replaced. The CRS of the markers
+    becomes the chunk's when the chunk has a local or geographic one, else their locations are transformed into
+    it. Returned: ``{"markers": n, "checks": n}`` and how many projections were left out, on photos this run does
+    not have."""
+    from ..core import crs as crs_mod
+    from ..core.camera import Reference
+    from ..core.marker import Marker, Projection
+
+    source = markers_chunk(Document.open(project))
+    labels = {c.key: c.label for c in source.cameras}
+    cameras = {c.label: c for c in chunk.cameras}
+    transform = None
+    if not crs_mod.is_local(source.crs) and source.crs != chunk.crs:
+        if crs_mod.is_local(chunk.crs) or crs_mod.is_geographic(chunk.crs):
+            chunk.crs = source.crs
+            if source.meta.get("marker_frames"):
+                chunk.meta["marker_frames"] = dict(source.meta["marker_frames"])
+        else:
+            transform = (source.crs, chunk.crs)
+    left_out = 0
+    for m in source.markers:
+        chunk.markers = [old for old in chunk.markers if old.label != m.label]
+        new = Marker(key=chunk._next_key(chunk.markers), label=m.label, code=m.code, target_type=m.target_type,
+                     reference=Reference.from_dict(m.reference.to_dict()), checkpoint=bool(m.checkpoint))
+        if transform is not None and new.reference.location is not None:
+            xyz = np.asarray(new.reference.location, float)[None]
+            new.reference.location = [float(v) for v in crs_mod.transform_points(xyz, *transform)[0]]
+        for key, proj in m.projections.items():
+            camera = cameras.get(labels.get(key))
+            if camera is None:
+                left_out += 1
+                continue
+            new.projections[camera.key] = Projection(proj.x, proj.y, proj.pinned)
+        chunk.markers.append(new)
+    chunk.document.save()
+    return {"markers": len(source.markers), "checks": sum(1 for m in source.markers if m.checkpoint)}, left_out
+
+
 def _rss_mb() -> float:
     """The resident memory of this process, in MiB (written ``mb``, as the memory of the machine is ``gb``)."""
     import psutil
@@ -319,13 +445,16 @@ class Result:
 def wanted(step: str, job: dict, chunk, imported: bool) -> bool:
     """Whether ``step`` runs: the markers when the job names targets, the reference when it gives one, the transform
     when a reference was imported, a camera has a reference position or the chunk has scale bars (as ppg process
-    decides); every other step always."""
+    decides); the steps before :data:`REUSED_FROM` never on the matches of a kept run (``matches_from``); every other
+    step always."""
     if step == "detect_markers":
         return bool(job.get("targets"))
     if step == "import_reference":
         return bool(job.get("reference"))
     if step == "update_transform":
         return imported or any(c.reference.location for c in chunk.cameras) or bool(chunk.scalebars)
+    if job.get("matches_from") and step in ALIGN_STEPS[:ALIGN_STEPS.index(REUSED_FROM)]:
+        return False  # the markers and the matching of the kept run are the project's already
     return True
 
 
@@ -346,6 +475,9 @@ def call(chunk, step: str, job: dict):
         kwargs["engine"] = job.get("align_engine", ENGINES[0])
     elif step in switch.STEPS:
         kwargs["engine"] = "classic"
+    elif step == "optimize_cameras":
+        kwargs["engine"] = job.get("optimize") or OPTIMIZE_ENGINES[0]
+        kwargs["solver"] = job.get("solver") or "auto"
     if step == "align_cameras":
         kwargs["mapper"] = job.get("mapper", MAPPERS[0])
     return getattr(chunk, step)(**kwargs)
@@ -357,10 +489,24 @@ def run_chain(chunk, job: dict, result: Result) -> bool:
     Right after ``import_reference`` the markers of ``job["check"]`` become check points (:func:`set_check`; a
     label the chunk lacks is an error of that step). ``job["after"]`` maps a step to a callable that gets the
     document once the step is noted and saved and returns numbers for the results (in-process; in the child the
-    hooks of :func:`snapshot_hooks`); what goes wrong in it is an error of the step."""
+    hooks of :func:`snapshot_hooks`); what goes wrong in it is an error of the step. Right before ``align_cameras``
+    the markers of the project ``job["markers"]`` are copied into the chunk (:func:`copy_markers`): their counts go to
+    the settings, the projections left out to the results, and the georeferencing then runs as after a reference; a
+    project that cannot be read is the error ``markers: ...`` of the run."""
     imported = False
     hooks = job.get("after") or {}
     for step in CHAINS[job["steps"]]:
+        if step == "align_cameras" and job.get("markers"):
+            try:
+                counts, left_out = copy_markers(chunk, Path(job["markers"]))
+            except Exception as exc:  # a project that cannot be read: the run measures nothing without its markers
+                result.data["error"] = f"markers: {record.describe(exc)}"
+                result.save()
+                return False
+            result.data["settings"].update(counts)
+            result.data["results"]["markers_projections_left_out"] = left_out
+            result.save()
+            imported = True  # markers with references: the chunk is georeferenced on them, as after a reference
         if not wanted(step, job, chunk, imported):
             continue
         entry, clock = result.start(step)
@@ -406,6 +552,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     result = Result(work / RESULT)
     job["after"] = snapshot_hooks(work, job.get("after"))  # names of steps in the job: the hooks of the child
+    if job.get("matches_from"):
+        try:
+            chunk = reuse_matches(Path(job["matches_from"]), work, job["photos"])
+        except Exception as exc:
+            result.data["error"] = f"matches_from: {record.describe(exc)}"
+            result.save()
+            return 1
+        return 0 if run_chain(chunk, job, result) else 1
     try:
         doc = Document()
         chunk = doc.add_chunk(CHUNK_LABEL)

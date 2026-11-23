@@ -33,7 +33,8 @@ SETTINGS = ["pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "map
             "native_fallback", "engine", "features", "routes", "native_dct", "native_guided", "native_guided_ratio",
             "native_guided_band", "native_guided_check", "max_ratio", "max_distance", "cross_check", "pycolmap",
             "photo_cache_mb", "georeferencing", "targets", "mapper_requested", "engine_requested",
-            "align_engine_requested", "ransac_seed"]
+            "align_engine_requested", "ransac_seed", "matches_reused", "markers", "checks", "optimize_engine",
+            "optimize_solver", "native_tracks_per_photo", "native_final_all_tracks"]
 # the record of the engine of a step that ran classic because auto, the default of a run, chose so
 AUTO_CLASSIC = {"requested": "auto", "used": "classic", "fallback": None}
 
@@ -723,7 +724,8 @@ def test_the_hook_after_a_step_adds_its_numbers_to_the_results(tmp_path, monkeyp
     result = steps.Result(tmp_path / "result.json")
     assert steps.run_chain(chunk, job, result) is True
     assert order == [["match_photos", "align_cameras", "import_reference", "update_transform"]]
-    assert calls[-1] == ("optimize_cameras", (), {})  # the defaults of ppg optimize, no engine of the switch
+    # the published optimization (COLMAP's formulation, the solver of the program) unless the job names another
+    assert calls[-1] == ("optimize_cameras", (), {"engine": "colmap", "solver": "auto"})
     assert result.data["results"]["truth_target_shape"] == 0.001 and result.data["results"]["truth_targets"] == 12
     job["after"] = {"align_cameras": lambda doc: {"label": "a word"}}
     result = steps.Result(tmp_path / "word.json")
@@ -1531,3 +1533,188 @@ def test_the_reference_is_private_and_a_text_that_holds_it_is_scrubbed(tmp_path,
     assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras", "import_reference"]
     assert r["steps"][-1]["error"] == r["error"]
     assert not any("Riferimenti" in text for _, text in strings_of(r))
+
+
+# --- the real sets: the matches of a kept run, the markers of a project, the optimization ---------------------------
+
+def stamps(*files: Path) -> list[tuple[bytes, int]]:
+    """The bytes and the time of change of each file: what a run must leave as it found it."""
+    return [(f.read_bytes(), f.stat().st_mtime_ns) for f in files]
+
+
+def kept_database(work: Path) -> Path:
+    (db,) = work.rglob("database.db")
+    return db
+
+
+def test_the_optimization_of_the_job_reaches_optimize_cameras(tmp_path, monkeypatch):
+    """``optimize`` and ``solver`` of the job are the ``engine`` and the ``solver`` of ``Chunk.optimize_cameras``;
+    without them the published optimization, COLMAP's formulation with the solver of the program."""
+    from pyarchinit_photogrammetry.markers import gcp
+
+    monkeypatch.setattr(gcp, "camera_reference_errors", lambda chunk: {})
+    monkeypatch.setattr(gcp, "marker_errors", lambda chunk: [])
+    monkeypatch.setattr(steps, "_rss_mb", lambda: 50.0)
+    for job_part, expected in (({}, {"engine": "colmap", "solver": "auto"}),
+                               ({"optimize": "ppg", "solver": "native"}, {"engine": "ppg", "solver": "native"})):
+        calls = []
+        chunk = stub_chunk(calls, [], report=REPORT)
+        chunk.markers = []
+        job = {"steps": "optimize", "targets": None, "reference": "/data/gcp.csv", "crs": None, **job_part}
+        assert steps.run_chain(chunk, job, steps.Result(tmp_path / "result.json")) is True
+        assert calls[-1] == ("optimize_cameras", (), expected)
+
+
+def test_the_options_of_the_real_sets_are_checked_before_anything_runs(tmp_path, monkeypatch):
+    """``--optimize`` (colmap or ppg), ``--solver`` (auto, native or scipy; COLMAP's adjustment has none to choose),
+    both for ``--steps optimize`` only; ``--matches-from`` a kept run and ``--markers`` a project, neither with
+    ``--steps match``: each refusal a usage error (exit 2) before a child starts, none naming a path."""
+    from typer.testing import CliRunner
+
+    pytest.importorskip("psutil")
+    monkeypatch.setattr(runner.subprocess, "Popen", child_only(no_child))
+    photos = noise_photos(tmp_path / "photos")
+    invoke = lambda *args: CliRunner().invoke(cli.app, ["bench", "run", str(photos), str(tmp_path / "o"),  # noqa
+                                                        "--name", "n", *args])
+    words = lambda result: " ".join(re.sub(r"[─-╿]", " ", result.output).split())  # noqa: E731
+    for args, said in ((("--steps", "optimize", "--optimize", "auto"), "--optimize"),
+                       (("--steps", "optimize", "--optimize", "ppg", "--solver", "fast"), "--solver"),
+                       (("--steps", "optimize", "--solver", "native"), "--solver"),
+                       (("--optimize", "ppg"), "--optimize"), (("--solver", "auto"), "--solver")):
+        result = invoke(*args)
+        assert result.exit_code == 2 and said in words(result), (args, result.output)
+    empty = tmp_path / "KeptRunX"
+    empty.mkdir()
+    for args in (("--matches-from", str(empty)), ("--matches-from", str(tmp_path / "MissingY")),
+                 ("--markers", str(tmp_path / "MissingZ.ppg")), ("--markers", str(empty))):
+        result = invoke(*args)
+        assert result.exit_code == 2 and args[0] in words(result), (args, result.output)
+        assert not any(w in words(result).replace(" ", "") for w in ("KeptRunX", "MissingY", "MissingZ")), \
+            result.output
+    assert "project.ppg" in words(invoke("--matches-from", str(empty)))  # what is missing, never where
+    # a folder with a project but no database: it was not matched
+    (empty / "project.ppg").write_text(json.dumps({"format": "pyarchinit-photogrammetry", "version": 1, "meta": {},
+                                                   "chunks": [{"key": 0, "label": "Chunk 1", "cameras": []}]}))
+    result = invoke("--matches-from", str(empty))
+    assert result.exit_code == 2 and "database.db" in words(result) and "KeptRunX" not in words(result)
+    with pytest.raises(ValueError, match="steps match"):
+        runner.check(tmp_path / "o", "n", "match", photos=photos, markers=tmp_path / "none.ppg")
+    with pytest.raises(ValueError, match="solver"):
+        runner.check(tmp_path / "o", "n", "optimize", photos=photos, optimize="colmap", solver="scipy")
+    assert not (tmp_path / "o").exists()
+
+
+def test_the_optimization_asked_for_goes_to_the_child_and_is_kept_in_the_settings(tmp_path, monkeypatch, stand_in):
+    from typer.testing import CliRunner
+
+    photos = noise_photos(tmp_path / "photos")
+    out = tmp_path / "o"
+    result = CliRunner().invoke(cli.app, ["bench", "run", str(photos), str(out), "--name", "t", "--keep", "--steps",
+                                          "optimize", "--optimize", "ppg", "--solver", "scipy"])
+    assert result.exit_code == 0, result.output
+    job = json.loads((out / "t-1" / "job.json").read_text(encoding="utf-8"))
+    assert job["optimize"] == "ppg" and job["solver"] == "scipy"
+    (written,) = out.glob("t-*.json")
+    settings = json.loads(written.read_text(encoding="utf-8"))["settings"]
+    assert settings["optimize_engine"] == "ppg" and settings["optimize_solver"] == "scipy"
+    assert settings["matches_reused"] is False and settings["markers"] is None and settings["checks"] is None
+    r = the_record(tmp_path / "d", runner.run(photos, tmp_path / "d", name="t", steps="optimize"))
+    assert r["settings"]["optimize_engine"] == "colmap" and r["settings"]["optimize_solver"] == "auto"
+    r = the_record(tmp_path / "a", runner.run(photos, tmp_path / "a", name="t"))  # no optimization in the chain
+    assert r["settings"]["optimize_engine"] is None and r["settings"]["optimize_solver"] is None
+
+
+def test_the_variables_of_the_native_mapper_reach_the_child_and_the_settings(tmp_path, monkeypatch, stand_in):
+    """``PPG_NATIVE_TRACKS_PER_PHOTO`` and ``PPG_NATIVE_FINAL_ALL_TRACKS`` of the parent reach the child's
+    environment and are kept as ``native_tracks_per_photo`` (a whole number) and ``native_final_all_tracks``
+    (False for ``0``, as the mapper reads it); None when unset. A count that is not a whole number is refused before
+    a child starts."""
+    from pyarchinit_photogrammetry.engine import native_map
+
+    photos = noise_photos(tmp_path / "photos")
+    monkeypatch.setenv(native_map.TRACKS_ENV, "300")
+    monkeypatch.setenv(native_map.FINAL_ALL_TRACKS_ENV, "0")
+    r = the_record(tmp_path / "set", runner.run(photos, tmp_path / "set", name="t"))
+    (_cmd, kwargs), = stand_in.calls
+    assert kwargs["env"][native_map.TRACKS_ENV] == "300" and kwargs["env"][native_map.FINAL_ALL_TRACKS_ENV] == "0"
+    assert r["settings"]["native_tracks_per_photo"] == 300 and r["settings"]["native_final_all_tracks"] is False
+    monkeypatch.setenv(native_map.FINAL_ALL_TRACKS_ENV, "1")
+    r = the_record(tmp_path / "on", runner.run(photos, tmp_path / "on", name="t"))
+    assert r["settings"]["native_final_all_tracks"] is True
+    monkeypatch.setenv(native_map.TRACKS_ENV, " ")  # blank: unset, as the mapper reads it
+    monkeypatch.delenv(native_map.FINAL_ALL_TRACKS_ENV)
+    r = the_record(tmp_path / "unset", runner.run(photos, tmp_path / "unset", name="t"))
+    assert r["settings"]["native_tracks_per_photo"] is None and r["settings"]["native_final_all_tracks"] is None
+    monkeypatch.setenv(native_map.TRACKS_ENV, "many")
+    with pytest.raises(ValueError, match=native_map.TRACKS_ENV):
+        runner.run(photos, tmp_path / "bad", name="t")
+    assert len(stand_in.calls) == 3 and not (tmp_path / "bad").exists()
+
+
+def test_a_run_on_the_matches_of_a_kept_run_aligns_without_matching(small_set, tmp_path):
+    """``matches_from`` a work folder kept by ``keep``: the run copies its project and its database (and the native
+    stores), drops the alignment and starts at ``align_cameras``; the record has no ``match_photos``,
+    ``matches_reused`` true, and the kept folder is left as it was."""
+    first = runner.run(small_set, tmp_path / "kept", name="k", keep=True)
+    kept = tmp_path / "kept" / "k-1"
+    files = (kept / "project.ppg", kept_database(kept))
+    before = stamps(*files)
+    out = tmp_path / "out"
+    r = the_record(out, runner.run(small_set, out, name="t", matches_from=kept, keep=True))
+    assert [s["step"] for s in r["steps"]] == ["align_cameras"] and r["error"] is None
+    assert r["settings"]["matches_reused"] is True and list(r["settings"]) == SETTINGS
+    assert r["results"]["aligned"] == r["results"]["cameras"] == 14 and r["results"]["reprojection_rms_px"] > 0
+    assert stamps(*files) == before and len(first) == 1
+    assert kept_database(out / "t-1") != files[1]
+    for where, text in strings_of(r):
+        assert str(tmp_path) not in text, where
+
+
+def markers_project(scene_dir: Path, folder: Path) -> Path:
+    """A project of the trench (all its photos) with its targets detected and measured, targets 4 and 5 check
+    points; never aligned."""
+    doc = ppg.Document()
+    chunk = doc.add_chunk("Saggio")
+    doc.save(folder / "markers.ppg")
+    chunk.add_photos([scene_dir / "photos"])
+    chunk.detect_markers("aruco_4x4_50")
+    chunk.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
+    for m in chunk.markers:
+        m.checkpoint = m.code in (4, 5)
+    doc.save()
+    return folder / "markers.ppg"
+
+
+def test_a_run_with_the_markers_of_a_project_optimizes_on_them(small_set, scene_dir, tmp_path):
+    """``markers`` a project whose chunk has markers measured: before the alignment the child copies every marker
+    (label, reference, check flag, its projections by camera label) into its chunk, leaving out and counting the
+    projections on photos the run does not have; the optimization then gives the control and check errors. The
+    record holds counts, never a label; the project is never written."""
+    project = markers_project(scene_dir, tmp_path / "m")
+    before = stamps(project)
+    source = ppg.Document.open(project).chunks[0]
+    names = {p.stem for p in small_set.iterdir()}
+    labels = {c.key: c.label for c in source.cameras}
+    left_out = sum(1 for m in source.markers for k in m.projections if labels[k] not in names)
+    assert left_out > 0
+    out = tmp_path / "out"
+    r = the_record(out, runner.run(small_set, out, name="t", steps="optimize", markers=project, keep=True))
+    assert r["error"] is None, r["error"]
+    assert [s["step"] for s in r["steps"]] == ["match_photos", "align_cameras", "update_transform",
+                                               "optimize_cameras"]
+    assert r["settings"]["markers"] == len(source.markers)
+    assert r["settings"]["checks"] == sum(m.checkpoint for m in source.markers) == 2
+    assert r["results"]["markers_projections_left_out"] == left_out
+    assert r["results"]["optimized_control_rmse"] < 0.01 and r["results"]["optimized_check_rmse"] < 0.01
+    assert r["settings"]["optimize_engine"] == "colmap" and r["settings"]["optimize_solver"] == "auto"
+    run_chunk = ppg.Document.open(out / "t-1" / "project.ppg").chunks[0]
+    assert sorted((m.label, m.checkpoint) for m in run_chunk.markers) == \
+        sorted((m.label, m.checkpoint) for m in source.markers)
+    run_labels = {c.key: c.label for c in run_chunk.cameras}
+    for m in run_chunk.markers:
+        src = next(s for s in source.markers if s.label == m.label)
+        assert m.reference.location == src.reference.location
+        assert {run_labels[k] for k in m.projections} == {labels[k] for k in src.projections} & names
+    assert stamps(project) == before
+    for where, text in strings_of(r):
+        assert not any(m.label in text for m in source.markers) and str(tmp_path) not in text, where

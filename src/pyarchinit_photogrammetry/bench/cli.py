@@ -41,6 +41,15 @@ ALIGN_ENGINE_HELP = ("the engine of the alignment: auto (the choice of the progr
 SEED_HELP = ("the seed of the RANSAC of the geometric verification of the matches (PPG_RANSAC_SEED in the child): runs "
              "with the same seed verify the same pairs; without it a seed from the clock, and the record says -1")
 RECORDS_HELP = "the folder of the records (default: OUT)"
+MATCHES_FROM_HELP = ("a work folder kept by --keep (OUT/<name>-<i>): each run copies its project, its database and "
+                     "its native stores, drops the alignment and starts at the alignment, without matching again; "
+                     "the kept folder is only read. The record says matches_reused")
+MARKERS_HELP = ("a project (.ppg, opened and never saved) whose chunk has markers measured on the photos: they are "
+                "copied into the run's chunk before the alignment (label, reference, check flag, projections by "
+                "the label of the photo); the record keeps how many (markers, checks), never a label")
+OPTIMIZE_HELP = ("--steps optimize: the formulation of the optimization, colmap (the default, the published one) or "
+                 "ppg; kept as optimize_engine")
+SOLVER_HELP = "--steps optimize with --optimize ppg: auto (the default), native or scipy; kept as optimize_solver"
 
 
 @bench_app.command("run")
@@ -56,7 +65,11 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
               seed: Optional[int] = typer.Option(None, "--seed", min=0, help=SEED_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
-              records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
+              records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP),
+              matches_from: Optional[Path] = typer.Option(None, "--matches-from", help=MATCHES_FROM_HELP),
+              markers: Optional[Path] = typer.Option(None, "--markers", help=MARKERS_HELP),
+              optimize: Optional[str] = typer.Option(None, "--optimize", help=OPTIMIZE_HELP),
+              solver: Optional[str] = typer.Option(None, "--solver", help=SOLVER_HELP)):
     """Runs of a set of photos: the steps in a child process, each timed, with its peak memory, the stages of the
     engine and the results of the run; one record per run, valid or not and why. The record holds no path, no photo
     name, no coordinate and no CRS."""
@@ -69,10 +82,16 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
         raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
     _engine(engine)
     _engine(align_engine, "--align-engine")
+    for option, value in (("--optimize", optimize), ("--solver", solver)):
+        if value is not None and steps != "optimize":
+            raise typer.BadParameter(f"{option} is an option of --steps optimize", param_hint=option)
+    # the options of the real sets go to the runner only when given: a run without them is the run of before
+    real = {key: value for key, value in (("matches_from", matches_from), ("markers", markers),
+                                          ("optimize", optimize), ("solver", solver)) if value is not None}
     _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper,
-                               engine=engine, align_engine=align_engine)
+                               engine=engine, align_engine=align_engine, **real)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, mapper=mapper, seed=seed, engine=engine, align_engine=align_engine))
+              records=records, mapper=mapper, seed=seed, engine=engine, align_engine=align_engine, **real))
 
 
 @bench_app.command("synthetic")

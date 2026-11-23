@@ -65,6 +65,10 @@ class _Plan:
     check: tuple[str, ...] = ()
     after: dict | None = None
     align_engine: str = child.ENGINES[0]
+    matches_from: Path | None = None
+    markers: Path | None = None
+    optimize: str | None = None
+    solver: str | None = None
 
 
 def photo_cache_mb(env: dict) -> int | None:
@@ -82,7 +86,9 @@ def photo_cache_mb(env: dict) -> int | None:
 def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 1, keep: bool = False,
         records: Path | None = None, *, mapper: str = "auto", engine: str = "auto", align_engine: str = "auto",
         extra_results: Callable | None = None, targets: str | None = None, reference: Path | None = None,
-        crs: str | None = None, seed: int | None = None, check_points=(), after: dict | None = None) -> list[Path]:
+        crs: str | None = None, seed: int | None = None, check_points=(), after: dict | None = None,
+        matches_from: Path | None = None, markers: Path | None = None, optimize: str = "colmap",
+        solver: str = "auto") -> list[Path]:
     """``repeat`` runs of the chain ``steps`` (``align``, ``all`` or ``match``, :data:`.steps.CHAINS`) on the photos
     of the folder ``photos``, each in the work folder ``out/<name>-<i>`` (removed after, unless ``keep`` or the run
     failed: then it stays with the child's log, said in the log by its name), the records written to ``records``
@@ -126,14 +132,36 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     one of ``engine`` is, right after it) goes to the child in the job, which aligns with it and nothing else. The
     record keeps it as ``settings["align_engine_requested"]``; the engine of the step ``align_cameras`` says what ran
     (the native mapper, or the classic alignment with the reason) and ``settings["native_fallback"]`` why the native
-    mapper handed its block to the classic chain, when it did."""
-    from ..engine import sfm
+    mapper handed its block to the classic chain, when it did.
+
+    The options of the real sets (refused by :func:`check` as it says): ``matches_from``, the work folder of a run
+    kept by ``keep``: each run copies its project, its database and its native stores into its own work folder,
+    drops the alignment and every product and starts the chain at ``align_cameras`` (:func:`.steps.reuse_matches`;
+    the kept folder is only read); the record has ``settings["matches_reused"]`` True and no ``match_photos``.
+    ``markers``, a project (``.ppg``, opened and never saved) whose active chunk has markers measured on the photos:
+    right before ``align_cameras`` the child copies every marker into its chunk (:func:`.steps.copy_markers`), the
+    record keeps how many as ``settings["markers"]`` and ``settings["checks"]`` and the projections left out, on
+    photos the run does not have, as ``results["markers_projections_left_out"]``; never a label. ``optimize``
+    (``colmap``, the default, or ``ppg``) and ``solver`` (``auto``, the default, ``native`` or ``scipy``; ``ppg``
+    only) are the ``engine`` and the ``solver`` of ``optimize_cameras`` in the chain ``optimize``, kept as
+    ``settings["optimize_engine"]`` and ``settings["optimize_solver"]`` (None in a chain without it).
+    ``PPG_NATIVE_TRACKS_PER_PHOTO`` and ``PPG_NATIVE_FINAL_ALL_TRACKS`` of this process's environment reach the
+    child with the rest of it and are kept as ``settings["native_tracks_per_photo"]`` (a whole number, else a
+    ValueError before anything runs) and ``settings["native_final_all_tracks"]`` (False for ``0``, as the mapper
+    reads it), None when unset."""
+    from ..engine import native_map, sfm
 
     photos = Path(photos).resolve()
     out, records = check(out, name, steps, repeat, records, photos=photos, mapper=mapper, engine=engine,
-                         align_engine=align_engine)
+                         align_engine=align_engine, matches_from=matches_from, markers=markers, optimize=optimize,
+                         solver=solver)
     if seed is not None and int(seed) < 0:
         raise ValueError("seed must be 0 or more")
+    # the two variables of the native mapper as it reads them: blank is unset
+    tracks, final_all = ((os.environ.get(var) or "").strip() or None
+                         for var in (native_map.TRACKS_ENV, native_map.FINAL_ALL_TRACKS_ENV))
+    if tracks is not None and not (tracks.isascii() and tracks.isdigit()):
+        raise ValueError(f"{native_map.TRACKS_ENV} must be a whole number, not {tracks!r}")
     env = dict(os.environ)
     env.pop("PPG_ENGINE", None)  # the engines of a run are the job's, never the one the computer asks for
     env.update(LIVE_LOG_ENV)
@@ -153,19 +181,29 @@ def run(photos: Path, out: Path, name: str, steps: str = "align", repeat: int = 
     settings = {**{key: None for key in child.SFM_SETTINGS}, **child.match_settings(), "pycolmap": None,
                 "photo_cache_mb": photo_cache_mb(env), "georeferencing": None, "targets": targets,
                 "mapper_requested": mapper, "engine_requested": engine, "align_engine_requested": align_engine,
-                "ransac_seed": verification_seed}
-    private = (photos, out, Path.home()) + ((reference,) if reference else ())
+                "ransac_seed": verification_seed, "matches_reused": matches_from is not None, "markers": None,
+                "checks": None, "optimize_engine": optimize if steps == "optimize" else None,
+                "optimize_solver": solver if steps == "optimize" else None,
+                "native_tracks_per_photo": int(tracks) if tracks is not None else None,
+                "native_final_all_tracks": final_all != "0" if final_all is not None else None}
+    if markers is not None:  # the counts of the project, said by the record even when the run stops before them
+        settings["markers"], settings["checks"] = markers_project(markers)
+    matches_from = Path(matches_from).resolve() if matches_from is not None else None
+    markers = Path(markers).resolve() if markers is not None else None
+    private = (photos, out, Path.home()) + tuple(p for p in (reference, matches_from, markers) if p is not None)
     plan = _Plan(name=name, steps=steps, mapper=mapper, engine=engine, local=local, out=out, records=records,
                  keep=keep, env=env, disk=disk, set=set_, settings=settings, private=private,
                  names=tuple(p.name for p in files), extra_results=extra_results, targets=targets,
                  reference=reference, crs=crs, check=tuple(str(c) for c in check_points or ()),
-                 after=dict(after or {}), align_engine=align_engine)
+                 after=dict(after or {}), align_engine=align_engine, matches_from=matches_from, markers=markers,
+                 optimize=optimize if steps == "optimize" else None, solver=solver if steps == "optimize" else None)
     return [_one_run(plan, index) for index in range(1, int(repeat) + 1)]
 
 
 def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: Path | None = None, *,
           photos: Path | None = None, mapper: str = "auto", engine: str = "auto",
-          align_engine: str = "auto") -> tuple[Path, Path]:
+          align_engine: str = "auto", matches_from: Path | None = None, markers: Path | None = None,
+          optimize: str = "colmap", solver: str = "auto") -> tuple[Path, Path]:
     """What :func:`run` refuses before anything runs, in its order, for a caller that must know before it makes its
     set (``ppg bench synthetic`` renders its photos after this): a name that is not one a file can take
     (ValueError), unknown steps, a mapper that is not one of :data:`.steps.MAPPERS`, an engine that is not one of
@@ -173,7 +211,14 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
     ``out`` or ``records`` (ValueError), ``records`` inside a work folder (ValueError), a work folder of one of the
     repeats that exists already (FileExistsError), psutil missing (RuntimeError), ``photos`` - when given - without a
     photo (ValueError). Returned: ``out`` and ``records`` resolved (``records`` is ``out`` when not given). The
-    engine of the matching (``engine``) is checked first, then that of the alignment (``align_engine``)."""
+    engine of the matching (``engine``) is checked first, then that of the alignment (``align_engine``).
+
+    After the engines, the options of the real sets (ValueError each, the text naming the option and never a path):
+    ``optimize`` not one of :data:`.steps.OPTIMIZE_ENGINES`, ``solver`` not one of the solvers, or other than
+    ``auto`` with ``colmap``, either not the default without the chain ``optimize``; ``matches_from`` or ``markers``
+    with the chain ``match``; ``matches_from`` that is not a kept run (:func:`.steps.kept_run`: what is missing), or
+    whose photos are not those of ``photos`` (when given); ``markers`` that is not a project whose active chunk has
+    a marker measured on a photo."""
     record.check_name(name)
     if steps not in child.CHAINS:
         raise ValueError(f"steps must be {', '.join(list(child.CHAINS)[:-1])} or {list(child.CHAINS)[-1]}, "
@@ -183,6 +228,7 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
     for word, value in (("engine", engine), ("align_engine", align_engine)):
         if value not in child.ENGINES:
             raise ValueError(f"{word} must be {', '.join(child.ENGINES[:-1])} or {child.ENGINES[-1]}, not {value!r}")
+    _real_set_options(steps, matches_from, markers, optimize, solver)
     if int(repeat) < 1:
         raise ValueError("repeat must be 1 or more")
     out = Path(out).resolve()
@@ -200,9 +246,53 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
         if work.exists():
             raise FileExistsError(f"the work folder {work} exists: delete it or choose another name")
     _psutil()
-    if photos is not None and not rawio.photo_files([photos], IMAGE_EXTENSIONS)[0]:
+    files = rawio.photo_files([photos], IMAGE_EXTENSIONS)[0] if photos is not None else None
+    if photos is not None and not files:
         raise ValueError(f"no photos in {photos}")
+    if matches_from is not None and files is not None:
+        project, _ = child.kept_run(matches_from)
+        if child.kept_photos(project) != {p.name for p in files}:
+            raise ValueError("--matches-from: the photos of the kept run are not the photos of this run")
     return out, records
+
+
+def _real_set_options(steps: str, matches_from, markers, optimize: str, solver: str) -> None:
+    """The options of :func:`check` for the real sets, refused with a ValueError that names the option and never
+    a path."""
+    from ..engine import bundle
+
+    if optimize not in child.OPTIMIZE_ENGINES:
+        raise ValueError(f"--optimize must be {' or '.join(child.OPTIMIZE_ENGINES)}, not {optimize!r}")
+    if solver not in bundle.SOLVERS:
+        raise ValueError(f"--solver must be {', '.join(bundle.SOLVERS[:-1])} or {bundle.SOLVERS[-1]}, "
+                         f"not {solver!r}")
+    if optimize == "colmap" and solver != "auto":
+        raise ValueError(f"--solver {solver} is an option of --optimize ppg: COLMAP's adjustment has no solver to "
+                         f"choose")
+    if steps != "optimize" and (optimize, solver) != (child.OPTIMIZE_ENGINES[0], "auto"):
+        raise ValueError("--optimize and --solver are options of --steps optimize")
+    for option, value in (("--matches-from", matches_from), ("--markers", markers)):
+        if value is not None and steps == "match":
+            raise ValueError(f"{option} needs the alignment: not with --steps match")
+    if matches_from is not None:
+        child.kept_run(matches_from)
+    if markers is not None:
+        markers_project(markers)
+
+
+def markers_project(path: Path) -> tuple[int, int]:
+    """How many markers, and how many check points, the project at ``path`` gives ``--markers``: a project file
+    whose active chunk has a marker measured on a photo (:func:`.steps.markers_chunk`). Opened and never saved;
+    refused with a ValueError that names the option, never the path."""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError("--markers is not a project file: give a .ppg whose chunk has its markers measured")
+    try:
+        doc = Document.open(path)
+    except Exception as exc:  # noqa: BLE001 - whatever stops the reading: its type, never the path
+        raise ValueError(f"--markers: the project cannot be read ({type(exc).__name__})") from None
+    chunk = child.markers_chunk(doc)
+    return len(chunk.markers), sum(1 for m in chunk.markers if m.checkpoint)
 
 
 def under(folder: Path, work: Path) -> bool:
@@ -256,7 +346,9 @@ def _run_in(plan: _Plan, index: int, work: Path) -> Path:
     job = {"photos": [str(p) for p in plan.local], "work": str(work), "steps": plan.steps, "mapper": plan.mapper,
            "engine": plan.engine, "align_engine": plan.align_engine, "targets": plan.targets,
            "reference": str(plan.reference) if plan.reference else None, "crs": plan.crs,
-           "check": list(plan.check) or None, "after": list(plan.after or ()) or None}
+           "check": list(plan.check) or None, "after": list(plan.after or ()) or None,
+           "matches_from": str(plan.matches_from) if plan.matches_from else None,
+           "markers": str(plan.markers) if plan.markers else None, "optimize": plan.optimize, "solver": plan.solver}
     (work / JOB).write_text(json.dumps(job, indent=1), encoding="utf-8")
     rec = record.new(plan.name, machine.machine_facts(), plan.disk, plan.set, dict(plan.settings))
     peaks: dict[str, int] = {}
