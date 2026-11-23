@@ -63,10 +63,22 @@ spostamento uguale per tutte le posizioni, come una base su un punto sbagliato o
 prende la georeferenziazione e non annulla nulla): per tenere un'ottimizzazione così, togli la spunta alle camere
 in *Riferimenti* (clic destro: *Non usare i riferimenti di tutte le camere*) e ripetila. *non usate* lascia fuori le posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la
 rete). Il motore *Proprio* in *automatico* tiene il blocco allo stesso modo, focale compresa; *usate con la loro
-accuratezza* e *usate, con un bias per volo* rifiniscono la focale (con un bias per volo la rete giudica ogni
-posizione meno il bias del suo volo). Dalla riga di comando: `ppg optimize progetto.ppg --gnss auto|off`
-(`plain` e `bias` con `--engine ppg`); l'uscita dice quante foto hanno tenuto il blocco e se la focale è rimasta
-quella dell'allineamento.
+accuratezza* e *usate, con un bias per volo* lasciano la focale alla compensazione, che la rifinisce dove il
+blocco la determina (con un bias per volo la rete giudica ogni posizione meno il bias del suo volo). Dalla riga
+di comando: `ppg optimize progetto.ppg --gnss auto|off` (`plain` e `bias` con `--engine ppg`); l'uscita dice
+quante foto hanno tenuto il blocco e se la focale è rimasta quella dell'allineamento.
+
+**La calibrazione viene rifinita solo dove il blocco la determina.** Prima di compensare, il programma misura
+quanto bene il blocco conosce la focale di ogni sensore (il suo scarto quadratico medio con la distorsione
+libera, dalla covarianza della compensazione). Sopra lo 0,5 % - foto che guardano dritte in basso su terreno
+piatto, dove la focale non si distingue dalla quota di volo, nemmeno con punti di controllo su quel terreno - la
+calibrazione dell'allineamento resta com'è, e il risultato dice per quanti sensori (*calibrazione
+dell'allineamento tenuta: il blocco non determina la focale*; nel log c'è il valore di ognuno). Rifinita lì, la
+focale scivola insieme alla quota delle camere: su un anello volato una volta su terreno piatto finiva dieci
+volte troppo lunga, con le camere 131 m troppo in alto. Foto oblique, rilievo o voli a due quote la
+determinano, e viene rifinita come prima. Togli la spunta a *Tieni la calibrazione delle camere di cui il blocco
+non determina la focale* per rifinirla comunque (`ppg optimize --free-undetermined`). Il controllo gira sul core
+nativo; senza, la calibrazione viene rifinita come prima e il log lo dice.
 
 *Motore*: *Automatico* (il predefinito, come per gli altri passi: la scelta del programma, per ora COLMAP), *COLMAP* o
 *Proprio* (`ppg optimize --engine auto|colmap|ppg`). Senza niente che lo tenga (il GPS di un drone, nessun punto di

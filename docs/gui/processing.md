@@ -61,10 +61,22 @@ and EXIF heights (a shift common to every position, as a base on a wrong point o
 taken up by the georeference and undoes nothing): to keep such an optimisation, untick the cameras in *Reference*
 (right click: *Do not use the references of all the cameras*) and run it again. *not used* leaves the positions out (the optimisation of earlier versions, still watched by the
 net). The engine *Own* on *automatic* holds the block the same way, focal length included; *used with their
-accuracy* and *used, with a bias per flight* refine the focal length (with a bias per flight the net judges each
-position less the bias of its flight). From the command line: `ppg optimize project.ppg --gnss auto|off`
-(`plain` and `bias` with `--engine ppg`); the output says how many photos held the block and whether the focal
-length was kept.
+accuracy* and *used, with a bias per flight* leave the focal length to the adjustment, which refines it where the
+block determines it (with a bias per flight the net judges each position less the bias of its flight). From the
+command line: `ppg optimize project.ppg --gnss auto|off` (`plain` and `bias` with `--engine ppg`); the output says
+how many photos held the block and whether the focal length was kept.
+
+**The calibration is refined only where the block determines it.** Before adjusting, the program measures how
+well the block knows the focal length of each sensor (its standard deviation with the distortion free, from the
+covariance of the adjustment). Above 0.5 % - photos looking straight down over flat ground, where the focal
+length cannot be told from the flying height, even with control points on that ground - the calibration of the
+alignment is kept as it is, and the result says for how many sensors (*calibration of the alignment kept: the
+block does not determine the focal length*; the log has the figure of each). Refined there, the focal length
+slides with the height of the cameras: on a ring flown once over flat ground it ended ten times too long, the
+cameras 131 m too high. Oblique photos, relief or flights at two heights determine it, and it is refined as
+before. Clear *Keep the calibration of the cameras whose focal length the block does not determine* to refine it
+anyway (`ppg optimize --free-undetermined`). The check runs on the native core; without it the calibration is
+refined as before and the log says so.
 
 *Engine*: *Automatic* (the default, as for the other steps: the program's choice, COLMAP for now), *COLMAP* or *Own*
 (`ppg optimize --engine auto|colmap|ppg`). Held by nothing (the GPS of a drone, no control points) the adjustment may
