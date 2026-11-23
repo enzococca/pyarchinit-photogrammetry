@@ -723,6 +723,9 @@ def test_the_frame_of_a_trace(model_outside):
     assert set(report) == {"side", "snapped", "median_shift", "max_shift", "length", "corners"}
     assert report["median_shift"] == pytest.approx(0.32, abs=0.005)
     assert report["length"] == path.length and report["corners"] == 1 == len(path.corners())
+    two, report = T.path_from_trace(ch, clicked[:2], side="right")              # two clicks: a wall without a corner
+    assert len(two.vertices) == 2 and two.radii == [] and report["corners"] == 0 and report["snapped"] is True
+    assert np.abs(two.vertices[:, 1] - face[0, 1]).max() < 0.001 and report["length"] == pytest.approx(6.156, abs=0.002)
     # without the snap the vertices are the clicked ones, in the order of the viewer
     path, report = T.path_from_trace(ch, clicked, side="right", snap=False)
     assert np.array_equal(path.vertices, clicked) and path.clicked is None
