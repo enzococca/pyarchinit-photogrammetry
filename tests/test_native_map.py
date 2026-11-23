@@ -468,6 +468,9 @@ def test_the_reduced_weak_ring(matched_ring, tmp_path):
     stages = ch.meta["timings"]["align_cameras"]["stages"]
     assert {"view_graph", "rotation_averaging", "track_establishment", "global_positioning", "bundle_adjustment",
             "write"} <= set(stages)
+    report = native["report"]
+    assert report["intrinsics_held"] == [cam[0] for cam in report["focal_sd"]]  # the flat ring: focal held (R16)
+    assert any(note.startswith("camera 0: focal held: ") for note in report["notes"])
     shape = truth.ring_shape(doc, scene)
     assert shape["truth_targets"] >= 6
     assert shape["truth_target_shape"] < WEAK_RING_GATE["shape"]
@@ -554,8 +557,8 @@ def test_a_rejected_block_goes_to_the_classic_chain(matched_ring, tmp_path, monk
 
 @pytest.mark.slow
 def test_a_failure_of_the_mapper_goes_to_the_classic_chain(matched_trench, tmp_path, spy, caplog):
-    """The native mapper failing half way (its adjustment raises): one WARNING line, the classic chain aligns every
-    photo, the record keeps the failure."""
+    """The native mapper failing half way (its adjustment raises): one WARNING line (the switch's), the classic chain
+    aligns every photo, the record keeps the failure."""
     ch = _copy(matched_trench, tmp_path).chunk
     spy.fail = "refine"
     with caplog.at_level("WARNING"):
@@ -564,7 +567,8 @@ def test_a_failure_of_the_mapper_goes_to_the_classic_chain(matched_trench, tmp_p
                                                   "fallback": "native mapper failed: boom"}
     assert spy.calls["refine"] == 1 and "write_model" not in spy.calls
     assert ch.meta["sfm"]["mapper"] in ("incremental", "global")
-    assert [r for r in caplog.records if "native mapper failed: boom" in r.getMessage()]
+    warned = [r for r in caplog.records if r.levelname == "WARNING" and "native mapper failed: boom" in r.getMessage()]
+    assert [r.name for r in warned] == ["pyarchinit_photogrammetry.engine.switch"]  # one WARNING: the switch's
 
 
 @pytest.mark.slow

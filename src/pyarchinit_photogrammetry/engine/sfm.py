@@ -1952,7 +1952,8 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
     ``engine``: ``classic`` or ``native``. With ``native`` the mapper is the global one, and the native mapper of
     the native core does it (:func:`.native_map.global_mapping`) in place of COLMAP's. A block it refuses
     (:class:`.native_map.NativeMapperRejected`) or any failure of it - not a cancel, not a full disk, which stop the
-    step - is kept in ``meta["sfm"]["native_fallback"]`` with one WARNING line, and the classic chain does the
+    step - is kept in ``meta["sfm"]["native_fallback"]`` with one INFO line (the WARNING is the switch's, once the
+    record of the engine takes the reason), and the classic chain does the
     alignment with its own rules: the mapper asked (``auto``: :func:`auto_mapper`), the global one judged after its
     positioning and the incremental one when it is refused. A continuation (``reset`` False after
     ``match_photos(reset=False)``) is always the classic incremental mapper's."""
@@ -1996,7 +1997,7 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
         if native:
             from .native_map import CONTINUATION_REASON
 
-            log.warning("native mapper: %s", CONTINUATION_REASON)
+            log.info("native mapper: %s", CONTINUATION_REASON)
             info["native_fallback"], native = CONTINUATION_REASON, False
     elif native:
         mapper = "global"
@@ -2031,7 +2032,7 @@ def _align_cameras(chunk: Chunk, progress: Progress | None = None, mapper: str =
                 raise as_disk_full(exc) from exc
             why = f"native mapper failed: {exc}"
         if why:
-            log.warning("native mapper: %s: the classic alignment takes over", why)
+            log.info("native mapper: %s: the classic alignment takes over", why)  # the WARNING is the switch's
             progress(0.05, "The native mapper gave up: the classic alignment takes over")
             info["native_fallback"] = why
             if isinstance(info.get("native_mapper"), dict):
