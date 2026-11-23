@@ -93,6 +93,18 @@ def _added(scene, vertices, faces):
     return scene
 
 
+def _on_rough_ground(scene, rough: float = 0.01, beyond=(3.5, 0.7), cell: float = 0.02, seed: int = 3):
+    """``scene`` with a ground that is not a plane: a grid of ``cell`` whose heights are anywhere between 0 and
+    ``rough``, over the box of the trace and ``beyond`` it (metres in x, in y)."""
+    rng = np.random.default_rng(seed)
+    lo, hi = scene.face.min(axis=0) - beyond, scene.face.max(axis=0) + beyond
+    gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + cell / 2, cell), np.arange(lo[1], hi[1] + cell / 2, cell))
+    xyz = np.column_stack([gx.ravel(), gy.ravel(), rng.uniform(0.0, rough, gx.size)])
+    idx = np.arange(gx.size).reshape(gx.shape)
+    a, b, c, d = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel(), idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
+    return _added(scene, xyz, np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])]))
+
+
 def _model_of(folder, xyz, faces, label: str = "Modello"):
     """A chunk in a local system whose model is the mesh ``xyz``, ``faces`` (metres), and nothing else."""
     import pyarchinit_photogrammetry as ppg
@@ -511,6 +523,46 @@ def test_a_ray_along_the_end_of_the_wall_adds_no_length(tmp_path):
     assert (part.depth_at(np.zeros(1), np.full(1, 101.0)) == -0.3).all()
     want = [-1.0, 0.0, 3.0, 9.0 + (10.0 - plain.length)]
     assert np.abs(np.interp([-1.0, 0.0, 3.0, 9.0], pairs[:, 0], pairs[:, 1]) - want).max() < 0.002
+
+
+def test_rough_ground_in_a_gap_and_past_the_ends_is_not_the_wall(tmp_path):
+    """The ground is not a plane: the rays of the lowest row of an elevation meet its bumps, anywhere in the band.
+    Where the wall has a gap, and where the trace is prolonged past the wall, that one row is not the face: the
+    column is empty, ``u`` goes on as the line does and does not wander with the ground."""
+    scene = _on_rough_ground(make_wall_scene(trace=[[0.0, 0.0], [8.0, 0.0]]))
+    _doc, ch, info = model_doc(tmp_path / "varco", scene, drop=(3.4, 4.4))            # a gap of a metre
+    entry = E.build_elevation(ch, path_of(info), resolution=RES, depth=(-0.3, 0.5), extend=(0.5, 0.5),
+                              heights=(100.0, 102.0))
+    assert abs(E.wall_length(entry) - 8.0) < 0.01
+    assert entry["bounds"][0] == pytest.approx(-0.5, abs=0.01) and entry["bounds"][2] == pytest.approx(8.5, abs=0.01)
+    marks = [m for m in info["marks"] if m[0] > 4.4]                                   # those past the gap
+    u = E.frame_from_dict(entry["frame"]).coords(np.array([m[2] for m in marks]))[:, 0]
+    assert [m[0] for m in marks] == [5.85, 6.15, 8.0] and np.abs(u - [5.85, 6.15, 8.0]).max() <= RES
+    d = relief_of(ch, entry)
+    gap = slice(*cols_of(entry, 3.42, 4.38))
+    assert np.isfinite(d[-3:, gap]).any()                                              # the ground is there
+    assert np.isnan(d[slice(*rows_of(entry, 100.05, 101.95)), gap]).all()              # and nothing over it
+    # a wall of 6 m, its trace prolonged by 3 m either way over the ground
+    _doc, ch, info = model_doc(tmp_path / "oltre", _on_rough_ground(make_wall_scene(trace=[[0.0, 0.0], [6.0, 0.0]])))
+    entry = E.build_elevation(ch, path_of(info), resolution=RES, extend=(3.0, 3.0), heights=(100.0, 102.0))
+    assert abs(E.wall_length(entry) - 6.0) < 0.01
+    assert entry["bounds"][0] == pytest.approx(-3.0, abs=0.02) and entry["bounds"][2] == pytest.approx(9.0, abs=0.02)
+
+
+def test_a_tenth_of_the_heights_makes_a_column_of_the_face(tmp_path):
+    """Two gaps in a wall. In the first what is left of it stands over 15 % of the heights asked, 0.2 m in front
+    of the line: it is the face there, and the wall runs out to it and back. In the second it stands over 5 % of
+    them: no more a face than the ground is, the line is carried across."""
+    scene = make_wall_scene(trace=[[0.0, 0.0], [8.0, 0.0]])
+    gone = (scene.face_columns >= 5.0) & (scene.face_columns < 6.0)
+    scene.faces, scene.face_columns = scene.faces[~gone], scene.face_columns[~gone]
+    for x0, x1, top in ((2.0, 3.0, 0.3), (5.0, 6.0, 0.1)):
+        _added(scene, [[x0, -0.2, 0.0], [x1, -0.2, 0.0], [x1, -0.2, top], [x0, -0.2, top]], [[0, 1, 2], [0, 2, 3]])
+    _doc, ch, info = model_doc(tmp_path, scene, drop=(2.0, 3.0))
+    entry = E.build_elevation(ch, path_of(info), resolution=RES, depth=(-0.3, 0.5), heights=(100.0, 102.0))
+    on_the_face = np.array([[1.0, 0.0, 1.0], [4.0, 0.0, 1.0], [7.0, 0.0, 1.0]]) + info["shift"]
+    u = E.frame_from_dict(entry["frame"]).coords(on_the_face)[:, 0]
+    assert np.abs(u - [1.0, 4.0 + 0.4, 7.0 + 0.4]).max() < 0.003 and abs(E.wall_length(entry) - 8.4) < 0.005
 
 
 def test_the_face_of_a_column_is_what_most_of_its_height_shows(tmp_path):

@@ -721,6 +721,7 @@ def wall_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
 
 
 FACE_COLUMN = 0.01  # m between the columns the face of a wall is measured in
+FACE_ROWS = 0.1  # the share of its heights where a column must have surface to be of the face
 FACE_TOLERANCE = 0.05  # m: roughness of the face under this adds no length to the wall
 FACE_CURVE = 0.25  # m: a bow of the face tighter than this radius is its roughness, not a wall that curves
 FACE_PAIR = 0.0005  # m in u: how far a pair left out of the map may be from the line between those kept
@@ -814,11 +815,13 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     then the length ``s`` along the line).
 
     The depth of the face in every column of :data:`FACE_COLUMN` along the line is the median of the surface over
-    the heights of the bounds (``samples`` of them at most: a drainpipe or a bush in front does not pull the
-    column); a column without surface - a hole in the model, the trace prolonged past the wall - takes the depth
-    interpolated between the nearest columns with one on either side, past the last of them the depth of that
-    one: there the face is the line of the frame carried on, and ``u`` does not jump. The column on the edge of
-    a stretch of surface takes the depth of the one next to it: on the very end of a wall a ray runs along its
+    the heights of the bounds (``samples`` of them at most: a bench at the foot of the wall or a bush in front
+    does not pull the column). A column with surface at fewer than :data:`FACE_ROWS` of those heights is empty,
+    as one with none: the ground in a gap of the wall or past its end, which the lowest rows meet anywhere in the
+    band, is not the face. An empty column - a hole in the model, the trace prolonged past the wall - takes the
+    depth interpolated between the nearest columns with a face on either side, past the last of them the depth of
+    that one: there the face is the line of the frame carried on, and ``u`` does not jump. The column on the edge
+    of a stretch of surface takes the depth of the one next to it: on the very end of a wall a ray runs along its
     return and finds any depth, which would be a step of the face that is not there. The face points are the
     points of the line moved by that depth along its normal; the face line goes through those of them that
     their simplification within :data:`FACE_TOLERANCE` keeps (the roughness of the masonry adds no length, a
@@ -847,7 +850,9 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
         d = surface.depth_at(np.repeat(at, rows), np.tile(heights, len(at))).reshape(len(at), rows)
         with warnings.catch_warnings():  # a column with no wall: "All-NaN slice", filled from its neighbours
             warnings.simplefilter("ignore", RuntimeWarning)
-            return np.nanmedian(d, axis=1)
+            column = np.nanmedian(d, axis=1)
+        column[np.isfinite(d).mean(axis=1) < FACE_ROWS] = np.nan  # a few rows of ground are not a face
+        return column
 
     s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
     d = depths(s)
