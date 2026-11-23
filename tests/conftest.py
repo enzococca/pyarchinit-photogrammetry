@@ -392,6 +392,28 @@ def processed_auto(scene_dir, tmp_path_factory):
                            surfaces=False)
 
 
+@pytest.fixture(scope="session")
+def wall_dataset(tmp_path_factory) -> Path:
+    """The synthetic wall with a corner (``testing.synthetic.make_wall_scene``) seen from outside - a convex corner:
+    the folder of its photos from known poses, its model and ``poses.json`` (``write_wall_dataset``). The documents
+    of the tests are made of it by ``tests/wall_helpers.py``."""
+    from pyarchinit_photogrammetry.testing.synthetic import write_wall_dataset
+
+    d = tmp_path_factory.mktemp("wall")
+    write_wall_dataset(d)
+    return d
+
+
+@pytest.fixture(scope="session")
+def wall_dataset_inside(tmp_path_factory) -> Path:
+    """The same wall seen from inside its corner (``viewer="left"``: a re-entrant corner)."""
+    from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene, write_wall_dataset
+
+    d = tmp_path_factory.mktemp("wall_inside")
+    write_wall_dataset(d, make_wall_scene(viewer="left"))
+    return d
+
+
 TRENCH_ORIGIN = (2480000.0, 4500000.0)  # metre coordinates in Gauss-Boaga: float32 would round them
 
 

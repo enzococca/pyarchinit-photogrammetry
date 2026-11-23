@@ -5,7 +5,10 @@ at known coordinates is rendered from a set of cameras by ray casting. The
 ground truth (surface, targets in a projected CRS) is returned so that the
 whole pipeline can be checked metrically. A larger scene, a mound with targets
 around it flown in a ring with noisy GPS in the EXIF, is made the same way
-(:func:`make_ring_scene`, :func:`write_ring_dataset`).
+(:func:`make_ring_scene`, :func:`write_ring_dataset`). A wall that follows a line of
+the plan round its corners, with marks at known lengths along its face, is a mesh
+scene photographed from known poses (:func:`make_wall_scene`,
+:func:`write_wall_dataset`, :func:`wall_plan`).
 """
 from __future__ import annotations
 
@@ -816,3 +819,220 @@ def render_fisheye(scene: MeshScene, world_from_cam: np.ndarray, focal: float, s
         scale = np.where(rd > 0, np.sin(theta) / rd, 1.0)
     dirs_cam = np.dstack([x * scale, y * scale, np.cos(theta)]).reshape(-1, 3)
     return _cast(scene, world_from_cam[:3, 3], dirs_cam @ world_from_cam[:3, :3].T).reshape(h, w, 3)
+
+
+# ---------------------------------------------------------------- a wall traced on the plan
+WALL_TRACE = ((0.0, 0.0), (6.0, 0.0), (6.0, 4.0))  # the face of the wall on the plan: an L with its corner at 6 m
+WALL_MARKS = ((1.0, 1.0), (3.0, 0.6), (5.85, 1.2), (6.15, 1.2), (8.0, 1.0))  # (face length, height): two by the corner
+WALL_MAT = 30.0  # metres a side, the ground the wall stands on
+WALL_MAT_TEXEL = 0.03
+WALL_BODY = (125.0, 120.0, 115.0)  # BGR of what is not the face: the top, the back, the two ends
+WALL_FAN_TURN = 15.0  # degrees: a corner that turns more is photographed by a fan of stations
+
+
+def _towards_viewer(face: np.ndarray, viewer: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Of the face of a wall on the plan (N, 2), seen from the ``viewer`` side of its direction: the length and
+    the direction of each segment, and its horizontal normal towards the viewer."""
+    if viewer not in ("right", "left"):
+        raise ValueError(f"the viewer is on the 'right' or on the 'left' of the trace, not {viewer!r}")
+    step = np.diff(face, axis=0)
+    length = np.hypot(step[:, 0], step[:, 1])
+    t = step / length[:, None]
+    side = 1.0 if viewer == "right" else -1.0
+    return length, t, side * np.column_stack([t[:, 1], -t[:, 0]])
+
+
+def _on_polyline(line: np.ndarray, xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Of plan points (M, 2): the length along the polyline ``line`` (N, 2) of the nearest point of it, and the
+    distance from it."""
+    step = np.diff(line, axis=0)
+    length = np.hypot(step[:, 0], step[:, 1])
+    start = np.concatenate([[0.0], np.cumsum(length)])
+    best, along = np.full(len(xy), np.inf), np.zeros(len(xy))
+    for i in range(len(step)):
+        q = xy - line[i]
+        tau = np.clip(q @ step[i] / length[i], 0.0, length[i])
+        dist = np.hypot(*(q - tau[:, None] * step[i] / length[i]).T)
+        closer = dist < best
+        best[closer], along[closer] = dist[closer], start[i] + tau[closer]
+    return along, best
+
+
+def _at_length(line: np.ndarray, length: float) -> np.ndarray:
+    """The point of the polyline ``line`` at ``length`` along it (within its two ends)."""
+    step = np.diff(line, axis=0)
+    seg = np.hypot(step[:, 0], step[:, 1])
+    start = np.concatenate([[0.0], np.cumsum(seg)])
+    i = int(np.clip(np.searchsorted(start, length, side="right") - 1, 0, len(seg) - 1))
+    return line[i] + np.clip(length - start[i], 0.0, seg[i]) * step[i] / seg[i]
+
+
+def make_wall_scene(trace=WALL_TRACE, viewer: str = "right", height: float = 2.0, thickness: float = 0.4,
+                    marks=WALL_MARKS, mark_radius: float = 0.04, face_step: float = 0.2, texel: float = 0.004,
+                    seed: int = 11) -> MeshScene:
+    """A wall whose **face** follows ``trace`` (plan points, local metres) with sharp corners, from z = 0 to
+    ``height``, seen from the ``viewer`` side (``"right"`` or ``"left"`` of the direction of the trace); its body
+    is ``thickness`` behind the face, on the side away from the viewer, and it stands on a ground mat of
+    :data:`WALL_MAT` metres. The face is textured by its own coordinates - the length along the trace and the
+    height - with noise between 150 and 230 and a black disc (value 10, ``mark_radius``) at each of ``marks``
+    (``(face length, height)``; those that do not fall on the face are left out); the rest of the body is plain.
+    The face is meshed in columns ``face_step`` wide along each segment, so that a piece of it can be left out
+    of a model.
+
+    Beside the fields of a :class:`MeshScene`: ``face`` (N, 2), ``back`` (N, 2: the back of the body, mitred),
+    ``viewer``, ``height``, ``thickness``, ``marks`` (``[(face length, height, (x, y, z))]``), ``targets``
+    (``{i: (x, y, z)}``, the same points) and ``face_columns``, for every triangle of the scene the face length of
+    the middle of the column it belongs to (NaN for the triangles that are not of the face)."""
+    face = np.array(trace, np.float64).reshape(-1, 2)
+    seg, t, towards = _towards_viewer(face, viewer)
+    rng = np.random.default_rng(seed)
+    start = np.concatenate([[0.0], np.cumsum(seg)])
+    # the back: the face moved away from the viewer, the corners mitred
+    away = -towards
+    back = np.empty_like(face)
+    back[0], back[-1] = face[0] + thickness * away[0], face[-1] + thickness * away[-1]
+    for i in range(1, len(face) - 1):
+        back[i] = face[i] + thickness * (away[i - 1] + away[i]) / (1.0 + away[i - 1] @ away[i])
+    half = WALL_MAT / 2.0
+    vertices = [[-half, -half, 0.0], [half, -half, 0.0], [half, half, 0.0], [-half, half, 0.0]]
+    faces = [[0, 1, 2], [0, 2, 3]]
+    columns = [np.nan, np.nan]
+
+    def quad(a, b, c, d, column=np.nan):
+        k = len(vertices)
+        vertices.extend([list(a), list(b), list(c), list(d)])
+        faces.extend([[k, k + 1, k + 2], [k, k + 2, k + 3]])
+        columns.extend([column, column])
+
+    def wall(p, q, column=np.nan):  # a vertical rectangle on the plan segment p-q
+        quad([*p, 0.0], [*q, 0.0], [*q, height], [*p, height], column)
+
+    for i in range(len(seg)):
+        n = max(1, int(np.ceil(seg[i] / face_step - 1e-9)))
+        edges = np.minimum(np.arange(n + 1) * face_step, seg[i])
+        for a, b in zip(edges[:-1], edges[1:]):
+            wall(face[i] + a * t[i], face[i] + b * t[i], start[i] + (a + b) / 2.0)
+        wall(back[i], back[i + 1])
+        quad([*face[i], height], [*face[i + 1], height], [*back[i + 1], height], [*back[i], height])  # the top
+    wall(face[0], back[0])
+    wall(face[-1], back[-1])
+    # the texture of the face: columns along the face length, rows down from the top
+    th, tw = max(2, int(round(height / texel))), max(2, int(round(start[-1] / texel)))
+    noise = _noise_texture(th, tw, rng).astype(np.float32)
+    tex = 150.0 + 80.0 * (noise - noise.min()) / max(float(noise.max() - noise.min()), 1.0)
+    placed = []
+    for length, z in marks:
+        if not (0.0 <= length <= start[-1] and 0.0 <= z <= height):  # a mark past the end of a shorter wall
+            continue
+        cx, cy, r = length / texel - 0.5, (height - z) / texel - 0.5, mark_radius / texel
+        r0, r1 = max(0, int(np.floor(cy - r - 1))), min(th, int(np.ceil(cy + r + 2)))
+        c0, c1 = max(0, int(np.floor(cx - r - 1))), min(tw, int(np.ceil(cx + r + 2)))
+        yy, xx = np.mgrid[r0:r1, c0:c1]
+        cover = np.clip(r - np.hypot(xx - cx, yy - cy) + 0.5, 0.0, 1.0)[..., None]  # the disc where it is, smooth
+        tex[r0:r1, c0:c1] = tex[r0:r1, c0:c1] * (1.0 - cover) + 10.0 * cover
+        x, y = _at_length(face, length)
+        placed.append((float(length), float(z), (float(x), float(y), float(z))))
+    mat_n = int(round(WALL_MAT / WALL_MAT_TEXEL))
+    mat = _noise_texture(mat_n, mat_n, rng)
+
+    def surface_color(p: np.ndarray) -> np.ndarray:
+        p = np.asarray(p, np.float64).reshape(-1, 3)
+        out = np.tile(np.asarray(WALL_BODY, np.float32), (len(p), 1))
+        along, dist = _on_polyline(face, p[:, :2])
+        on = (dist < 1e-3) & (p[:, 2] < height - 1e-4)
+        if on.any():
+            out[on] = _sample(tex, along[on] / texel - 0.5, (height - p[on, 2]) / texel - 0.5)
+        return out
+
+    scene = MeshScene(np.array(vertices, np.float64), np.array(faces, np.uint32), 2, WALL_MAT, WALL_MAT_TEXEL, mat,
+                      surface_color, targets={i: m[2] for i, m in enumerate(placed)})
+    scene.face, scene.back, scene.viewer = face, back, viewer
+    scene.height, scene.thickness, scene.marks = float(height), float(thickness), placed
+    scene.face_columns = np.array(columns, np.float64)
+    return scene
+
+
+def wall_poses(scene: MeshScene, distance: float = 2.5, spacing: float = 0.6, heights=(0.5, 1.5)) -> list[np.ndarray]:
+    """Where the wall of :func:`make_wall_scene` is photographed from (``world_from_cam``, the camera level): at
+    each of ``heights``, a station every ``spacing`` metres of the face, ``distance`` in front of it on the
+    viewer's side and facing it (a station on a corner faces the segment that ends there); at each corner that
+    turns more than :data:`WALL_FAN_TURN` degrees a fan of three stations ``distance`` from the corner, looking
+    at it, a quarter, a half and three quarters of the way round from one face to the next. A station nearer
+    than ``0.6 distance`` to the face is left out: seen from outside, a corner keeps its fan; seen from inside,
+    it keeps the station in the middle of the room and loses those that would stand by the other wall. The
+    stations follow the face, the fan of a corner in its place among them."""
+    face = scene.face
+    seg, t, towards = _towards_viewer(face, scene.viewer)
+    start = np.concatenate([[0.0], np.cumsum(seg)])
+    stations = []  # (face length, place in the fan, where the camera stands, what it looks at)
+    for k in range(int(np.floor(start[-1] / spacing + 1e-9)) + 1):
+        length = min(k * spacing, start[-1])
+        i = int(np.clip(np.searchsorted(start, length - 1e-9, side="right") - 1, 0, len(seg) - 1))
+        p = face[i] + (length - start[i]) * t[i]
+        stations.append((length, 0, p + distance * towards[i], p))
+    for i in range(len(seg) - 1):
+        a, b = towards[i], towards[i + 1]
+        turn = np.arctan2(a[0] * b[1] - a[1] * b[0], a @ b)
+        if abs(np.degrees(turn)) > WALL_FAN_TURN:
+            for place, share in enumerate((0.25, 0.5, 0.75)):
+                c, s = np.cos(share * turn), np.sin(share * turn)
+                eye = face[i + 1] + distance * np.array([a[0] * c - a[1] * s, a[0] * s + a[1] * c])
+                stations.append((start[i + 1], 1 + place, eye, face[i + 1]))
+    stations.sort(key=lambda st: st[:2])
+    near = _on_polyline(face, np.array([st[2] for st in stations]))[1]
+    kept = [st for st, d in zip(stations, near) if d >= 0.6 * distance - 1e-9]
+    return [look_at(np.array([*eye, z]), np.array([*target, z]), up=(0, 0, 1)) for z in heights
+            for _length, _place, eye, target in kept]
+
+
+def write_wall_dataset(out_dir: str | Path, scene: MeshScene | None = None, size=(800, 600), focal: float = 700.0,
+                       **poses) -> MeshScene:
+    """The photos of a wall (:func:`make_wall_scene`, the default one without ``scene``) from the poses of
+    :func:`wall_poses` (``poses``: its arguments) in ``out_dir/photos`` (``WALL_000.jpg``..., no distortion, the
+    focal length in their EXIF), the mesh of the scene as ``model.ply`` (local metres) and ``poses.json``:
+    ``size``, ``focal`` (pixels), ``poses`` (``world_from_cam``, one per photo in the order of their names),
+    ``face``, ``viewer``, ``height``, ``thickness`` and ``marks`` (``[face length, height, [x, y, z]]``)."""
+    import json
+
+    from ..io.mesh_ply import MeshData, write_mesh
+
+    out = Path(out_dir)
+    (out / "photos").mkdir(parents=True, exist_ok=True)
+    scene = scene or make_wall_scene()
+    K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
+    cams = wall_poses(scene, **poses)
+    for i, pose in enumerate(cams):
+        img = render_mesh(scene, pose, K, size, k1=0.0)
+        (out / "photos" / f"WALL_{i:03d}.jpg").write_bytes(_jpeg_with_focal(img, 36.0 * focal / max(size)))
+        scene.cameras.append({"label": f"WALL_{i:03d}", "world_from_cam": pose.copy()})
+    v = np.empty(len(scene.vertices), [("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
+    v["x"], v["y"], v["z"] = np.asarray(scene.vertices, np.float64).T
+    write_mesh(out / "model.ply", MeshData(v, np.asarray(scene.faces, np.int64)))
+    (out / "poses.json").write_text(json.dumps({
+        "size": [int(size[0]), int(size[1])], "focal": float(focal), "poses": [p.tolist() for p in cams],
+        "face": scene.face.tolist(), "viewer": scene.viewer, "height": scene.height, "thickness": scene.thickness,
+        "marks": [[length, z, list(xyz)] for length, z, xyz in scene.marks]}, indent=1))
+    return scene
+
+
+def wall_plan(scene: MeshScene, cell: float = 0.02) -> tuple[np.ndarray, np.ndarray, tuple[float, float]]:
+    """The plan of a wall scene (:func:`make_wall_scene`) over its whole ground mat: ``(dem, rgb, top_left)`` -
+    ``dem`` (h, w) float32, the height of the wall on its footprint and 0 on the ground; ``rgb`` (3, h, w) uint8,
+    the ground with the plain top of the wall on it; ``top_left`` the (x, y) of the corner of the first cell, row
+    0 at the largest y. Local metres, cells of ``cell``."""
+    from shapely import contains_xy
+    from shapely.geometry import Polygon
+
+    n = int(round(scene.mat_size / cell))
+    half = scene.mat_size / 2.0
+    rgb = cv2.resize(scene.mat_texture, (n, n), interpolation=cv2.INTER_LINEAR)[..., ::-1].copy()
+    dem = np.zeros((n, n), np.float32)
+    footprint = Polygon(np.vstack([scene.face, scene.back[::-1]]))
+    x0, y0, x1, y1 = footprint.bounds
+    c0, c1 = max(0, int((x0 + half) / cell) - 1), min(n, int((x1 + half) / cell) + 2)
+    r0, r1 = max(0, int((half - y1) / cell) - 1), min(n, int((half - y0) / cell) + 2)
+    rows, cols = np.mgrid[r0:r1, c0:c1]
+    inside = contains_xy(footprint, -half + (cols + 0.5) * cell, half - (rows + 0.5) * cell)
+    dem[r0:r1, c0:c1][inside] = scene.height
+    rgb[r0:r1, c0:c1][inside] = np.asarray(WALL_BODY[::-1], np.uint8)
+    return dem, np.ascontiguousarray(np.moveaxis(rgb, -1, 0)), (-half, half)
