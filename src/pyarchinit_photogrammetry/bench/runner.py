@@ -251,8 +251,13 @@ def check(out: Path, name: str, steps: str = "align", repeat: int = 1, records: 
         raise ValueError(f"no photos in {photos}")
     if matches_from is not None and files is not None:
         project, _ = child.kept_run(matches_from)
-        if child.kept_photos(project) != {p.name for p in files}:
-            raise ValueError("--matches-from: the photos of the kept run are not the photos of this run")
+        # the photos the child will have: those that are not online-only (run() leaves those out), as it compares
+        local = {p.name for p in files if not machine.is_online_only(p)}
+        if child.kept_photos(project) != local:
+            online = len(files) - len(local)
+            raise ValueError("--matches-from: the photos of the kept run are not the photos of this run"
+                             + (f" ({online} online-only photos of this run left out: make them available offline)"
+                                if online else ""))
     return out, records
 
 
