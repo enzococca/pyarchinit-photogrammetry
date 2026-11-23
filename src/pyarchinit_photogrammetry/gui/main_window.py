@@ -7862,7 +7862,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 "pannello Riferimenti. Con COLMAP le scelte del motore proprio valgono come automatico.") + "\n\n" + tr(
                 "La calibrazione di una camera viene affinata solo dove il blocco la determina: con sole foto "
                 "nadirali su terreno piatto la focale non si distingue dalla quota di volo (lo scarto della focale "
-                "supera lo 0,5 %), e la calibrazione resta quella dell'allineamento; il risultato dice per quali "
+                "supera lo 0,5 %), e la calibrazione resta quella dell'allineamento; il risultato dice per quanti "
                 "sensori. Togli l'ultima spunta per affinarla comunque.") + "\n\n" + self._gnss_hold_text(sfm.gnss_hold(ch, with_markers)))
         if not v:
             return
