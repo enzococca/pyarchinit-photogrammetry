@@ -1542,6 +1542,12 @@ def stamps(*files: Path) -> list[tuple[bytes, int]]:
     return [(f.read_bytes(), f.stat().st_mtime_ns) for f in files]
 
 
+def folder_listing(folder: Path) -> dict[str, tuple[int, int]]:
+    """Every file under ``folder``, by its path under it, with its size and its time of change."""
+    return {str(p.relative_to(folder)): (p.stat().st_size, p.stat().st_mtime_ns)
+            for p in folder.rglob("*") if p.is_file()}
+
+
 def kept_database(work: Path) -> Path:
     (db,) = work.rglob("database.db")
     return db
@@ -1658,14 +1664,21 @@ def test_a_run_on_the_matches_of_a_kept_run_aligns_without_matching(small_set, t
     first = runner.run(small_set, tmp_path / "kept", name="k", keep=True)
     kept = tmp_path / "kept" / "k-1"
     files = (kept / "project.ppg", kept_database(kept))
+    store = files[1].parent / steps.NATIVE_STORES / "features" / "probe.store"  # a store of the native matching
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_bytes(b"store of the kept run")
     before = stamps(*files)
+    listing = folder_listing(kept)
     out = tmp_path / "out"
     r = the_record(out, runner.run(small_set, out, name="t", matches_from=kept, keep=True))
     assert [s["step"] for s in r["steps"]] == ["align_cameras"] and r["error"] is None
     assert r["settings"]["matches_reused"] is True and list(r["settings"]) == SETTINGS
     assert r["results"]["aligned"] == r["results"]["cameras"] == 14 and r["results"]["reprojection_rms_px"] > 0
     assert stamps(*files) == before and len(first) == 1
-    assert kept_database(out / "t-1") != files[1]
+    assert folder_listing(kept) == listing  # no file gained, lost or changed in the kept folder
+    copied = kept_database(out / "t-1")
+    assert copied != files[1]
+    assert (copied.parent / store.relative_to(files[1].parent)).read_bytes() == b"store of the kept run"
     for where, text in strings_of(r):
         assert str(tmp_path) not in text, where
 
@@ -1718,3 +1731,22 @@ def test_a_run_with_the_markers_of_a_project_optimizes_on_them(small_set, scene_
     assert stamps(project) == before
     for where, text in strings_of(r):
         assert not any(m.label in text for m in source.markers) and str(tmp_path) not in text, where
+
+
+def test_matches_from_compares_the_kept_photos_with_the_local_ones(tmp_path, monkeypatch, stand_in):
+    """The photos of the kept run are compared with the photos of this run that are not online-only, as the child
+    compares them; the refusal counts the online-only photos and names none."""
+    photos = noise_photos(tmp_path / "photos")
+    kept = tmp_path / "kept"
+    project = kept / "project.ppg"
+    (project.parent / "project.ppg.files" / "chunk_0" / "sfm").mkdir(parents=True)
+    (project.parent / "project.ppg.files" / "chunk_0" / "sfm" / "database.db").write_bytes(b"")
+    cameras = [{"path": str(p)} for p in sorted(photos.iterdir())]
+    project.write_text(json.dumps({"format": "pyarchinit-photogrammetry", "chunks": [{"key": 0, "cameras": cameras}]}))
+    runner.check(tmp_path / "o", "t", photos=photos, matches_from=kept)  # the same photos: accepted
+    online = sorted(photos.iterdir())[0]
+    monkeypatch.setattr(machine, "is_online_only", lambda p: Path(p).name == online.name)
+    with pytest.raises(ValueError, match="1 online-only") as refused:
+        runner.check(tmp_path / "o", "t", photos=photos, matches_from=kept)
+    assert online.stem not in str(refused.value) and str(tmp_path) not in str(refused.value)
+    assert not stand_in.calls
