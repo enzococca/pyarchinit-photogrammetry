@@ -3,10 +3,11 @@
 A line clicked on the plan is never on the face of the wall: it runs on its crest, in front of it, a couple of
 metres off. :func:`snap_trace` moves it onto the face of the model. Through the vertical plane of each clicked
 segment the face is looked for from the line, in a band in front of it and behind it, a line is fitted to what
-the segment sees, and each vertex goes where the lines of its two segments meet. :func:`side_of` says from which side of the
-line the wall is seen - a word, a point of the plan, or where most photos are - and :func:`path_from_trace` makes
-the frame of the wall (:class:`~.wall_path.WallPath`) of the clicked line: smoothed and snapped as asked, put in
-the order of the viewer, its fillets sized on the depth kept in front of the face and behind it.
+the segment sees, and each vertex goes where the lines of its two segments meet. :func:`side_of` says from which
+side of the line the wall is seen - a word, a point of the plan, or where the photos see it better - and
+:func:`path_from_trace` makes the frame of the wall (:class:`~.wall_path.WallPath`) of the clicked line: smoothed
+and snapped as asked, put in the order of the viewer, its fillets sized on the depth kept in front of the face
+and behind it.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from .elevation import FACE_ROWS, FrameSurface, plane_from_line
 from .wall_path import (CLEARANCE, DEFAULT_FRONT, TraceRefused, WallPath, _MIN_STEP, _plan_points, _turns, _xy,
                         corner_radii, ordered, smooth_trace)
 
+PHOTO_NEAR = 1.0  # m: a photo nearer the line than this weighs, for the side, as one this far from it
 SNAP_BAND = 2.5  # m in front of the clicked line and behind it where the face is looked for
 MIN_SNAP_SHARE = 0.3  # the share of the columns of a segment that must lie on its line for it to be moved
 MIN_FIT = 0.5  # m of face a line is fitted to: a shorter stretch gives a shift alone
@@ -36,14 +38,16 @@ _PAST = 0.001  # m past a surface, where a look goes on from
 
 
 # ---------------------------------------------------------------- the side
-def _sides(line: np.ndarray, points: np.ndarray) -> np.ndarray:
+def _sides(line: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Of plan points (M, 2), each at the point of the polyline ``line`` (N, 2) nearest to it (the first of two
-    equally near): +1 on the right of the line as it is travelled, -1 on its left, 0 on it. A point whose nearest
-    point is a corner lies outside that corner: on the right of a left turn. Past an end, the side of the end
-    segment carried on."""
+    equally near): its side - +1 on the right of the line as it is travelled, -1 on its left, 0 on it - and that
+    nearest point. A point whose nearest point is a corner lies outside that corner: on the right of a left turn.
+    Past an end, the side of the end segment carried on; the point a closed line starts and ends on is a corner
+    like the others."""
     v = line - line[0]
     q = points - line[0]
     length, t, _turn = _turns(v)
+    last = len(length) - 1
     best = np.full(len(q), np.inf)
     seg, tau = np.zeros(len(q), np.intp), np.zeros(len(q))
     for i in range(len(length)):
@@ -53,12 +57,40 @@ def _sides(line: np.ndarray, points: np.ndarray) -> np.ndarray:
         best[nearer], seg[nearer], tau[nearer] = dist[nearer], i, along[nearer]
     foot = v[seg] + tau[:, None] * t[seg]
     heading = t[seg].copy()  # at a corner, the direction half way round it
-    before = (tau <= 0.0) & (seg > 0)
-    heading[before] += t[seg[before] - 1]
-    after = (tau >= length[seg]) & (seg < len(length) - 1)
-    heading[after] += t[seg[after] + 1]
+    closed = last > 1 and float(np.hypot(*v[-1])) <= _MIN_STEP
+    before, after = tau <= 0.0, tau >= length[seg]
+    for at, other in ((before & (seg > 0), seg - 1), (after & (seg < last), seg + 1),
+                      (before & (seg == 0) & closed, np.full(len(q), last)),
+                      (after & (seg == last) & closed, np.zeros(len(q), np.intp))):
+        heading[at] += t[other[at]]
     w = q - foot
-    return -np.sign(heading[:, 0] * w[:, 1] - heading[:, 1] * w[:, 0])
+    return -np.sign(heading[:, 0] * w[:, 1] - heading[:, 1] * w[:, 0]), foot + line[0]
+
+
+def side_votes(chunk: Chunk, points) -> dict:
+    """How well the aligned photos of ``chunk`` see the wall of the clicked line ``points`` from either side of
+    it: ``{"left": weight, "right": weight}``, for :func:`side_of` and for a caller that asks when the two are
+    close.
+
+    Each photo counts for the side it stands on, at the point of the line nearest to it. It weighs the cosine of
+    the angle between its view and the normal of the face there, over the distance at which its view meets the
+    plane of the face: the cosine squared over its distance from the line on the plan (:data:`PHOTO_NEAR` at
+    least). A photo that looks straight down, along the wall or away from it weighs nothing: a flight over the
+    site does not outvote the close-ups of the face, nor do photos taken from far. Both weights are 0 without an
+    aligned photo."""
+    line = _plan_points(points)
+    cameras = chunk.aligned_cameras
+    if not cameras:
+        return {"left": 0.0, "right": 0.0}
+    centres = chunk.to_world(np.array([c.center for c in cameras]))[:, :2]
+    views = np.array([c.transform[:3, 2] for c in cameras]) @ np.asarray(chunk.transform, np.float64)[:3, :3].T
+    level = views[:, :2] / np.linalg.norm(views, axis=1)[:, None]  # of each unit view, its part on the plan
+    side, foot = _sides(line, centres)
+    off = centres - foot
+    far = np.hypot(off[:, 0], off[:, 1])
+    cosine = np.where(far > 0.0, -(level * off).sum(axis=1) / np.maximum(far, 1e-300), 0.0)  # looking at the line
+    weight = np.where(cosine > 0.0, cosine ** 2 / np.maximum(far, PHOTO_NEAR), 0.0)
+    return {"left": float(weight[side < 0].sum()), "right": float(weight[side > 0].sum())}
 
 
 def side_of(chunk: Chunk, points, side="auto") -> str:
@@ -66,19 +98,20 @@ def side_of(chunk: Chunk, points, side="auto") -> str:
     ``"left"`` or ``"right"`` of the direction it was clicked in.
 
     ``side``: one of those two words, given back as it is; a plan point ``(x, y)`` where the viewer stands - its
-    side at the point of the line nearest to it; or ``"auto"`` (None too): the side where most aligned photos of
-    ``chunk`` are, one vote each at the point of the line nearest to it (as many on either side: the right).
+    side at the point of the line nearest to it; or ``"auto"`` (None too): the side from which the aligned
+    photos of ``chunk`` see the wall better (:func:`side_votes`; as well from either side: the right).
 
     :class:`~.wall_path.TraceRefused`: ``"points"`` for a line without two different points; ``"side"`` for
-    ``"auto"`` without an aligned photo, a point that lies on the line, anything else that is no point."""
+    ``"auto"`` without an aligned photo that looks at the wall, a point that lies on the line, anything else that
+    is no point."""
     line = _plan_points(points)
     if side is None or (isinstance(side, str) and side == "auto"):
-        cameras = chunk.aligned_cameras
-        if not cameras:
-            raise TraceRefused("side", "no aligned photo says from which side the wall is seen: say 'left' or "
-                                       "'right' of the line as it was clicked, or a point where the viewer stands")
-        centres = chunk.to_world(np.array([c.center for c in cameras]))[:, :2]
-        return "right" if _sides(line, centres).sum() >= 0 else "left"
+        votes = side_votes(chunk, line)
+        if not chunk.aligned_cameras or not max(votes.values()) > 0.0:
+            raise TraceRefused("side", ("no aligned photo" if not chunk.aligned_cameras else "no aligned photo "
+                                        "looks at the wall: none") + " says from which side the wall is seen: say "
+                               "'left' or 'right' of the line as it was clicked, or a point where the viewer stands")
+        return "right" if votes["right"] >= votes["left"] else "left"
     if isinstance(side, str):
         if side in ("left", "right"):
             return side
@@ -91,7 +124,7 @@ def side_of(chunk: Chunk, points, side="auto") -> str:
     if len(point) not in (2, 3) or not np.isfinite(point[:2]).all():
         raise TraceRefused("side", f"the side of the viewer is 'left', 'right', 'auto' or a point of the plan, "
                                    f"not {side!r}")
-    where = _sides(line, point[None, :2])[0]
+    where = _sides(line, point[None, :2])[0][0]
     if where == 0:
         raise TraceRefused("side", "the point given for the side of the viewer lies on the line")
     return "right" if where > 0 else "left"

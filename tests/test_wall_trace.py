@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from pyarchinit_photogrammetry.core.geometry import look_at
 from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
 from pyarchinit_photogrammetry.engine import wall_trace as T
 from pyarchinit_photogrammetry.engine.wall_path import TraceRefused, WallPath, corner_radii, smooth_trace
@@ -120,14 +121,14 @@ def _in_front(face, viewer: str, by: float) -> np.ndarray:
     return out
 
 
-def _stand(chunk, places):
-    """The photos of ``chunk`` taken from ``places`` (plan points, local metres), one each; the others not aligned."""
+def _stand(chunk, shots):
+    """The photos of ``chunk`` taken as ``shots`` say, one each, the others not aligned: ``(where, at)``, the place
+    of the camera and the point it looks at (local metres; a plan point stands 1.5 m up)."""
     for cam in chunk.cameras:
         cam.transform = None
-    for cam, (x, y) in zip(chunk.cameras, places):
-        pose = np.eye(4)
-        pose[:3, 3] = [x, y, 1.5]
-        cam.transform = pose
+    for cam, (where, at) in zip(chunk.cameras, shots):
+        eye, target = ([*q, 1.5] if len(q) == 2 else list(q) for q in (where, at))
+        cam.transform = look_at(np.array(eye, np.float64), np.array(target, np.float64))
 
 
 # ---------------------------------------------------------------- the snap
@@ -776,20 +777,67 @@ def test_the_side_by_the_photos_a_word_or_a_point(wall_dataset, model_outside, t
 def test_each_photo_votes_at_its_nearest_point_of_the_line(wall_dataset, tmp_path):
     _doc, (ch,), info = wall_doc(tmp_path, wall_dataset)
     face = np.asarray(info["face"])
-    # three photos in the room, between the wall and the line from its first point to its last - on the left of
-    # both legs, on the right of that line - and two in front of the first leg
-    _stand(ch, [(5.0, 1.2), (5.0, 2.0), (4.0, 1.0), (2.0, -2.5), (4.0, -2.5)])
+    # three photos in the room, a metre from the wall they look at, between the wall and the line from its first
+    # point to its last - on the left of both legs, on the right of that line - and two 2.5 m in front of the first leg
+    _stand(ch, [((5.0, 1.2), (6.0, 1.2)), ((5.0, 2.0), (6.0, 2.0)), ((4.0, 1.0), (4.0, 0.0)),
+                ((2.0, -2.5), (2.0, 0.0)), ((4.0, -2.5), (4.0, 0.0))])
     assert T.side_of(ch, face) == "left" and T.side_of(ch, face[::-1]) == "right"
+    assert T.side_votes(ch, face) == pytest.approx({"left": 3.0, "right": 0.8})
+    assert T.side_votes(ch, face[::-1]) == pytest.approx({"left": 0.8, "right": 3.0})
     # three east of the second leg - on its right, and on the left of the first leg carried on - two in the room
-    _stand(ch, [(8.5, 2.0), (8.5, 3.0), (8.5, 3.5), (2.0, 2.5), (3.0, 2.5)])
-    assert T.side_of(ch, face) == "right"
-    # a photo switched off has no vote, nor one that is not aligned; as many on either side: the right
-    _stand(ch, [(2.0, -2.5), (2.0, 2.5), (3.0, 2.5)])
+    _stand(ch, [((8.5, 2.0), (6.0, 2.0)), ((8.5, 3.0), (6.0, 3.0)), ((8.5, 3.5), (6.0, 3.5)),
+                ((2.0, 2.5), (2.0, 0.0)), ((3.0, 2.5), (3.0, 0.0))])
+    assert T.side_of(ch, face) == "right" and T.side_votes(ch, face) == pytest.approx({"left": 0.8, "right": 1.2})
+    # a photo switched off has no vote, nor one that is not aligned; as much on either side: the right
+    _stand(ch, [((2.0, -2.5), (2.0, 0.0)), ((2.0, 2.5), (2.0, 0.0)), ((3.0, 2.5), (3.0, 0.0))])
     assert T.side_of(ch, face) == "left"
     ch.cameras[2].enabled = False
     assert T.side_of(ch, face) == "right" and T.side_of(ch, face[::-1]) == "right"
+    assert T.side_votes(ch, face) == pytest.approx({"left": 0.4, "right": 0.4})
     ch.cameras[0].transform = None
-    assert T.side_of(ch, face) == "left"
+    assert T.side_of(ch, face) == "left" and T.side_votes(ch, face) == pytest.approx({"left": 0.4, "right": 0.0})
+
+
+def test_a_photo_weighs_by_how_well_it_sees_the_wall(wall_dataset, model_outside, tmp_path):
+    """The side by the photos is where they see the wall better: each weighs the cosine of the angle between its
+    view and the normal of the face at the point of the line nearest to it, over the distance at which its view
+    meets the plane of the face - the cosine squared over its distance from the line, a metre at least."""
+    _doc, (ch,), info = wall_doc(tmp_path, wall_dataset)
+    face = np.asarray(info["face"])
+    # a flight straight down over the room, sixteen photos 30 m up, and two close-ups 2.5 m in front of the wall
+    flight = [((x, y, 30.0), (x, y, 0.0)) for x in (1.0, 2.0, 3.0, 4.0) for y in (0.5, 1.5, 2.5, 3.5)]
+    _stand(ch, flight + [((2.0, -2.5), (2.0, 0.0)), ((4.0, -2.5), (4.0, 0.0))])
+    votes = T.side_votes(ch, face)
+    assert votes == pytest.approx({"left": 0.0, "right": 0.8}, abs=1e-9) and T.side_of(ch, face) == "right"
+    # three photos 10 m off on the right, one 2.5 m off on the left
+    _stand(ch, [((1.0, -10.0), (1.0, 0.0)), ((2.0, -10.0), (2.0, 0.0)), ((3.0, -10.0), (3.0, 0.0)),
+                ((3.0, 2.5), (3.0, 0.0))])
+    assert T.side_votes(ch, face) == pytest.approx({"left": 0.4, "right": 0.3}) and T.side_of(ch, face) == "left"
+    # the angle: 60 degrees off the normal of the face; along the wall; away from it; down at its foot from 45
+    # degrees (one at a time, 2.5 m in front of the first leg)
+    for at, weight in (((3.0 + 2.5 * np.tan(np.radians(60.0)), 0.0), 0.25 / 2.5), ((9.0, -2.5), 0.0),
+                       ((3.0, -9.0), 0.0), ((3.0, 0.0, -1.0), 0.5 / 2.5)):
+        _stand(ch, [((3.0, -2.5), at)])
+        assert T.side_votes(ch, face) == pytest.approx({"left": 0.0, "right": weight}, abs=1e-9)
+    # nearer than a metre weighs as at a metre; on the line itself, nothing
+    _stand(ch, [((3.0, -0.2), (3.0, 0.0)), ((1.0, 0.5), (1.0, 0.0))])
+    assert T.side_votes(ch, face) == pytest.approx({"left": 1.0, "right": 1.0})
+    _stand(ch, [((3.0, 0.0), (3.0, 1.0))])
+    assert T.side_votes(ch, face) == {"left": 0.0, "right": 0.0}
+    # past a corner the face looked at is the corner: 2.5 m from it, half way round
+    _stand(ch, [((6.0 + 2.5 * np.sqrt(0.5), -2.5 * np.sqrt(0.5)), (6.0, 0.0))])
+    assert T.side_votes(ch, face) == pytest.approx({"left": 0.0, "right": 0.4})
+    # photos that do not look at the wall say nothing, and no side is given for them
+    _stand(ch, flight)
+    assert T.side_votes(ch, face) == pytest.approx({"left": 0.0, "right": 0.0}, abs=1e-9)
+    with pytest.raises(TraceRefused) as e:
+        T.side_of(ch, face)
+    assert e.value.reason == "side" and "look" in str(e.value)
+    model, _info = model_outside
+    assert T.side_votes(model, face) == {"left": 0.0, "right": 0.0}             # no photo at all
+    with pytest.raises(TraceRefused) as e:
+        T.side_votes(model, face[:1])
+    assert e.value.reason == "points"
 
 
 def test_the_side_of_a_point_is_taken_at_its_nearest_point_of_the_line(model_outside):
@@ -815,6 +863,14 @@ def test_the_side_of_a_point_is_taken_at_its_nearest_point_of_the_line(model_out
     with pytest.raises(TraceRefused) as e:
         T.side_of(ch, [turn[0]], "right")                      # the line itself is asked first
     assert e.value.reason == "points"
+    # a triangle traced all round, anticlockwise: the point it starts and ends on is a corner like the other two,
+    # and what lies outside it is on the right - past the start of the first leg and a little to its left too
+    ring = np.array([[0.0, 0.0], [4.0, 0.0], [2.0, 3.0], [0.0, 0.0]])
+    for outside in ((-1.0, 0.2), (-1.0, -0.2), (-0.2, -1.0), (-1.0, 0.9), (5.0, 0.2), (2.0, 4.0), (2.0, -1.0)):
+        assert T.side_of(ch, ring, outside) == "right" and T.side_of(ch, ring[::-1], outside) == "left"
+    for inside in ((2.0, 1.0), (0.3, 0.1), (0.2, 0.2)):
+        assert T.side_of(ch, ring, inside) == "left" and T.side_of(ch, ring[::-1], inside) == "right"
+    assert T.side_of(ch, ring[:3], (-1.0, 0.2)) == "left"      # the same two legs not closed: past an end, its side
 
 
 def test_outside_a_corner_whichever_leg_is_taken_for_the_nearest():
@@ -834,7 +890,7 @@ def test_outside_a_corner_whichever_leg_is_taken_for_the_nearest():
             angle = heading[k - 1] - np.sign(turn[k - 1]) * np.pi / 2.0 + rng.uniform(0.02, 0.98, 50) * turn[k - 1]
             points = line[k] + rng.uniform(0.1, 3.0, 50)[:, None] * np.column_stack([np.cos(angle), np.sin(angle)])
             here = distance_to(line, points) > np.hypot(*(points - line[k]).T) - 1e-9    # the corner is the nearest
-            assert (T._sides(line, points[here]) == np.sign(turn[k - 1])).all()         # a left turn: on its right
+            assert (T._sides(line, points[here])[0] == np.sign(turn[k - 1])).all()      # a left turn: on its right
             seen += int(here.sum())
     assert seen > 2000
 
