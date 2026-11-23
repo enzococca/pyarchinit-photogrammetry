@@ -66,8 +66,8 @@ and writes one record, a JSON file. A folder of records gives the table of a ver
 by side.
 
 ```bash
-ppg bench run PHOTOS OUT --name NAME [--steps align|all|match] [--mapper auto|incremental|global] [--engine auto|classic|native] [--seed N] [--repeat N] [--keep] [--records DIR]
-ppg bench synthetic trench|ring OUT [--engine auto|classic|native] [--repeat 3] [--keep] [--records DIR]
+ppg bench run PHOTOS OUT --name NAME [--steps align|all|match|optimize] [--mapper auto|incremental|global] [--engine auto|classic|native] [--align-engine auto|classic|native] [--matches-from KEPT] [--markers PROJECT] [--optimize colmap|ppg] [--solver auto|native|scipy] [--seed N] [--repeat N] [--keep] [--records DIR]
+ppg bench synthetic trench|ring|weak-ring OUT [--engine auto|classic|native] [--align-engine auto|classic|native] [--repeat 3] [--keep] [--records DIR]
 ppg bench adjust PROJECT --name NAME [--solvers native,colmap,scipy] [--repeat 3] [--records DIR]
 ppg bench table DIR
 ppg bench pairs A B
@@ -78,9 +78,10 @@ ppg bench pairs A B
   and, when the photos carry a GPS position, georeferences by those positions; `all` detects the
   default targets (`aruco_4x4_50`) first and goes on with the depth maps, the dense cloud, the model,
   the texture, the DEM and the orthophoto: the chain of `ppg process` with its defaults, which the
-  record writes out; `match` matches and stops (see *Measuring the native matching*). A reference
-  file or other targets are not options of `run` (the synthetic sets
-  pass them; a real set is measured as its photos come). Each of the `--repeat` runs works in
+  record writes out; `match` matches and stops (see *Measuring the native matching*); `optimize` is
+  `align` followed by the optimization of the cameras (see *Measuring the native mapper*). A
+  reference file or other targets are not options of `run` (the synthetic sets pass them); the
+  markers of a real set come from a project of it, `--markers` (see *Measuring the native mapper*). Each of the `--repeat` runs works in
   `OUT/NAME-<i>`: `ppg bench` prints nothing while a run lasts; the step that is running and those
   done are in `result.json` there, rewritten as each step starts and ends, and what the child prints
   (the warnings of the program and of COLMAP) in `child.log` - both readable meanwhile. The folder
@@ -207,9 +208,9 @@ ppg bench table OUT
 ppg bench pairs OUT/SET-classic-1 OUT/SET-native-1
 ```
 
-* `--engine auto|classic|native` is the engine of the matching alone: the alignment and the depth
-  maps run on the classic engine whatever is asked, so that the two runs differ in the matching and
-  nothing else, and `PPG_ENGINE` of the shell never reaches the child (the engine of a run is the
+* `--engine auto|classic|native` is the engine of the matching alone: the alignment keeps its own
+  (`--align-engine`, `auto` by default) and the depth maps run on the classic engine whatever is
+  asked, so that the two runs differ in the matching and nothing else, and `PPG_ENGINE` of the shell never reaches the child (the engine of a run is the
   one asked). The record keeps the word as `settings.engine_requested`, which the table compares
   (native and classic runs under one name are `mixed settings`), while the `engine` of the step
   says what ran: `native`, or `classic` with the reason of a fallback (the native core missing, a
@@ -245,3 +246,56 @@ The figures above are a made-up example of the line, not a measurement. A classi
 with the native one is seeded (`--seed`): COLMAP's RANSAC would otherwise verify a few pairs
 differently between repeats, and those pairs would read as lost or gained by the engine. The native
 matching seeds its own RANSAC from the pair and gives the same pairs on every run and every device.
+
+### Measuring the native mapper
+
+The native mapper is measured against the classic alignment on the same set, with the same matches
+and the same markers, and after the same optimization. Four options of `run` and two variables do
+it; the synthetic sets have their own (`ppg bench synthetic weak-ring OUT --steps optimize`).
+
+```bash
+ppg bench run PHOTOS OUT --name SET-match --keep                                   # the matches, kept once
+ppg bench run PHOTOS OUT --name SET-classic --matches-from OUT/SET-match-1 --markers PROJECT.ppg \
+    --steps optimize --align-engine classic --repeat 3
+ppg bench run PHOTOS OUT --name SET-native --matches-from OUT/SET-match-1 --markers PROJECT.ppg \
+    --steps optimize --align-engine native --repeat 3
+ppg bench table OUT
+```
+
+* `--align-engine auto|classic|native` is the engine of the alignment alone (`native`: the global
+  mapper of the native engine, the classic alignment behind it when it gives its block up). The
+  record keeps the word as `settings.align_engine_requested`, which the table compares; the `engine`
+  of the step `align_cameras` says what ran, and `settings.native_fallback` why the native mapper
+  handed its block to the classic chain (`null` when it did not).
+* `--matches-from KEPT`: `KEPT` is a work folder kept by `--keep` (`OUT/<name>-<i>`), holding
+  exactly one `project.ppg` whose one chunk was matched. Each run copies that project, its
+  `database.db` and, when the matching was native, its stores into its own work folder, drops the
+  alignment and every product, and starts the chain at `align_cameras`: the runs differ in the
+  mapper, not in the matches. The photos of the run must be those of the kept project. The record
+  has `settings.matches_reused` true and no step `match_photos`. A folder that is not a kept run is
+  refused before anything runs, saying what is missing (`project.ppg`, the `database.db` of its
+  chunk), never where.
+* `--markers PROJECT`: a project (`.ppg`) of the same photos whose active chunk has its markers
+  measured on the photos (placed by hand or detected) and, for the georeferencing, their reference
+  coordinates. Right before the alignment the run copies every marker into its chunk: its label,
+  code, reference (location, accuracy, whether it is used), whether it is a check point, and its
+  projections, matched to the run's photos by the label of the photo; the projections on photos the
+  run does not have are left out and counted (`results.markers_projections_left_out`). The chunk
+  takes the CRS of the markers when it has none of its own (local or geographic), else their
+  locations are transformed into it; the georeferencing then runs on them, as after a reference
+  file. The record keeps how many markers and check points (`settings.markers`,
+  `settings.checks`), never a label.
+* `--optimize colmap|ppg` and `--solver auto|native|scipy` (with `--steps optimize` only): the
+  formulation and the solver of the optimization of the cameras after the georeferencing; `colmap`
+  and `auto` by default, the published optimization (`--solver` other than `auto` goes with
+  `--optimize ppg`: COLMAP's adjustment has no solver to choose). Kept as
+  `settings.optimize_engine` and `settings.optimize_solver` (`null` in a chain without the
+  optimization); the results add `optimized_control_rmse` and `optimized_check_rmse`, the errors of
+  the control and check markers after it.
+* `PPG_NATIVE_TRACKS_PER_PHOTO` (the tracks the native mapper keeps per photo, a whole number) and
+  `PPG_NATIVE_FINAL_ALL_TRACKS` (`0`: no last round with every track), set in the shell that runs
+  `ppg bench`, reach the child and are kept as `settings.native_tracks_per_photo` and
+  `settings.native_final_all_tracks` (`false` for `0`), `null` when unset; the table compares them.
+
+The kept folder and the project of the markers are only read: their files are never written, and
+their paths, like the labels of the markers, never reach a record.
