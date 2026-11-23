@@ -59,14 +59,13 @@ NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not ins
 INTRINSICS_MISSING = "the native core with the covariance of the intrinsics (API 18) is not installed"
 # the camera optimisation refines each group of the intrinsics of a camera only where the block determines it
 # (judge_intrinsics; the rule of the rounds of the native mapper, native/engine/src/mapper/rounds.rs, taken group
-# by group and on one scale): a focal length whose relative marginal sd is above FOCAL_SD_HOLD, and each other
-# group - the tangential terms, the principal point, the radial terms - when the marginal sd of the displacement it
-# causes at the corner of the photo is above GROUP_SD_HOLD_PX pixels, is beyond its limit. While a group is beyond
-# its limit, the one furthest beyond it (the largest sd over its limit) is held and the others are judged again
-# in the adjustment without it. JUDGED: the groups, in the order of the record - and the order in which they are
-# given up where the block has no covariance to rank them by. What an adjustment then moves too far is held and
-# the adjustment run again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first radial
-# term by more than K1_MOVE_HOLD
+# by group and on one scale): a focal length whose relative marginal sd is above FOCAL_SD_HOLD is held; each other
+# group - the tangential terms, the principal point, the radial terms - is held when the marginal sd of the
+# displacement it causes at the corner of the photo is above GROUP_SD_HOLD_PX pixels. The groups are judged in the
+# order of JUDGED, each in the adjustment as it is left by what was held before it (the radial terms last: they
+# are what a block most needs, and what the others trade with). What an adjustment then moves too far is held
+# and the adjustment run again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first
+# radial term by more than K1_MOVE_HOLD
 FOCAL_SD_HOLD = 0.005
 GROUP_SD_HOLD_PX = 0.5
 JUDGED = ("focal", "tangential", "principal_point", "radial")
@@ -824,31 +823,27 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     group of :data:`JUDGED` that the problem frees, the marginal sd of the group in the adjustment:
 
     * ``focal``: the relative sd of the focal length - the square root of the largest variance of its focal
-      columns (fx and fy of a model with two) over its focal length; its limit is :data:`FOCAL_SD_HOLD`;
+      columns (fx and fy of a model with two) over its focal length; held above :data:`FOCAL_SD_HOLD`;
     * ``tangential``, ``principal_point``, ``radial``: the sd, in pixels, of the displacement the group causes at
-      the corner of the photo (:func:`corner_sd`, from the covariance of the terms of the group); its limit is
+      the corner of the photo (:func:`corner_sd`, from the covariance of the terms of the group); held above
       :data:`GROUP_SD_HOLD_PX`.
 
     Marginal: every intrinsic that is still to be refined is free with the group (a conditional sd, with the
-    terms that trade with it held, is always smaller). While a group of a camera is beyond its limit, the one
-    furthest beyond it - the largest sd over its limit, among all the cameras - is held and leaves the adjustment:
-    the covariance is taken again without it and every group still free is judged again, until none is beyond its
-    limit. No order is set among the groups: the radial terms of a block that cannot tell its focal length from
-    its height look as lost as it is while it is free, and are determined once it is held; of two groups that
-    trade with each other, the worse determined is given up and the other, judged without it, may stay.
-    ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment
-    refines a group for all its cameras or for none). Without a covariance (a normal matrix that cannot be
-    inverted: an intrinsic the block does not hold at all) nothing can be ranked: the first group of
-    :data:`JUDGED` that is still free is held for every camera, and the rest is judged without it.
+    terms that trade with it held, is always smaller). The groups are judged in the order of :data:`JUDGED`, and
+    what is held leaves the adjustment before the next group is judged - the covariance is taken again without
+    it: the radial terms of a block that cannot tell its focal length from its height are determined once that
+    focal length is held, and judged with it free they would look as lost as it is. ``together``: a group held
+    for one camera is held for every camera that would refine it (COLMAP's adjustment refines a group for all its
+    cameras or for none). Without a covariance (a normal matrix that cannot be inverted: an intrinsic the block
+    does not hold at all) the group being judged is held for every camera, and the next one is judged without it.
 
     The covariance is scaled by the variance factor of the tie points (:func:`tie_variance_factor`: it goes into
     ``pixel_sigma``; the references keep the accuracy they state) and taken with the gauge of
-    :func:`_with_gauge`. Returns, per camera, ``{group: sd}`` - the sd of the round the group was last judged in:
-    the one it was held at, or the last one for a group that stays free (None for a group the problem does not
-    free, or held without a covariance) - and ``{group: why}`` for the groups to hold, in the order they were
-    held - ``("sd", sd)``, ``("no covariance", message)`` or ``("with", camera)`` -, and the variance factor (None
-    when the problem frees nothing that is judged: the core is not asked). RuntimeError where the core cannot
-    give a covariance at all (:func:`covariance_ready`)."""
+    :func:`_with_gauge`. Returns, per camera, ``{group: sd}`` (None for a group the problem does not free, or
+    without a covariance) and ``{group: why}`` for the groups to hold - ``("sd", sd)``, ``("no covariance",
+    message)`` or ``("with", camera)`` -, and the variance factor (None when the problem frees nothing that is
+    judged: the core is not asked). RuntimeError where the core cannot give a covariance at all
+    (:func:`covariance_ready`)."""
     n = len(pb.cameras)
     groups = [intrinsic_groups(model) for model, *_rest in pb.cameras]
     free = [list(f) for f in _free_intrinsics(pb)]
@@ -858,10 +853,6 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     def refined(c: int, group: str) -> list:
         return [k for k in free[c] if k in groups[c][group]]
 
-    def hold(c: int, group: str, why: tuple) -> None:
-        held[c][group] = why
-        free[c] = [k for k in free[c] if k not in groups[c][group]]
-
     if not any(refined(c, group) for c in range(n) for group in JUDGED):
         return sds, held, None
     reason = covariance_ready(pb)
@@ -870,47 +861,52 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     probe, flight = _with_gauge(pb)
     factor = tie_variance_factor(probe)
     probe.pixel_sigma = float(probe.pixel_sigma) * float(np.sqrt(factor))
-    while any(refined(c, group) for c in range(n) for group in JUDGED):
+
+    def covariance():
+        """The covariance of what is still free with the column of each ``(camera, parameter)``, or None with why."""
         probe.free_intrinsics = [list(f) for f in free]
         try:
             matrix, _counts = intrinsics_covariance(probe, reference_flight=flight)
-        except RuntimeError as exc:  # nothing to rank the groups by: the first of JUDGED still free is given up
-            group = next(g for g in JUDGED if any(refined(c, g) for c in range(n)))
-            for c in range(n):
-                if refined(c, group):
-                    sds[c][group] = None
-                    hold(c, group, ("no covariance", str(exc)))
-            continue
-        columns = {(c, k): j for j, (c, k) in enumerate((c, k) for c in range(n) for k in free[c])}
-        worst = None  # (how far beyond its limit, camera, group, why)
+        except RuntimeError as exc:
+            return None, str(exc)
+        return matrix, {(c, k): j for j, (c, k) in enumerate((c, k) for c in range(n) for k in free[c])}
+
+    matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
+    for group in JUDGED:
         for c in range(n):
+            terms = refined(c, group)
+            if not terms:
+                continue
+            if matrix is None:
+                held[c][group] = ("no covariance", str(columns))
+                continue
+            index = [columns[(c, k)] for k in terms]
+            block = matrix[np.ix_(index, index)]
             model, params, width, height = pb.cameras[c]
-            for group in JUDGED:
-                terms = refined(c, group)
-                if not terms:
-                    continue
-                index = [columns[(c, k)] for k in terms]
-                block = matrix[np.ix_(index, index)]
-                if group == "focal":
-                    sd = float(np.sqrt(max(float(block.diagonal().max()), 0.0))) / abs(float(params[0]))
-                    limit = FOCAL_SD_HOLD
-                else:
-                    sd = corner_sd(model, params, float(width), float(height), terms, block)
-                    limit = GROUP_SD_HOLD_PX
-                if np.isfinite(sd):
-                    sds[c][group], beyond, why = sd, sd / limit, ("sd", sd)
-                else:
-                    sds[c][group], beyond, why = None, float("inf"), ("no covariance", "its variance is not a number")
-                if beyond > 1.0 and (worst is None or beyond > worst[0]):
-                    worst = (beyond, c, group, why)
-        if worst is None:
-            break
-        _beyond, c, group, why = worst
-        hold(c, group, why)
+            if group == "focal":
+                sd = float(np.sqrt(max(float(block.diagonal().max()), 0.0))) / abs(float(params[0]))
+                limit = FOCAL_SD_HOLD
+            else:
+                sd = corner_sd(model, params, float(width), float(height), terms, block)
+                limit = GROUP_SD_HOLD_PX
+            if not np.isfinite(sd):
+                held[c][group] = ("no covariance", "its variance is not a number")
+                continue
+            sds[c][group] = sd
+            if sd > limit:
+                held[c][group] = ("sd", sd)
+        holders = [c for c in range(n) if group in held[c]]
+        if not holders:
+            continue
         if together:
-            for other in range(n):
-                if refined(other, group):
-                    hold(other, group, ("with", c))
+            for c in range(n):
+                if refined(c, group) and group not in held[c]:
+                    held[c][group] = ("with", holders[0])
+        for c in range(n):
+            if group in held[c]:
+                free[c] = [k for k in free[c] if k not in groups[c][group]]
+        if any(refined(c, later) for c in range(n) for later in JUDGED[JUDGED.index(group) + 1:]):
+            matrix, columns = covariance()  # what is still to judge, in the adjustment without what was held
     return sds, held, factor
 
 

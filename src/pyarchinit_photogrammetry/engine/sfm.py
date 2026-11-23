@@ -3067,19 +3067,17 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
     calibration: each group of intrinsics only where the block determines it - the rule of the rounds of the
     native mapper, applied to the camera optimisation group by group and on one scale
     (:func:`.bundle.judge_intrinsics`). From the covariance of the adjustment at the alignment (every intrinsic
-    still to be refined free together, scaled by the variance factor of the tie points), a group is beyond its
-    limit when:
+    still to be refined free together, scaled by the variance factor of the tie points), in this order, each group
+    judged in the adjustment as the holds before it leave it:
 
-    * the focal length of a camera has a relative marginal sd above :data:`.bundle.FOCAL_SD_HOLD`, 0.5 % - nadir
-      photos over flat ground cannot tell it from the height, whatever control points on that ground say;
-    * the tangential terms, the principal point (when the adjustment refines it) or the radial terms move the
-      corner of the photo with a marginal sd above :data:`.bundle.GROUP_SD_HOLD_PX`, half a pixel - a nadir grid
-      over flat ground does not determine its radial terms (they trade with a dome of the block).
-
-    While a group is beyond its limit, the one furthest beyond it (the largest sd over its limit) is held, and
-    the others are judged again in the adjustment without it. Without a covariance at all (a normal matrix that
-    cannot be inverted) nothing can be ranked: the groups are given up in the order of :data:`.bundle.JUDGED`,
-    the focal length first, until there is one.
+    * the focal length of a camera whose relative marginal sd is above :data:`.bundle.FOCAL_SD_HOLD`, 0.5 %, is
+      held - nadir photos over flat ground cannot tell it from the height, whatever control points on that ground
+      say;
+    * the tangential terms, the principal point (when the adjustment refines it) and the radial terms, each held
+      when the marginal sd of the displacement it causes at the corner of the photo is above
+      :data:`.bundle.GROUP_SD_HOLD_PX`, half a pixel - a ring flown once does not determine its tangential terms,
+      a nadir grid over flat ground its radial ones (they trade with a dome of the block);
+    * without a covariance at all (a normal matrix that cannot be inverted) the group being judged is held.
 
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment).
     Nothing is asked with ``hold_undetermined`` False (every calibration is refined as the options say), where the
@@ -3338,18 +3336,17 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     marginal sds are taken from the covariance of the adjustment at the alignment - every intrinsic still to be
     refined free together, the control points, the bars and the positions that take part in it at their accuracy,
     scaled by the variance factor of the tie points. A focal length whose relative sd is above
-    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %) is beyond its limit: nadir photos over flat ground cannot tell the focal
-    length from the height, whatever control points on that ground say, and an adjustment that refines it there
-    slides along that trade (a ring flown once over flat ground: the focal length ten times longer, the cameras
-    131 m higher, the check targets 0.6 m off). So are the tangential terms, the principal point (when asked:
-    ``fit_principal_point``) and the radial terms, each when the marginal sd of the displacement it causes at the
-    corner of the photo is above :data:`.bundle.GROUP_SD_HOLD_PX` (half a pixel). While a group is beyond its
-    limit, the one furthest beyond it - the largest sd over its limit - is held as the alignment left it, and the
-    others are judged again in the adjustment without it: the radial terms of that ring are lost while its focal
-    length is free (1.6 px) and determined once it is held (0.12 px), so they are refined; those of a nadir grid
-    over flat ground are not (3 px: they trade with a dome of the block that control points at its corners do not
-    see) and stay as the alignment left them. Without a covariance at all the groups are given up one by one,
-    the focal length first, until there is one. A guard watches what was refined
+    :data:`.bundle.FOCAL_SD_HOLD` (0.5 %) is held as the alignment left it: nadir photos over flat ground cannot
+    tell the focal length from the height, whatever control points on that ground say, and an adjustment that
+    refines it there slides along that trade (a ring flown once over flat ground: the focal length ten times
+    longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the principal
+    point (when asked: ``fit_principal_point``) and the radial terms, each judged by the displacement it causes at
+    the corner of the photo: held when the marginal sd of that displacement is above
+    :data:`.bundle.GROUP_SD_HOLD_PX` (half a pixel). Each group is judged in the adjustment as the holds before
+    it leave it: the radial terms of that ring are lost with its focal length free (1.6 px) and well determined
+    once it is held (0.12 px), so they are refined; those of a nadir grid over flat ground are not (3 px: they
+    trade with a dome of the block that control points at its corners do not see) and stay as the alignment left
+    them. Without a covariance at all the group being judged is held. A guard watches what was refined
     (:func:`.bundle.runaways`): a focal length moved by more than :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its
     start, or a first radial term changed by more than :data:`.bundle.K1_MOVE_HOLD` (0.5), has the optimisation
     run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment refines a group

@@ -2,10 +2,10 @@
 (the rule of the rounds of the native mapper taken group by group and on one scale, with both formulations of
 ``optimize_cameras``): the covariance of the free intrinsics by the native core (API 18) against a dense inverse of
 the normal matrix, the variance factor of the tie points, the marginal sd of the focal length and of what each
-other group moves at the corner of the photo, the group furthest beyond its limit held first and the covariance
-taken again without it, on synthetic blocks; what the optimisation holds and what it still refines, the guard on a
-focal length or a radial term that runs away, the option that frees everything whatever the block says, what
-happens without the core, and the weak ring, a nadir grid and the trench optimised."""
+other group moves at the corner of the photo, judged one after the other on synthetic blocks, what the optimisation
+holds and what it still refines, the guard on a focal length or a radial term that runs away, the option that frees
+everything whatever the block says, what happens without the core, and the weak ring, a nadir grid and the trench
+optimised."""
 from __future__ import annotations
 
 import copy
@@ -262,92 +262,41 @@ def _oracle(pb: bundle.Problem, factor: float, held=()) -> tuple[np.ndarray, lis
     return _dense_inverse(probe)[np.ix_(cols, cols)], free
 
 
-def _greedy(pb: bundle.Problem, factor: float) -> tuple[dict, dict, list]:
-    """What the judgement of the one camera of ``pb`` must give, by dense inverses of the normal matrix
-    (:func:`_oracle`): in each round the sd of every group still free, and the group furthest beyond its limit -
-    the largest sd over its limit - held, until none is beyond it. Returns the sd of each group as it was last
-    judged, the sds of the groups held, in the order they were held, and the ratios sd over limit of each
-    round."""
+@needs_core
+@pytest.mark.parametrize("tilt, references", [(bundle_problems.TILT, "control"), (0.0, "control"),
+                                              (bundle_problems.TILT, "gnss")])
+def test_each_group_is_judged_by_what_it_moves_at_the_corner_of_the_photo(tilt, references):
+    """``bundle.judge_intrinsics`` with every intrinsic free: the focal length by its relative sd, then the
+    tangential terms, the principal point and the radial terms by the sd, in pixels, of what each moves at the
+    corner of the photo - each from the covariance of the adjustment without what was held before it. The same
+    figures and the same verdicts come from a dense inverse of the normal matrix, taken again after every hold."""
+    pb = _drone_block(tilt, references, free=range(8))
     model, params, width, height = pb.cameras[0]
     groups = bundle.intrinsic_groups(model)
-    sds, held, gone, rounds = dict.fromkeys(bundle.JUDGED), {}, [], []
-    while True:
-        cov, free = _oracle(pb, factor, gone)
-        live = [group for group in bundle.JUDGED if set(groups[group]) & set(free)]
-        if not live:
-            break
-        ratios = {}
-        for group in live:
-            index = [free.index(k) for k in groups[group]]
-            block = cov[np.ix_(index, index)]
-            if group == "focal":
-                sds[group], limit = float(np.sqrt(block.diagonal().max()) / params[0]), bundle.FOCAL_SD_HOLD
-            else:
-                sds[group] = bundle.corner_sd(model, params, width, height, list(groups[group]), block)
-                limit = bundle.GROUP_SD_HOLD_PX
-            ratios[group] = sds[group] / limit
-        rounds.append(ratios)
-        worst = max(ratios, key=ratios.get)
-        if ratios[worst] <= 1.0:
-            break
-        held[worst] = sds[worst]
-        gone += list(groups[worst])
-    return sds, held, rounds
-
-
-@needs_core
-@pytest.mark.parametrize("tilt, references", [(bundle_problems.TILT, "control"), (0.0, "control"), (0.0, "gnss"),
-                                              (bundle_problems.TILT, "gnss")])
-def test_the_group_furthest_beyond_its_limit_is_held_first(tilt, references):
-    """``bundle.judge_intrinsics`` with every intrinsic free: the focal length by its relative sd; the tangential
-    terms, the principal point and the radial terms by the sd, in pixels, of what each moves at the corner of the
-    photo. While a group is beyond its limit, the one furthest beyond it - the largest sd over its limit - is held
-    and the covariance is taken again without it. The same figures and the same groups, held in the same order,
-    come from a dense inverse of the normal matrix taken again after every hold."""
-    pb = _drone_block(tilt, references, free=range(8))
     sds, held, factor = bundle.judge_intrinsics(pb)
     assert factor == pytest.approx(NOISE ** 2, rel=0.05) and len(sds) == len(held) == 1
-    assert set(sds[0]) == set(bundle.JUDGED) == {"focal", "tangential", "principal_point", "radial"}
-    assert bundle.FOCAL_SD_HOLD == 0.005 and bundle.GROUP_SD_HOLD_PX == 0.5
-    want, want_held, rounds = _greedy(pb, factor)
-    for ratios in rounds:  # no verdict of this test hangs on the last digit
-        ranked = sorted(ratios.values(), reverse=True)
-        assert all(abs(ratio - 1.0) > 0.02 for ratio in ranked), ratios
-        assert len(ranked) < 2 or ranked[0] <= 1.0 or ranked[0] > 1.05 * ranked[1], ratios
-    assert sds[0] == pytest.approx(want, rel=1e-4)
-    assert list(held[0]) == list(want_held)  # held in the same order
-    assert held[0] == {group: ("sd", pytest.approx(sd, rel=1e-4)) for group, sd in want_held.items()}
-    if tilt == 0.0 and references == "control":  # looking straight down: nothing of the calibration is determined
-        assert list(held[0]) == ["principal_point", "focal", "tangential", "radial"]
-    elif tilt == 0.0:  # positions of every photo: the radial terms are
-        assert list(held[0]) == ["focal", "principal_point", "tangential"]
-    else:  # pitched: the focal length and the radial terms are, and the tangential ones without the principal point
-        assert list(held[0]) == ["principal_point"]
-
-
-@needs_core
-def test_the_worst_group_first_is_not_a_fixed_order():
-    """Pitched photos on control points, every intrinsic free: the tangential terms (0.53 px at the corner) and the
-    principal point (1.87 px) trade, and both are beyond half a pixel. The principal point is the further beyond:
-    it is held, the tangential terms are then determined (0.10 px) and are refined. A fixed order that judges the
-    tangential terms first would have held them, and refined the principal point (0.34 px without them)."""
-    pb = _drone_block(bundle_problems.TILT, free=range(8))
-    model, params, width, height = pb.cameras[0]
-    sds, held, factor = bundle.judge_intrinsics(pb)
-    assert held[0] == {"principal_point": ("sd", sds[0]["principal_point"])}
-    assert sds[0]["principal_point"] > 1.5 and 0 < sds[0]["tangential"] < 0.2
-    assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and 0 < sds[0]["radial"] < 0.3
-
-    def corner(columns, gone=()):
+    assert bundle.JUDGED == ("focal", "tangential", "principal_point", "radial") and set(sds[0]) == set(bundle.JUDGED)
+    gone, verdicts = [], {}
+    for group in bundle.JUDGED:
         cov, free = _oracle(pb, factor, gone)
-        index = [free.index(k) for k in columns]
-        return bundle.corner_sd(model, params, width, height, list(columns), cov[np.ix_(index, index)])
-
-    # the first round, by a dense inverse: both beyond the limit, the principal point by more
-    assert bundle.GROUP_SD_HOLD_PX < corner((6, 7)) < 0.6 < 1.5 < corner((2, 3))
-    assert sds[0]["principal_point"] == pytest.approx(corner((2, 3)), rel=1e-4)
-    assert sds[0]["tangential"] == pytest.approx(corner((6, 7), gone=(2, 3)), rel=1e-4)
-    assert corner((2, 3), gone=(6, 7)) < bundle.GROUP_SD_HOLD_PX  # what the other choice would have left
+        index = [free.index(k) for k in groups[group]]
+        block = cov[np.ix_(index, index)]
+        if group == "focal":
+            want, limit = np.sqrt(block.diagonal().max()) / params[0], bundle.FOCAL_SD_HOLD
+        else:
+            want = bundle.corner_sd(model, params, width, height, list(groups[group]), block)
+            limit = bundle.GROUP_SD_HOLD_PX
+        assert sds[0][group] == pytest.approx(want, rel=1e-4), group
+        assert abs(want / limit - 1.0) > 0.02, (group, want)  # no verdict of this test hangs on the last digit
+        if want > limit:
+            verdicts[group] = ("sd", pytest.approx(want, rel=1e-4))
+            gone += list(groups[group])
+    assert held[0] == verdicts
+    assert bundle.FOCAL_SD_HOLD == 0.005 and bundle.GROUP_SD_HOLD_PX == 0.5
+    if tilt == 0.0:  # looking straight down: nothing of the calibration is determined
+        assert set(held[0]) == set(bundle.JUDGED)
+    else:  # pitched: the focal length and the radial terms are
+        assert "focal" not in held[0] and "radial" not in held[0]
 
 
 @needs_core
@@ -374,9 +323,8 @@ def test_what_is_held_leaves_the_adjustment_before_the_next_group_is_judged():
 @needs_core
 def test_without_a_covariance_the_group_being_judged_is_held_and_the_next_one_judged_without_it(monkeypatch):
     """A normal matrix that cannot be inverted with the focal length free (photos looking straight down, nothing
-    that places the block): nothing can be ranked, and the groups are given up in the order of
-    :data:`bundle.JUDGED` until there is a covariance - the focal length first, for want of one; the radial terms
-    are then judged in the adjustment without it. A core that never gives a covariance: every group is held."""
+    that places the block): the focal length is held for want of a covariance, and the radial terms are then
+    judged in the adjustment without it. A core that never gives a covariance: every group is held."""
     nadir = _drone_block(0.0, "none")
     real = bundle.intrinsics_covariance
     calls = []
@@ -389,7 +337,7 @@ def test_without_a_covariance_the_group_being_judged_is_held_and_the_next_one_ju
 
     monkeypatch.setattr(bundle, "intrinsics_covariance", singular_with_the_focal)
     sds, held, _factor = bundle.judge_intrinsics(nadir)
-    assert calls[:2] == [[0, 1, 4, 5], [4, 5]] and bundle.JUDGED[0] == "focal" and bundle.JUDGED[-1] == "radial"
+    assert calls == [[0, 1, 4, 5], [4, 5]]
     assert held[0]["focal"] == ("no covariance", "pivot 99 of the reduced system is not positive")
     assert sds[0]["focal"] is None and sds[0]["radial"] > 0
     assert ("radial" in held[0]) == (sds[0]["radial"] > bundle.GROUP_SD_HOLD_PX)
@@ -406,8 +354,8 @@ def test_without_a_covariance_the_group_being_judged_is_held_and_the_next_one_ju
 @needs_core
 def test_colmap_holds_a_group_for_every_camera_or_for_none():
     """``together``: two cameras of which one - on one photo that sees the middle of its frame alone - does not
-    determine what its radial terms do at the corner, nor its focal length. The other, which does, is held with
-    it, and the reason names the camera it follows; without ``together`` each camera keeps its own verdict."""
+    determine its focal length nor what its radial terms do at the corner. The other, which does, is held with it,
+    and the reason names the camera it follows; without ``together`` each camera keeps its own verdict."""
     rng = np.random.default_rng(5)
     pb, truth = bundle_problems.block(rng, model="RADIAL", tilt=bundle_problems.TILT)
     pb = bundle._without_held(pb, np.bincount(pb.obs_point, minlength=len(pb.points)) >= 2)
@@ -426,24 +374,21 @@ def test_colmap_holds_a_group_for_every_camera_or_for_none():
 
     sds, held, _factor = bundle.judge_intrinsics(pb)
     assert held[0] == {} and 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and 0 < sds[0]["radial"] < 0.5
-    assert list(held[1]) == ["radial", "focal"]  # the group furthest beyond its limit first, by far
-    assert held[1] == {"radial": ("sd", sds[1]["radial"]), "focal": ("sd", sds[1]["focal"])}
-    assert sds[1]["radial"] > 100.0 and sds[1]["focal"] > 0.02  # 3.7 % with its radial terms held
-    alone = dict(held[1])
+    assert held[1] == {"focal": ("sd", sds[1]["focal"]), "radial": ("sd", sds[1]["radial"])}
+    assert sds[1]["focal"] > 0.02 and sds[1]["radial"] > 100.0
 
     sds, held, _factor = bundle.judge_intrinsics(pb, together=True)
-    assert held[1]["radial"] == ("sd", sds[1]["radial"]) and held[0]["radial"] == ("with", 1)
-    assert set(held[0]) == set(held[1]) == set(alone)
-    assert all(why == ("with", 1) for why in held[0].values())
+    assert held[0] == {"focal": ("with", 1), "radial": ("with", 1)}
+    assert held[1] == {"focal": ("sd", sds[1]["focal"]), "radial": ("sd", sds[1]["radial"])}
     assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and 0 < sds[0]["radial"] < 0.5  # its own figures stay
 
 
 @needs_core
 def test_the_sd_is_marginal_over_what_the_problem_frees():
-    """With the distortion held the focal length of the nadir block looks better determined than it is with it
-    free: the sd of a group is taken with every group that is still free when it is judged."""
-    alone, radial = (_sd(_drone_block(0.0, free=free)) for free in ([0, 1], None))
-    assert alone < radial
+    """With the distortion and the principal point held the focal length of the nadir block looks far better
+    determined than it is with them free: the sd is taken with every group the adjustment frees."""
+    alone, radial, everything = (_sd(_drone_block(0.0, free=free)) for free in ([0, 1], None, range(8)))
+    assert alone < radial <= everything
     # a camera whose focal length is not free has no sd of it: the groups it frees are judged
     sds, _held, factor = bundle.judge_intrinsics(_drone_block(0.0, free=[4, 5]))
     assert sds[0]["focal"] is None and sds[0]["radial"] > 0 and factor == pytest.approx(NOISE ** 2, rel=0.05)
@@ -1306,11 +1251,10 @@ def _marker_rmse(ch) -> dict:
 def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_path, engine):
     """The weak ring cannot tell its focal length from its height (the native mapper held it, at the value of the
     EXIF); the optimisation on its six control targets holds it too, with either formulation, and says so. With
-    COLMAP's formulation the ring then determines its radial terms (0.12 px at the corner of the photo), which the
-    mapper left at zero: they are refined. Our formulation has the tangential terms as well, and with them free the
-    radial terms are the further beyond their limit (3.1 px against 1.6 px): the radial terms are held, and the
-    tangential ones, determined without them (0.08 px), are refined. The cameras stay at their height: before this
-    rule the same optimisation moved the focal length ten times and the cameras 131 m up."""
+    the focal length held the ring determines its radial terms (0.12 px at the corner of the photo), which the
+    mapper left at zero: they are refined. It does not determine the tangential terms of our formulation (1.6 px):
+    they are held. The cameras stay at their height: before this rule the same optimisation moved the focal length
+    ten times and the cameras 131 m up."""
     ch = _copy_of(weak_ring.project, tmp_path / engine).chunk
     before, heights = _calibration(ch), np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras])
     assert before[0][4:] == [0.0, 0.0, 0.0, 0.0]  # the lens the native mapper left unmodelled
@@ -1318,68 +1262,48 @@ def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_pa
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
     sensor = check["focal_sd"][0][0]
-    assert check["checked"] is True and check["held"]["focal"] == [sensor]
+    assert check["checked"] is True and check["held"]["focal"] == [sensor] and check["held"]["radial"] == []
     assert check["held"]["principal_point"] == [] and check["principal_point_sd"] == []
     assert check["focal_sd"][0][1] > 0.05  # 10 % (COLMAP's formulation) and 14 % (ours) measured
+    assert 0 < check["radial_sd"][0][1] < 0.3 < bundle.GROUP_SD_HOLD_PX  # 0.12 px
     notes = [f"sensor {sensor}: focal held: undetermined, sd {100 * check['focal_sd'][0][1]:.2f} %"]
-    radial = check["radial_sd"][0][1]
-    after = _calibration(ch)
-    assert after[0][:4] == before[0][:4]  # the focal length, exactly
     if engine == "ppg":
-        assert check["held"]["radial"] == [sensor] and check["held"]["tangential"] == [] and radial > 2.0  # 3.07 px
-        assert 0 < check["tangential_sd"][0][1] < 0.2 < bundle.GROUP_SD_HOLD_PX  # 0.08 px without the radial terms
-        notes.append(f"sensor {sensor}: radial held: undetermined, sd {radial:.2f} px at the image corner")
-        assert after[0][4:6] == [0.0, 0.0] and after[0][6:] != [0.0, 0.0]  # the tangential terms refined
+        tangential = check["tangential_sd"][0][1]
+        assert check["held"]["tangential"] == [sensor] and tangential > 1.0  # 1.62 px
+        notes.append(f"sensor {sensor}: tangential held: undetermined, sd {tangential:.2f} px at the image corner")
     else:
-        assert check["held"]["radial"] == [] and 0 < radial < 0.3 < bundle.GROUP_SD_HOLD_PX  # 0.12 px
         assert check["held"]["tangential"] == [] and check["tangential_sd"] == []
-        assert after[0][4] != 0.0 and after[0][6:] == [0.0, 0.0]  # the radial terms refined
     assert check["notes"] == notes
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and rep["control_points"] == 6
+    after = _calibration(ch)
+    assert after[0][:4] == before[0][:4] and after[0][4] != 0.0  # the focal length exactly, the radial terms refined
+    assert after[0][6:] == [0.0, 0.0]
     rose = np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras]) - heights
-    assert np.abs(rose).max() < 0.5  # in the coordinate system: where the alignment put them
+    assert np.abs(rose).max() < 0.5  # in the coordinate system: where the alignment put them, the lens fitted
 
 
 @needs_core
 @pytest.mark.slow
-def test_the_weak_ring_meets_the_four_lines_of_its_gate(weak_ring, tmp_path):
+@pytest.mark.parametrize("engine", ["auto", "ppg"])
+def test_the_weak_ring_meets_the_four_lines_of_its_gate(weak_ring, tmp_path, engine):
     """The gate of the weak ring, whole: every photo aligned by the native mapper with no fallback; the shape of
     the ring within ``WEAK_RING_GATE["shape"]`` of its diameter before any optimisation; and after the
-    optimisation the program runs by default (COLMAP's formulation) the control targets within
-    ``WEAK_RING_GATE["control_m"]`` and the check targets within ``WEAK_RING_GATE["check_m"]``. The radial
-    distortion found with the focal length held is the true one."""
+    optimisation - with the formulation the program runs by default, COLMAP's, and with our own - the control
+    targets within ``WEAK_RING_GATE["control_m"]`` and the check targets within ``WEAK_RING_GATE["check_m"]``. The
+    radial distortion found with the focal length held is the true one."""
     from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
 
     assert weak_ring.aligned == (80, {"requested": "native", "used": "native", "fallback": None})
     assert weak_ring.shape["truth_targets"] >= 6
     assert weak_ring.shape["truth_target_shape"] <= WEAK_RING_GATE["shape"]  # 0.00037 measured
     ch = _copy_of(weak_ring.project, tmp_path / "gate").chunk
-    ch.optimize_cameras()
-    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": "auto", "used": "colmap"}
+    ch.optimize_cameras(engine=engine)
+    assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": engine,
+                                                           "used": "colmap" if engine == "auto" else "ppg"}
     assert _calibration(ch)[0][4] == pytest.approx(-0.04, abs=0.005)  # the lens the photos were rendered with
     errors = _marker_rmse(ch)
-    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm measured
-    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.8 mm measured
-
-
-@needs_core
-@pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="our own formulation frees the tangential terms beside the radial ones. With "
-                                       "the focal length held the radial terms are the further beyond their limit "
-                                       "(3.07 px against 1.63 px) and are held first; the tangential terms, 0.08 px "
-                                       "without them, are refined: k1 stays at the zero of the mapper for a true "
-                                       "-0.04, control 1.91 mm, check 17.1 mm (lines 2 and 13 mm). Held in a fixed "
-                                       "order, the tangential terms before the radial ones, the radial terms were "
-                                       "refined: 1.22 and 8.88 mm")
-def test_our_formulation_meets_the_gate_of_the_weak_ring(weak_ring, tmp_path):
-    """The same two lines after the optimisation with our own adjustment (``engine="ppg"``)."""
-    from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
-
-    ch = _copy_of(weak_ring.project, tmp_path / "ours").chunk
-    ch.optimize_cameras(engine="ppg")
-    errors = _marker_rmse(ch)
-    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
-    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
+    assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm (COLMAP's), 1.22 mm (ours)
+    assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.87 mm and 8.88 mm
 
 
 @needs_core

@@ -708,26 +708,24 @@ taken group by group and on one scale). Before the first adjustment the marginal
 covariance of the adjustment at the alignment - every intrinsic the options free free together (the distortion,
 the principal point with `fit_principal_point`), the control points, the bars and the positions that take part in
 the adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.judge_intrinsics`,
-on the native core, `ppg_core` API 18). Each group has a limit: the focal length a relative sd of 0.5 %
-(`bundle.FOCAL_SD_HOLD`); the tangential terms, the principal point (when it was asked for) and the radial terms
-half a pixel (`bundle.GROUP_SD_HOLD_PX`) for the sd of the displacement each causes at the corner of the photo.
-While a group is beyond its limit, the one furthest beyond it - the largest sd over its limit - is held as the
-alignment left it, the covariance is taken again without it and the others are judged again; no order is set
-among the groups. Nadir photos over flat ground cannot tell the focal length from the flying height, whatever
-control points on that ground say, and an adjustment that refines it there slides along that trade (a ring flown
-once over flat ground, optimised on six targets: the focal length ten times longer, the cameras 131 m higher, the
-check targets 0.6 m off). That ring has its focal length at 10 % and, while the focal length is free, its radial
-terms at 1.6 px: the focal length is the further beyond its limit and is held, the radial terms are then
-determined (0.12 px) and are refined - the radial term found within 0.0003 of the true one, the control targets
-at 1 mm and the check targets at 9 mm. Our own formulation frees the tangential terms as well, and on that ring,
-with the focal length held, gives up the radial terms (3.1 px, against 1.6 px for the tangential ones): the check
-targets stay at 17 mm. On a nadir grid over flat ground the radial terms trade with a dome of the block, which
-control points at its corners do not see (a synthetic grid of 40 photos: 3.2 px with the focal length held):
-they are held as well, and a point in the middle of that grid ends 3 mm off - 4 to 6 cm with the radial terms
-refined, 11 to 28 cm with everything refined. Oblique photos around relief determine every group (the synthetic
-trench: 0.02 % and 0.05 px), and the whole calibration is refined as before. Where the block has no covariance at
-all (a normal matrix that cannot be inverted) the groups are given up one by one, the focal length first, until
-it has one.
+on the native core, `ppg_core` API 18). The focal length is judged first: one whose relative sd is above 0.5 %
+(`bundle.FOCAL_SD_HOLD`) is held as the alignment left it. Nadir photos over flat ground cannot tell the focal
+length from the flying height, whatever control points on that ground say, and an adjustment that refines it
+there slides along that trade (a ring flown once over flat ground, optimised on six targets: the focal length
+ten times longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the
+principal point (when it was asked for) and the radial terms, each by what it moves in the photo: a group is
+held when the marginal sd of the displacement it causes at the corner of the photo is above half a pixel
+(`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it leave it - the
+covariance is taken again without what was held -, the radial terms last. That ring does not determine its
+radial terms while its focal length is free (1.6 px at the corner) and determines them once it is held (0.12
+px): they are refined, the radial term found within 0.0003 of the true one, the control targets at 1 mm and the
+check targets at 9 mm; it does not determine the tangential terms of our own formulation (1.6 px), which are
+held. On a nadir grid over flat ground the radial terms trade with a dome of the block, which control points at
+its corners do not see (a synthetic grid of 40 photos: 3.2 px): they are held as well, and a point in the middle
+of that grid ends 3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined.
+Oblique photos around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole
+calibration is refined as before. A group that has no covariance at all (a normal matrix that cannot be
+inverted) is held.
 
 A guard watches what was refined (`bundle.runaways`): a focal length moved by more than 20 % of its start
 (`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5 (`bundle.K1_MOVE_HOLD`), has the

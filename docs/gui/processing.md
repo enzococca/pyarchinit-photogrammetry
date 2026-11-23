@@ -68,22 +68,22 @@ how many photos held the block and whether the focal length was kept.
 
 **Each part of the calibration is refined only where the block determines it.** Before adjusting, the program
 measures how well the block knows each part of the calibration of each sensor (its standard deviation, from the
-covariance of the adjustment). The focal length has a limit of 0.5 %: beyond it - photos looking straight down
-over flat ground, where the focal length cannot be told from the flying height, even with control points on that
-ground - the focal length of the alignment is kept, and the result says for how many sensors (*focal length of
-the alignment held: the block does not determine it*; the log has the figure of each). Refined there, the focal
+covariance of the adjustment). The focal length first: above 0.5 % - photos looking straight down over flat
+ground, where the focal length cannot be told from the flying height, even with control points on that ground -
+the focal length of the alignment is kept, and the result says for how many sensors (*focal length of the
+alignment held: the block does not determine it*; the log has the figure of each). Refined there, the focal
 length slides with the height of the cameras: on a ring flown once over flat ground it ended ten times too long,
-the cameras 131 m too high. The distortion and a principal point that was asked for are measured by what each
-moves at the corner of the photo, with a limit of half a pixel. While a part is beyond its limit, the one furthest
-beyond it is held and the others are measured again without it. The same ring, once its focal length is held,
-determines its radial distortion, which is refined (its check targets end at 9 mm); a grid of nadir photos over
-flat ground does not - refined there, the distortion bends the block into a dome between the control points - and
-keeps the one of the alignment. The result names what was held (*parts of the calibration held because the block
-does not determine them: radial distortion*). A focal length or a radial term that runs away during the
-optimisation is held and the optimisation run again. Oblique photos, relief or flights at two heights determine
-the calibration, and it is refined as before. Clear *Keep the parts of the calibration that the block does not
-determine* to refine everything anyway (`ppg optimize --free-undetermined`). The check runs on the native core;
-without it the calibration is refined as before and the log says so.
+the cameras 131 m too high. Then the distortion and a principal point that was asked for, each by what it moves
+at the corner of the photo: a part the block determines to worse than half a pixel is held as well, the others
+are refined. The same ring, once its focal length is held, determines its radial distortion, which is refined (its
+check targets end at 9 mm); a grid of nadir photos over flat ground does not - refined there, the distortion
+bends the block into a dome between the control points - and keeps the one of the alignment. The result names
+what was held (*parts of the calibration held because the block does not determine them: radial distortion*). A
+focal length or a radial term that runs away during the optimisation is held and the optimisation run again.
+Oblique photos, relief or flights at two heights determine the calibration, and it is refined as before. Clear
+*Keep the parts of the calibration that the block does not determine* to refine everything anyway (`ppg optimize
+--free-undetermined`). The check runs on the native core; without it the calibration is refined as before and the
+log says so.
 
 *Engine*: *Automatic* (the default, as for the other steps: the program's choice, COLMAP for now), *COLMAP* or *Own*
 (`ppg optimize --engine auto|colmap|ppg`). Held by nothing (the GPS of a drone, no control points) the adjustment may
