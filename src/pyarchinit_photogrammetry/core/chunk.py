@@ -461,9 +461,13 @@ class Chunk:
         running - the native core missing or switched off, a learned ``matcher``, rigs of
         360-degree photos, processing nodes, a camera model it does not know -; otherwise, and
         when it fails half way, the classic step runs with the same arguments and the reason is
-        kept; a cancel and a full disk stop the step as they are. ``auto`` is the classic engine
-        until the native matching has passed its gate. What was asked and what was used are kept
-        in ``meta["engine"]``."""
+        kept (with ``auto``, a request the native engine does not take goes to the classic step
+        as the program's choice: no reason kept, no warning - an INFO line when the native core is
+        missing, switched off or too old; :func:`engine.switch.decline`); a
+        cancel, a full disk and a request the step refuses (an argument, a chunk without photos:
+        the error the classic step gives) stop the step as they are. ``auto`` is the native
+        engine for this step since the native matching passed its gate. What was asked and what
+        was used are kept in ``meta["engine"]``."""
         from ..engine import sfm, switch
 
         choice = switch.resolve("match_photos", engine)
@@ -477,7 +481,7 @@ class Chunk:
 
             reason = native_match.cannot_run(self, matcher, reset)
             if reason is not None:
-                choice = switch.fall_back(choice, reason)
+                choice = switch.decline(choice, reason, notice=native_match.core_unavailable() is not None)
         if choice.used == "native":
             try:
                 native_match.match_photos(self, **kwargs)
@@ -485,6 +489,8 @@ class Chunk:
                 raise
             except Exception as exc:  # noqa: BLE001 - whatever stopped the native step: the classic one does the step
                 if native_match.disk_full(exc):  # a full disk, whichever layer says so: no engine can go on
+                    raise
+                if native_match.refused(exc):  # an error of the request: the caller's, whichever engine runs
                     raise
                 choice = switch.fall_back(choice, f"native matching failed: {exc}")
         if choice.used == "classic":

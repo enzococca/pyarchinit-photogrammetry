@@ -91,7 +91,8 @@ def test_matching_and_alignment_leave_their_timings(scene_dir, tmp_path):
     assert ppg.Document.open(tmp_path / "project.ppg").chunks[0].meta["timings"] == t
     ch.match_photos(generic=True, reference="sequential")
     stages = ch.meta["timings"]["match_photos"]["stages"]
-    assert list(stages) == ["features", "preselection", "pairs"]
+    native = ch.meta["engine"]["match_photos"]["used"] == "native"  # auto: native since its gate, where the core is
+    assert list(stages) == ["features", "preselection", "pairs"] + (["export"] if native else [])
     assert sum(stages.values()) <= ch.meta["timings"]["match_photos"]["seconds"] + 0.01
 
 
@@ -193,7 +194,7 @@ def test_a_failed_matching_keeps_the_seconds_measured_so_far_and_the_type_of_its
     monkeypatch.setattr(sfm._native, "gpu_devices", lambda setting=None: [])  # the CPU alone: COLMAP matches
     monkeypatch.setattr(pycolmap, "match_exhaustive", no_pairs)
     with pytest.raises(RuntimeError, match="pairs stage"):
-        ch.match_photos()
+        ch.match_photos(engine="classic")  # COLMAP's pairs stage
     record = ch.meta["timings"]["match_photos"]
     assert record["failed"] == "RuntimeError" and list(record["stages"]) == ["features", "pairs"]
     assert record["stages"]["features"] > 0 and record["seconds"] >= record["stages"]["features"]

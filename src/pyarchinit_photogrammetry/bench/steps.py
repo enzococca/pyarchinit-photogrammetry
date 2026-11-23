@@ -73,11 +73,12 @@ ARGUMENTS = {"match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepo
 # the keys of chunk.meta["sfm"] a record keeps as settings: never image_root or names. "engine", "features" and
 # "routes" are the native matching's (its record names the engine, where the features were found and the routes the
 # pairs took; the classic record names no engine and no routes): facts of the run, not settings, for the table
-# (table.RUN_FACTS). The last four are the native matching's settings read from the environment (the JPEG decoded at
-# a DCT scale, and the second stage: on, its ratio test, its band), None in a classic record: settings, so runs that
-# differ in them are not one measurement
+# (table.RUN_FACTS). The last five are the native matching's settings read from the environment (the JPEG decoded at
+# a DCT scale, and the second stage: on, its ratio test, its band, its check against the first stage's rivals), None
+# in a classic record: settings, so runs that differ in them are not one measurement
 SFM_SETTINGS = ("pairs", "matcher", "quality", "gpu", "gpu_pairs", "cpu_pairs", "mapper", "global_fallback", "engine",
-                "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band")
+                "features", "routes", "native_dct", "native_guided", "native_guided_ratio", "native_guided_band",
+                "native_guided_check")
 MATCH_SETTINGS = ("max_ratio", "max_distance", "cross_check")
 PROJECT = "project.ppg"
 # the project as it was right after a step the job names in ``after`` (:func:`snapshot_hooks`), in the work folder

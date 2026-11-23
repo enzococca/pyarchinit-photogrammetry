@@ -145,28 +145,36 @@ database vengono aggiornati sul posto (gli stessi assi), le foto aggiunte ricevo
 ### Il matching nativo
 
 `match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
-`auto` resta il motore classico finché il matching nativo non ha superato il suo collaudo) fa il passo
-con il motore nativo del nucleo (`engine.native_match`, `ppg_core` API 14): il suo SIFT (che segue
-quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
+`auto`, il predefinito, è il motore nativo per questo passo da quando ha superato il suo collaudo - il
+classico per l'allineamento e le depth map) fa il passo con il motore nativo del nucleo
+(`engine.native_match`, `ppg_core` API 15): il suo SIFT (che segue quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
 immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
 `database.db` di COLMAP come lo scrive il passo classico, così `align_cameras` vi fa girare il mapper
 classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
-nativo segue sempre le linee epipolari).
+nativo segue sempre le linee epipolari). `PPG_RANSAC_SEED` (il seme della verifica geometrica di COLMAP,
+`ppg bench run --seed`) vale solo per il matching classico: il passo nativo non lo legge.
 
 Quando il motore nativo non può fare il passo - il nucleo assente, spento (`PPG_NATIVE=0`) o più vecchio
-dell'API 14, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
+dell'API 15, un `matcher` appreso, rig di foto a 360 gradi, nodi di elaborazione, un modello di camera
 che non conosce - o fallisce a metà, gira il passo classico con gli stessi argomenti, una riga nel log
-dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Un
+dice perché e `meta["engine"]["match_photos"]` tiene `requested`, `used` e il motivo del `fallback`. Con
+`auto` una richiesta che il motore nativo non accetta (l'elenco qui sopra, non un errore) è la scelta del
+programma per il passo classico: nessun motivo tenuto, e nessuna riga nel log salvo una riga INFO quando
+il nucleo è assente, spento o troppo vecchio (`switch.decline`). Un
 annullamento e un disco pieno invece fermano il passo: un disco pieno è un `OSError` di ENOSPC
 qualunque strato lo dica (il sistema, sqlite, pycolmap; `native_match.disk_full`), e il progetto resta
-com'era.
+com'era. Lo stesso vale per una richiesta che il passo rifiuta - un `apply_masks`, una preselezione o un
+numero di vicini che non accetta, una preselezione per riferimento che non trova coppie, un chunk senza
+foto abilitate o fuori da un progetto: chi chiama riceve l'errore che dà il passo classico, qualunque
+motore giri, prima che sia rilevato alcun punto.
 
 `meta["sfm"]` ha le chiavi del record classico più `engine` (`native`), `features` (`gpu`, `cpu` o
 `gpu+cpu`: chi ha trovato i punti), `routes` (le coppie per strada: `guided`, `brute_force`,
 `dropped`), `preselection_size` e le impostazioni lette dall'ambiente (`native_dct`, `native_guided`,
-`native_guided_ratio`, `native_guided_band`, sotto; un record di benchmark le conserva); `gpu` e le chiavi
+`native_guided_ratio`, `native_guided_band`, `native_guided_check`, sotto; un record di benchmark le
+conserva); `gpu` e le chiavi
 di `gpu_shares` nominano gli adattatori come il record classico, `gpu_shares`, `gpu_pairs` e `cpu_pairs` contano le coppie di cui ciascuno ha fatto la prima fase (con una GPU i thread della CPU prendono da lei la loro prima fase, così `cpu_pairs` conta le coppie di una GPU persa o di nessuna). `meta["timings"]["match_photos"]` ha le fasi `features`, `preselection`,
 `pairs` ed `export`.
 
@@ -175,13 +183,20 @@ permette, scelta per la maggiore delle sue due riduzioni - quella del matching e
 preselezione - così una sola decodifica dà entrambe (di norma ogni JPEG viene decodificato per intero e
 ridotto come lo riduce COLMAP: la scala DCT è un po' più veloce ma dà un'altra immagine e meno punti di
 legame);
-`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una (di norma i thread della CPU lavorano accanto a loro: sulle coppie fanno la seconda fase e la verifica, con la prima fase dalla GPU). Tre regolano la seconda
+`PPG_NATIVE_CPU_SHARE=0` lascia le foto e le coppie alle GPU quando ce n'è una (di norma i thread della CPU lavorano accanto a loro: sulle coppie fanno la seconda fase e la verifica, con la prima fase dalla GPU). Quattro regolano la seconda
 fase di una coppia, il matching lungo le linee epipolari del modello della prima: `PPG_NATIVE_GUIDED=0`
 confronta invece ogni punto con ogni punto nelle coppie affidabili (la prima fase decide ancora quali
 coppie sono affidabili, tenute o scartate), `PPG_NATIVE_GUIDED_RATIO` (un numero sopra 0, al massimo 1; di
 norma 0,6: lì un punto è confrontato con meno punti che nella prima fase) è il test del rapporto della seconda, dove un punto è
 confrontato solo con i punti della sua banda, e `PPG_NATIVE_GUIDED_BAND` (sopra 0; di norma 1,0) è la
-semilarghezza della banda come multiplo della soglia della verifica. Un valore che non lo è ferma il
+semilarghezza della banda come multiplo della soglia della verifica, e `PPG_NATIVE_GUIDED_CHECK=0` (per
+le prove; acceso di norma) toglie il controllo della seconda fase: una corrispondenza deve anche passare
+il test del rapporto della prima fase (0,8) contro il rivale che ciascuno dei suoi punti ha avuto nella
+prima fase, sull'intera foto (ogni punto di una foto che ne ha al più 8.000; altrimenti le sue scale più
+grandi), così che un candidato solo nella sua banda il cui descrittore ha un gemello altrove - una
+tessitura ripetitiva, che la verifica non può rifiutare lungo la linea e che diventa un punto di legame
+alla profondità sbagliata - non viene abbinato. Gli archivi fatti senza il controllo non vengono
+continuati (`reset=False` rifà ogni foto). Un valore che non lo è ferma il
 passo con un errore che nomina la variabile. Una GPU persa a metà
 del passo restituisce il suo lavoro alle altre; se era l'ultima, la CPU prende quello che resta, anche
 con `PPG_NATIVE_CPU_SHARE=0`. Una foto o una coppia che fallisce su un dispositivo e poi anche sulla CPU viene lasciata

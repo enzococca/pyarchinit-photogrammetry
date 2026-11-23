@@ -336,7 +336,7 @@ def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
     squares over triples of points (every triple up to ``samples``, else a random ``samples`` of them), then the
     points within ``factor`` times the median residual of the best triple's fit (never less than ``floor`` times
     the spread of ``dst``: the photos of a block are not equally well placed - obliques, edges), fitted again on
-    those and judged once more. Fewer than four points, points on a line, or a robust fit that keeps fewer than half of
+    those and judged once more. A triple close to a line (:func:`_spread`) is not tried. Fewer than four points, points on a line, or a robust fit that keeps fewer than half of
     them: all are kept and the check did not run. Returns ``(mask, ran)``."""
     from itertools import combinations
 
@@ -350,7 +350,9 @@ def robust_inliers(src: np.ndarray, dst: np.ndarray, with_scale: bool = True,
     best, best_med = None, np.inf
     for t in range(samples if combos is None else len(combos)):
         idx = list(combos[t]) if combos is not None else list(rng.choice(n, 3, replace=False))
-        if not (_spread(src[idx], 1e-6) and _spread(dst[idx], 1e-6)):
+        # a triple close to a line fits the photos of that line and leaves the turn about it free: on a block whose
+        # photos in common are mostly one strip it can beat the triples that hold the block and keep the strip alone
+        if not (_spread(src[idx]) and _spread(dst[idx])):
             continue
         try:
             m = geometry.umeyama(src[idx], dst[idx], with_scale=with_scale)
