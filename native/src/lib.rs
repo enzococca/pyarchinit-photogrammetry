@@ -32,8 +32,9 @@ use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift,
 /// 13: the native matching - native_features, native_preselect, native_match_pairs, the stores,
 /// 14: the options of its second stage - guided, guided_max_ratio, guided_band, 15: the guided check -
 /// a match of the second stage also tested against the rivals the first stage saw, `guided_check`,
-/// 16: the native mapper - NativeMapper, native_mapper_defaults).
-const API: u32 = 16;
+/// 16: the native mapper - NativeMapper, native_mapper_defaults, 17: the variances of the free intrinsics of a
+/// bundle problem - bundle_intrinsics_variances).
+const API: u32 = 17;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {
@@ -1140,6 +1141,32 @@ fn bundle_evaluate<'py>(py: Python<'py>, problem: &Bound<'py, PyDict>, loss: &st
         Array1::from_vec(values).into_pyarray(py), ev.cost))
 }
 
+/// The variances of the free intrinsics of each camera of a problem (as :func:`bundle_adjust` takes it) at the
+/// parameters it holds (`bundle::intrinsics_variances`, API 17): per camera, one value per entry of its
+/// ``free_intrinsics``, in their order (none for a camera with none free) - the diagonal of the inverse of the normal
+/// matrix at their columns, from the system reduced to the cameras, with ``loss`` and ``loss_scale`` on the tie
+/// points. The accuracies of the problem are taken as they are: a caller with a variance factor puts it into them
+/// first. ``reference_flight``: with ``gnss_bias``, the flight whose bias is held at zero (the frame of the
+/// positions; without control points the biases of all the flights and a shift of the block would trade off). The
+/// GIL is released. A problem that is not consistent is a ValueError; a normal matrix that is not positive definite
+/// (a gauge left free, an intrinsic the observations do not hold) or a panic, a RuntimeError with its message.
+#[pyfunction]
+#[pyo3(signature = (problem, loss="none", loss_scale=1.0, reference_flight=None))]
+fn bundle_intrinsics_variances(py: Python<'_>, problem: &Bound<'_, PyDict>, loss: &str, loss_scale: f64,
+                               reference_flight: Option<i64>) -> PyResult<Vec<Vec<f64>>> {
+    let mut pb = bundle_problem(problem)?;
+    pb.reference_flight = reference_flight;
+    let loss = bundle_loss(loss, loss_scale)?;
+    pb.check().map_err(PyValueError::new_err)?;
+    match py.detach(|| catch_unwind(AssertUnwindSafe(|| bundle::intrinsics_variances(&pb, loss)))) {
+        Ok(Ok(variances)) => Ok(variances),
+        Ok(Err(message)) => Err(PyRuntimeError::new_err(message)),
+        Err(payload) => {
+            Err(PyRuntimeError::new_err(format!("variances of the intrinsics: {}", panic_text(&*payload))))
+        }
+    }
+}
+
 /// Camera models the projection kernels know.
 #[pyfunction]
 fn supported_models() -> Vec<&'static str> {
@@ -1341,6 +1368,7 @@ fn ppg_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tin_volume, m)?)?;
     m.add_function(wrap_pyfunction!(bundle_adjust, m)?)?;
     m.add_function(wrap_pyfunction!(bundle_evaluate, m)?)?;
+    m.add_function(wrap_pyfunction!(bundle_intrinsics_variances, m)?)?;
     m.add_function(wrap_pyfunction!(two_view_defaults, m)?)?;
     m.add_function(wrap_pyfunction!(verify_pair, m)?)?;
     m.add_function(wrap_pyfunction!(native_match::native_features, m)?)?;

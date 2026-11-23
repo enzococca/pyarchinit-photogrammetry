@@ -56,6 +56,7 @@ LOSSES = ("none", "huber", "cauchy")  # on the tie points; the scale in the unit
 FUNCTION_TOLERANCE = 1e-9
 ROBUST_FUNCTION_TOLERANCE = 1e-6
 NATIVE_MISSING = "the native core with the bundle adjustment (API 12) is not installed"
+INTRINSICS_MISSING = "the native core with the variances of the intrinsics (API 17) is not installed"
 
 
 @dataclass
@@ -609,6 +610,41 @@ def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evalua
     residuals, gradient, rows, cols, values, cost = fn(_to_native(pb), loss, float(loss_scale))
     jacobian = csr_matrix((values, (rows, cols)), shape=(len(residuals), _Layout(pb).size))
     return Evaluation(float(cost), np.asarray(residuals, float), np.asarray(gradient, float), jacobian)
+
+
+def variances_ready(pb: Problem) -> str | None:
+    """``None`` when the native core can give the variances of the free intrinsics of ``pb``
+    (:func:`intrinsics_variances`), else why not: the core switched off, missing or older than API 17, or a camera
+    model that is not among the six of its projection kernels."""
+    if not _native.enabled():
+        return "the native core is switched off by PPG_NATIVE=0"
+    if not _native.has("intrinsics_variances") or (_native.api() or 0) < _native.INTRINSICS_API:
+        return INTRINSICS_MISSING
+    for model, *_ in pb.cameras:
+        if not _native.supports(model):
+            return f"camera model {model} is not in the native core"
+    return None
+
+
+def intrinsics_variances(pb: Problem, loss: str = "none", loss_scale: float = 1.0,
+                         reference_flight: int | None = None) -> list[np.ndarray]:
+    """The variance of each free intrinsic of each camera of ``pb`` at the parameters it holds, by the native
+    engine (API 17; RuntimeError where it cannot run, :func:`variances_ready`): per camera, one value per entry of
+    its ``free_intrinsics``, in their order - the diagonal of the inverse of the normal matrix at their columns,
+    taken from the system reduced to the cameras; ``loss`` with ``loss_scale`` on the tie points, as
+    :func:`adjust` takes them. The accuracies of ``pb`` are taken as they are: a variance factor goes into them
+    first. ``reference_flight``: with ``gnss_bias``, the flight whose bias is held at
+    zero - without control points the biases of all the flights and a shift of the block trade off. A normal
+    matrix that cannot be inverted (a gauge left free, an intrinsic the observations do not hold) is a
+    RuntimeError: nothing is regularised."""
+    if loss not in LOSSES:
+        raise ValueError(f"loss {loss!r}: none, huber or cauchy")
+    reason = variances_ready(pb)
+    if reason is not None:
+        raise RuntimeError(reason)
+    fn = _native.kernel("bundle_intrinsics_variances")
+    flight = None if reference_flight is None else int(reference_flight)
+    return [np.asarray(v, float) for v in fn(_to_native(pb), loss, float(loss_scale), flight)]
 
 
 def _problem_at(pb: Problem, rotations, centres, camera_params, points, markers) -> Problem:
