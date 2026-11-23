@@ -715,12 +715,17 @@ there slides along that trade (a ring flown once over flat ground, optimised on 
 ten times longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the
 principal point (when it was asked for) and the radial terms, each by what it moves in the photo: a group is
 held when the marginal sd of the displacement it causes at the corner of the photo is above half a pixel
-(`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it leave it - the
-covariance is taken again without what was held -, the radial terms last. That ring does not determine its
-radial terms while its focal length is free (1.6 px at the corner) and determines them once it is held (0.12
-px): they are refined, the radial term found within 0.0003 of the true one, the control targets at 1 mm and the
-check targets at 9 mm; it does not determine the tangential terms of our own formulation (1.6 px), which are
-held. On a nadir grid over flat ground the radial terms trade with a dome of the block, which control points at
+(`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it leave it: the
+covariance is taken again without what was held. The order is fixed - the focal length first, with every other
+group free, as the native alignment judges it; then from what a real lens needs least to what it needs most: the
+tangential terms, near zero in most lenses, the principal point, near the centre of the photo, the radial terms
+last. Of two groups that trade with each other the earlier is given up, and the later, judged without it, may
+stay. That ring does not determine its radial terms while its focal length is free (1.6 px at the corner) and
+determines them once it is held (0.12 px): they are refined, the radial term found within 0.0003 of the true
+one, the control targets at 1 mm and the check targets at 9 mm. It does not determine the tangential terms of our
+own formulation (1.6 px), which are held: an order by how far each group is beyond its limit would have given up
+its radial terms in their place (3.1 px while the tangential terms are free) and left the check targets at 17
+mm. On a nadir grid over flat ground the radial terms trade with a dome of the block, which control points at
 its corners do not see (a synthetic grid of 40 photos: 3.2 px): they are held as well, and a point in the middle
 of that grid ends 3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined.
 Oblique photos around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole

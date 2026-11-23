@@ -77,7 +77,10 @@ controllo su quel terreno - la focale dell'allineamento resta quella, e il risul
 focale scivola insieme alla quota delle camere: su un anello volato una volta su terreno piatto finiva dieci
 volte troppo lunga, con le camere 131 m troppo in alto. Poi la distorsione e il punto principale, se chiesto,
 ciascuno per quello che sposta all'angolo della foto: una parte che il blocco determina peggio di mezzo pixel
-resta ferma anche lei, le altre vengono rifinite. Lo stesso anello, una volta tenuta la focale, determina la sua
+resta ferma anche lei, le altre vengono rifinite. Le parti si misurano in un ordine fisso, ciascuna senza quelle
+già tenute: dopo la focale, da ciò che serve meno a un obiettivo a ciò che gli serve di più - la distorsione
+tangenziale, il punto principale, la distorsione radiale per ultima - così che di due parti che il blocco non
+distingue si rinuncia a quella che serve meno. Lo stesso anello, una volta tenuta la focale, determina la sua
 distorsione radiale, che viene rifinita (i target di verifica finiscono a 9 mm); una griglia di foto nadirali su
 terreno piatto no - rifinita lì, la distorsione piega il blocco a cupola tra i punti di controllo - e tiene quella
 dell'allineamento. Il risultato nomina che cosa è rimasto fermo (*parti della calibrazione tenute ferme perché il

@@ -740,16 +740,22 @@ più lunga, camere 131 m più in alto, target di verifica fuori di 0,6 m). Poi i
 principale (quando è stato chiesto) e i termini radiali, ciascuno per quello che sposta nella foto: un gruppo
 resta fermo quando lo scarto marginale dello spostamento che causa all'angolo della foto supera mezzo pixel
 (`bundle.GROUP_SD_HOLD_PX`). Ogni gruppo viene giudicato nella compensazione come la lasciano i gruppi già
-tenuti - la covarianza viene ripresa senza ciò che è stato tenuto -, i termini radiali per ultimi. Quell'anello
-non determina i suoi termini radiali finché la focale è libera (1,6 px all'angolo) e li determina una volta
-tenuta la focale (0,12 px): vengono rifiniti, con il termine radiale trovato entro 0,0003 da quello vero, i
-target di controllo a 1 mm e quelli di verifica a 9 mm; non determina i termini tangenziali della nostra
-formulazione (1,6 px), che restano fermi. Su una griglia nadirale su terreno piatto i termini radiali si
-scambiano con una cupola del blocco, che i punti di controllo agli angoli non vedono (una griglia sintetica di 40
-foto: 3,2 px): restano fermi anche loro, e un punto nel mezzo di quella griglia finisce a 3 mm - da 4 a 6 cm
-rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. Foto oblique intorno a un rilievo determinano ogni
-gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera calibrazione viene rifinita come prima. Un gruppo che
-non ha affatto una covarianza (una matrice normale che non si può invertire) resta fermo.
+tenuti: la covarianza viene ripresa senza ciò che è stato tenuto. L'ordine è fisso - la focale per prima, con
+tutti gli altri gruppi liberi, come la giudica l'allineamento nativo; poi da ciò che serve meno a un obiettivo
+vero a ciò che gli serve di più: i termini tangenziali, vicini a zero nella maggior parte degli obiettivi, il
+punto principale, vicino al centro della foto, i termini radiali per ultimi. Di due gruppi che si scambiano tra
+loro si rinuncia al primo, e il secondo, giudicato senza di lui, può restare libero. Quell'anello non determina i
+suoi termini radiali finché la focale è libera (1,6 px all'angolo) e li determina una volta tenuta la focale
+(0,12 px): vengono rifiniti, con il termine radiale trovato entro 0,0003 da quello vero, i target di controllo a
+1 mm e quelli di verifica a 9 mm. Non determina i termini tangenziali della nostra formulazione (1,6 px), che
+restano fermi: un ordine secondo quanto ogni gruppo supera il suo limite avrebbe rinunciato al loro posto ai
+termini radiali (3,1 px finché i tangenziali sono liberi) e lasciato i target di verifica a 17 mm. Su una griglia
+nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco, che i punti di controllo
+agli angoli non vedono (una griglia sintetica di 40 foto: 3,2 px): restano fermi anche loro, e un punto nel mezzo
+di quella griglia finisce a 3 mm - da 4 a 6 cm rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. Foto
+oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
+calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covarianza (una matrice normale che non
+si può invertire) resta fermo.
 
 Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale spostata di più del 20 % dal suo
 valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale cambiato di più di 0,5
