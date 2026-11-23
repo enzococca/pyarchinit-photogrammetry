@@ -7927,17 +7927,23 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                            "l'ha lasciato l'allineamento", held["termination"])
             judged = rep.get("intrinsics") or {}
             held = judged.get("held") or {}  # what the block does not determine, by group: the sensors held
-            walked = judged.get("lens_prior") or []  # [sensor, from, to, steps]: back at what the photos state
+            # the focal lengths put between the estimate of the alignment and what the photos state
+            walked = judged.get("lens_prior") or []
+
+            def px(name: str) -> str:
+                return ", ".join(f"{row[name]:.0f} px" for row in walked)
+
             if held.get("focal") and walked:
-                text += tr("; focale riportata al valore dichiarato dalle foto ({0}) e tenuta: il blocco non la "
-                           "determina ({1} sensori su {2})", ", ".join(f"{row[2]:.0f} px" for row in walked),
+                text += tr("; focale portata a {0}, tra la stima dell'allineamento ({1}) e il valore dichiarato "
+                           "dalle foto ({2}), e tenuta: il blocco non la determina ({3} sensori su {4})",
+                           px("target"), px("estimate"), px("prior"),
                            len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
             elif held.get("focal"):
                 text += tr("; focale dell'allineamento tenuta: il blocco non la determina ({0} sensori su {1})",
                            len(held["focal"]), len(judged.get("focal_sd") or held["focal"]))
             elif rep.get("focal_held") and walked:
-                text += tr("; focale riportata al valore dichiarato dalle foto ({0}) e tenuta",
-                           ", ".join(f"{row[2]:.0f} px" for row in walked))
+                text += tr("; focale portata a {0}, tra la stima dell'allineamento ({1}) e il valore dichiarato "
+                           "dalle foto ({2}), e tenuta", px("target"), px("estimate"), px("prior"))
             elif rep.get("focal_held"):
                 text += tr("; focale dell'allineamento tenuta")
             others = [name for group, name in (("tangential", tr("distorsione tangenziale")),

@@ -569,8 +569,9 @@ class Chunk:
         ``"auto"``, ``"native"`` (the core) or ``"scipy"``, the one that ran in the report; ``engine="auto"``, the
         default: the formulation the program chooses, :data:`engine.sfm.OPTIMIZE_AUTO_ENGINE`). Each group of the
         intrinsics of a camera is refined only where the block determines it (``hold_undetermined``, True by
-        default: a focal length the block does not determine - nadir photos over flat ground - is held at the one
-        its photos state, or where the alignment left it when they state none; the tangential terms, a principal
+        default: a focal length the block does not determine - nadir photos over flat ground - is held between
+        the estimate of the alignment and the one its photos state, each weighed by how well it is known, or
+        where the alignment left it when they state none; the tangential terms, a principal
         point asked for and the radial terms whose effect at the corner of the photo the block determines to worse
         than half a pixel stay those of the alignment;
         ``meta["sfm"]["optimize"]["intrinsics"]`` says which groups of which sensors and why; False refines every

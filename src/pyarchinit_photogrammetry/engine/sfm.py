@@ -2709,14 +2709,19 @@ FOCAL_HELD_UNDETERMINED = "the block does not determine the focal length"  # _ca
 # why that check asked nothing of the core though it was wanted (report["intrinsics"]["reason"]): the optimisation
 # refines no intrinsic at all (every calibration is fixed)
 NOTHING_TO_JUDGE = "no intrinsic is refined"
-# a focal length the block does not determine is held at the lens prior - the focal length the photos state,
-# kept with the sensor apart from its parameters (lens_prior) -, not where a free alignment left it: an alignment
-# that refines it on such a block leaves it anywhere along the valley it shares with the height of the cameras
-# (a ring flown once: 750 to 3900 px for a lens of 1000). The focal length is walked to the prior in steps of
-# LENS_PRIOR_STEP of its value at most, the block adjusted again at each with its calibration held
-# (_to_lens_prior, LENS_PRIOR_ITERATIONS iterations a step). A block whose mean reprojection error then ends
-# above LENS_PRIOR_WORSE times the one it started with (and LENS_PRIOR_SLACK_PX more) does not follow: it is
-# left as it was. A focal length within LENS_PRIOR_TOLERANCE of its prior, relative, is at it
+# a focal length the block does not determine is not held where a free alignment left it: an alignment that
+# refines it on such a block leaves it anywhere along the valley it shares with the height of the cameras (a ring
+# flown once: 750 to 3900 px for a lens of 1000). It is held between that estimate and the lens prior - the focal
+# length the photos state, kept with the sensor apart from its parameters (lens_prior) -, each weighed by the
+# inverse of its variance (lens_target): the estimate has the marginal sd the check of the calibrations gave it,
+# the prior LENS_PRIOR_SD of its value - the focal lengths of the EXIF are rounded, crop factors vary. A block
+# that hardly knows its focal length ends at the prior, one that nearly determines it stays near its estimate.
+# The focal length is walked there in steps of LENS_PRIOR_STEP of its value at most, the block adjusted again at
+# each with its calibration held (_to_lens_prior, LENS_PRIOR_ITERATIONS iterations a step). A block whose mean
+# reprojection error then ends above LENS_PRIOR_WORSE times the one it started with (and LENS_PRIOR_SLACK_PX
+# more) does not follow: it is left as it was. A focal length within LENS_PRIOR_TOLERANCE of its target,
+# relative, is at it
+LENS_PRIOR_SD = 0.02
 LENS_PRIOR_STEP = 0.1
 LENS_PRIOR_ITERATIONS = 15
 LENS_PRIOR_WORSE = 1.5
@@ -3095,24 +3100,51 @@ def _along_the_valley(model: str, params, ratio: float) -> list:
     return out
 
 
-def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, cameras) -> dict:
-    """{sensor key: its lens prior} for the cameras ``cameras`` (indices in ``pb``) whose sensor has a lens prior
-    (:func:`lens_prior`) that its focal length is not at."""
+def lens_target(estimate: float, sd: float | None, prior: float) -> float:
+    """Where a focal length the block does not determine is held (ruling R26), in pixels: between the
+    ``estimate`` of the alignment, whose relative marginal sd in the adjustment is ``sd``, and the lens
+    ``prior``, whose sd is :data:`LENS_PRIOR_SD` of it, each weighed by the inverse of its variance -
+    ``(estimate / s_e^2 + prior / s_p^2) / (1 / s_e^2 + 1 / s_p^2)`` with ``s_e = sd * estimate`` and ``s_p =
+    LENS_PRIOR_SD * prior``. The prior itself for an estimate without an sd (None or not a number: the block gave
+    no covariance), the estimate itself for one without error."""
+    estimate, prior = float(estimate), float(prior)
+    if sd is None or not np.isfinite(sd):
+        return prior
+    own, lens = (float(sd) * estimate) ** 2, (LENS_PRIOR_SD * prior) ** 2
+    return estimate + (prior - estimate) * own / (own + lens)
+
+
+def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, sds: dict) -> dict:
+    """The focal lengths to walk (:func:`_to_lens_prior`) among the cameras of ``sds`` - {index in ``pb``: the
+    relative marginal sd of its focal length, None without one}: ``{sensor key: {"estimate", "sd", "prior",
+    "target"}}`` for those whose sensor has a lens prior (:func:`lens_prior`) and whose focal length is not at its
+    target (:func:`lens_target`). A focal length that is where an optimisation before this one put it
+    (``Sensor.focal_target``) is left there: it is no estimate of the block any more, and weighing it against
+    the prior again would bring it nearer the prior at every run."""
     out = {}
-    for c in cameras:
+    for c, sd in sds.items():
         key = sensors[c]
         if key is None or pb.cameras[c][0] not in _VALLEY_POWERS:
             continue
-        prior = lens_prior(chunk, chunk.sensors[key])
-        if prior and abs(prior / float(pb.cameras[c][1][0]) - 1.0) > LENS_PRIOR_TOLERANCE:
-            out[key] = prior
+        sensor = chunk.sensors[key]
+        prior = lens_prior(chunk, sensor)
+        if not prior:
+            continue
+        estimate = float(pb.cameras[c][1][0])
+        if sensor.focal_target and abs(estimate / float(sensor.focal_target) - 1.0) <= LENS_PRIOR_TOLERANCE:
+            continue
+        target = lens_target(estimate, sd, prior)
+        if abs(target / estimate - 1.0) > LENS_PRIOR_TOLERANCE:
+            out[key] = {"estimate": estimate, "sd": None if sd is None else float(sd), "prior": float(prior),
+                        "target": float(target)}
     return out
 
 
-def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
-    """Ruling R24: the focal lengths of the sensors of ``priors`` ({sensor key: lens prior, pixels}) walked from
-    where the alignment left them to their prior, and the block with them. In steps of :data:`LENS_PRIOR_STEP`
-    of the focal length at most: the calibration carried along the valley (:func:`_along_the_valley`), the
+def _to_lens_prior(chunk: Chunk, targets: dict, progress: Progress) -> list:
+    """Rulings R24 and R26: the focal lengths of the sensors of ``targets`` (:func:`_off_the_lens_prior`) walked
+    from where the alignment left them to their target, and the block with them. In steps of
+    :data:`LENS_PRIOR_STEP` of the focal length at most: the calibration carried along the valley
+    (:func:`_along_the_valley`), the
     photos of the sensor moved along their axes to as many times their distance from what they see, and the block
     adjusted again - poses and tie points, every intrinsic held: nothing is refined that the check of the
     calibrations has not judged. The tie points are then put back where they were by one similarity, so that the
@@ -3121,8 +3153,9 @@ def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
 
     A block whose mean reprojection error ends above :data:`LENS_PRIOR_WORSE` times the one it started with does
     not follow (a prior that is wrong on a block that resists it): nothing is written. Returns, per sensor that
-    was off its prior, ``{"sensor", "from", "to", "steps", "reprojection": [before, after], "followed"}``; []
-    when none was, or for a reconstruction our adjustment does not take (rigs)."""
+    was off its target, ``{"sensor", "estimate", "sd", "prior", "target", "steps", "reprojection": [before,
+    after], "followed"}``; [] when none was, or for a reconstruction our adjustment does not take (rigs). The
+    sensor of a focal length that was walked keeps its target (``Sensor.focal_target``)."""
     from dataclasses import replace
 
     from ..core import geometry
@@ -3137,13 +3170,14 @@ def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
     sensors = _camera_sensors(chunk, rec, ids["cameras"])
     todo = {}
     for c, (model, params, *_size) in enumerate(pb.cameras):
-        prior = priors.get(sensors[c])
-        if prior and model in _VALLEY_POWERS and abs(prior / float(params[0]) - 1.0) > LENS_PRIOR_TOLERANCE:
-            todo[c] = (float(params[0]), float(prior))
+        aim = targets.get(sensors[c])
+        if (aim and model in _VALLEY_POWERS
+                and abs(float(aim["target"]) / float(params[0]) - 1.0) > LENS_PRIOR_TOLERANCE):
+            todo[c] = (float(params[0]), float(aim["target"]))
     if not todo:
         return []
-    steps = max(max(1, int(np.ceil(abs(np.log(prior / focal)) / np.log1p(LENS_PRIOR_STEP) - 1e-9)))
-                for focal, prior in todo.values())
+    steps = max(max(1, int(np.ceil(abs(np.log(target / focal)) / np.log1p(LENS_PRIOR_STEP) - 1e-9)))
+                for focal, target in todo.values())
     rec.update_point_3d_errors()
     before = float(rec.compute_mean_reprojection_error())
     start = pb.points.copy()
@@ -3155,8 +3189,8 @@ def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
         cameras, centres = list(pb.cameras), pb.centres.copy()
         axes = pb.rotations[:, 2, :]  # where each photo looks, in the frame of the block
         depth = np.einsum("ij,ij->i", pb.points[pb.obs_point] - centres[pb.obs_image], axes[pb.obs_image])
-        for c, (focal, prior) in todo.items():
-            ratio = (prior / focal) ** (1.0 / steps)
+        for c, (focal, target) in todo.items():
+            ratio = (target / focal) ** (1.0 / steps)
             model, params, width, height = cameras[c]
             cameras[c] = (model, _along_the_valley(model, params, ratio), width, height)
             for i in np.flatnonzero(pb.image_camera == c):
@@ -3168,11 +3202,11 @@ def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
         res = bundle.adjust(pb, max_iterations=LENS_PRIOR_ITERATIONS, progress=progress.sub(step / steps, 1.0 / steps))
         pb = bundle.problem_at(pb, res)
     cameras = list(pb.cameras)
-    for c, (_focal, prior) in todo.items():  # the prior itself, not the product of the steps
+    for c, (_focal, target) in todo.items():  # the target itself, not the product of the steps
         model, params, width, height = cameras[c]
         params = [float(v) for v in params]
         for k in bundle.intrinsic_groups(model)["focal"]:
-            params[k] = prior
+            params[k] = target
         cameras[c] = (model, params, width, height)
     # the ground back where it was: one similarity puts the tie points on their places of before
     moved = np.all(np.isfinite(pb.points), axis=1) & np.all(np.isfinite(start), axis=1)
@@ -3186,29 +3220,43 @@ def _to_lens_prior(chunk: Chunk, priors: dict, progress: Progress) -> list:
     rec.update_point_3d_errors()
     after = float(rec.compute_mean_reprojection_error())
     followed = bool(np.isfinite(after) and after <= LENS_PRIOR_WORSE * before + LENS_PRIOR_SLACK_PX)
-    out = [{"sensor": sensors[c], "from": focal, "to": prior, "steps": steps, "reprojection": [before, after],
-            "followed": followed} for c, (focal, prior) in todo.items()]
+    out = [{"sensor": sensors[c], "estimate": float(targets[sensors[c]]["estimate"]),
+            "sd": targets[sensors[c]]["sd"], "prior": float(targets[sensors[c]]["prior"]), "target": target,
+            "steps": steps, "reprojection": [before, after], "followed": followed}
+           for c, (_focal, target) in todo.items()]
     if followed:
         chunk._before_product_write("reconstruction")
         rec.write(str(chunk.product_path("reconstruction")))
         import_reconstruction(chunk, rec)
+        for row in out:  # where it was put: a later optimisation leaves it there
+            chunk.sensors[row["sensor"]].focal_target = float(row["target"])
     return out
 
 
 def _note_lens_prior(record: dict, walked: list) -> None:
     """What :func:`_to_lens_prior` did, at the head of the notes of ``record`` (:func:`_calibration_check`) and,
-    for the focal lengths that were walked, in its ``lens_prior``: [sensor, from, to, steps]."""
+    for the focal lengths that were walked, in its ``lens_prior``: ``{"sensor", "estimate" (the focal length of
+    the alignment, pixels), "sd" (its relative marginal sd; None without one), "prior" (the lens prior, pixels),
+    "prior_sd" (relative: LENS_PRIOR_SD), "target" (where it was put, pixels), "steps"}``."""
     notes = []
     for w in walked:
         before, after = w["reprojection"]
+        if w["sd"] is None:  # nothing known of the estimate: the prior is the target
+            where = f"the lens prior, its estimate {w['estimate']:.2f} px being without an sd"
+        else:
+            where = (f"between its estimate {w['estimate']:.2f} px (sd {100 * w['sd']:.2f} %) and the lens prior "
+                     f"{w['prior']:.2f} px (sd {100 * LENS_PRIOR_SD:.2f} %)")
         if w["followed"]:
-            record["lens_prior"].append([w["sensor"], float(w["from"]), float(w["to"]), int(w["steps"])])
-            notes.append(f"sensor {w['sensor']}: focal walked to the lens prior: {w['from']:.2f} -> {w['to']:.2f} px "
-                         f"in {w['steps']} steps (reprojection {before:.3f} -> {after:.3f} px)")
+            record["lens_prior"].append({"sensor": w["sensor"], "estimate": float(w["estimate"]),
+                                         "sd": None if w["sd"] is None else float(w["sd"]),
+                                         "prior": float(w["prior"]), "prior_sd": LENS_PRIOR_SD,
+                                         "target": float(w["target"]), "steps": int(w["steps"])})
+            notes.append(f"sensor {w['sensor']}: focal walked to {w['target']:.2f} px, {where}, in {w['steps']} "
+                         f"steps (reprojection {before:.3f} -> {after:.3f} px)")
             log.info("camera optimisation: %s", notes[-1])
         else:
-            notes.append(f"sensor {w['sensor']}: focal left at {w['from']:.2f} px: the block does not follow to the "
-                         f"lens prior {w['to']:.2f} px (reprojection {before:.3f} -> {after:.3f} px)")
+            notes.append(f"sensor {w['sensor']}: focal left at {w['estimate']:.2f} px: the block does not follow to "
+                         f"{w['target']:.2f} px, {where} (reprojection {before:.3f} -> {after:.3f} px)")
             log.warning("camera optimisation: %s", notes[-1])
     record["notes"][:0] = notes
 
@@ -3272,8 +3320,9 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
     px at the image corner``, ``sensor 3: tangential held: given up for the radial terms (0.91 px at the image
     corner with it free, 0.04 px without)``, ``sensor 3: focal held: not judged, the block gave no covariance
     (...)``): numbers and fixed words, the key of a sensor and never a name -, ``{index of the camera in pb:
-    groups to hold}`` and, for the focal lengths the block does not determine that are not at their lens prior,
-    ``{sensor: lens prior}`` (ruling R24: :func:`_to_lens_prior` walks them there)."""
+    groups to hold}`` and, for the focal lengths the block does not determine that are not at their target
+    between the estimate of the alignment and the lens prior, what :func:`_off_the_lens_prior` gives (rulings R24
+    and R26: :func:`_to_lens_prior` walks them there)."""
     from . import bundle
 
     record = _check_record(hold_undetermined)
@@ -3323,8 +3372,8 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
                           level=logging.WARNING)
                     continue
                 _hold(record, group, sensors[c], note)
-    undetermined = [c for c in range(len(judged))
-                    if judged[c]["focal"] and verdicts[c].get("focal", (None,))[0] in ("sd", "no covariance")]
+    undetermined = {c: sds[c]["focal"] for c in range(len(judged))  # with the sd of each; None without a covariance
+                    if judged[c]["focal"] and verdicts[c].get("focal", (None,))[0] in ("sd", "no covariance")}
     return record, held, _off_the_lens_prior(chunk, sensors, pb, undetermined)
 
 
@@ -3385,6 +3434,8 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
     intrinsics of a camera is refined only where the block determines it (:func:`_calibration_check`,
     ``report["intrinsics"]``), and an adjustment that moves a focal length or a first radial term it refined too
     far (:func:`bundle.runaways`) runs again from the same start with that group of that camera held."""
+    from dataclasses import replace
+
     from ..markers import gcp
     from . import bundle
 
@@ -3399,20 +3450,25 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
 
     def judged(rec):
         """The problem of the block as ``rec`` has it, why its focal length is held whatever the block says, what
-        the check of the calibrations holds of it, and the focal lengths to walk to their lens prior."""
+        the check of the calibrations holds of it, and the focal lengths to walk towards their lens prior."""
         pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
                                             rolling_shutter=rolling_shutter,
                                             fit_principal_point=fit_principal_point, hold_focal=hold_focal)
+        asked = [list(free) for free in bundle._free_intrinsics(pb)]
         refined = [c for c, (model, *_rest) in enumerate(pb.cameras)
-                   if any(k in bundle.intrinsic_groups(model)["focal"] for k in pb.free_intrinsics[c])]
+                   if any(k in bundle.intrinsic_groups(model)["focal"] for k in asked[c])]
         if not pb.absolute:  # nothing places the block: the focal length and the depth scale together at one cost
             bundle.hold_focal_length(pb)
             why = FOCAL_HELD_NO_REFERENCES
         else:
             why = FOCAL_HELD_BY_POSITIONS if hold_focal else None
         check, undetermined, lost = _calibration_check(chunk, rec, pb, ids, hold_undetermined)
-        if check["checked"] and not pb.absolute:  # held as undetermined, without a verdict: at the lens prior too
-            lost.update(_off_the_lens_prior(chunk, _camera_sensors(chunk, rec, ids["cameras"]), pb, refined))
+        if check["checked"] and not pb.absolute and refined:
+            # held without a verdict on the block: what the block knows of its focal length is asked apart - the
+            # sd it has with the focal length free - and weighed against the lens prior as anywhere else
+            sds = bundle.judge_intrinsics(replace(pb, free_intrinsics=asked), only=("focal",))[0]
+            lost.update(_off_the_lens_prior(chunk, _camera_sensors(chunk, rec, ids["cameras"]), pb,
+                                            {c: sds[c]["focal"] for c in refined}))
         return pb, ids, why, check, undetermined, lost
 
     pb, ids, focal_held, check, undetermined, lost = judged(rec)
@@ -3556,14 +3612,21 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     :data:`.bundle.FOCAL_SD_HOLD` (0.5 %) is held: nadir photos over flat ground cannot tell the focal length from
     the height, whatever control points on that ground say, and an adjustment that refines it there slides along
     that trade (a ring flown once over flat ground: the focal length ten times longer, the cameras 131 m higher,
-    the check targets 0.6 m off). It is held at the lens prior - the focal length its photos state
-    (:func:`lens_prior`: their EXIF, kept with the sensor apart from its parameters) -, not where the alignment
-    left it: an alignment that refined it leaves it anywhere along that trade (COLMAP's mapper on that ring: 750
-    to 3900 px for a lens of 1000, the check targets 20 to 230 mm off once it is held there). The focal length is
-    first walked to the prior in steps of a tenth at most, the block adjusted again at each with its calibration
-    held and carried along (:func:`_to_lens_prior`), and the calibration judged again from there
-    (``report["intrinsics"]["lens_prior"]``: [sensor, from, to, steps]; the walked block is written as the
-    alignment before the optimisation goes on); a focal length that was guessed, or given by hand, has no prior
+    the check targets 0.6 m off). It is not held where the alignment left it either: an alignment that refined
+    it leaves it anywhere along that trade (COLMAP's mapper on that ring: 750 to 3900 px for a lens of 1000, the
+    check targets 20 to 230 mm off once it is held there). It is held between that estimate and the lens prior -
+    the focal length its photos state (:func:`lens_prior`: their EXIF, kept with the sensor apart from its
+    parameters) -, each weighed by the inverse of its variance (:func:`lens_target`): the estimate has the
+    marginal sd just taken, the prior :data:`LENS_PRIOR_SD` (2 %) of its value - the focal lengths of the EXIF
+    are rounded, crop factors vary. A block that hardly knows its focal length (that ring: an sd of 6 to 22 % of
+    the mapper's estimates) ends within 2 % of the prior; one that nearly determines it (0.6 %) stays near its
+    estimate when its photos state a focal length 3 % off (a tenth of the way). The focal length is first walked
+    to that target in steps of a tenth at most, the block adjusted again at each with its calibration held and
+    carried along (:func:`_to_lens_prior`), and the calibration judged again from there
+    (``report["intrinsics"]["lens_prior"]``: per sensor the estimate, its sd, the prior, its sd, the target and
+    the steps; the walked block is written as the alignment before the optimisation goes on). The sensor keeps
+    where its focal length was put (``Sensor.focal_target``): a later optimisation that finds it there leaves it
+    - it is no estimate of the block any more. A focal length that was guessed, or given by hand, has no prior
     and stays where the alignment left it. Then the tangential terms, the principal
     point (when asked: ``fit_principal_point``) and the radial terms, each judged by the displacement it causes at
     the corner of the photo: held when the marginal sd of that displacement is above
@@ -3577,8 +3640,9 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     group that passed is given up too for a later one that fails only with it free: the later group is judged
     again without the earlier groups still free, and where it then passes they are held in its place (on a block
     of many tie points the tangential terms of that ring pass at 0.5 px and its radial terms, with them free, fail
-    at 0.9 px: the tangential terms are held, the radial terms refined). Without a covariance at all the group
-    being judged is held, with a warning: nothing was judged. A guard watches what was refined
+    at 0.9 px: the tangential terms are held, the radial terms refined). The focal length goes this way for the
+    radial terms alone, never for the tangential terms or the principal point. Without a covariance at all the
+    group being judged is held, with a warning: nothing was judged. A guard watches what was refined
     (:func:`.bundle.runaways`): a focal length moved by more than :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its
     start, or a first radial term changed by more than :data:`.bundle.K1_MOVE_HOLD` (0.5), has the optimisation
     run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment refines a group

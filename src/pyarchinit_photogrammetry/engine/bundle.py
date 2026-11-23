@@ -848,8 +848,8 @@ def _conditional_covariance(matrix: np.ndarray, kept: list, gone: list) -> np.nd
     return matrix[np.ix_(kept, kept)] - cross @ solved
 
 
-def judge_intrinsics(pb: Problem, together: bool = False,
-                     marker_weight: float | None = None) -> tuple[list, list, float | None]:
+def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float | None = None,
+                     only: tuple | None = None) -> tuple[list, list, float | None]:
     """Which groups of the intrinsics of each camera an adjustment of ``pb`` determines, at the parameters of the
     problem (the rule of the rounds of the native mapper, group by group and on one scale). Per camera and per
     group of :data:`JUDGED` that the problem frees, the marginal sd of the group in the adjustment:
@@ -893,17 +893,22 @@ def judge_intrinsics(pb: Problem, together: bool = False,
     ``{group: why}`` for the groups to hold - ``("sd", sd)``, ``("no covariance", message)``, ``("with",
     camera)`` or ``("for", (later group, its sd with this one free, its sd without))`` -, and the variance factor
     (None when the problem frees nothing that is judged: the core is not asked). RuntimeError where the core
-    cannot give a covariance at all (:func:`covariance_ready`)."""
+    cannot give a covariance at all (:func:`covariance_ready`).
+
+    ``only``: the groups to judge, the others left as free as the problem has them and not judged -
+    ``("focal",)`` gives the sd of the focal length of a block from one covariance, every other intrinsic free
+    with it."""
     n = len(pb.cameras)
     groups = [intrinsic_groups(model) for model, *_rest in pb.cameras]
     free = [list(f) for f in _free_intrinsics(pb)]
     sds = [dict.fromkeys(JUDGED) for _camera in range(n)]
     held: list = [{} for _camera in range(n)]
+    wanted = [group for group in JUDGED if only is None or group in only]
 
     def refined(c: int, group: str) -> list:
         return [k for k in free[c] if k in groups[c][group]]
 
-    if not any(refined(c, group) for c in range(n) for group in JUDGED):
+    if not any(refined(c, group) for c in range(n) for group in wanted):
         return sds, held, None
     reason = covariance_ready(pb)
     if reason is not None:
@@ -960,6 +965,8 @@ def judge_intrinsics(pb: Problem, together: bool = False,
 
     matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
     for position, group in enumerate(JUDGED):
+        if group not in wanted:
+            continue
         failing: dict = {}
         for c in range(n):
             terms = refined(c, group)
@@ -979,9 +986,9 @@ def judge_intrinsics(pb: Problem, together: bool = False,
         # the earlier groups that go for it, the first to go first, and only those a lens needs less than this
         # one: the focal length - first in the order for what a flat block cannot tell, not because a lens can
         # do without it - goes for the radial terms alone, and last
-        earlier = [g for g in JUDGED[:position] if g != "focal"]
+        earlier = [g for g in JUDGED[:position] if g != "focal" and g in wanted]
         if group == JUDGED[-1]:
-            earlier += [g for g in JUDGED[:position] if g == "focal"]
+            earlier += [g for g in JUDGED[:position] if g == "focal" and g in wanted]
         saved = without_earlier(group, failing, earlier) if failing and matrix is not None else {}
         given_up: dict = {}  # {camera: [earlier groups held in place of this one]}
         for c, sd in failing.items():
@@ -1003,7 +1010,8 @@ def judge_intrinsics(pb: Problem, together: bool = False,
         for c in range(n):
             gone = set(given_up.get(c, ())) | ({group} if group in held[c] else set())
             free[c] = [k for k in free[c] if not any(k in groups[c][g] for g in gone)]
-        if (holders or given_up) and any(refined(c, later) for c in range(n) for later in JUDGED[position + 1:]):
+        still = [later for later in JUDGED[position + 1:] if later in wanted]
+        if (holders or given_up) and any(refined(c, later) for c in range(n) for later in still):
             matrix, columns = covariance()  # what is still to judge, in the adjustment without what was held
     return sds, held, factor
 

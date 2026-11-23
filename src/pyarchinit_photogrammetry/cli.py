@@ -1291,7 +1291,8 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
                  True, "--hold-undetermined/--free-undetermined",
                  help="keep each part of the calibration of a camera where the block does not determine it: the "
                       "focal length (photos looking straight down over flat ground: its marginal sd above 0.5 %; "
-                      "held at the value the photos state), the distortion and a principal point asked for (above "
+                      "held between the estimate of the alignment and the value the photos state, each weighed by "
+                      "how well it is known), the distortion and a principal point asked for (above "
                       "half a pixel at the corner of the photo); the report says so per sensor. "
                       "--free-undetermined refines every calibration whatever the block determines"),
              chunk: Optional[str] = None):

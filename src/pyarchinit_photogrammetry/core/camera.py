@@ -71,9 +71,14 @@ class Sensor:
     # alignment), None (given by hand, a calibration, or a project of an older version)
     focal_source: str | None = None
     # the focal length the photos state (their EXIF: ``focal_source`` exif or exif_mm), in pixels, kept apart from
-    # ``params``, which an alignment overwrites: the lens prior a block that does not determine its focal length
-    # is held at (engine.sfm.lens_prior). None for a guess, and in a project of an older version
+    # ``params``, which an alignment overwrites: the lens prior that the estimate of a block which does not
+    # determine its focal length is weighed against (engine.sfm.lens_prior, lens_target). None for a guess, and in
+    # a project of an older version
     focal_prior: float | None = None
+    # where the camera optimisation last put a focal length the block does not determine, between the estimate of
+    # the alignment and the lens prior (pixels; None when it never did): a focal length that is still there is
+    # no estimate of the block any more, and is not weighed against the prior a second time
+    focal_target: float | None = None
 
     def __post_init__(self):
         if self.model not in CAMERA_MODELS:
@@ -155,7 +160,7 @@ class Sensor:
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in ("key", "label", "width", "height", "model", "params",
                                               "pixel_size_mm", "focal_length_mm", "fixed", "focal_source",
-                                              "focal_prior")}
+                                              "focal_prior", "focal_target")}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Sensor":

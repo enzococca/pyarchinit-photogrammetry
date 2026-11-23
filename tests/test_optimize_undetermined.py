@@ -447,6 +447,34 @@ def test_what_is_held_leaves_the_adjustment_before_the_next_group_is_judged():
 
 
 @needs_core
+def test_the_focal_length_can_be_judged_alone(monkeypatch):
+    """``judge_intrinsics(..., only=("focal",))``: the sd of the focal length as the whole judgement has it - every
+    intrinsic that is free with it -, from one covariance; nothing else is judged, and nothing else is held."""
+    nadir = _drone_block(0.0, "gnss")  # the focal length is not determined, the radial terms are
+    whole, held, factor = bundle.judge_intrinsics(nadir)
+    real = bundle.intrinsics_covariance
+    calls = []
+
+    def counted(pb, **kwargs):
+        calls.append(list(pb.free_intrinsics[0]))
+        return real(pb, **kwargs)
+
+    monkeypatch.setattr(bundle, "intrinsics_covariance", counted)
+    sds, alone, again = bundle.judge_intrinsics(nadir, only=("focal",))
+    assert calls == [list(nadir.free_intrinsics[0])]  # asked once, with everything free
+    assert sds == [{**dict.fromkeys(bundle.JUDGED), "focal": whole[0]["focal"]}]
+    assert alone == [{"focal": held[0]["focal"]}] and again == factor
+    pitched = _drone_block(bundle_problems.TILT)
+    sds, alone, _factor = bundle.judge_intrinsics(pitched, only=("focal",))
+    assert 0 < sds[0]["focal"] < bundle.FOCAL_SD_HOLD and alone == [{}] and sds[0]["radial"] is None
+    # nothing of what is asked is free: the core is not asked
+    del calls[:]
+    radial = dataclasses.replace(nadir, free_intrinsics=[[4, 5]])
+    assert bundle.judge_intrinsics(radial, only=("focal",)) == ([dict.fromkeys(bundle.JUDGED)], [{}], None)
+    assert calls == []
+
+
+@needs_core
 def test_without_a_covariance_the_group_being_judged_is_held_and_the_next_one_judged_without_it(monkeypatch):
     """A normal matrix that cannot be inverted with the focal length free (photos looking straight down, nothing
     that places the block): the focal length is held for want of a covariance, and the radial terms are then
@@ -1289,8 +1317,12 @@ def test_a_sensor_keeps_the_focal_length_its_photos_state(tmp_path):
     doc.save(tmp_path / "priors.ppg")
     again = ppg.Document.open(tmp_path / "priors.ppg").chunk.sensors[stated.key]
     assert again.focal_prior == 1000.0 and again.params[0] == 2430.4 and again.focal_source == "exif"
-    older = {k: v for k, v in stated.to_dict().items() if k != "focal_prior"}
-    assert Sensor.from_dict(older).focal_prior is None
+    older = {k: v for k, v in stated.to_dict().items() if k not in ("focal_prior", "focal_target")}
+    assert Sensor.from_dict(older).focal_prior is None and Sensor.from_dict(older).focal_target is None
+    # where the optimisation last held a focal length the block does not determine: kept as well
+    assert stated.focal_target is None and again.focal_target is None
+    again.focal_target = 1009.7
+    assert Sensor.from_dict(again.to_dict()).focal_target == 1009.7
 
 
 def test_the_lens_prior_of_a_sensor():
@@ -1318,16 +1350,18 @@ def test_the_lens_prior_of_a_sensor():
 def _slide_along_the_valley(ch, factor: float) -> None:
     """``ch`` (the nadir block of :func:`_block`) as an alignment that slid along the valley of a flat nadir block
     leaves it: the focal length ``factor`` times longer, the cameras as many times higher above the ground, the
-    radial terms by its square and its fourth power - the same photos, the same ground. The model on disk, the
+    radial terms by its square and its fourth power - the same photos, the same ground (the relief of the block,
+    3 dm, is all that tells the two apart: 0.77 px of mean reprojection error for 0.63). The model on disk, the
     chunk and its georeference follow."""
     rec = sfm.load_reconstruction(ch)
+    ground = float(np.mean([point.xyz[2] for point in rec.points3D.values()]))  # the ground of the model: level
     for cam in rec.cameras.values():
         f, _fy, cx, cy, k1, k2, p1, p2 = cam.params
         cam.params = [f * factor, f * factor, cx, cy, k1 * factor ** 2, k2 * factor ** 4, p1 * factor, p2 * factor]
     for image in rec.images.values():
         r = np.asarray(image.cam_from_world().matrix())[:3, :3]
         c = -r.T @ np.asarray(image.cam_from_world().matrix())[:3, 3]
-        c = c - (factor - 1.0) * c[2] * r[2] / r[2][2]  # along its axis, to factor times its height
+        c = c - (factor - 1.0) * (ground - c[2]) / r[2][2] * r[2]  # back along its axis, factor times as far
         rec.frames[image.frame_id].set_cam_from_world(image.camera_id,
                                                       pycolmap.Rigid3d(pycolmap.Rotation3d(r), -r @ c))
     rec.write(str(ch.product_path("reconstruction")))
@@ -1341,33 +1375,72 @@ def _heights(ch) -> np.ndarray:
     return np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras]) - ground
 
 
+def test_the_target_between_the_estimate_of_the_block_and_the_lens_prior():
+    """``sfm.lens_target``: where a focal length the block does not determine is held (ruling R26) - between what
+    the alignment estimated, with its marginal sd, and the lens prior, whose sd is 2 % of it (the focal lengths
+    of the EXIF are rounded, crop factors vary), each weighed by the inverse of its variance. A block that hardly
+    knows its focal length ends at the prior; one that nearly determines it stays near its estimate, whatever the
+    photos state."""
+    assert sfm.LENS_PRIOR_SD == 0.02
+    near = sfm.lens_target(1000.0, 0.006, 1030.0)  # sd 6 px against 20.6 px
+    assert near == pytest.approx((1000.0 / 6.0 ** 2 + 1030.0 / 20.6 ** 2) / (1.0 / 6.0 ** 2 + 1.0 / 20.6 ** 2))
+    assert 1002.0 < near < 1003.0
+    # a ring flown once, as COLMAP's mapper left it twice: an sd of 161 px, and of 254 px
+    assert sfm.lens_target(747.28, 0.2153, 1000.0) == pytest.approx(996.15, abs=0.05)
+    assert sfm.lens_target(3909.22, 0.0649, 1000.0) == pytest.approx(1018.0, abs=0.1)
+    for sd in (None, float("inf"), float("nan")):  # nothing known of the estimate: the prior itself
+        assert sfm.lens_target(3909.2, sd, 1000.0) == 1000.0
+    assert sfm.lens_target(1000.0, 0.0, 1030.0) == 1000.0  # an estimate without error: itself
+    assert sfm.lens_target(1000.0, 0.02, 1000.0) == 1000.0
+
+
 @needs_core
 @pytest.mark.parametrize("engine", ENGINES)
-def test_an_undetermined_focal_length_is_held_at_the_lens_prior(tmp_path, engine):
-    """A block that does not determine its focal length keeps the one its photos state, not the one a free
-    alignment left (ruling R24). The nadir grid slid along its valley - the focal length 1.3 times too long, the
-    cameras 12 m too high: the optimisation walks the focal length back to the lens prior in steps of a tenth at
-    most, the block adjusted again at each with its calibration held, then holds it there and goes on as on a
-    block that was never off. Without a prior (a focal length that was guessed, or given by hand) the focal
-    length stays where the alignment left it, as before."""
+def test_an_undetermined_focal_length_is_held_between_its_estimate_and_the_lens_prior(tmp_path, engine):
+    """A block that does not determine its focal length is not held where a free alignment left it (rulings R24,
+    R26). The nadir grid slid along its valley - the focal length 1.3 times too long, the cameras 12 m too high:
+    its estimate is worth next to nothing (an sd of 92 % of the focal length and more) and the target is the
+    focal length the photos state, to a tenth of a pixel. The optimisation walks the focal length there in steps
+    of a tenth at most, the block adjusted again at each with its calibration held, then holds it and goes on as
+    on a block that was never off; the record has the estimate, its sd, the prior and the target. A second
+    optimisation finds the focal length at its target and leaves it. Without a prior (a focal length that was
+    guessed, or given by hand) it stays where the alignment left it, as before."""
     _doc, ch = _block(tmp_path / "prior")
     _slide_along_the_valley(ch, 1.3)
     assert _calibration(ch)[0][0] == pytest.approx(1.3 * F) and _heights(ch).mean() == pytest.approx(52.0, abs=0.5)
+    slid = sfm.load_reconstruction(ch)
+    slid.update_point_3d_errors()
+    assert slid.compute_mean_reprojection_error() < 1.0  # the same photos and the same ground: still a fit
+    assert np.mean([image.cam_from_world().inverse().translation[2] for image in slid.images.values()]) > 50  # m
     ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", F
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
     after = _calibration(ch)[0]
-    assert after[0] == F and after[1] == F  # exactly the prior
-    assert check["lens_prior"] == [[0, pytest.approx(1.3 * F), F, 3]]
-    assert check["notes"][0].startswith("sensor 0: focal walked to the lens prior: 1300.00 -> 1000.00 px in 3 steps "
-                                        "(reprojection ")
+    walked, = check["lens_prior"]
+    assert set(walked) == {"sensor", "estimate", "sd", "prior", "prior_sd", "target", "steps"}
+    assert (walked["sensor"], walked["prior"], walked["prior_sd"], walked["steps"]) == (0, F, 0.02, 3)
+    # the sd of the grid as it was slid: 92 % with COLMAP's formulation, a few hundred times the focal with ours
+    assert walked["estimate"] == pytest.approx(1.3 * F) and walked["sd"] > 0.5
+    target = sfm.lens_target(walked["estimate"], walked["sd"], F)
+    assert walked["target"] == pytest.approx(target, rel=1e-12) and F <= target < F + 0.2
+    assert after[0] == pytest.approx(target, rel=1e-12) and after[1] == after[0]
+    assert ch.sensors[0].focal_target == pytest.approx(target, rel=1e-12)
+    assert check["notes"][0].startswith(
+        f"sensor 0: focal walked to {target:.2f} px, between its estimate 1300.00 px (sd {100 * walked['sd']:.2f} %) "
+        "and the lens prior 1000.00 px (sd 2.00 %), in 3 steps (reprojection ")
     assert check["held"] == {**NOTHING_HELD, "focal": [0], "radial": [0]}  # judged again where the block now is
     assert check["notes"][1].startswith("sensor 0: focal held: undetermined, sd ")
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
-    assert after[4] == pytest.approx(K1, rel=1e-6) and after[5] == pytest.approx(K2, rel=1e-6)  # carried back
+    scale = target / F  # the radial terms carried back along the valley
+    assert after[4] == pytest.approx(K1 * scale ** 2, rel=1e-6)
+    assert after[5] == pytest.approx(K2 * scale ** 4, rel=1e-6)
     assert _heights(ch).mean() == pytest.approx(40.0, abs=0.2)
     assert rep["control_points"] == 4 and rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.013
+    ch.optimize_cameras(engine=engine)  # again: the focal length is where it was put
+    again = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert again["lens_prior"] == [] and again["held"]["focal"] == [0]
+    assert _calibration(ch)[0][0] == pytest.approx(target, rel=1e-12)
 
     _doc, ch = _block(tmp_path / "guessed")
     _slide_along_the_valley(ch, 1.3)
@@ -1377,6 +1450,42 @@ def test_an_undetermined_focal_length_is_held_at_the_lens_prior(tmp_path, engine
         check = ch.meta["sfm"]["optimize"]["intrinsics"]
         assert check["lens_prior"] == [] and check["held"]["focal"] == [0]
         assert _calibration(ch)[0][0] == pytest.approx(1.3 * F, rel=1e-9)  # where the alignment left it
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_focal_length_the_block_nearly_determines_stays_near_its_estimate(tmp_path, engine):
+    """The other end of ruling R26: a grid pitched a little knows its focal length to 0.6 or 0.7 % - beyond the
+    limit, so it is not refined - and its photos state one 3 % too long (a rounded EXIF). The estimate of the
+    block weighs ten times the prior: the focal length is held 0.3 % from where the alignment left it, not 3 %
+    off at the value of the photos, the record says what was weighed, and the block ends as the same block does
+    when its photos state the focal length of the alignment - its cameras a decimetre higher, where the value of
+    the photos would have put them more than a metre off."""
+    _doc, same = _block(tmp_path / "same", pitch=0.12)
+    same.sensors[0].focal_source, same.sensors[0].focal_prior = "exif", F
+    same.optimize_cameras(engine=engine)
+    plain = same.meta["sfm"]["optimize"]
+    assert plain["intrinsics"]["lens_prior"] == [] and _calibration(same)[0][0] == F  # at its target already
+    _doc, ch = _block(tmp_path / "long", pitch=0.12)
+    assert _calibration(ch)[0][0] == F  # the alignment has the true focal length
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", 1.03 * F
+    ch.optimize_cameras(engine=engine)
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    walked, = check["lens_prior"]
+    assert walked["estimate"] == F and walked["prior"] == 1.03 * F and walked["steps"] == 1
+    assert bundle.FOCAL_SD_HOLD < walked["sd"] < 0.008  # 0.63 % (COLMAP's formulation), 0.68 % (ours)
+    target = sfm.lens_target(F, walked["sd"], 1.03 * F)
+    assert walked["target"] == pytest.approx(target, rel=1e-12)
+    assert F + 1.0 < target < F + 4.0  # 2.5 and 2.9 px: a tenth of the way to the prior
+    assert _calibration(ch)[0][0] == pytest.approx(target, rel=1e-12)
+    assert check["held"]["focal"] == [0] and rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    assert check["notes"][0].startswith(
+        f"sensor 0: focal walked to {target:.2f} px, between its estimate 1000.00 px (sd {100 * walked['sd']:.2f} %) "
+        "and the lens prior 1030.00 px (sd 2.00 %), in 1 steps (reprojection ")
+    assert abs(_heights(ch).mean() - _heights(same).mean()) < 0.15  # 0.10 and 0.12 m; 1.17 m at the prior
+    for kind in ("control", "check"):  # 2.8 against 2.9 mm, 24.0 against 25.0 mm
+        assert rep["after"][kind] == pytest.approx(plain["after"][kind], rel=0.1)
 
 
 @needs_core
@@ -1393,10 +1502,14 @@ def test_a_focal_length_the_block_determines_is_not_brought_to_the_prior(tmp_pat
 
 
 @needs_core
-def test_a_block_nothing_places_keeps_the_focal_length_of_its_lens(tmp_path):
-    """Our adjustment of a block that nothing places holds its focal length, which cannot be told from the depth:
-    at the lens prior too, when the alignment left it elsewhere."""
-    _doc, ch = _block(tmp_path)
+def test_a_block_nothing_places_weighs_its_focal_length_against_the_lens_as_any_other(tmp_path):
+    """Our adjustment of a block that nothing places holds its focal length, which it cannot tell from the depth
+    as it is asked there: no verdict on the block. What the block knows of its focal length is asked apart - the
+    sd it has with the focal length free - and weighed against the lens prior as anywhere else (ruling R26): the
+    nadir grid slid along its valley ends at the focal length its photos state; pitched photos, which know their
+    focal length to 0.7 % by their tie points alone, stay a third of a per cent from the one of the alignment
+    when their photos state one 3 % longer."""
+    _doc, ch = _block(tmp_path / "nadir")
     _slide_along_the_valley(ch, 1.3)
     for marker in ch.markers:
         marker.reference.enabled = False
@@ -1406,8 +1519,30 @@ def test_a_block_nothing_places_keeps_the_focal_length_of_its_lens(tmp_path):
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
     assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
-    assert rep["intrinsics"]["lens_prior"] == [[0, pytest.approx(1.3 * F), F, 3]]
-    assert _calibration(ch)[0][:2] == [F, F]
+    walked, = rep["intrinsics"]["lens_prior"]
+    assert (walked["sensor"], walked["prior"], walked["prior_sd"], walked["steps"]) == (0, F, 0.02, 3)
+    assert walked["estimate"] == pytest.approx(1.3 * F)
+    assert walked["sd"] is None or walked["sd"] > 1.0  # no covariance, or an sd of hundreds of times the focal
+    target = sfm.lens_target(walked["estimate"], walked["sd"], F)
+    assert walked["target"] == pytest.approx(target, rel=1e-12) and F <= target < F + 0.1
+    assert _calibration(ch)[0][:2] == [pytest.approx(target, rel=1e-12)] * 2
+
+    _doc, ch = _block(tmp_path / "pitched", pitch=PITCH)
+    for marker in ch.markers:
+        marker.reference.enabled = False
+    for cam in ch.cameras:
+        cam.reference.enabled = False
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", 1.03 * F
+    assert _calibration(ch)[0][0] == F
+    ch.optimize_cameras(engine="ppg")
+    rep = ch.meta["sfm"]["optimize"]
+    assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
+    walked, = rep["intrinsics"]["lens_prior"]
+    assert walked["estimate"] == F and walked["prior"] == 1.03 * F and walked["steps"] == 1
+    assert 0.005 < walked["sd"] < 0.009  # 0.71 %
+    target = sfm.lens_target(F, walked["sd"], 1.03 * F)
+    assert walked["target"] == pytest.approx(target, rel=1e-12) and F + 2.0 < target < F + 5.0  # 3.2 px of 30
+    assert _calibration(ch)[0][:2] == [pytest.approx(target, rel=1e-12)] * 2
 
 
 # ------------------------------------------------------------------- the option, at every door
@@ -1551,14 +1686,15 @@ def test_the_dialog_offers_the_choice_and_the_window_says_what_was_held(tmp_path
         assert [others in line for line in said] == [True, False, True]
         assert not any(line.count("focale dell'allineamento tenuta") > 1 for line in said)
         assert not any("valore dichiarato dalle foto" in line for line in said)
-        # a focal length walked back to the one the photos state: said as such, with its value
-        walked.append([0, 2430.4, 1000.0, 10])
+        # a focal length walked towards the one the photos state: said as such, with the three values
+        walked.append({"sensor": 0, "estimate": 2430.4, "sd": 0.1, "prior": 1000.0, "prior_sd": 0.02,
+                       "target": 1009.7, "steps": 10})
         w.optimize_cameras()
         w.runner.wait()
         app.processEvents()
         last = [e[2] for e in w.log_pane.entries if "Errore di riproiezione" in e[2]][-1]
-        assert ("focale riportata al valore dichiarato dalle foto (1000 px) e tenuta: il blocco non la determina "
-                "(1 sensori su 1)") in last
+        assert ("focale portata a 1010 px, tra la stima dell'allineamento (2430 px) e il valore dichiarato dalle "
+                "foto (1000 px), e tenuta: il blocco non la determina (1 sensori su 1)") in last
         assert "focale dell'allineamento tenuta" not in last and others in last
     finally:
         w.setWindowModified(False)
@@ -1782,11 +1918,12 @@ def classic_ring(tmp_path_factory):
 @pytest.mark.slow
 @pytest.mark.parametrize("run", [1, 2, 3])
 def test_the_classic_weak_ring_meets_the_lines_of_the_gate(classic_ring, tmp_path, run):
-    """The classic chain on the weak ring (ruling R24): COLMAP's incremental mapper refines the focal length of a
-    block that does not determine it and leaves it anywhere along its valley (750 to 3900 px for a lens of 1000,
-    another place each time). The optimisation judges it undetermined, walks it back to the focal length the
-    photos state and holds it there: the control targets end within ``WEAK_RING_GATE["control_m"]`` and the check
-    targets within ``WEAK_RING_GATE["check_m"]``, whatever the alignment left - where the focal length held as the
+    """The classic chain on the weak ring (rulings R24 and R26): COLMAP's incremental mapper refines the focal
+    length of a block that does not determine it and leaves it anywhere along its valley (750 to 3900 px for a
+    lens of 1000, another place each time). The optimisation judges it undetermined, walks it back to within two
+    per cent of the focal length the photos state - the estimate of such a block weighs little beside the prior -
+    and holds it there: the control targets end within ``WEAK_RING_GATE["control_m"]`` and the check targets
+    within ``WEAK_RING_GATE["check_m"]``, whatever the alignment left - where the focal length held as the
     alignment left it gave 3 to 24 mm and 20 to 230 mm."""
     from pyarchinit_photogrammetry.bench import steps, truth
     from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
@@ -1806,11 +1943,14 @@ def test_the_classic_weak_ring_meets_the_lines_of_the_gate(classic_ring, tmp_pat
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
     assert rep["engine_choice"]["used"] == "colmap" and check["held"]["focal"] == [sensor.key]
-    if abs(left / 1000.0 - 1.0) > 1e-6:  # the mapper never leaves it at the prior: measured 716 to 3909 px
-        assert check["lens_prior"] == [[sensor.key, pytest.approx(left), 1000.0, check["lens_prior"][0][3]]]
-        assert check["notes"][0].startswith(f"sensor {sensor.key}: focal walked to the lens prior: {left:.2f} -> "
-                                            "1000.00 px in ")
-    assert sensor.params[0] == 1000.0
+    walked, = check["lens_prior"]  # the mapper never leaves it at the prior: measured 716 to 3909 px
+    assert walked["sensor"] == sensor.key and walked["estimate"] == pytest.approx(left) and walked["prior"] == 1000.0
+    target = sfm.lens_target(left, walked["sd"], 1000.0)
+    assert walked["target"] == pytest.approx(target, rel=1e-12) and walked["sd"] > 0.03
+    assert abs(target / 1000.0 - 1.0) < 0.05  # 996 to 1018 px measured: the further the estimate, the more is left
+    assert check["notes"][0].startswith(f"sensor {sensor.key}: focal walked to {target:.2f} px, between its "
+                                        f"estimate {left:.2f} px (sd ")
+    assert sensor.params[0] == pytest.approx(target, rel=1e-12)
     errors = _marker_rmse(ch)
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.2 to 1.5 mm measured
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 3.5 to 3.7 mm measured
