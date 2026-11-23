@@ -1493,24 +1493,74 @@ def _on_plane(entry: dict):
 
 
 PLACE_STEP = 0.02  # m: the least step a drawing of a wall path is densified to before it is placed on the surface
+PLACE_GAP = 0.25  # m: a hole in the relief up to this wide along u is bridged by the depths either side of it
+
+
+def _relief_sampler(chunk: Chunk, entry: dict):
+    """The function ``uv (N, 2) -> d (N,)`` that reads the relief of ``entry`` at each ``(u, v)`` (the cell that holds
+    it, as ``rasterio`` samples), the file read once, when first asked. Where a cell has no value, ``d`` is
+    interpolated along ``u`` between the nearest cells of its row that have one, when there is one on both sides
+    within :data:`PLACE_GAP` (a hole in the model, a corner the photos missed); else NaN (above the wall, past its
+    ends, no relief)."""
+    held = {}
+
+    def read():
+        if "band" not in held:
+            import rasterio
+
+            relief = elevation_paths(chunk, entry)[1]
+            held["band"] = None
+            if relief.exists():
+                with rasterio.open(relief) as src:
+                    band = src.read(1).astype(np.float64)
+                    if src.nodata is not None and np.isfinite(src.nodata):
+                        band[band == src.nodata] = np.nan
+                    held["band"], held["t"] = band, src.transform
+        return held["band"], held.get("t")
+
+    def sample(uv):
+        uv = np.asarray(uv, np.float64).reshape(-1, 2)
+        out = np.full(len(uv), np.nan)
+        band, t = read()
+        if band is None or not len(uv):
+            return out
+        h, w = band.shape
+        col = np.floor((uv[:, 0] - t.c) / t.a).astype(np.int64)
+        row = np.floor((uv[:, 1] - t.f) / t.e).astype(np.int64)
+        inside = (col >= 0) & (col < w) & (row >= 0) & (row < h)
+        out[inside] = band[row[inside], col[inside]]
+        reach = max(3, int(np.ceil(PLACE_GAP / abs(t.a))))
+        for i in np.nonzero(inside & ~np.isfinite(out))[0]:
+            r, c = row[i], col[i]
+            left = band[r, max(0, c - reach):c][::-1]
+            right = band[r, c + 1:c + 1 + reach]
+            kl, kr = np.flatnonzero(np.isfinite(left)), np.flatnonzero(np.isfinite(right))
+            if not len(kl) or not len(kr):
+                continue
+            ul = t.c + (c - kl[0] - 0.5) * t.a  # the centres of the two cells either side
+            ur = t.c + (c + 1 + kr[0] + 0.5) * t.a
+            out[i] = np.interp(uv[i, 0], [ul, ur], [left[kl[0]], right[kr[0]]])
+        return out
+
+    return sample
 
 
 def _placer(chunk: Chunk, entry: dict):
     """The function that places a ``(u, v)`` geometry of the elevation ``entry`` in 3D world coordinates: on a wall
     path, the geometry densified (every ``max(2 resolution, PLACE_STEP)`` metres) and each vertex at the depth of
-    the relief there - on the face of the wall, also round its corners - or on the line (``d`` = 0) where the relief
-    has none; on a plane or a cylinder, the vertices as drawn on it (``d`` = 0, :func:`_on_plane`)."""
+    the relief there (:func:`_relief_sampler`: a narrow hole bridged) - on the face of the wall, also round its
+    corners - or on the line (``d`` = 0) where the relief has none; the relief is read once for all the geometries
+    the function places; on a plane or a cylinder, the vertices as drawn on it (``d`` = 0, :func:`_on_plane`)."""
     import shapely
 
     frame = frame_from_dict(entry["frame"])
     if frame.kind != "path":
         return _on_plane(entry)
-    from .elevation_drawings import surface_depths
-
     step = max(2.0 * float(entry.get("resolution") or 0.0), PLACE_STEP)
+    depths = _relief_sampler(chunk, entry)
 
     def on_surface(c):
-        d = surface_depths(chunk, entry, c[:, :2])
+        d = depths(c[:, :2])
         return frame.point(c[:, 0], c[:, 1], np.where(np.isfinite(d), d, 0.0))
 
     def place(geom):
@@ -1535,8 +1585,8 @@ def world_tables(chunk: Chunk, entry: dict, data: dict | None = None, trace: boo
     ``profilo`` (LINESTRING) - written with Z by :func:`write_world_tables` (the GeoPackage of the export, the live
     GeoPackage of QGIS and RustGIS). On a wall path "on the plane" is on the surface of the wall (:func:`_placer`).
     ``trace``: also ``traccia`` (LINESTRING), the trace of the elevation on the plan at its middle height
-    (:func:`..io.site_sections.trace`; none for a plane that lies down), with ``nome`` (the elevation's name),
-    ``prospetto`` (its id) and ``tipo`` (the kind of its frame)."""
+    (:func:`..io.site_sections.trace`; none for a plane that lies down), with ``nome`` and ``prospetto`` (the
+    elevation's name), ``prospetto_id`` (its id) and ``tipo`` (the kind of its frame), as in :func:`trace_layer`."""
     from shapely.geometry import LineString, MultiPolygon, Point
 
     items = _drawing_items(chunk, entry, data)
@@ -1574,9 +1624,11 @@ def world_tables(chunk: Chunk, entry: dict, data: dict | None = None, trace: boo
 
         g = site_sections.trace(entry, bounds_of(chunk, entry), z=True)
         rows = [] if g is None or g["type"] != "LineString" else \
-            [(LineString(g["coordinates"]), {"nome": entry.get("name"), "prospetto": entry["id"],
+            [(LineString(g["coordinates"]), {"nome": entry.get("name"), "prospetto": entry.get("name"),
+                                             "prospetto_id": entry["id"],
                                              "tipo": frame_from_dict(entry["frame"]).kind})]
-        out["traccia"] = ("LINESTRING", {"nome": "TEXT", "prospetto": "TEXT", "tipo": "TEXT"}, rows)
+        out["traccia"] = ("LINESTRING", {"nome": "TEXT", "prospetto": "TEXT", "prospetto_id": "TEXT", "tipo": "TEXT"},
+                          rows)
     return out
 
 

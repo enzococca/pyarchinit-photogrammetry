@@ -210,25 +210,36 @@ def give_frame(chunk, eid: str, data: dict | None) -> None:
 
 
 # ---------------------------------------------------------------- the drawings of one elevation on another
-def _carry(source: dict, target: dict, uv, depths) -> np.ndarray:
+LAND_TOLERANCE = 0.05  # m, the least: how far from the surface of a wall path a drawing given to it may land
+
+
+def _carry(chunk, source: dict, target: dict, uv, depths) -> np.ndarray:
     """``(u, v)`` of ``source`` to ``(u, v)`` of ``target`` through their world point at ``depths``; NaN where the
-    world point is not on the frame of ``target`` - and, for a wall path, where it lies outside the depth band of
-    that elevation (in front of or behind the wall, off it)."""
+    world point does not land on ``target`` (:func:`_landed`)."""
     uv = np.asarray(uv, np.float64).reshape(-1, 2)
     if not len(uv):
         return uv
-    return _landed(target, uv_of(target, world_of_uv(source, uv, depths)))
+    return _landed(chunk, target, uv_of(target, world_of_uv(source, uv, depths)))
 
 
-def _landed(target: dict, uvd: np.ndarray) -> np.ndarray:
-    """``(u, v)`` of ``uvd`` ``(N, 3)`` on the elevation ``target``, NaN for the rows that do not land on it (see
-    :func:`_carry`)."""
+def _landed(chunk, target: dict, uvd: np.ndarray) -> np.ndarray:
+    """``(u, v)`` of ``uvd`` ``(N, 3)`` on the elevation ``target``, NaN for the rows that do not land on it: off its
+    frame; for a wall path also outside its depth band, or farther than ``max(3 resolution, LAND_TOLERANCE)`` from
+    its surface there (from its line where the relief has no value) - a point 8 m in front of a corner is on the
+    frame of a wall path, not on the wall."""
     uvd = np.asarray(uvd, np.float64).reshape(-1, 3)
     out = uvd[:, :2].copy()
-    if target["frame"].get("kind") == "path" and target.get("depth"):
+    if target["frame"].get("kind") != "path":
+        return out
+    ok = np.isfinite(uvd).all(axis=1)
+    if target.get("depth"):
         lo, hi = (float(x) for x in target["depth"])
-        with np.errstate(invalid="ignore"):
-            out[~((uvd[:, 2] >= lo - 1e-9) & (uvd[:, 2] <= hi + 1e-9))] = np.nan
+        ok[ok] = (uvd[ok, 2] >= lo - 1e-9) & (uvd[ok, 2] <= hi + 1e-9)
+    if ok.any():
+        tol = max(3.0 * float(target.get("resolution") or 0.0), LAND_TOLERANCE)
+        surface = surface_depths(chunk, target, uvd[ok, :2])
+        ok[ok] = np.abs(uvd[ok, 2] - np.where(np.isfinite(surface), surface, 0.0)) <= tol
+    out[~ok] = np.nan
     return out
 
 
@@ -260,7 +271,7 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
     def move(uv):
         uv = np.asarray(uv, np.float64).reshape(-1, 2)
         d = surface_depths(chunk, a, uv) if surface else np.full(len(uv), np.nan)
-        return _carry(a, b, uv, np.where(np.isfinite(d), d, 0.0))
+        return _carry(chunk, a, b, uv, np.where(np.isfinite(d), d, 0.0))
 
     off = {k: 0 for k in KINDS}
 
@@ -298,7 +309,7 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
                 continue
             if "x" in rec and "y" in rec and rec.get(height) not in (None, ""):
                 world = np.array([[float(rec["x"]), float(rec["y"]), float(rec[height])]])
-                uv = _landed(b, uv_of(b, world))[0]
+                uv = _landed(chunk, b, uv_of(b, world))[0]
             else:
                 uv = move([[rec["u"], rec["v"]]])[0]
             if not np.isfinite(uv).all():
@@ -334,9 +345,9 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
             continue
         out["stones"].append(geom.wkt)
     if any(off.values()):
-        log.warning("Drawings of the elevation %s that fall off the elevation %s stay where they are: %s",
+        log.warning("Disegni del prospetto %s che cadono fuori dal prospetto %s: restano dove sono (%s)",
                     a.get("name") or source, b.get("name") or target,
-                    ", ".join(f"{n} {k}" for k, n in off.items() if n))
+                    ", ".join(f"{n} {_KIND_WORDS[k]}" for k, n in off.items() if n))
     frames = _frames(chunk, create=True)
     dest = frames.setdefault(target, {"units": [], "quote": []})
     for key in ("units", "quote", "points", "lines"):
@@ -363,6 +374,9 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
                 else:
                     stones.pop(source)
     return done
+
+
+_KIND_WORDS = {"units": "unità", "quote": "quote", "points": "punti", "lines": "linee", "stones": "pietre"}
 
 
 class _OffTarget(Exception):

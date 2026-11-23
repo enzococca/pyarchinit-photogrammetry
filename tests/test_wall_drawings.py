@@ -186,7 +186,8 @@ def test_the_exported_world_geopackage_has_the_trace(built, tmp_path):
     out = E.export_drawings(ch, entry, tmp_path, dxf_3d=False)
     assert out["gpkg_world"].name.endswith("_disegni_mondo.gpkg")
     (row,) = gpkg.read_table(out["gpkg_world"], "traccia")
-    assert row[1]["nome"] == entry["name"] and row[1]["prospetto"] == entry["id"] and row[1]["tipo"] == "path"
+    assert row[1]["nome"] == entry["name"] and row[1]["prospetto"] == entry["name"] and row[1]["tipo"] == "path"
+    assert row[1]["prospetto_id"] == entry["id"]
     assert row[0].geom_type == "LineString"
     assert distance_to(info["face"], np.asarray(row[0].coords)[:, :2]).max() < 0.01
     tables = E.world_tables(ch, entry, trace=True)
@@ -206,7 +207,7 @@ def test_a_transfer_keeps_what_falls_off_the_wall(built, caplog):
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         done = D.transfer(ch, plane["id"], entry["id"])
     assert done["units"] == 1
-    assert any("fall off" in r.getMessage() for r in caplog.records)
+    assert any("cadono fuori" in r.getMessage() for r in caplog.records)
     (moved,) = D.drawings(ch, entry["id"])["units"]
     assert moved["us"] == "1"
     # the same world place: the plane's point on its surface, the path's on its own
@@ -221,3 +222,57 @@ def test_a_transfer_keeps_what_falls_off_the_wall(built, caplog):
     assert done["units"] == 1
     left = D.drawings(ch, plane["id"])["units"]
     assert [u["us"] for u in left] == ["2"]                                      # what fell off stays where it is
+
+
+def _copy_entry(ch, entry, eid, **changes):
+    """Another record of the same elevation (its files shared), with ``changes``."""
+    other = {**entry, "id": eid, **changes}
+    ch.meta["elevations"].append(other)
+    return other
+
+
+def test_a_corner_without_relief_takes_the_depth_of_its_neighbours(built, tmp_path):
+    import rasterio
+
+    ch, info, entry = built
+    _ortho, relief = E.elevation_paths(ch, entry)
+    with rasterio.open(relief) as src:
+        band, profile = src.read(1), src.profile
+        t = src.transform
+    col = int((6.0 - t.c) / t.a)
+    band[:, col - 2:col + 3] = np.nan                                            # five columns round the corner
+    holed = tmp_path / "relief_holed.tif"
+    with rasterio.open(holed, "w", **profile) as dst:
+        dst.write(band, 1)
+    other = _copy_entry(ch, entry, "buco", relief=str(holed))                   # an absolute path: data_dir / it
+    data = {"units": [unit_box(5.8, 100.5, 6.2, 101.0).to_dict()], "quote": []}
+    (geom, _v), = E.world_tables(ch, other, data)["unita"][2]
+    xyz = np.asarray(geom.geoms[0].exterior.coords)
+    assert distance_to(info["face"], xyz[:, :2]).max() <= RES + 1e-3
+
+
+def _plane_entry(ch, info, eid, offset):
+    """A plane of the first leg ``offset`` metres in front of its face, its relief 0 everywhere."""
+    sx, sy = info["shift"][:2]
+    plane = E.Plane(np.array([sx, sy - offset, 0.0]), [1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+    return _hand_entry(ch, eid, plane, (0.0, 99.0, 16.0, 102.0), depth=0.0)
+
+
+def test_a_wide_band_does_not_take_what_stands_off_the_wall(built):
+    ch, info, entry = built
+    wide = _copy_entry(ch, entry, "largo", depth=[-10.0, 10.0])             # as with depth=None on a big model
+    on_line = _plane_entry(ch, info, "sul_muro", 0.0)
+    add_units(ch, "sul_muro", [unit_box(2.0, 100.6, 2.5, 101.0, us="a"), unit_box(14.0, 100.6, 14.5, 101.0, us="b"),
+                               unit_box(-0.4, 100.6, -0.1, 101.0, us="c")])   # c: just before the start of the path
+    assert D.transfer(ch, "sul_muro", "largo")["units"] == 2
+    moved = {u["us"]: u for u in D.drawings(ch, "largo")["units"]}
+    assert sorted(moved) == ["a", "c"]
+    src = np.asarray(unit_box(-0.4, 100.6, -0.1, 101.0).geometry.exterior.coords)
+    dst = np.asarray(moved["c"]["geometry"].exterior.coords)
+    assert np.abs(D.world_of_uv(on_line, src) - D.world_of_uv(wide, dst)).max() < 0.01
+    _plane_entry(ch, info, "vicino", 0.04)                                       # the tolerance: 5 cm at 1 cm
+    _plane_entry(ch, info, "lontano", 0.07)
+    add_units(ch, "vicino", [unit_box(2.0, 100.6, 2.5, 101.0)])
+    add_units(ch, "lontano", [unit_box(2.0, 100.6, 2.5, 101.0)])
+    assert D.transfer(ch, "vicino", "largo")["units"] == 1
+    assert D.transfer(ch, "lontano", "largo")["units"] == 0
