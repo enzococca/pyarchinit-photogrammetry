@@ -439,13 +439,17 @@ def _running_step(data: dict | None) -> str | None:
     return last.get("step") if isinstance(last, dict) and last.get("end") is None else None
 
 
+# the settings of the child that hold the text of an exception (why a mapper handed the alignment on): scrubbed
+FALLBACK_SETTINGS = ("native_fallback", "global_fallback")
+
+
 def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: float, code: int | None = None,
              cancelled: bool = False) -> list[str]:
     """The steps, the settings, the results and the error of the record from what the child wrote. A step the child
     did not end (it died in it, or was cancelled) gets the seconds up to ``ended`` and says so; a child that ended
     without finishing the chain and without an error gives ``<step>: child ended with code N``. The texts of the
-    exceptions the child wrote are scrubbed of paths, photo names, CRS codes and coordinates; the texts of the runner
-    itself (the codes, ``cancelled``) are not. Returned: the warnings the child wrote (``warnings`` of its result;
+    exceptions the child wrote (its errors and the fallback reasons among its settings) are scrubbed of paths, photo
+    names, CRS codes and coordinates; the texts of the runner itself (the codes, ``cancelled``) are not. Returned: the warnings the child wrote (``warnings`` of its result;
     none from the child of the steps, those of ``ppg bench adjust``), scrubbed the same way, for :func:`_finish`:
     the judge of a record resets its warnings, so they are added after it."""
     data = _read(work / child.RESULT) or {}
@@ -477,7 +481,11 @@ def _collect(rec: dict, work: Path, peaks: dict[str, int], plan: _Plan, ended: f
         where = running or (steps[-1]["step"] if steps else "setup")
         error = f"{where}: child ended with code {code}"
     rec["steps"] = steps
-    rec["settings"].update(data.get("settings") or {})
+    settings = dict(data.get("settings") or {})
+    for key in FALLBACK_SETTINGS:  # the reasons are texts of exceptions: they may name a photo or a path
+        if isinstance(settings.get(key), str):
+            settings[key] = scrubbed(settings[key])
+    rec["settings"].update(settings)
     rec["results"] = dict(data.get("results") or {})
     rec["error"] = error
     return [scrubbed(w) for w in data.get("warnings") or []]

@@ -1750,3 +1750,27 @@ def test_matches_from_compares_the_kept_photos_with_the_local_ones(tmp_path, mon
         runner.check(tmp_path / "o", "t", photos=photos, matches_from=kept)
     assert online.stem not in str(refused.value) and str(tmp_path) not in str(refused.value)
     assert not stand_in.calls
+
+
+def test_the_fallback_reasons_in_the_settings_are_scrubbed(tmp_path):
+    """The reasons the native mapper or the global mapper handed the alignment on are texts of exceptions: a photo
+    name or a path in them never reaches the record's settings."""
+    work = tmp_path / "out" / "t-1"
+    work.mkdir(parents=True)
+    private = tmp_path / "Scavo Nord"
+    result = {"done": True, "steps": [], "results": {},
+              "settings": {"native_fallback": f"native mapper failed: RuntimeError: IMG_0042.JPG has no pose "
+                                              f"under {private / 'photos'}",
+                           "global_fallback": f"global mapper failed: cannot read {private / 'IMG_0007.JPG'}",
+                           "mapper": "incremental"}}
+    (work / runner.child.RESULT).write_text(json.dumps(result), encoding="utf-8")
+    plan = runner._Plan(name="t", steps="align", mapper="auto", engine="auto", local=(), out=tmp_path / "out",
+                        records=tmp_path / "out", keep=False, env={}, disk={}, set={}, settings={},
+                        private=(private,), names=("IMG_0042.JPG", "IMG_0007.JPG"), extra_results=None,
+                        targets=None, reference=None, crs=None)
+    r = rec()
+    runner._collect(r, work, {}, plan, ended=0.0, code=0)
+    text = json.dumps(r["settings"])
+    assert "IMG_00" not in text and "Scavo" not in text and str(tmp_path) not in text
+    assert r["settings"]["native_fallback"].startswith("native mapper failed: RuntimeError: <photo> has no pose")
+    assert r["settings"]["mapper"] == "incremental"
