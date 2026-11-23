@@ -709,28 +709,51 @@ covariance of the adjustment at the alignment - every intrinsic the options free
 the principal point with `fit_principal_point`), the control points, the bars and the positions that take part in
 the adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.judge_intrinsics`,
 on the native core, `ppg_core` API 18). The focal length is judged first: one whose relative sd is above 0.5 %
-(`bundle.FOCAL_SD_HOLD`) is held as the alignment left it. Nadir photos over flat ground cannot tell the focal
-length from the flying height, whatever control points on that ground say, and an adjustment that refines it
-there slides along that trade (a ring flown once over flat ground, optimised on six targets: the focal length
-ten times longer, the cameras 131 m higher, the check targets 0.6 m off). Then the tangential terms, the
-principal point (when it was asked for) and the radial terms, each by what it moves in the photo: a group is
-held when the marginal sd of the displacement it causes at the corner of the photo is above half a pixel
-(`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it leave it: the
-covariance is taken again without what was held. The order is fixed - the focal length first, with every other
-group free, as the native alignment judges it; then from what a real lens needs least to what it needs most: the
-tangential terms, near zero in most lenses, the principal point, near the centre of the photo, the radial terms
-last. Of two groups that trade with each other the earlier is given up, and the later, judged without it, may
-stay. That ring does not determine its radial terms while its focal length is free (1.6 px at the corner) and
-determines them once it is held (0.12 px): they are refined, the radial term found within 0.0003 of the true
-one, the control targets at 1 mm and the check targets at 9 mm. It does not determine the tangential terms of our
-own formulation (1.6 px), which are held: an order by how far each group is beyond its limit would have given up
-its radial terms in their place (3.1 px while the tangential terms are free) and left the check targets at 17
-mm. On a nadir grid over flat ground the radial terms trade with a dome of the block, which control points at
-its corners do not see (a synthetic grid of 40 photos: 3.2 px): they are held as well, and a point in the middle
-of that grid ends 3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined.
-Oblique photos around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole
-calibration is refined as before. A group that has no covariance at all (a normal matrix that cannot be
-inverted) is held.
+(`bundle.FOCAL_SD_HOLD`) is held. Nadir photos over flat ground cannot tell the focal length from the flying
+height, whatever control points on that ground say, and an adjustment that refines it there slides along that
+trade (a ring flown once over flat ground, optimised on six targets: the focal length ten times longer, the
+cameras 131 m higher, the check targets 0.6 m off).
+
+It is held at the lens prior - the focal length its photos state (their EXIF, kept with the sensor apart from the
+parameters an alignment overwrites: `Sensor.focal_prior`, `sfm.lens_prior`) -, not where the alignment left it.
+An alignment that refines the focal length of such a block leaves it anywhere along the same trade (COLMAP's
+mapper on that ring: 750 to 3900 px for a lens of 1000, another place every time; held there, the check targets
+were 20 to 230 mm off). The optimisation first walks the focal length to the prior in steps of a tenth of it at
+most, the block adjusted again at each with the calibration held and carried along (the radial terms go with the
+square of the focal length, the cameras with their distance from what they see); the walked block replaces the
+alignment, the calibration is judged again from there, and `report["intrinsics"]["lens_prior"]` says what was
+walked (`[sensor, from, to, steps]`). Every run of the classic chain on that ring then ends within 2 mm on the
+control targets and 4 mm on the check targets, the cameras at their true height. A block whose reprojection
+error would end half as large again does not follow and is left as it was, with a note. A focal length that was
+guessed, or given by hand, has no prior: it is held where the alignment left it.
+
+Then the tangential terms, the principal point (when it was asked for) and the radial terms, each by what it
+moves in the photo: a group is held when the marginal sd of the displacement it causes at the corner of the photo
+is above half a pixel (`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it
+leave it: the covariance is taken again without what was held. The order is fixed - the focal length first, with
+every other group free, as the native alignment judges it; then from what a real lens needs least to what it
+needs most: the tangential terms, near zero in most lenses, the principal point, near the centre of the photo,
+the radial terms last. Of two groups that trade with each other the earlier is given up, and the later, judged
+without it, may stay - also where the earlier one had passed on its own: a later group that fails is judged
+again without the earlier groups that are still free (the tangential terms first, the focal length last), and
+where it then passes they are held in its place. That ring does not determine its radial terms while its focal
+length is free (1.6 px at the corner) and determines them once it is held (0.12 px): they are refined, the radial
+term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm. It does not
+determine the tangential terms of our own formulation (1.6 px), which are held; on a block of many tie points
+they pass (0.5 px) while the radial terms, with them free, fail (0.9 px), and they are held all the same, for
+the radial terms. An order by how far each group is beyond its limit would have given up the radial terms in
+their place (3.1 px while the tangential terms are free) and left the check targets at 17 mm. Oblique photos
+around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole calibration is
+refined as before. A group that has no covariance at all (a normal matrix that cannot be inverted) is held
+without having been judged: its note says so in its own words (`not judged, the block gave no covariance`) and
+the log has a warning.
+
+On a nadir grid over flat ground the radial terms trade with a dome of the block - the middle higher or lower
+than the edges -, which control points at its corners do not see: a dome passes through them all (a synthetic
+grid of 40 photos: 3.2 px). The radial terms are held there as well, and a point in the middle of that grid ends
+3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined. The rule keeps the
+optimisation from bending such a block; it cannot flatten one that its alignment bent: a control point in the
+middle of the block, or at least a check point there, is what shows a dome.
 
 A guard watches what was refined (`bundle.runaways`): a focal length moved by more than 20 % of its start
 (`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5 (`bundle.K1_MOVE_HOLD`), has the

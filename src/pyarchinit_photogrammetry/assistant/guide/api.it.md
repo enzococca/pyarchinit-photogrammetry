@@ -733,29 +733,54 @@ tutti gli intrinseci che le opzioni liberano (la distorsione, il punto principal
 punti di controllo, le barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con
 il fattore di varianza dei punti di legame (`engine.bundle.judge_intrinsics`, sul core nativo, `ppg_core` API
 18). La focale viene giudicata per prima: quella il cui scarto relativo supera lo 0,5 % (`bundle.FOCAL_SD_HOLD`)
-resta come l'ha lasciata l'allineamento. Foto nadirali su terreno piatto non distinguono la focale dalla quota di
-volo, qualunque cosa dicano i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola
-lungo quello scambio (un anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte
-più lunga, camere 131 m più in alto, target di verifica fuori di 0,6 m). Poi i termini tangenziali, il punto
-principale (quando è stato chiesto) e i termini radiali, ciascuno per quello che sposta nella foto: un gruppo
-resta fermo quando lo scarto marginale dello spostamento che causa all'angolo della foto supera mezzo pixel
-(`bundle.GROUP_SD_HOLD_PX`). Ogni gruppo viene giudicato nella compensazione come la lasciano i gruppi già
-tenuti: la covarianza viene ripresa senza ciò che è stato tenuto. L'ordine è fisso - la focale per prima, con
-tutti gli altri gruppi liberi, come la giudica l'allineamento nativo; poi da ciò che serve meno a un obiettivo
-vero a ciò che gli serve di più: i termini tangenziali, vicini a zero nella maggior parte degli obiettivi, il
-punto principale, vicino al centro della foto, i termini radiali per ultimi. Di due gruppi che si scambiano tra
-loro si rinuncia al primo, e il secondo, giudicato senza di lui, può restare libero. Quell'anello non determina i
-suoi termini radiali finché la focale è libera (1,6 px all'angolo) e li determina una volta tenuta la focale
-(0,12 px): vengono rifiniti, con il termine radiale trovato entro 0,0003 da quello vero, i target di controllo a
-1 mm e quelli di verifica a 9 mm. Non determina i termini tangenziali della nostra formulazione (1,6 px), che
-restano fermi: un ordine secondo quanto ogni gruppo supera il suo limite avrebbe rinunciato al loro posto ai
-termini radiali (3,1 px finché i tangenziali sono liberi) e lasciato i target di verifica a 17 mm. Su una griglia
-nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco, che i punti di controllo
-agli angoli non vedono (una griglia sintetica di 40 foto: 3,2 px): restano fermi anche loro, e un punto nel mezzo
-di quella griglia finisce a 3 mm - da 4 a 6 cm rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. Foto
-oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
+resta ferma. Foto nadirali su terreno piatto non distinguono la focale dalla quota di volo, qualunque cosa dicano
+i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola lungo quello scambio (un
+anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte più lunga, camere 131 m
+più in alto, target di verifica fuori di 0,6 m).
+
+Resta ferma al valore dell'obiettivo - la focale che dichiarano le foto (il loro EXIF, tenuto con il sensore a
+parte dai parametri che un allineamento sovrascrive: `Sensor.focal_prior`, `sfm.lens_prior`) -, non dove l'ha
+lasciata l'allineamento. Un allineamento che rifinisce la focale di un blocco così la lascia in un punto
+qualunque dello stesso scambio (il mapper di COLMAP su quell'anello: da 750 a 3900 px per un obiettivo da 1000,
+ogni volta altrove; tenuta lì, i target di verifica erano fuori da 20 a 230 mm). L'ottimizzazione prima riporta
+la focale a quel valore a passi di un decimo al massimo, compensando di nuovo il blocco a ogni passo con la
+calibrazione ferma e portata con sé (i termini radiali vanno con il quadrato della focale, le camere con la loro
+distanza da ciò che vedono); il blocco così riportato sostituisce l'allineamento, la calibrazione viene
+giudicata di nuovo da lì, e `report["intrinsics"]["lens_prior"]` dice che cosa è stato riportato (`[sensore, da,
+a, passi]`). Ogni corsa della catena classica su quell'anello finisce allora entro 2 mm sui target di
+controllo e 4 mm su quelli di verifica, con le camere alla quota vera. Un blocco il cui errore di riproiezione
+finirebbe una volta e mezza più grande non segue e resta com'era, con una nota. Una focale che era stata
+ipotizzata, o data a mano, non ha un valore dell'obiettivo: resta dove l'ha lasciata l'allineamento.
+
+Poi i termini tangenziali, il punto principale (quando è stato chiesto) e i termini radiali, ciascuno per quello
+che sposta nella foto: un gruppo resta fermo quando lo scarto marginale dello spostamento che causa all'angolo
+della foto supera mezzo pixel (`bundle.GROUP_SD_HOLD_PX`). Ogni gruppo viene giudicato nella compensazione come la
+lasciano i gruppi già tenuti: la covarianza viene ripresa senza ciò che è stato tenuto. L'ordine è fisso - la
+focale per prima, con tutti gli altri gruppi liberi, come la giudica l'allineamento nativo; poi da ciò che serve
+meno a un obiettivo vero a ciò che gli serve di più: i termini tangenziali, vicini a zero nella maggior parte
+degli obiettivi, il punto principale, vicino al centro della foto, i termini radiali per ultimi. Di due gruppi
+che si scambiano tra loro si rinuncia al primo, e il secondo, giudicato senza di lui, può restare libero - anche
+dove il primo da solo era passato: un gruppo successivo che non passa viene giudicato di nuovo senza i gruppi
+precedenti ancora liberi (prima i termini tangenziali, la focale per ultima), e dove allora passa sono loro a
+restare fermi al suo posto. Quell'anello non determina i suoi termini radiali finché la focale è libera (1,6 px
+all'angolo) e li determina una volta tenuta la focale (0,12 px): vengono rifiniti, con il termine radiale
+trovato entro 0,0003 da quello vero, i target di controllo a 1 mm e quelli di verifica a 9 mm. Non determina i
+termini tangenziali della nostra formulazione (1,6 px), che restano fermi; su un blocco con molti punti di
+legame quelli passano (0,5 px) mentre i termini radiali, con loro liberi, no (0,9 px), e restano fermi lo
+stesso, per i termini radiali. Un ordine secondo quanto ogni gruppo supera il suo limite avrebbe rinunciato al
+loro posto ai termini radiali (3,1 px finché i tangenziali sono liberi) e lasciato i target di verifica a 17 mm.
+Foto oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
 calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covarianza (una matrice normale che non
-si può invertire) resta fermo.
+si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
+block gave no covariance`) e nel log c'è un avviso.
+
+Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
+più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti
+(una griglia sintetica di 40 foto: 3,2 px). Lì restano fermi anche i termini radiali, e un punto nel mezzo di
+quella griglia finisce a 3 mm - da 4 a 6 cm rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. La regola
+impedisce all'ottimizzazione di piegare un blocco così; non può raddrizzarne uno che l'allineamento ha già
+piegato: un punto di controllo nel mezzo del blocco, o almeno un punto di verifica lì, è ciò che mostra una
+cupola.
 
 Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale spostata di più del 20 % dal suo
 valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale cambiato di più di 0,5
