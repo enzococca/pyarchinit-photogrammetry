@@ -699,13 +699,17 @@ def test_where_nothing_judged_is_refined_nothing_is_asked(tmp_path, monkeypatch)
     """Accurate positions that hold the block keep the focal length of the alignment as before, and the distortion
     is still refined with it held; a block nothing places keeps it under our adjustment. The covariance is not
     asked for: there is neither a focal length nor a principal point to judge."""
-    asked = []
-    real = bundle.intrinsics_variances
+    asked, built = [], []
+    real, problem = bundle.intrinsics_variances, bundle.problem_from_chunk
     monkeypatch.setattr(bundle, "intrinsics_variances", lambda pb, **kwargs: asked.append(1) or real(pb, **kwargs))
+    monkeypatch.setattr(bundle, "problem_from_chunk",
+                        lambda *args, **kwargs: built.append(1) or problem(*args, **kwargs))
     for engine, name in (("colmap", "a"), ("ppg", "b")):
         _doc, ch = _rtk_block(tmp_path / name)
         focal = ch.sensors[0].params[0]
+        built.clear()
         ch.optimize_cameras(engine=engine)
+        assert built == ([] if engine == "colmap" else [1])  # COLMAP's path builds no problem of ours for nothing
         rep = ch.meta["sfm"]["optimize"]
         assert rep["focal_held"] == sfm.FOCAL_HELD_BY_POSITIONS and rep["gnss"]["photos"] == 40
         assert rep["intrinsics"] == sfm._check_record(True, sfm.NOTHING_TO_JUDGE)

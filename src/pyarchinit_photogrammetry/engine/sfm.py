@@ -3534,6 +3534,8 @@ def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, pos
 
     if not hold_undetermined:
         return _check_record(False), set()
+    if positions and not fit_principal_point:  # the focal length held by the step, no principal point asked for
+        return _check_record(True, NOTHING_TO_JUDGE), set()
     try:
         pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss="plain" if positions else "off",
                                             fit_principal_point=fit_principal_point, hold_focal=positions)
