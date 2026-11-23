@@ -12,6 +12,7 @@ import copy
 import dataclasses
 import json
 import logging
+import re
 
 import numpy as np
 import pytest
@@ -1926,9 +1927,11 @@ def test_the_weak_ring_with_many_tie_points_gives_up_its_tangential_terms_for_th
     sensor = check["focal_sd"][0][0]
     assert check["held"] == {**NOTHING_HELD, "focal": [sensor], "tangential": [sensor]}
     assert 0.4 < check["tangential_sd"][0][1] < bundle.GROUP_SD_HOLD_PX and 0 < check["radial_sd"][0][1] < 0.1
-    assert len(check["notes"]) == 2 and check["notes"][1].startswith(
-        f"sensor {sensor}: tangential held: given up for the radial terms (0.91 px at the image corner with it "
-        "free, 0.04 px without)")
+    # the sd with the tangential terms free sits at 0.905 px: the native alignment under load rounds it to 0.90
+    # or 0.91 in the note, so the figure is read back and bounded rather than spelt
+    said = re.fullmatch(rf"sensor {sensor}: tangential held: given up for the radial terms \((\d\.\d\d) px at the "
+                        r"image corner with it free, 0\.04 px without\)", check["notes"][1])
+    assert len(check["notes"]) == 2 and said and 0.85 < float(said.group(1)) < 0.95
     calibration = _calibration(ch)[0]
     assert calibration[4] == pytest.approx(-0.04, abs=0.005) and calibration[6:] == [0.0, 0.0]
     errors = _marker_rmse(ch)
