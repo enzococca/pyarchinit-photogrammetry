@@ -271,8 +271,11 @@ ppg bench table OUT
   exactly one `project.ppg` whose one chunk was matched. Each run copies that project, its
   `database.db` and, when the matching was native, its stores into its own work folder, drops the
   alignment and every product, and starts the chain at `align_cameras`: the runs differ in the
-  mapper, not in the matches. The photos of the run must be those of the kept project. The record
-  has `settings.matches_reused` true and no step `match_photos`. A folder that is not a kept run is
+  mapper, not in the matches. The photos of the run must be those of the kept project (online-only
+  photos left out of the run make it refuse, counted). The record has `settings.matches_reused`
+  true and no step `match_photos`. Its settings of the matching (`--engine`, `--seed` and the
+  parameters of the matcher) are those of the current command line, not those the kept run
+  matched with: read them in the kept run's own record; `matches_reused` tells the runs apart. A folder that is not a kept run is
   refused before anything runs, saying what is missing (`project.ppg`, the `database.db` of its
   chunk), never where.
 * `--markers PROJECT`: a project (`.ppg`) of the same photos whose active chunk has its markers
