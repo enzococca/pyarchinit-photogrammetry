@@ -4,6 +4,7 @@ of it. The walls are those of ``testing.synthetic.make_wall_scene``: their model
 seen from outside the corner and from inside, or with their photos (``wall_doc``)."""
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,7 +12,9 @@ import pytest
 
 from pyarchinit_photogrammetry.core.geometry import look_at
 from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+from pyarchinit_photogrammetry.engine import elevation as E
 from pyarchinit_photogrammetry.engine import wall_trace as T
+from pyarchinit_photogrammetry.engine.visibility import raycaster_for_chunk
 from pyarchinit_photogrammetry.engine.wall_path import TraceRefused, WallPath, corner_radii, smooth_trace
 from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene
 
@@ -167,6 +170,9 @@ def test_what_a_snap_gives_back(model_outside):
     step = clicked[1] - clicked[0]
     normal = np.array([step[1], -step[0]]) / np.hypot(*step)
     assert np.abs(r["points"][0] - (clicked[0] - 0.4 / abs(normal[1]) * normal)).max() < 1e-3
+    # a line clicked on the face itself stays where it is: a look starts a centimetre on the other side of it
+    on = T.snap_trace(ch, face, side="right")
+    assert on["snapped"] is True and on["max_shift"] < 1e-3 and all(s["share"] > 0.95 for s in on["segments"])
     # not snapped: the points as clicked, nothing moved
     r = T.snap_trace(ch, clicked, side="right", band=0.1)
     assert r["snapped"] is False and r["max_shift"] == 0.0 == r["median_shift"] and not r["shift"].any()
@@ -317,6 +323,37 @@ def test_a_click_anywhere_on_the_crest_of_a_thick_wall(thickness, viewer, tmp_pa
         # (seen from inside, a leg clicked on the crest runs on past the corner under the crest of the other leg:
         # there it sees nothing within the band, 1.8 m of 5.8 at most)
         assert all(s["share"] > (0.9 if viewer == "right" else 0.65) for s in r["segments"])
+    # the face further in front than the band, the back further behind: nothing is found
+    middle = _in_front(face, viewer, -thickness / 2.0)
+    assert T.snap_trace(ch, middle, side=viewer, band=thickness / 2.0 - 0.1)["snapped"] is False
+
+
+def test_the_look_from_the_line_stops_at_the_band(tmp_path):
+    """One sample 1 m up on a line 3 m along the wall of 20 cm between the two rooms: the depth of the face it
+    finds, from where it is clicked, within the band it is given."""
+    _doc, ch, info = model_doc(tmp_path, _two_rooms())
+    face = np.asarray(info["face"])
+    raycaster, lock = raycaster_for_chunk(ch), threading.Lock()
+
+    def seen(by: float, band: float) -> float:
+        a, b = face[0] + [0.0, -by], face[1] + [0.0, -by]
+        plane = E.plane_from_line(ch, a, b, (a + b) / 2.0 + [0.0, -1.0])
+        return float(T._from_line(ch, raycaster, lock, plane, np.array([3.0]), np.array([101.0]), 102.0, band)[0])
+
+    # in the first room, 30 cm in front of the face: the first surface behind the line, the wall across the room
+    # (its face 1.7 m in front, its back 2.1 m) no nearer
+    assert seen(0.3, 0.4) == pytest.approx(-0.3, abs=1e-4) and np.isnan(seen(0.3, 0.2))
+    assert seen(0.3, 2.5) == pytest.approx(-0.3, abs=1e-4)
+    # on the crest, 10 cm behind the face: the first surface in front, from inside
+    assert seen(-0.1, 0.2) == pytest.approx(0.1, abs=1e-4) and np.isnan(seen(-0.1, 0.05))
+    # in the second room, 70 cm past the back of the wall: the way out of it, 90 cm in front - the wall across
+    # that room, 1.3 m behind the line, is further
+    assert seen(-0.9, 1.0) == pytest.approx(0.9, abs=2e-3) and np.isnan(seen(-0.9, 0.8)) and np.isnan(seen(-0.9, 0.6))
+    assert seen(-0.9, 2.5) == pytest.approx(0.9, abs=2e-3)
+    # 1.4 m past its back the wall across is nearer (60 cm behind the line) than the way out (1.6 m in front)
+    assert seen(-1.6, 2.5) == pytest.approx(-0.6, abs=1e-4)
+    # exactly on the face: the face (a look starts a centimetre on the other side of the line)
+    assert seen(0.0, 2.5) == pytest.approx(0.0, abs=1e-4)
 
 
 @pytest.mark.parametrize("by", [0.2, -0.2])
@@ -488,6 +525,20 @@ def test_a_line_has_three_tenths_of_the_columns_on_it(tmp_path):
     assert first["share"] == 1.0 and 0.0 < second["share"] < T.MIN_SNAP_SHARE
     assert (second["offset"], second["slope"]) == (0.0, 0.0)
     assert np.abs(r["points"] - (o + [[0.0, 0.0], [6.0, 0.0], [12.0, 0.0]])).max() < 0.005     # it goes with the first
+
+
+def test_a_column_within_ten_centimetres_of_the_line_lies_on_it(tmp_path):
+    """A wall of 10 m with two panels against it: 7 cm thick over 2 m, 15 cm thick over the next 2 m. The line is
+    that of the bare wall, six tenths of the columns; the columns of the thin panel lie on it, those of the thick
+    one do not."""
+    scene = _block(make_wall_scene(trace=[(0.0, 0.0), (10.0, 0.0)]), (6.0, -0.07, 0.0), (8.0, 0.0, 2.0))
+    _doc, ch, info = model_doc(tmp_path, _block(scene, (8.0, -0.15, 0.0), (10.0, 0.0, 2.0)))
+    face = np.asarray(info["face"])
+    r = T.snap_trace(ch, face + [0.0, -0.3], side="right")
+    (seg,) = r["segments"]
+    assert seg["share"] == pytest.approx(0.8, abs=0.006) and T.FIT_NEAR == 0.1
+    assert seg["offset"] == pytest.approx(-0.3, abs=1e-3) and abs(seg["slope"]) < 1e-4
+    assert np.abs(r["points"] - face).max() < 0.005
 
 
 def test_the_heights_the_face_is_looked_for_at(tmp_path):
