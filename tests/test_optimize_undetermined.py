@@ -300,6 +300,33 @@ def test_each_group_is_judged_by_what_it_moves_at_the_corner_of_the_photo(tilt, 
 
 
 @needs_core
+def test_the_order_decides_between_two_groups_that_trade():
+    """The order of the judgement is fixed, from what a real lens needs least to what it needs most: focal length,
+    tangential terms, principal point, radial terms. Pitched photos on control points, every intrinsic free: the
+    tangential terms (0.53 px at the corner) and the principal point (1.87 px) trade, and both are beyond half a
+    pixel. The tangential terms come first and are held; the principal point, judged without them, is determined
+    (0.34 px) and is refined - though of the two it was the further beyond its limit: a rule that gave up the
+    worst group first would have held it, and refined the tangential terms (0.10 px without it)."""
+    pb = _drone_block(bundle_problems.TILT, free=range(8))
+    model, params, width, height = pb.cameras[0]
+    sds, held, factor = bundle.judge_intrinsics(pb)
+    assert bundle.JUDGED == ("focal", "tangential", "principal_point", "radial")
+    assert held[0] == {"tangential": ("sd", sds[0]["tangential"])}
+    assert bundle.GROUP_SD_HOLD_PX < sds[0]["tangential"] < 0.6 and 0 < sds[0]["principal_point"] < 0.4
+
+    def corner(columns, gone=()):
+        cov, free = _oracle(pb, factor, gone)
+        index = [free.index(k) for k in columns]
+        return bundle.corner_sd(model, params, width, height, list(columns), cov[np.ix_(index, index)])
+
+    # by a dense inverse: with everything free the principal point is the further beyond the limit of the two
+    assert corner((2, 3)) > 1.5 and corner((2, 3)) > 2 * corner((6, 7)) > 2 * bundle.GROUP_SD_HOLD_PX
+    assert sds[0]["tangential"] == pytest.approx(corner((6, 7)), rel=1e-4)
+    assert sds[0]["principal_point"] == pytest.approx(corner((2, 3), gone=(6, 7)), rel=1e-4)
+    assert corner((6, 7), gone=(2, 3)) < 0.2  # what the other choice would have left of the tangential terms
+
+
+@needs_core
 def test_what_is_held_leaves_the_adjustment_before_the_next_group_is_judged():
     """The radial terms of a block that cannot tell its focal length from its height: judged with the focal length
     free they look as lost as it is - they trade with it -, judged once it is held they are what the block gives
@@ -613,6 +640,35 @@ def test_a_nadir_grid_keeps_what_it_does_not_determine_and_a_pitched_one_refines
     assert after != before and after[0][0] == pytest.approx(before[0][0], rel=0.01)  # refined, near the true one
     assert after[0][0] != before[0][0] and after[0][4] == pytest.approx(K1, abs=0.003)
     assert rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.02
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_a_pitched_grid_asked_for_its_principal_point_keeps_it_and_its_focal_length(tmp_path, engine):
+    """What the fixed order gives where two groups trade (focal length, tangential terms, principal point, radial
+    terms; what is held leaves the adjustment before the next group is judged). Pitched photos asked for their
+    principal point: with it free the focal length is beyond its limit (0.55 % with COLMAP's formulation, 1.4 %
+    with ours) and, first in the order, is held; the principal point, judged without it, is beyond its own (1.2
+    and 1.4 px) and is held too; the distortion is refined. A rule that gave up the group furthest beyond its
+    limit first would have held the principal point alone (3.0 and 11 px with the focal length free) and refined
+    the focal length, which is determined without it (0.19 % and 0.34 %)."""
+    _doc, ch = _block(tmp_path, pitch=PITCH)
+    before = _calibration(ch)
+    ch.optimize_cameras(engine=engine, fit_principal_point=True)
+    rep = ch.meta["sfm"]["optimize"]
+    check = rep["intrinsics"]
+    assert check["checked"] is True and check["held"] == {**NOTHING_HELD, "focal": [0], "principal_point": [0]}
+    focal, principal_point = check["focal_sd"][0][1], check["principal_point_sd"][0][1]
+    assert bundle.FOCAL_SD_HOLD < focal < 0.02 and 1.0 < principal_point < 2.0
+    assert check["notes"] == [f"sensor 0: focal held: undetermined, sd {100 * focal:.2f} %",
+                              f"sensor 0: principal point held: undetermined, sd {principal_point:.2f} px at the "
+                              "image corner"]
+    assert 0 < check["radial_sd"][0][1] < bundle.GROUP_SD_HOLD_PX
+    assert all(0 < sd < bundle.GROUP_SD_HOLD_PX for _sensor, sd in check["tangential_sd"])
+    assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
+    after = _calibration(ch)
+    assert after[0][:4] == before[0][:4] and after[0][4:6] != before[0][4:6]  # the distortion alone is refined
+    assert rep["after"]["control"] < 0.005 and rep["after"]["check"] < 0.006  # 3.2 mm and 2.6 mm at the middle
 
 
 @needs_core

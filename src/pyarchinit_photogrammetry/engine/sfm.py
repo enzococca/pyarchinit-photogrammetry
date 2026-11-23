@@ -3079,6 +3079,8 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
       a nadir grid over flat ground its radial ones (they trade with a dome of the block);
     * without a covariance at all (a normal matrix that cannot be inverted) the group being judged is held.
 
+    The order is fixed: the focal length first, then from what a real lens needs least to what it needs most, so
+    that of two groups that trade with each other the earlier is given up and the later may stay.
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment).
     Nothing is asked with ``hold_undetermined`` False (every calibration is refined as the options say), where the
     adjustment refines no intrinsic (:data:`NOTHING_TO_JUDGE`), and where the core cannot give the covariance
@@ -3346,7 +3348,10 @@ def optimize_cameras(chunk: Chunk, fit_principal_point: bool = False, use_marker
     it leave it: the radial terms of that ring are lost with its focal length free (1.6 px) and well determined
     once it is held (0.12 px), so they are refined; those of a nadir grid over flat ground are not (3 px: they
     trade with a dome of the block that control points at its corners do not see) and stay as the alignment left
-    them. Without a covariance at all the group being judged is held. A guard watches what was refined
+    them. The order is fixed, the focal length first and then from what a real lens needs least to what it needs
+    most: of two groups that trade with each other the earlier is given up and the later, judged without it, may
+    stay (the tangential terms of our own formulation on that ring, 1.6 px, and not its radial terms). Without a
+    covariance at all the group being judged is held. A guard watches what was refined
     (:func:`.bundle.runaways`): a focal length moved by more than :data:`.bundle.FOCAL_MOVE_HOLD` (20 %) of its
     start, or a first radial term changed by more than :data:`.bundle.K1_MOVE_HOLD` (0.5), has the optimisation
     run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment refines a group

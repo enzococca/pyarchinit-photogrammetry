@@ -62,10 +62,16 @@ INTRINSICS_MISSING = "the native core with the covariance of the intrinsics (API
 # by group and on one scale): a focal length whose relative marginal sd is above FOCAL_SD_HOLD is held; each other
 # group - the tangential terms, the principal point, the radial terms - is held when the marginal sd of the
 # displacement it causes at the corner of the photo is above GROUP_SD_HOLD_PX pixels. The groups are judged in the
-# order of JUDGED, each in the adjustment as it is left by what was held before it (the radial terms last: they
-# are what a block most needs, and what the others trade with). What an adjustment then moves too far is held
-# and the adjustment run again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first
-# radial term by more than K1_MOVE_HOLD
+# order of JUDGED, each in the adjustment as it is left by what was held before it. The order is fixed, on what
+# is known of lenses: the focal length first, with every other group free, as the mapper judges it; then from
+# what a real lens needs least to what it needs most - the tangential terms, near zero in most lenses, the
+# principal point, near the centre of the photo, the radial terms last. Of two groups that trade the earlier is
+# given up, and the later, judged without it, may stay. An order by how far each group is beyond its limit, the
+# worst first, was tried and dropped: on a ring flown once, with the focal length held, it gave up the radial
+# terms (3.07 px) in place of the tangential ones (1.63 px), left k1 at zero for a true -0.04 and the check
+# targets at 17 mm - 9 mm in this order. What an adjustment then moves too far is held and the adjustment run
+# again (runaways): a focal length by more than FOCAL_MOVE_HOLD of its start, the first radial term by more than
+# K1_MOVE_HOLD
 FOCAL_SD_HOLD = 0.005
 GROUP_SD_HOLD_PX = 0.5
 JUDGED = ("focal", "tangential", "principal_point", "radial")
@@ -832,7 +838,12 @@ def judge_intrinsics(pb: Problem, together: bool = False) -> tuple[list, list, f
     terms that trade with it held, is always smaller). The groups are judged in the order of :data:`JUDGED`, and
     what is held leaves the adjustment before the next group is judged - the covariance is taken again without
     it: the radial terms of a block that cannot tell its focal length from its height are determined once that
-    focal length is held, and judged with it free they would look as lost as it is. ``together``: a group held
+    focal length is held, and judged with it free they would look as lost as it is. The order is fixed - the
+    focal length first, then from what a real lens needs least to what it needs most: the tangential terms, the
+    principal point, the radial terms -, so that of two groups that trade with each other the earlier is given up
+    and the later, judged without it, may stay; it does not follow how far each group is beyond its limit (the
+    tangential terms of a ring flown once are less far beyond theirs than its radial terms are while they are
+    free, and are the ones to give up). ``together``: a group held
     for one camera is held for every camera that would refine it (COLMAP's adjustment refines a group for all its
     cameras or for none). Without a covariance (a normal matrix that cannot be inverted: an intrinsic the block
     does not hold at all) the group being judged is held for every camera, and the next one is judged without it.
