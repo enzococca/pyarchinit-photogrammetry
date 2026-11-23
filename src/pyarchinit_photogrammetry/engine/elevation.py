@@ -874,7 +874,8 @@ def face_map(surface: "FrameSurface", samples: int = 200) -> list[list[float]]:
     s = np.linspace(s0, s1, max(1, int(np.ceil((s1 - s0) / FACE_COLUMN - 1e-9))) + 1)
     d = depths(s)  # as measured: the columns on the edges are settled at each use, those halved with the others
     if not np.isfinite(d).any():
-        raise ValueError("no surface in the depth band along the trace: the length on the face needs the wall")
+        raise ValueError(f"no surface in the depth band along the trace (a column is of the face when the model is met "
+                         f"at {FACE_ROWS:.0%} of its heights at least): the length on the face needs the wall")
     for _ in range(FACE_HALVINGS):
         points = _face_points(frame, s, _settled(d))
         gap = np.hypot(*np.diff(points, axis=0).T)
