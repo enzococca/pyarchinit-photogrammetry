@@ -892,13 +892,38 @@ def test_a_block_without_a_covariance_keeps_its_calibration(tmp_path, monkeypatc
     assert check["held"] == {group: ([0] if group in groups else []) for group in bundle.JUDGED}
     assert all(check[f"{group}_sd"] == [[0, None]] for group in groups) and check["principal_point_sd"] == []
     why = "not judged, the block gave no covariance (pivot 7 of the reduced system is not positive)"
-    assert check["notes"] == [f"sensor 0: {group} held: {why}" for group in groups]
+    kept = f"; {sfm.FOCAL_KEPT_NO_COVARIANCE}"  # the focal length stays at the alignment's estimate
+    assert check["notes"] == [f"sensor 0: {group} held: {why}{kept if group == 'focal' else ''}" for group in groups]
     assert not any("undetermined" in note for note in check["notes"])
     warned = [r.getMessage() for r in caplog.records
               if r.levelno == logging.WARNING and "not judged" in r.getMessage()]
     assert warned == [f"camera optimisation: {note}" for note in check["notes"]]
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED
     assert _calibration(ch) == before and rep["after"]["control"] < 0.005
+
+
+@needs_core
+@pytest.mark.parametrize("engine", ENGINES)
+def test_without_a_covariance_the_focal_length_stays_where_the_alignment_put_it(tmp_path, monkeypatch, engine):
+    """No covariance is no verdict that the block does not know its focal length: it is held at the alignment's
+    estimate, never walked to the lens prior its photos state (an sd that cannot be computed is not an infinite
+    one), and the note of the focal length says so."""
+    _doc, ch = _block(tmp_path, pitch=PITCH)
+    before = _calibration(ch)
+    ch.sensors[0].focal_source, ch.sensors[0].focal_prior = "exif", 1.05 * F
+
+    def no_covariance(pb, **kwargs):
+        raise RuntimeError("pivot 7 of the reduced system is not positive")
+
+    monkeypatch.setattr(bundle, "intrinsics_covariance", no_covariance)
+    ch.optimize_cameras(engine=engine)
+    check = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert check["held"]["focal"] == [0] and check["lens_prior"] == []
+    focal_notes = [note for note in check["notes"] if note.startswith("sensor 0: focal held")]
+    assert focal_notes == ["sensor 0: focal held: not judged, the block gave no covariance (pivot 7 of the reduced "
+                           "system is not positive); kept at the alignment's estimate, not moved towards the lens "
+                           "prior"]
+    assert _calibration(ch)[0][:2] == before[0][:2]
 
 
 @needs_core
@@ -1389,8 +1414,8 @@ def test_the_target_between_the_estimate_of_the_block_and_the_lens_prior():
     # a ring flown once, as COLMAP's mapper left it twice: an sd of 161 px, and of 254 px
     assert sfm.lens_target(747.28, 0.2153, 1000.0) == pytest.approx(996.15, abs=0.05)
     assert sfm.lens_target(3909.22, 0.0649, 1000.0) == pytest.approx(1018.0, abs=0.1)
-    for sd in (None, float("inf"), float("nan")):  # nothing known of the estimate: the prior itself
-        assert sfm.lens_target(3909.2, sd, 1000.0) == 1000.0
+    for sd in (None, float("inf"), float("nan")):  # no covariance: nothing to weigh, the estimate stays
+        assert sfm.lens_target(3909.2, sd, 1000.0) == 3909.2
     assert sfm.lens_target(1000.0, 0.0, 1030.0) == 1000.0  # an estimate without error: itself
     assert sfm.lens_target(1000.0, 0.02, 1000.0) == 1000.0
 

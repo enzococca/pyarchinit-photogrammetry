@@ -3100,23 +3100,28 @@ def _along_the_valley(model: str, params, ratio: float) -> list:
     return out
 
 
+# the end of the note of a focal length held because the block gave no covariance (:func:`_calibration_check`)
+FOCAL_KEPT_NO_COVARIANCE = "kept at the alignment's estimate, not moved towards the lens prior"
+
+
 def lens_target(estimate: float, sd: float | None, prior: float) -> float:
     """Where a focal length the block does not determine is held (ruling R26), in pixels: between the
     ``estimate`` of the alignment, whose relative marginal sd in the adjustment is ``sd``, and the lens
     ``prior``, whose sd is :data:`LENS_PRIOR_SD` of it, each weighed by the inverse of its variance -
     ``(estimate / s_e^2 + prior / s_p^2) / (1 / s_e^2 + 1 / s_p^2)`` with ``s_e = sd * estimate`` and ``s_p =
-    LENS_PRIOR_SD * prior``. The prior itself for an estimate without an sd (None or not a number: the block gave
-    no covariance), the estimate itself for one without error."""
+    LENS_PRIOR_SD * prior``. The estimate itself for one without an sd (None or not a number: the block gave no
+    covariance, which is no verdict that it does not know its focal length - nothing to weigh, nothing moves) and
+    for one without error."""
     estimate, prior = float(estimate), float(prior)
     if sd is None or not np.isfinite(sd):
-        return prior
+        return estimate
     own, lens = (float(sd) * estimate) ** 2, (LENS_PRIOR_SD * prior) ** 2
     return estimate + (prior - estimate) * own / (own + lens)
 
 
 def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, sds: dict) -> dict:
     """The focal lengths to walk (:func:`_to_lens_prior`) among the cameras of ``sds`` - {index in ``pb``: the
-    relative marginal sd of its focal length, None without one}: ``{sensor key: {"estimate", "sd", "prior",
+    relative marginal sd of its focal length, None without one: left where it is}: ``{sensor key: {"estimate", "sd", "prior",
     "target"}}`` for those whose sensor has a lens prior (:func:`lens_prior`) and whose focal length is not at its
     target (:func:`lens_target`). A focal length that is where an optimisation before this one put it
     (``Sensor.focal_target``) is left there: it is no estimate of the block any more, and weighing it against
@@ -3368,12 +3373,15 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
                 elif kind == "for":
                     note = _given_up_note(*value)
                 else:  # nothing to judge it by: not a verdict on the block, and said louder
-                    _hold(record, group, sensors[c], f"not judged, the block gave no covariance ({value})",
-                          level=logging.WARNING)
+                    note = f"not judged, the block gave no covariance ({value})"
+                    if group == "focal":  # held where the alignment put it: no sd to weigh the lens prior against
+                        note += f"; {FOCAL_KEPT_NO_COVARIANCE}"
+                    _hold(record, group, sensors[c], note, level=logging.WARNING)
                     continue
                 _hold(record, group, sensors[c], note)
-    undetermined = {c: sds[c]["focal"] for c in range(len(judged))  # with the sd of each; None without a covariance
-                    if judged[c]["focal"] and verdicts[c].get("focal", (None,))[0] in ("sd", "no covariance")}
+    # with the sd of each; a focal length held for want of a covariance stays at the alignment's estimate
+    undetermined = {c: sds[c]["focal"] for c in range(len(judged))
+                    if judged[c]["focal"] and verdicts[c].get("focal", (None,))[0] == "sd"}
     return record, held, _off_the_lens_prior(chunk, sensors, pb, undetermined)
 
 
@@ -3467,8 +3475,14 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
             # held without a verdict on the block: what the block knows of its focal length is asked apart - the
             # sd it has with the focal length free - and weighed against the lens prior as anywhere else
             sds = bundle.judge_intrinsics(replace(pb, free_intrinsics=asked), only=("focal",))[0]
-            lost.update(_off_the_lens_prior(chunk, _camera_sensors(chunk, rec, ids["cameras"]), pb,
-                                            {c: sds[c]["focal"] for c in refined}))
+            sensors = _camera_sensors(chunk, rec, ids["cameras"])
+            for c in refined:
+                if sds[c]["focal"] is None and sensors[c] is not None:
+                    note = f"sensor {sensors[c]}: focal: the block gave no covariance; {FOCAL_KEPT_NO_COVARIANCE}"
+                    if note not in check["notes"]:
+                        check["notes"].append(note)
+                        log.warning("camera optimisation: %s", note)
+            lost.update(_off_the_lens_prior(chunk, sensors, pb, {c: sds[c]["focal"] for c in refined}))
         return pb, ids, why, check, undetermined, lost
 
     pb, ids, focal_held, check, undetermined, lost = judged(rec)
