@@ -325,6 +325,13 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   overwrite: bool = typer.Option(False, help="with --compare: replace the image and the PDF beside "
                                                  "it when they exist (without it they are kept and nothing is "
                                                  "written)"),
+                  composite: bool = typer.Option(False, help="with --like: the composite of the campaigns of the "
+                                                 "group of that elevation - per cell the most recent campaign, an "
+                                                 "older one where it is deeper by more than --deeper or where the "
+                                                 "recent has nothing - made (again, in place) in the chunk the wall "
+                                                 "was traced on; nothing else is built"),
+                  deeper: Optional[float] = typer.Option(None, help="with --composite: metres an older campaign must "
+                                                         "be deeper to take a cell (default 0.15)"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
                                                          help="the orthophoto from the texture of the model, or from "
                                                               "the photos (default: the texture when the chunk has no "
@@ -337,7 +344,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
     With --path the wall traced on the plan as a line, bent or curved, its face developed along it.
     With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk);
     with --like and --chunks on several chunks, the campaigns of that wall as a group; with --like and
-    --compare the comparison sheet of that group."""
+    --compare the comparison sheet of that group; with --like and --composite the composite of its campaigns."""
     import numpy as np
 
     from .engine import elevation as E
@@ -366,6 +373,11 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             raise typer.BadParameter("--compare draws the sheet of the group and builds nothing: not with --chunks")
         if (title is not None or overwrite) and compare is None:
             raise typer.BadParameter("--title and --overwrite go with --compare")
+        if composite and (chunks is not None or compare is not None):
+            raise typer.BadParameter("--composite makes the composite of the group and builds nothing else: not with "
+                                     "--chunks or --compare")
+        if deeper is not None and not composite:
+            raise typer.BadParameter("--deeper goes with --composite")
         doc, ch = _open(project, chunk)
         source = ch
         if like_chunk is not None:
@@ -380,6 +392,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                      f"{source.label!r}; its elevations: {names}", param_hint="--like")
         if compare is not None:
             _compare(doc, source, found[0], compare, title, overwrite)
+            return
+        if composite:
+            _composite(doc, source, found[0], deeper, name)
             return
         if chunks is not None:
             _campaigns(doc, source, found[0], chunks, dates, same_frame)
@@ -405,6 +420,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
         raise typer.BadParameter("--like-chunk, --same-frame, --chunks and --dates go with --like")
     if compare is not None or title is not None or overwrite:
         raise typer.BadParameter("--compare, --title and --overwrite go with --like (the sheet of the group of that "
+                                 "elevation)")
+    if composite or deeper is not None:
+        raise typer.BadParameter("--composite and --deeper go with --like (the composite of the group of that "
                                  "elevation)")
     if sum(v is not None for v in (trace, markers, facing, circle, path)) != 1:
         raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle, --path or --like")
@@ -606,6 +624,34 @@ def _compare(doc, source, entry: dict, out: Path, title: Optional[str], overwrit
         typer.echo(f"{label}: left out - {r['reasons'][label]}")
     typer.echo(f"{len(r['bands'])} campaigns at {1 / r['px_per_m']:.4g} m/px (one pixel in {r['factor']})")
     typer.echo(f"{r['image']}\n{r['pdf']}")
+
+
+def _composite(doc, source, entry: dict, deeper: Optional[float], name: Optional[str]) -> None:
+    """``ppg elevation --like ID --composite``: the composite of the campaigns of the group of that elevation."""
+    from .engine import elevation_composite as C
+    from .engine import elevation_groups as G
+    from .engine.elevation import elevation_paths
+
+    found = G.group_of(doc, source, entry["id"])
+    if found is None:
+        typer.echo(f"Error: {entry.get('name')!r} ({entry['id']}) is in no group of campaigns: build it on the other "
+                   "chunks first (--like ID --chunks ...)", err=True)
+        raise typer.Exit(1)
+    ref, group = found
+    try:
+        made = C.composite(doc, ref, group, threshold=C.DEEPER if deeper is None else deeper, name=name,
+                           progress=print_progress)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    doc.save()
+    w, h = made["size"]
+    by_key = {c.key: c.label for c in doc.chunks}
+    typer.echo(f"{made['name']} ({made['id']}, chunk {ref.label!r}): {w} x {h} px at {made['resolution']:.4g} m/px; "
+               f"an older campaign where it is deeper by more than {made['threshold']:g} m")
+    typer.echo("sources, oldest first: " + ", ".join(by_key.get(s["chunk"], str(s["chunk"])) for s in made["sources"]))
+    ortho, relief = elevation_paths(ref, made)
+    typer.echo(f"{ortho}\n{relief}\n{ref.data_dir / made['sources_raster']}")
 
 
 def _campaigns(doc, source, entry: dict, chunks: str, dates: Optional[str], same_frame: bool) -> None:

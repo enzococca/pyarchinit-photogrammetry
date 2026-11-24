@@ -149,6 +149,36 @@ class TexturePainted(ValueError):
         self.english, self.italian = TEXTURE_EN, TEXTURE_IT
 
 
+COMPOSITE_IT = ("le patch scelgono le foto di un'area, ma questo prospetto è fatto dai raster di altri prospetti (il "
+                "composito delle campagne): metti le patch sulle campagne e rifai il composito")
+COMPOSITE_EN = ("patches choose the photos of an area, but this elevation is made from the rasters of other elevations "
+                "(the composite of the campaigns): patch the campaigns and make the composite again")
+
+
+class CompositePatched(ValueError):
+    """Patches asked on an elevation made from rasters (a composite of campaigns, :mod:`.elevation_composite`):
+    ``str()`` English, ``italian`` Italian."""
+
+    def __init__(self):
+        super().__init__(COMPOSITE_EN)
+        self.english, self.italian = COMPOSITE_EN, COMPOSITE_IT
+
+
+def from_rasters(chunk: Chunk, frame: str | None) -> bool:
+    """Whether the elevation ``frame`` of ``chunk`` was made from rasters (a composite of campaigns): it has no
+    photos for patches to choose from."""
+    if frame is None:
+        return False
+    return next((e.get("kind") == "composite" or e.get("source") == "rasters"
+                 for e in chunk.meta.get("elevations") or [] if e.get("id") == frame), False)
+
+
+def refuse_rasters(chunk: Chunk, frame: str | None) -> None:
+    """:class:`CompositePatched` when the elevation ``frame`` was made from rasters."""
+    if from_rasters(chunk, frame):
+        raise CompositePatched()
+
+
 def texture_painted(chunk: Chunk, frame: str | None = None) -> bool:
     """Whether the orthophoto (or the elevation ``frame``) of ``chunk`` was painted from the texture of the model
     (:mod:`.texture_ortho`): patches of photos do not apply to it."""
@@ -164,6 +194,7 @@ def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str 
     only from ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
     ``surface`` "dem" or "ground" (see the module; an elevation takes its relief, "dem", only). Call
     :func:`update_orthomosaic` / :func:`update_elevation` (or build the product) to apply it."""
+    refuse_rasters(chunk, frame)
     if texture_painted(chunk, frame):
         raise TexturePainted()
     if mode not in MODES:
@@ -338,6 +369,7 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     from .ortho import _context, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
 
+    refuse_rasters(chunk, frame)
     if texture_painted(chunk, frame):
         raise TexturePainted()
 
@@ -412,6 +444,7 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
     from .ortho import _colour, _context, _on_grid, _surface, stored_blending
     from .visibility import project_valid, raycaster_for_chunk, readable_cameras
 
+    refuse_rasters(chunk, frame)
     geom = _geometry(polygon)
     cams, _bad = readable_cameras(chunk, skip_unreadable)
     raycaster = raycaster_for_chunk(chunk)
@@ -520,6 +553,7 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
 
     from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile, correction_for
 
+    refuse_rasters(chunk, frame)
     progress = progress or (lambda *_a, **_k: None)
     bounds, shape, res = preview_grid(polygon, max_side)
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]

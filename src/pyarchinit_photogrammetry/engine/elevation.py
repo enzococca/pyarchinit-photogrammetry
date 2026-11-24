@@ -1241,7 +1241,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
              "orthophoto": str(ortho_path.relative_to(chunk.data_dir)), "relief": str(dem_path.relative_to(chunk.data_dir)),
              "size": [w, h], "blending": blending, "colour_correction": correction is not None,
              "max_angle": float(max_angle), "max_cameras": 8, "blend_sigma": ctx.blend_sigma if ctx is not None else 0.0,
-             "ghosting": bool(ghosting), "fill_holes": bool(fill_holes)}
+             "ghosting": bool(ghosting), "fill_holes": bool(fill_holes), "build": new_build()}
     if from_texture:
         entry.update(blending="texture", source="texture", colour_correction=False)
     if getattr(frame, "tilt", None):
@@ -1297,8 +1297,9 @@ def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Pro
     Copied from ``entry``: the frame with its ``u_map`` (a development scaled on the wall keeps its length along the
     wall, not one measured again on this chunk's relief), the resolution, bounds, depth band, kind (a section stays a
     section), blending, colour correction (on or off, measured again on this chunk's photos), ghosting filter, hole
-    filling and maximum angle. Not copied: the patches (``frame_patches``) and the drawings of the elevation, which
-    belong to the source.
+    filling and maximum angle - a composite of campaigns (:mod:`.elevation_composite`, made from rasters) gives an
+    ``elevation`` painted with the mosaic. Not copied: the patches (``frame_patches``) and the drawings of the
+    elevation, which belong to the source.
 
     The frame is in world coordinates: the chunks must be in the same reference system (compared by meaning,
     :func:`same_crs`), else ``ValueError``. Two LOCAL chunks have arbitrary worlds of their own - two campaigns of a
@@ -1337,10 +1338,14 @@ def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Pro
                     entry.get("name"), entry.get("id"))
     frame = frame_from_dict(entry["frame"])
     kind = entry.get("kind", "elevation")
+    blending = entry.get("blending", "mosaic")
+    if kind == "composite" or entry.get("source") == "rasters":  # made from rasters: built here from the photos
+        kind = "elevation" if kind == "composite" else kind
+        blending = "mosaic" if blending == "composite" else blending
     depth = entry.get("depth")
     new = build_elevation(chunk, frame, float(entry["resolution"]),
                           name or _free_name(chunk, entry.get("name") or "Prospetto"),
-                          tuple(depth) if depth is not None else None, blending=entry.get("blending", "mosaic"),
+                          tuple(depth) if depth is not None else None, blending=blending,
                           colour_correction=bool(entry.get("colour_correction", False)),
                           ghosting=bool(entry.get("ghosting", False)), fill_holes=bool(entry.get("fill_holes", True)),
                           progress=progress, workers=workers, max_angle=float(entry.get("max_angle", 80.0)),
@@ -1349,6 +1354,118 @@ def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Pro
     if stale:
         new["grid_of_stale"] = True
     return new
+
+
+def new_build() -> str:
+    """The mark of one build of an elevation (12 hex): new at every build, so what was made from an elevation knows
+    when it was built again (:func:`source_stamp`)."""
+    return uuid.uuid4().hex[:12]
+
+
+def source_stamp(entry: dict) -> str:
+    """A digest of the build of the elevation ``entry`` and of the patches applied to its orthophoto: it changes
+    when the elevation is built again or patched, so a product made from it (a composite of campaigns) knows it is
+    to be made again."""
+    import hashlib
+
+    text = json.dumps([entry.get("build"), entry.get("applied_patches")], sort_keys=True, default=str)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+
+
+def grid_of(entry: dict) -> tuple[tuple[float, float], tuple[int, int]]:
+    """``(origin (u0, v1), shape (h, w))`` of the grid of an elevation, from its bounds and resolution as
+    :class:`FrameSurface` lays it."""
+    if not entry.get("bounds"):
+        raise ValueError("the elevation says no bounds (built before 1.5.5): its grid is not known from its record")
+    res = float(entry["resolution"])
+    u0, v0, u1, v1 = (float(b) for b in entry["bounds"])
+    origin = (np.floor(u0 / res) * res, np.ceil(v1 / res) * res)
+    shape = (int(np.ceil((origin[1] - v0) / res)) + 1, int(np.ceil((u1 - origin[0]) / res)) + 1)
+    return origin, shape
+
+
+LIKE_KEYS = ("frame", "crs", "depth", "resolution", "bounds", "v_is_height", "scale", "tilt", "extend")
+
+
+def entry_from_rasters(chunk: Chunk, like: dict, rgba, relief, name: str | None = None, kind: str = "composite",
+                       extra: dict | None = None, replace: dict | None = None) -> dict:
+    """An elevation of ``chunk`` made from rasters instead of the model: ``rgba`` (4, h, w) uint8 its orthophoto,
+    ``relief`` (h, w) float32 its depth ``d`` (NaN where it has none), on the frame and grid of the elevation
+    ``like`` (of this chunk or another: its frame, system, depth band, resolution, bounds, heights and scale are
+    copied). ``elevation.tif``, ``relief.tif`` and ``frame.json`` are written as :func:`build_elevation` writes
+    them (the frame in the tags, tiles, overviews); the entry says ``source`` "rasters" and ``blending``
+    "composite", takes ``extra`` and is stamped with the chunk's transform. ``ValueError`` for rasters not of the
+    grid's shape.
+
+    ``replace``: an elevation of ``chunk`` made again - its folder swapped for the new one (crash-safe,
+    :func:`..io.files.swap_folder`), its id, name (unless ``name`` is given) and drawings kept, its place in the
+    list too. Returns the entry."""
+    import rasterio
+    from rasterio.enums import ColorInterp, Resampling
+    from rasterio.transform import from_origin
+
+    from ..io.files import swap_folder
+
+    origin, (h, w) = grid_of(like)
+    rgba = np.asarray(rgba)
+    relief = np.asarray(relief)
+    if rgba.shape != (4, h, w):
+        raise ValueError(f"the orthophoto is {rgba.shape}: the grid of the elevation takes (4, {h}, {w})")
+    if relief.shape != (h, w):
+        raise ValueError(f"the relief is {relief.shape}: the grid of the elevation takes ({h}, {w})")
+    entries = elevations(chunk)
+    if replace is not None:
+        replace = next((e for e in entries if e.get("id") == replace.get("id")), None)
+        if replace is None:
+            raise ValueError("the elevation to make again is not among those of the chunk")
+    resolution = float(like["resolution"])
+    eid = replace["id"] if replace is not None else uuid.uuid4().hex[:8]
+    root = chunk.data_dir / "elevations"
+    place = root / eid
+    folder = root / (f".{eid}.{uuid.uuid4().hex[:6]}.new" if replace is not None else eid)
+    folder.mkdir(parents=True, exist_ok=False)
+    try:
+        transform = from_origin(origin[0], origin[1], resolution, resolution)
+        tags = {"ppg_frame": json.dumps(like["frame"]), "ppg_depth": json.dumps(list(like["depth"]))}
+        tiled = {"tiled": True, "blockxsize": 256, "blockysize": 256} if h >= 256 and w >= 256 else {}
+        profile = {"driver": "GTiff", "height": h, "width": w, "count": 4, "dtype": "uint8", "transform": transform,
+                   "compress": "deflate", "photometric": "RGB", "BIGTIFF": "IF_SAFER", **tiled}
+        with rasterio.open(folder / "elevation.tif", "w", **profile) as dst:
+            dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+            dst.update_tags(**tags)
+            dst.write(rgba.astype(np.uint8))
+            factors = [f for f in (2, 4, 8, 16, 32, 64) if min(h, w) // f >= 64]
+            if factors:
+                dst.build_overviews(factors, Resampling.average)
+        dprof = {"driver": "GTiff", "height": h, "width": w, "count": 1, "dtype": "float32", "transform": transform,
+                 "compress": "deflate", "nodata": float("nan"), "BIGTIFF": "IF_SAFER", **tiled}
+        with rasterio.open(folder / "relief.tif", "w", **dprof) as dst:
+            dst.update_tags(**tags)
+            dst.write(relief.astype(np.float32)[None])
+        (folder / "frame.json").write_text(json.dumps({"frame": like["frame"], "depth": list(like["depth"]),
+                                                       "resolution": resolution, "kind": kind,
+                                                       "bounds": list(like["bounds"]),
+                                                       "v_is_height": like.get("v_is_height", False)}, indent=1))
+        if replace is not None:
+            swap_folder(folder, place)
+    except BaseException:
+        import shutil
+
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    default = replace.get("name") if replace is not None else ("Composito" if kind == "composite" else "Prospetto")
+    entry = {"id": eid, "name": name or default, "kind": kind, "crs": like.get("crs") or chunk.crs}
+    entry.update({k: like[k] for k in LIKE_KEYS if k in like and k != "crs"})
+    entry.update({"orthophoto": str((place / "elevation.tif").relative_to(chunk.data_dir)),
+                  "relief": str((place / "relief.tif").relative_to(chunk.data_dir)), "size": [w, h],
+                  "source": "rasters", "blending": "composite", "colour_correction": False, "build": new_build()})
+    entry.update(extra or {})
+    stamps.stamp_entry(chunk, entry)
+    if replace is not None:
+        chunk.meta["elevations"] = [entry if e is replace else e for e in entries]
+    else:
+        chunk.meta.setdefault("elevations", []).append(entry)
+    return entry
 
 
 def remove_elevation(chunk: Chunk, eid: str) -> bool:
