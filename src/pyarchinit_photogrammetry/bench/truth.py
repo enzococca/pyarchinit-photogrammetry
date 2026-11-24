@@ -1,7 +1,8 @@
 """What ``ppg bench synthetic`` measures against the truth of its sets, as the extra results of a run (numbers only,
 the keys that start with ``truth_``): the trench against the targets of its ``gcp.csv`` with the control/check split of
 the metric tests (:func:`trench_truth`), the ring against the true targets and poses of its scene after the
-georeferencing by the positions of its photos (:func:`ring_truth`)."""
+georeferencing by the positions of its photos (:func:`ring_truth`), the shape of the targets of a ring whatever its
+placement (:func:`ring_shape`: the weak ring, before the optimization)."""
 from __future__ import annotations
 
 import numpy as np
@@ -9,6 +10,9 @@ import numpy as np
 # the check points of the trench: the split of tests/test_pipeline.py::test_checkpoints (targets 4 and 5 left out of
 # the fit and measured, the other six control)
 TRENCH_CHECK = ("target 4", "target 5")
+# the check points of the weak ring (testing.synthetic.write_weak_ring_dataset): the targets of odd code, left out of
+# the georeferencing and of the optimization and measured; the six of even code are control
+WEAK_RING_CHECK = (1, 3, 5, 7, 9, 11)
 
 
 def _rms(values) -> float:
@@ -83,3 +87,25 @@ def ring_truth(doc, scene) -> dict:
     results.update(truth_camera_rmse=_rms(np.linalg.norm(d, axis=1)), truth_camera_height_mean=float(np.mean(d[:, 2])),
                    truth_camera_height_rmse=_rms(d[:, 2]))
     return results
+
+
+def ring_shape(doc, scene) -> dict:
+    """The shape of the targets of a ring whatever its placement: the targets the chunk triangulated (their internal
+    positions, the markers whose code is one of ``scene.targets``) put on the true targets by one similarity with
+    scale (:func:`..core.geometry.umeyama`), and the residuals over ``scene.diameter``: the largest
+    (``truth_target_shape``; spec 8.4 asks for 0.5 % at most) and their RMS (``truth_target_shape_rmse``), over
+    ``truth_targets`` targets. A ring bent by its alignment keeps its bend through any similarity, a ring only
+    misplaced loses it. Nothing (``{}``) with fewer than 3 targets."""
+    from ..core import geometry
+
+    markers = [m for m in doc.chunk.markers if m.code in scene.targets and m.position is not None]
+    if len(markers) < 3:
+        return {}
+    src = np.array([m.position for m in markers], float).reshape(-1, 3)
+    dst = np.array([scene.targets[m.code] for m in markers], float)
+    centre = dst.mean(axis=0)  # the true targets about their centre: a CRS's large coordinates out of the fit
+    M = geometry.umeyama(src, dst - centre)
+    residuals = np.linalg.norm(src @ M[:3, :3].T + M[:3, 3] - (dst - centre), axis=1)
+    diameter = float(scene.diameter)
+    return {"truth_target_shape": float(residuals.max() / diameter),
+            "truth_target_shape_rmse": _rms(residuals) / diameter, "truth_targets": len(markers)}

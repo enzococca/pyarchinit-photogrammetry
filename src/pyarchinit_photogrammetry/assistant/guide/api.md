@@ -23,8 +23,8 @@ longer explanations follow the table.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | the raw files of the photos developed again: missing copies, raws that changed, other settings; returns `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below); the classic or the native engine (*The native matching*, below) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto")` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; returns the reprojection error (px) |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below) or by the global mapper of the native engine (*The native alignment*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; each group of the intrinsics of a camera is refined only where the block determines it (`hold_undetermined`); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
 | `add_marker(...)`, `add_marker_projection(...)` | markers by hand (how they are placed: *Scale bars*) |
@@ -149,7 +149,7 @@ alignment and the depth maps) does the step with the native engine of the core (
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
 preselection did not choose dropped when it has too little. The result is written to COLMAP's
-`database.db` as the classic step writes it, so `align_cameras` runs the classic mapper on it. The
+`database.db` as the classic step writes it, so `align_cameras` runs either engine's mapper on it. The
 arguments are those of the classic step; `guided_matching` is ignored (the native matching always
 follows the epipolar lines). `PPG_RANSAC_SEED` (the seed of COLMAP's geometric verification, `ppg bench run
 --seed`) applies to the classic matching only: the native step does not read it.
@@ -622,6 +622,48 @@ grows by 10 % with up to 5 refinements each (`meta["sfm"]["ba_schedule"]`): on a
 photos that is most of the alignment time. `mapper="hierarchical"` is COLMAP's hierarchical
 pipeline: clusters of photos aligned on the cores, then merged.
 
+### The native alignment
+
+`align_cameras(engine="native")` (or `PPG_ENGINE=native`) aligns the photos with the global mapper of the
+native engine (`engine.native_map`, `ppg_core` API 16) in place of COLMAP's: it reads the cameras, the key
+points and the verified pairs of `database.db` (whichever engine matched them), builds the view graph,
+averages the rotations, establishes the tracks (`tiepoint_limit / 4` per photo, 500 at least, as the classic
+global mapper), positions the cameras - on the GPS of the photos when three of them or more have one, on the
+same metric axes less a round offset as the pose priors of the classic engine; frame `gnss` when the positions
+orient the block, `similarity` when they spread too little for their accuracy and only place it, `free` without
+them - and adjusts the block in rounds (focal length and radial distortion freed from the second, only where the
+block determines them: a camera whose focal length has a marginal posterior sd (every term the last round frees free with it: fx and fy, the
+principal point and the decentring terms too where that round widens the camera to OPENCV) above
+0.5 % after the first round - a flat
+nadir block, which cannot tell its focal length from its height - keeps its calibration held, as does one whose
+focal length a freed round moves by more than 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` and the
+notes say so). The model is
+written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, stays the
+classic alignment until the native one has passed its gate.
+
+What the native mapper does not do stays classic, with the reason in the log and in
+`meta["engine"]["align_cameras"]["fallback"]`: the native core missing or older than API 16
+(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, the `incremental` or
+`hierarchical` mapper asked, photos added to an alignment (`reset=False`), 360-degree rigs, calibrations held
+fixed, a camera model it does not know (a fisheye one).
+
+The block is judged as the classic global one is: right after the rotations (it must place 90 % of the photos),
+right after the positioning (its cameras must sit on the GPS of the photos, `meta["sfm"]["global_check"]`), and
+on the model written (a median reprojection error of 2 px at most, half of the observations kept at least). A
+block that fails, or a failure of the mapper, hands the alignment to the classic chain, which aligns with its
+own rules (the mapper asked, `auto` included: the global one with its own check, the incremental one when it is
+refused); `meta["sfm"]["native_fallback"]` and the record of the engine keep the reason (`placed 24 of 48
+photos`, `built a block whose cameras miss the GPS of the photos by 99 m`, `native mapper failed: ...`). A cancel
+and a full disk stop the step and leave the model and the database as they were.
+
+`meta["sfm"]["native_mapper"]` reports each stage in numbers and words (never a name of a photo or a path):
+`input`, `view_graph`, `rotations`, `tracks`, `position` (with `frame`, `placed`, `positions`, `crs`,
+`offset`), `refine` (the rounds), `report` (the whole report of the mapper: `median_reprojection_px`,
+`tracks_kept_share`, `sigma_h`, `sigma_v`, the biases of the flights...). `meta["timings"]["align_cameras"]`
+has the stages `view_graph` (the database read included), `rotation_averaging`, `track_establishment`,
+`global_positioning`, `bundle_adjustment` and `write`. For trials: `PPG_NATIVE_TRACKS_PER_PHOTO` (the tracks
+kept per photo) and `PPG_NATIVE_FINAL_ALL_TRACKS=0` (no last round with every track).
+
 ### Camera optimisation
 
 With 3 or more control points (markers with an enabled reference, not check points) a free
@@ -660,6 +702,91 @@ it is put back, the model on disk included, and the report then describes it (`r
 the optimisation stops with an error or is cancelled, with the report of the optimisation before it (none when
 there was none).
 
+Each group of the intrinsics of a camera is refined only where the block determines it
+(`hold_undetermined=True`, the default, with both engines: the rule of the rounds of the native alignment, above,
+taken group by group and on one scale). Before the first adjustment the marginal posterior sds are taken from the
+covariance of the adjustment at the alignment - every intrinsic the options free free together (the distortion,
+the principal point with `fit_principal_point`), the control points, the bars and the positions that take part in
+the adjustment at their accuracy, scaled by the variance factor of the tie points (`engine.bundle.judge_intrinsics`,
+on the native core, `ppg_core` API 18). The focal length is judged first: one whose relative sd is above 0.5 %
+(`bundle.FOCAL_SD_HOLD`) is held. Nadir photos over flat ground cannot tell the focal length from the flying
+height, whatever control points on that ground say, and an adjustment that refines it there slides along that
+trade (a ring flown once over flat ground, optimised on six targets: the focal length ten times longer, the
+cameras 131 m higher, the check targets 0.6 m off).
+
+It is not held where the alignment left it either. An alignment that refines the focal length of such a block
+leaves it anywhere along the same trade (COLMAP's mapper on that ring: 750 to 3900 px for a lens of 1000, another
+place every time; held there, the check targets were 20 to 230 mm off). It is held between that estimate and the
+lens prior - the focal length its photos state (their EXIF, kept with the sensor apart from the parameters an
+alignment overwrites: `Sensor.focal_prior`, `sfm.lens_prior`) -, each weighed by the inverse of its variance
+(`sfm.lens_target`): the estimate has the marginal sd the check has just taken, the prior 2 % of its value
+(`sfm.LENS_PRIOR_SD`: the focal lengths of the EXIF are rounded, and crop factors vary). A block that hardly
+knows its focal length ends at the prior: that ring, whose estimates have an sd of 6 to 22 % of themselves, ends
+within 2 % of it (996 to 1018 px). One that nearly determines it stays near its estimate: a grid pitched a
+little, which knows its focal length to 0.6 %, moves a tenth of the way to a value of the photos that is 3 % too
+long (2.5 px of 30). The optimisation first walks the focal length to that target in steps of a tenth of it at
+most, the block adjusted again at each with the calibration held and carried along (the radial terms go with the
+square of the focal length, the cameras with their distance from what they see); the walked block replaces the
+alignment, the calibration is judged again from there, and `report["intrinsics"]["lens_prior"]` says what was
+weighed, per sensor: `estimate` and its `sd` (relative), `prior` and `prior_sd`, `target`, `steps`. The sensor
+keeps where its focal length was put (`Sensor.focal_target`), and an optimisation that finds it there leaves it:
+it is no estimate of the block any more, and weighed against the prior again it would come nearer the prior at
+every run. Every run of the classic chain on that ring then ends within 2 mm on the control targets and 5 mm on
+the check targets; its cameras end as far from their true height as the target is from the true focal length
+(0.1 to 1.8 %: 1 to 27 cm on that ring), which is what listening to the estimate of such a block costs. A block
+whose reprojection error would end half as large again does not follow and is left as it was, with a note. A
+focal length that was guessed, or given by hand, has no prior: it is held where the alignment left it.
+
+Then the tangential terms, the principal point (when it was asked for) and the radial terms, each by what it
+moves in the photo: a group is held when the marginal sd of the displacement it causes at the corner of the photo
+is above half a pixel (`bundle.GROUP_SD_HOLD_PX`). Each group is judged in the adjustment as the holds before it
+leave it: the covariance is taken again without what was held. The order is fixed - the focal length first, with
+every other group free, as the native alignment judges it; then from what a real lens needs least to what it
+needs most: the tangential terms, near zero in most lenses, the principal point, near the centre of the photo,
+the radial terms last. Of two groups that trade with each other the earlier is given up, and the later, judged
+without it, may stay - also where the earlier one had passed on its own: a later group that fails is judged
+again without the earlier groups that are still free (the tangential terms first), and where it then passes they
+are held in its place. The focal length goes this way for the radial terms alone, when nothing else is enough:
+it stands first for what a flat block cannot tell, not because a lens can do without it (a grid pitched a
+little: the focal length passes at 0.4 %, the tangential terms fail at 0.57 px with it free; they are held, and
+the focal length is refined). That ring does not determine its radial terms while its focal
+length is free (1.6 px at the corner) and determines them once it is held (0.12 px): they are refined, the radial
+term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm. It does not
+determine the tangential terms of our own formulation (1.6 px), which are held; on a block of many tie points
+they pass (0.5 px) while the radial terms, with them free, fail (0.9 px), and they are held all the same, for
+the radial terms. An order by how far each group is beyond its limit would have given up the radial terms in
+their place (3.1 px while the tangential terms are free) and left the check targets at 17 mm. Oblique photos
+around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole calibration is
+refined as before. A group that has no covariance at all (a normal matrix that cannot be inverted) is held
+without having been judged: its note says so in its own words (`not judged, the block gave no covariance`) and
+the log has a warning. A focal length held so stays at the alignment's estimate: no sd is no verdict that the
+block does not know it, and nothing is weighed against the lens prior (`kept at the alignment's estimate, not
+moved towards the lens prior`).
+
+On a nadir grid over flat ground the radial terms trade with a dome of the block - the middle higher or lower
+than the edges -, which control points at its corners do not see: a dome passes through them all (a synthetic
+grid of 40 photos: 3.2 px). The radial terms are held there as well, and a point in the middle of that grid ends
+3 mm off - 4 to 6 cm with the radial terms refined, 11 to 28 cm with everything refined. The rule keeps the
+optimisation from bending such a block; it cannot flatten one that its alignment bent: a control point in the
+middle of the block, or at least a check point there, is what shows a dome.
+
+A guard watches what was refined (`bundle.runaways`): a focal length moved by more than 20 % of its start
+(`bundle.FOCAL_MOVE_HOLD`), or a first radial term changed by more than 0.5 (`bundle.K1_MOVE_HOLD`), has the
+optimisation run again from the start with the focal length, or the radial terms, held. COLMAP's adjustment
+refines a group for every camera or for none, and the distortion whole or not at all: with several sensors, what
+is held for one is held for all, and either kind of distortion term takes the other with it (our own adjustment
+holds each group sensor by sensor). `report["intrinsics"]` says what was judged, in numbers and by the key of
+each sensor: `checked`, `variance_factor`, `focal_sd` (relative), `tangential_sd`, `principal_point_sd` and
+`radial_sd` (pixels at the corner of the photo; each a list of `[sensor, sd]`), `held` (the sensors held, by
+group: `focal`, `tangential`, `principal_point`, `radial`), `notes` (`sensor 0: focal held: undetermined, sd
+11.42 %`, `sensor 0: radial held: undetermined, sd 3.16 px at the image corner`), and `reason` when nothing was
+asked - no intrinsic to refine (a fixed calibration), 360-degree rigs, or a core that cannot give the covariance
+(missing, older than API 18, `PPG_NATIVE=0`, a camera model it does not know): the calibration is then refined
+as before and the log says so once. Where the rule holds a focal length, `report["focal_held"]` is `"the block
+does not determine the focal length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, the last
+tick of the dialog) refines every calibration as the other options say, whatever the block determines, and
+guards nothing.
+
 An optimisation that nothing holds in its frame (no fixed points, positions not accurate enough to hold
 the block: the GPS of a drone) lets the adjustment fix the gauge of the block its own way, and it may
 scale, turn and move the whole block in its internal frame (seven times larger on a real block, with
@@ -677,8 +804,9 @@ native solver is already the default under `"ppg"` - with the restrictions of th
 `report["engine_choice"]` records the engine asked for and the one that ran (`ppg optimize --engine
 auto|colmap|ppg`, the *Motore* of the dialog).
 
-`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both refine
-the focal length; `"auto"` is `"plain"` with the focal length held when the positions can hold the
+`engine="ppg"` uses our own adjustment instead (below), with `gnss="plain"` or `"bias"` (both leave
+the focal length to the adjustment, which refines it where the block determines it; `"auto"` is `"plain"`
+with the focal length held when the positions can hold the
 block and no fixed points do, else `"off"`), `rolling_shutter=True` and `solver="auto"`, `"native"` or
 `"scipy"` (below; an option of our own adjustment: with `engine="colmap"` any word but `"auto"` is
 refused before any work). On a block nothing places - fewer than three control points and fewer than
@@ -711,7 +839,13 @@ log has a line: never an error (a robust loss is then dropped on a block with re
 saying so). `bundle.Result` carries the adjusted block and what the solve was: `cost`,
 `gradient_max`, `solver`, `fallback`, `seconds`, `linear_solver` (`dense`, `sparse`, `pcg`),
 `termination`; `bundle.evaluate(problem)` gives the residuals, gradient and Jacobian of a problem by
-the native engine, `bundle.problem_at(problem, result)` a problem started where a result ended. On the
+the native engine, `bundle.problem_at(problem, result)` a problem started where a result ended,
+`bundle.intrinsics_covariance(problem)` the covariance of the free intrinsics of the cameras at the parameters
+of the problem (the block of the inverse of the normal matrix at their columns, from the reduced system;
+`ppg_core` API 18) and `bundle.judge_intrinsics(problem)` the marginal sd of each group of the intrinsics of each
+camera - the focal length (relative), the tangential terms, the principal point and the radial terms (what each
+moves at the corner of the photo, in pixels) - with the groups to hold, scaled by the variance factor of the tie
+points (`bundle.tie_variance_factor`): what the camera optimisation judges a block by. On the
 synthetic problems of `testing.bundle_problems` (one per kind of residual and per camera model) the
 native solver reaches scipy's optimum - a cost not above scipy's, the parameters within a tenth of
 their standard deviation - in a few iterations where scipy takes a hundred evaluations.

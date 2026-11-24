@@ -63,10 +63,53 @@ spostamento uguale per tutte le posizioni, come una base su un punto sbagliato o
 prende la georeferenziazione e non annulla nulla): per tenere un'ottimizzazione così, togli la spunta alle camere
 in *Riferimenti* (clic destro: *Non usare i riferimenti di tutte le camere*) e ripetila. *non usate* lascia fuori le posizioni (l'ottimizzazione delle versioni precedenti, sempre sotto la
 rete). Il motore *Proprio* in *automatico* tiene il blocco allo stesso modo, focale compresa; *usate con la loro
-accuratezza* e *usate, con un bias per volo* rifiniscono la focale (con un bias per volo la rete giudica ogni
-posizione meno il bias del suo volo). Dalla riga di comando: `ppg optimize progetto.ppg --gnss auto|off`
-(`plain` e `bias` con `--engine ppg`); l'uscita dice quante foto hanno tenuto il blocco e se la focale è rimasta
-quella dell'allineamento.
+accuratezza* e *usate, con un bias per volo* lasciano la focale alla compensazione, che la rifinisce dove il
+blocco la determina (con un bias per volo la rete giudica ogni posizione meno il bias del suo volo). Dalla riga
+di comando: `ppg optimize progetto.ppg --gnss auto|off` (`plain` e `bias` con `--engine ppg`); l'uscita dice
+quante foto hanno tenuto il blocco e se la focale è rimasta quella dell'allineamento.
+
+**Ogni parte della calibrazione viene rifinita solo dove il blocco la determina.** Prima di compensare, il
+programma misura quanto bene il blocco conosce ogni parte della calibrazione di ogni sensore (il suo scarto
+quadratico medio, dalla covarianza della compensazione). Per prima la focale: sopra lo 0,5 % - foto che guardano
+dritte in basso su terreno piatto, dove la focale non si distingue dalla quota di volo, nemmeno con punti di
+controllo su quel terreno - la focale non viene rifinita. Non resta nemmeno dove l'ha lasciata l'allineamento - un
+allineamento che ha rifinito la focale di un blocco così l'ha lasciata in un punto qualunque - ma tra quella stima
+e il valore dichiarato dalle foto (il loro EXIF), ciascuno pesato per quanto è noto: la stima per quello che il
+blocco ne sa, il valore delle foto al 2 % (le focali dell'EXIF sono arrotondate). Un blocco che della focale non
+sa quasi nulla finisce sul valore delle foto; uno che la determina quasi resta vicino alla propria stima, anche
+quando le foto dichiarano un valore sbagliato di qualche per cento. Il programma prima porta lì la focale, a
+piccoli passi, con il blocco che la segue (*focale portata a 1010 px, tra la stima dell'allineamento (2430 px) e
+il valore dichiarato dalle foto (1000 px), e tenuta: il blocco non la determina*; nel log ci sono i valori), e
+un'ottimizzazione successiva la lascia lì. Le foto che non dichiarano una focale tengono quella dell'allineamento
+(*focale dell'allineamento tenuta: il blocco non la determina*). Rifinita lì, la focale scivola insieme alla quota
+delle camere: su un anello volato una volta su terreno piatto finiva dieci volte troppo lunga, con le camere 131 m
+troppo in alto. Poi la distorsione e il punto principale, se chiesto, ciascuno per quello che sposta all'angolo
+della foto: una parte che il blocco determina peggio di mezzo pixel resta ferma anche lei, le altre vengono
+rifinite. Le parti si misurano in un ordine fisso, ciascuna senza quelle già tenute: dopo la focale, da ciò che
+serve meno a un obiettivo a ciò che gli serve di più - la distorsione tangenziale, il punto principale, la
+distorsione radiale per ultima - così che di due parti che il blocco non distingue si rinuncia a quella che serve
+meno, anche quando da sola era passata (alla focale solo per la distorsione radiale). Lo stesso anello, una volta
+tenuta la focale, determina la sua distorsione radiale, che viene rifinita (i target di verifica finiscono a 9
+mm); una griglia di foto nadirali su terreno piatto no - rifinita lì, la distorsione piega il blocco a cupola tra
+i punti di controllo - e tiene quella dell'allineamento. Il risultato nomina che cosa è rimasto fermo (*parti
+della calibrazione tenute ferme perché il blocco non le determina: distorsione radiale*). Una focale o un termine
+radiale che scappano durante l'ottimizzazione vengono tenuti e l'ottimizzazione ripetuta. Foto oblique, rilievo o
+voli a due quote determinano la calibrazione, che viene rifinita come prima. Togli la spunta a *Tieni le parti
+della calibrazione che il blocco non determina* per rifinire tutto comunque (`ppg optimize --free-undetermined`;
+in un batch, la stessa spunta nel passo). Il controllo gira sul core nativo; senza, la calibrazione viene rifinita
+come prima e il log lo dice. Quando il blocco non dà una covarianza con cui misurare una parte, quella parte resta
+ferma senza essere stata misurata, e nel log c'è un avviso; una focale tenuta così resta dove l'ha messa
+l'allineamento, senza avvicinarla al valore delle foto.
+
+**Punti di controllo solo agli angoli di un blocco piatto.** Un blocco di foto nadirali su terreno piatto può
+piegarsi a cupola - il centro più alto o più basso dei bordi - mentre la distorsione radiale compensa nelle
+foto. L'errore di riproiezione non lo mostra, e nemmeno i punti di controllo agli angoli del blocco: una cupola
+passa per tutti. Il controllo qui sopra impedisce all'ottimizzazione di piegare un blocco così (su una griglia
+sintetica di 40 foto con quattro punti di controllo agli angoli, un punto nel mezzo finisce a 3 mm con la
+distorsione ferma e a 4-6 cm rifinendola), ma non può raddrizzare un blocco che l'allineamento ha già piegato.
+Ciò che mostra una cupola è un punto nel mezzo: mettici un punto di controllo, o almeno un punto di verifica, e
+guarda il suo errore dopo l'ottimizzazione. Foto inclinate in avanti su strisciate volate nei due sensi, o un
+secondo volo a un'altra quota, tolgono l'ambiguità stessa.
 
 *Motore*: *Automatico* (il predefinito, come per gli altri passi: la scelta del programma, per ora COLMAP), *COLMAP* o
 *Proprio* (`ppg optimize --engine auto|colmap|ppg`). Senza niente che lo tenga (il GPS di un drone, nessun punto di

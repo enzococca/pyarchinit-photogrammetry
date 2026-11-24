@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -87,10 +88,16 @@ def test_the_tail_marks_the_stages_colmap_announces(tmp_path):
                                (0.4, "Global alignment: global positioning")]
 
 
-def test_a_relay_marks_the_stages_of_its_log_and_closes_the_last_one(tmp_path):
+def test_a_relay_marks_the_stages_of_its_log_and_closes_the_last_one(tmp_path, monkeypatch):
     """The stages the log of the block announces are marked as they come - names outside ``STAGES`` too - and the
-    last one ends with the block: a later close adds nothing to it."""
+    last one ends with the block: a later close adds nothing to it.
+
+    The relay is one per process: a relay an earlier test left open (a thread of pycolmap still in a block) would
+    make this one nested, and do nothing, so the test starts from none. The log is written under the name glog
+    gives its file, and made the newest one, so a line glog writes meanwhile into a file of its own cannot take
+    the tail's place."""
     pytest.importorskip("pycolmap")
+    monkeypatch.setattr(colmap_log, "_ACTIVE", [])
     from pyarchinit_photogrammetry.engine.timing import Stages
 
     now = [0.0]
@@ -99,7 +106,9 @@ def test_a_relay_marks_the_stages_of_its_log_and_closes_the_last_one(tmp_path):
     lines = [f"{PREFIX}global_mapper.cc:553] === Running {name} ===\n"
              for name in ("rotation averaging", "view graph calibration")]
     with colmap_log.relay(Progress(), work, stages=stages):
-        (work / "colmap_log.INFO").write_text("".join(lines))  # as COLMAP would write it
+        log = work / f"colmap_log.20261124-101500.{os.getpid()}"  # as glog names the file COLMAP writes
+        log.write_text("".join(lines))
+        os.utime(log, (time.time() + 60.0, time.time() + 60.0))
     now[0] = 5.0
     stages.close()
     assert stages.as_dict() == {"rotation_averaging": 0.0, "view_graph_calibration": 0.0}

@@ -11,8 +11,8 @@ use std::collections::HashSet;
 
 use ppg_engine::bundle::synthetic::grid_block;
 use ppg_engine::bundle::{
-    evaluate, evaluate_at, solve, CameraBlock, Layout, LinearSolver, Loss, Obs, Options, Parameters, Problem,
-    Solution, Termination,
+    evaluate, evaluate_at, intrinsics_covariance, intrinsics_variances, solve, CameraBlock, Layout, LinearSolver,
+    Loss, Obs, Options, Parameters, Problem, Solution, Termination,
 };
 use ppg_engine::camera::{project, Model};
 
@@ -769,4 +769,52 @@ fn a_point_seen_once_stays_on_its_ray_under_a_robust_loss() {
         assert!(max_distance(&sol.centres, &truth.centres) < 1e-2, "{loss:?}");
         assert!(max_distance(&sol.points[..600], &truth.points) < 1e-2, "{loss:?}");
     }
+}
+
+/// The covariance of the free intrinsics (`intrinsics_covariance`) on the grid block: one block
+/// over the free intrinsics of the camera (fx, fy, k1, k2), symmetric, its diagonal the variances
+/// `intrinsics_variances` gives; and what its off-diagonal terms are for - with the focal lengths
+/// held, the covariance of the radial terms is their covariance conditional on the focal lengths
+/// (`S_AA - S_AB S_BB^-1 S_BA`): what holding some intrinsics leaves of the others.
+#[test]
+fn the_covariance_of_the_free_intrinsics_and_what_holding_some_leaves_of_the_others() {
+    let (pb, _) = grid_block(12, 200, 3);
+    let (cov, counts) = intrinsics_covariance(&pb, Loss::None).unwrap();
+    assert_eq!(counts, vec![4]);
+    let k = 4;
+    assert_eq!(cov.len(), k * k);
+    let at = |i: usize, j: usize| cov[i * k + j];
+    let variances = intrinsics_variances(&pb, Loss::None).unwrap();
+    assert_eq!(variances.len(), 1);
+    for i in 0..k {
+        assert_eq!(at(i, i).to_bits(), variances[0][i].to_bits());
+        assert!(at(i, i) > 0.0);
+        for j in 0..k {
+            assert!((at(i, j) - at(j, i)).abs() <= 1e-9 * (at(i, i) * at(j, j)).sqrt(), "({i}, {j})");
+        }
+    }
+    let mut held = pb.clone();
+    held.cameras[0].free = vec![4, 5];
+    let (alone, counts) = intrinsics_covariance(&held, Loss::None).unwrap();
+    assert_eq!((counts, alone.len()), (vec![2], 4));
+    let det = at(0, 0) * at(1, 1) - at(0, 1) * at(1, 0);
+    let inverse = [[at(1, 1) / det, -at(0, 1) / det], [-at(1, 0) / det, at(0, 0) / det]];
+    for a in 0..2 {
+        for b in 0..2 {
+            let mut want = at(2 + a, 2 + b);
+            for p in 0..2 {
+                for q in 0..2 {
+                    want -= at(2 + a, p) * inverse[p][q] * at(q, 2 + b);
+                }
+            }
+            let (got, scale) = (alone[a * 2 + b], (alone[a * 2 + a] * alone[b * 2 + b]).sqrt());
+            assert!((got - want).abs() <= 1e-6 * scale, "({a}, {b}): {got} vs {want}");
+        }
+    }
+    // the conditional variances are smaller than the marginal ones: what the focal lengths traded
+    assert!(alone[0] < at(2, 2) && alone[3] < at(3, 3));
+    let mut none = pb.clone();
+    none.cameras[0].free.clear();
+    assert_eq!(intrinsics_covariance(&none, Loss::None).unwrap(), (Vec::new(), vec![0]));
+    assert_eq!(intrinsics_variances(&none, Loss::None).unwrap(), vec![Vec::<f64>::new()]);
 }

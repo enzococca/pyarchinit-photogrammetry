@@ -33,12 +33,14 @@ MACHINE = {"system": "Darwin", "release": "27.0.0", "arch": "arm64", "cpu": "CPU
 DISK = {"bus": "PCI-Express", "link_mbps": None, "read_mb_s": 400.0, "solid_state": True}
 SET = {"photos": 28, "bytes": 1, "online_only": 0, "gps": 0}
 SETTINGS = {"pairs": 378, "matcher": "sift", "quality": "high", "gpu": "GPU A", "gpu_pairs": 100, "cpu_pairs": 278,
-            "mapper": "incremental", "global_fallback": None, "engine": None, "features": "gpu", "routes": None,
-            "max_ratio": 0.8, "max_distance": 0.7, "cross_check": True, "pycolmap": "4.2.1", "photo_cache_mb": None,
-            "georeferencing": "markers", "targets": "aruco_4x4_50", "mapper_requested": "auto",
-            "engine_requested": "auto"}
+            "mapper": "incremental", "global_fallback": None, "native_fallback": None, "engine": None,
+            "features": "gpu", "routes": None, "max_ratio": 0.8, "max_distance": 0.7, "cross_check": True,
+            "pycolmap": "4.2.1", "photo_cache_mb": None, "georeferencing": "markers", "targets": "aruco_4x4_50",
+            "mapper_requested": "auto", "engine_requested": "auto", "align_engine_requested": "auto"}
 ENGINE = {"requested": "auto", "used": "classic", "fallback": None}
 NATIVE = {"requested": "native", "used": "native", "fallback": None}
+# the record of an alignment by the native mapper: the engine asked for it and the mapper it is
+NATIVE_ALIGNMENT = {"align_engine_requested": "native", "mapper": "global"}
 # the record of a native matching: what the native engine writes in chunk.meta["sfm"] beside the classic keys, which
 # differ between repeats of one run (the routes count what each pair took, the features where they were found)
 NATIVE_SETTINGS = {"engine_requested": "native", "engine": "native", "features": "gpu+cpu",
@@ -263,6 +265,41 @@ def test_runs_that_differ_in_the_engine_asked_for_are_a_mix_under_one_name_and_t
         [("t", "classic", 12.0, False, True), ("t-native", "native", 6.0, False, True)]
 
 
+def test_runs_that_differ_in_the_engine_of_the_alignment_asked_for_are_a_mix_under_one_name_and_two_rows_under_two():
+    """The engine a run was asked to align with (--align-engine) is a setting and is compared, as the engine of the
+    matching is: alignments by the native mapper and by the classic one under one name are a mix (the engine column
+    of the alignment says both), under two names two baselines side by side. What the alignment did is a fact of the
+    run: a native mapper that handed the block to the classic chain in one of three runs (``native_fallback``, with
+    the mapper that aligned and its own fallback) leaves them one measurement, and the engine column says both."""
+    assert "align_engine_requested" not in table.RUN_FACTS and "native_fallback" in table.RUN_FACTS
+    classic = [a_record(s) for s in (10.0, 12.0, 30.0)]
+    native = [a_record(s, engine=NATIVE, settings=NATIVE_ALIGNMENT) for s in (5.0, 6.0, 7.0)]
+    rows, _ = table.summarise(native)
+    assert [(r["step"], r["engine"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("align_cameras", "native", False, True)]
+    rows, _ = table.summarise(classic + native)
+    assert [(r["name"], r["engine"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t", "classic/native", True, False)]
+    assert "| not a baseline (mixed settings) |" in table.render(rows, {})
+    for rec in native:
+        rec["name"] = "t-native"
+    rows, _ = table.summarise(classic + native)
+    assert [(r["name"], r["engine"], r["seconds"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t", "classic", 12.0, False, True), ("t-native", "native", 6.0, False, True)]
+    # asked for classic by its word against auto, which chose it: two requests, a mix as well
+    by_word = [a_record(s, engine={"requested": "classic", "used": "classic", "fallback": None},
+                        settings={"align_engine_requested": "classic"}) for s in (5.0, 6.0, 7.0)]
+    rows, _ = table.summarise(classic + by_word)
+    assert [(r["engine"], r["mixed_settings"], r["baseline"]) for r in rows] == [("classic", True, False)]
+    # the native mapper gave up in one run of three: what the run did, not what it was asked for
+    why = "placed 61 of 80 photos"
+    gave_up = a_record(40.0, name="t-native", engine={"requested": "native", "used": "classic", "fallback": why},
+                       settings={"align_engine_requested": "native", "native_fallback": why, "mapper": "incremental"})
+    rows, _ = table.summarise(native[:2] + [gave_up])
+    assert [(r["name"], r["engine"], r["seconds"], r["mixed_settings"], r["baseline"]) for r in rows] == \
+        [("t-native", "native/classic", 6.0, False, True)]
+
+
 def test_the_two_results_of_the_matching_gate_come_right_after_the_photos_aligned():
     results = {"zeta": 1.0, "reprojection_rms_px": 0.5, "tie_points_per_photo": 812.4, "verified_pairs": 370,
                "aligned": 28, "cameras": 28, "control_rmse": 0.002}
@@ -372,18 +409,23 @@ def test_run_passes_its_options_and_says_whether_each_record_is_valid(tmp_path, 
     assert result.exit_code == 0, result.output
     assert calls == [(photos, tmp_path / "o", "n", {"steps": "all", "repeat": 2, "keep": True,
                                                    "records": tmp_path / "r", "mapper": "auto", "seed": None,
-                                                   "engine": "auto"})]
+                                                   "engine": "auto", "align_engine": "auto"})]
     assert "not valid (slow disk link: 480 Mb/s)" in result.output and "1.5 s" in result.output
     result = invoke(["run", str(photos), str(tmp_path / "o2"), "--name", "n", "--mapper", "global", "--seed", "7"])
     assert result.exit_code == 0, result.output
     assert calls[1][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "global",
-                           "seed": 7, "engine": "auto"}
+                           "seed": 7, "engine": "auto", "align_engine": "auto"}
     # the matching alone on the native engine: the time gate of the native matching on a large set
     result = invoke(["run", str(photos), str(tmp_path / "o3"), "--name", "n", "--steps", "match", "--engine",
                      "native"])
     assert result.exit_code == 0, result.output
     assert calls[2][3] == {"steps": "match", "repeat": 1, "keep": False, "records": None, "mapper": "auto",
-                           "seed": None, "engine": "native"}
+                           "seed": None, "engine": "native", "align_engine": "auto"}
+    # the alignment on the native mapper, the matching as the program chooses: the gate of the native mapper
+    result = invoke(["run", str(photos), str(tmp_path / "o4"), "--name", "n", "--align-engine", "native"])
+    assert result.exit_code == 0, result.output
+    assert calls[3][3] == {"steps": "align", "repeat": 1, "keep": False, "records": None, "mapper": "auto",
+                           "seed": None, "engine": "auto", "align_engine": "native"}
 
 
 def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_records_written(tmp_path, monkeypatch):
@@ -406,9 +448,9 @@ def test_what_stops_the_runner_after_it_started_is_an_error_that_prints_the_reco
         assert result.exit_code == 1 and f"error: {exc}" in result.output
 
 
-def test_synthetic_takes_trench_or_ring(tmp_path):
+def test_synthetic_takes_trench_ring_or_weak_ring(tmp_path):
     result = invoke(["synthetic", "bogus", str(tmp_path)])
-    assert result.exit_code == 2 and "trench or ring" in result.output
+    assert result.exit_code == 2 and "trench, ring or weak-ring" in result.output
 
 
 def a_writer(prefix: str):

@@ -23,8 +23,8 @@ spiegazioni più lunghe seguono la tabella.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | i file raw delle foto sviluppati di nuovo: copie mancanti, raw cambiati, altre impostazioni; restituisce `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto); il motore classico o quello nativo (*Il matching nativo*, sotto) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
-| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto")` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; restituisce l'errore di riproiezione (px) |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto) o dal mapper globale del motore nativo (*L'allineamento nativo*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
+| `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina (`hold_undetermined`); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
 | `add_marker(...)`, `add_marker_projection(...)` | marker a mano (come vengono collocati: *Barre di scala*) |
@@ -152,7 +152,7 @@ immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
 che la preselezione non ha scelto viene scartata quando ha troppo poco. Il risultato viene scritto nel
 `database.db` di COLMAP come lo scrive il passo classico, così `align_cameras` vi fa girare il mapper
-classico. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
+dell'uno o dell'altro motore. Gli argomenti sono quelli del passo classico; `guided_matching` viene ignorato (il matching
 nativo segue sempre le linee epipolari). `PPG_RANSAC_SEED` (il seme della verifica geometrica di COLMAP,
 `ppg bench run --seed`) vale solo per il matching classico: il passo nativo non lo legge.
 
@@ -643,6 +643,48 @@ globali del mapper incrementale, che per impostazione compensa l'intero blocco o
 gran parte del tempo di allineamento. `mapper="hierarchical"` è la pipeline gerarchica di COLMAP:
 gruppi di foto allineati sui core, poi uniti.
 
+### L'allineamento nativo
+
+`align_cameras(engine="native")` (o `PPG_ENGINE=native`) allinea le foto con il mapper globale del motore
+nativo (`engine.native_map`, `ppg_core` API 16) al posto di quello di COLMAP: legge le camere, i punti chiave e
+le coppie verificate di `database.db` (qualunque motore le abbia abbinate), costruisce il grafo delle viste,
+media le rotazioni, stabilisce le tracce (`tiepoint_limit / 4` per foto, almeno 500, come il mapper globale
+classico), posiziona le camere - sul GPS delle foto quando almeno tre ce l'hanno, sugli stessi assi metrici
+meno un offset tondo dei prior di posa del motore classico; sistema `gnss` quando le posizioni orientano il
+blocco, `similarity` quando si spargono troppo poco per la loro accuratezza e lo collocano soltanto, `free`
+senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo, solo dove il blocco le determina: una camera la
+cui focale ha uno scarto a posteriori marginale (con liberi tutti i termini che l'ultimo turno libera: anche fx e fy, il
+punto principale e i termini di decentramento dove quel turno allarga la camera a OPENCV) sopra lo
+0,5 % dopo il primo turno - un blocco nadirale piatto, che non
+distingue la focale dalla quota - tiene la calibrazione ferma, come una la cui focale un turno libero sposta di
+più del 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` e le note lo dicono). Il modello viene
+scritto nel formato di COLMAP e l'allineamento prosegue come con i mapper classici. `auto`, il predefinito,
+resta l'allineamento classico finché quello nativo non ha superato il suo collaudo.
+
+Ciò che il mapper nativo non fa resta classico, con il motivo nel log e in
+`meta["engine"]["align_cameras"]["fallback"]`: il core nativo assente o più vecchio dell'API 16
+(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, il mapper `incremental` o
+`hierarchical` richiesto, foto aggiunte a un allineamento (`reset=False`), rig a 360 gradi, calibrazioni tenute
+fisse, un modello di camera che non conosce (uno fisheye).
+
+Il blocco viene giudicato come quello globale classico: subito dopo le rotazioni (deve collocare il 90 % delle
+foto), subito dopo il posizionamento (le sue camere devono stare sul GPS delle foto,
+`meta["sfm"]["global_check"]`) e sul modello scritto (errore di riproiezione mediano al più 2 px, almeno metà
+delle osservazioni tenute). Un blocco che non passa, o un errore del mapper, passa l'allineamento alla catena
+classica, che allinea con le sue regole (il mapper richiesto, `auto` compreso: quello globale con il suo
+controllo, quello incrementale quando viene rifiutato); `meta["sfm"]["native_fallback"]` e il registro del
+motore tengono il motivo (`placed 24 of 48 photos`, `built a block whose cameras miss the GPS of the photos by
+99 m`, `native mapper failed: ...`). Un annullamento e un disco pieno fermano il passo e lasciano il modello e il
+database com'erano.
+
+`meta["sfm"]["native_mapper"]` riporta ogni fase in numeri e parole (mai un nome di foto o un percorso):
+`input`, `view_graph`, `rotations`, `tracks`, `position` (con `frame`, `placed`, `positions`, `crs`,
+`offset`), `refine` (i turni), `report` (il rapporto intero del mapper: `median_reprojection_px`,
+`tracks_kept_share`, `sigma_h`, `sigma_v`, gli scarti dei voli...). `meta["timings"]["align_cameras"]` ha le
+fasi `view_graph` (lettura del database compresa), `rotation_averaging`, `track_establishment`,
+`global_positioning`, `bundle_adjustment` e `write`. Per le prove: `PPG_NATIVE_TRACKS_PER_PHOTO` (le tracce
+tenute per foto) e `PPG_NATIVE_FINAL_ALL_TRACKS=0` (niente ultimo turno con tutte le tracce).
+
 ### Ottimizzazione delle camere
 
 Con 3 o più punti di controllo (marker con un riferimento abilitato, non punti di verifica) a una
@@ -683,6 +725,97 @@ prima, modello su disco compreso, e il resoconto descrive quello (`reprojection_
 l'ottimizzazione si ferma per un errore o viene annullata a mano, con il resoconto dell'ottimizzazione di prima
 (nessuno quando non c'era).
 
+Ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina
+(`hold_undetermined=True`, il predefinito, con entrambi i motori: la regola dei giri dell'allineamento nativo,
+sopra, presa gruppo per gruppo e su una sola scala). Prima della prima compensazione si prendono gli scarti
+quadratici medi marginali a posteriori dalla covarianza della compensazione all'allineamento - con liberi insieme
+tutti gli intrinseci che le opzioni liberano (la distorsione, il punto principale con `fit_principal_point`), i
+punti di controllo, le barre e le posizioni che entrano nella compensazione con la loro accuratezza, scalata con
+il fattore di varianza dei punti di legame (`engine.bundle.judge_intrinsics`, sul core nativo, `ppg_core` API
+18). La focale viene giudicata per prima: quella il cui scarto relativo supera lo 0,5 % (`bundle.FOCAL_SD_HOLD`)
+resta ferma. Foto nadirali su terreno piatto non distinguono la focale dalla quota di volo, qualunque cosa dicano
+i punti di controllo su quel terreno, e una compensazione che lì la rifinisce scivola lungo quello scambio (un
+anello volato una volta su terreno piatto, ottimizzato su sei target: focale dieci volte più lunga, camere 131 m
+più in alto, target di verifica fuori di 0,6 m).
+
+Non resta nemmeno dove l'ha lasciata l'allineamento. Un allineamento che rifinisce la focale di un blocco così la
+lascia in un punto qualunque dello stesso scambio (il mapper di COLMAP su quell'anello: da 750 a 3900 px per un
+obiettivo da 1000, ogni volta altrove; tenuta lì, i target di verifica erano fuori da 20 a 230 mm). Resta ferma
+tra quella stima e il valore dell'obiettivo - la focale che dichiarano le foto (il loro EXIF, tenuto con il
+sensore a parte dai parametri che un allineamento sovrascrive: `Sensor.focal_prior`, `sfm.lens_prior`) -,
+ciascuno pesato con l'inverso della sua varianza (`sfm.lens_target`): la stima ha lo scarto marginale appena
+misurato, il valore dell'obiettivo il 2 % di se stesso (`sfm.LENS_PRIOR_SD`: le focali dell'EXIF sono
+arrotondate, e i fattori di crop variano). Un blocco che della focale non sa quasi nulla finisce sul valore
+dell'obiettivo: quell'anello, le cui stime hanno uno scarto dal 6 al 22 % di se stesse, finisce entro il 2 % (da
+996 a 1018 px). Uno che la determina quasi resta vicino alla propria stima: una griglia appena inclinata, che
+conosce la focale allo 0,6 %, fa un decimo della strada verso un valore delle foto più lungo del 3 % (2,5 px su
+30). L'ottimizzazione prima porta la focale a quel valore a passi di un decimo al massimo, compensando di nuovo
+il blocco a ogni passo con la calibrazione ferma e portata con sé (i termini radiali vanno con il quadrato della
+focale, le camere con la loro distanza da ciò che vedono); il blocco così portato sostituisce l'allineamento, la
+calibrazione viene giudicata di nuovo da lì, e `report["intrinsics"]["lens_prior"]` dice che cosa è stato
+pesato, per sensore: `estimate` e il suo `sd` (relativo), `prior` e `prior_sd`, `target`, `steps`. Il sensore
+ricorda dove è stata messa la sua focale (`Sensor.focal_target`), e un'ottimizzazione che la trova lì la lascia:
+non è più una stima del blocco, e pesata di nuovo con il valore dell'obiettivo gli si avvicinerebbe a ogni
+corsa. Ogni corsa della catena classica su quell'anello finisce allora entro 2 mm sui target di controllo e 5 mm
+su quelli di verifica; le sue camere finiscono lontane dalla quota vera quanto il valore scelto lo è dalla
+focale vera (dallo 0,1 all'1,8 %: da 1 a 27 cm su quell'anello), che è quello che costa dare ascolto alla stima
+di un blocco così. Un blocco il cui errore di riproiezione finirebbe una volta e mezza più grande non segue e
+resta com'era, con una nota. Una focale che era stata ipotizzata, o data a mano, non ha un valore
+dell'obiettivo: resta dove l'ha lasciata l'allineamento.
+
+Poi i termini tangenziali, il punto principale (quando è stato chiesto) e i termini radiali, ciascuno per quello
+che sposta nella foto: un gruppo resta fermo quando lo scarto marginale dello spostamento che causa all'angolo
+della foto supera mezzo pixel (`bundle.GROUP_SD_HOLD_PX`). Ogni gruppo viene giudicato nella compensazione come la
+lasciano i gruppi già tenuti: la covarianza viene ripresa senza ciò che è stato tenuto. L'ordine è fisso - la
+focale per prima, con tutti gli altri gruppi liberi, come la giudica l'allineamento nativo; poi da ciò che serve
+meno a un obiettivo vero a ciò che gli serve di più: i termini tangenziali, vicini a zero nella maggior parte
+degli obiettivi, il punto principale, vicino al centro della foto, i termini radiali per ultimi. Di due gruppi
+che si scambiano tra loro si rinuncia al primo, e il secondo, giudicato senza di lui, può restare libero - anche
+dove il primo da solo era passato: un gruppo successivo che non passa viene giudicato di nuovo senza i gruppi
+precedenti ancora liberi (prima i termini tangenziali), e dove allora passa sono loro a restare fermi al suo
+posto. Alla focale si rinuncia così solo per i termini radiali, quando nient'altro basta: è la prima per quello
+che un blocco piatto non sa distinguere, non perché un obiettivo ne possa fare a meno (una griglia appena
+inclinata: la focale passa allo 0,4 %, i termini tangenziali con lei libera no, 0,57 px; restano fermi loro, e
+la focale viene rifinita). Quell'anello non determina i suoi termini radiali finché la focale è libera (1,6 px
+all'angolo) e li determina una volta tenuta la focale (0,12 px): vengono rifiniti, con il termine radiale
+trovato entro 0,0003 da quello vero, i target di controllo a 1 mm e quelli di verifica a 9 mm. Non determina i
+termini tangenziali della nostra formulazione (1,6 px), che restano fermi; su un blocco con molti punti di
+legame quelli passano (0,5 px) mentre i termini radiali, con loro liberi, no (0,9 px), e restano fermi lo
+stesso, per i termini radiali. Un ordine secondo quanto ogni gruppo supera il suo limite avrebbe rinunciato al
+loro posto ai termini radiali (3,1 px finché i tangenziali sono liberi) e lasciato i target di verifica a 17 mm.
+Foto oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
+calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covarianza (una matrice normale che non
+si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
+block gave no covariance`) e nel log c'è un avviso. Una focale tenuta così resta alla stima dell'allineamento:
+nessuna deviazione standard non è un verdetto che il blocco non la conosca, e nulla viene pesato contro il valore
+dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`).
+
+Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
+più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti
+(una griglia sintetica di 40 foto: 3,2 px). Lì restano fermi anche i termini radiali, e un punto nel mezzo di
+quella griglia finisce a 3 mm - da 4 a 6 cm rifinendo i termini radiali, da 11 a 28 cm rifinendo tutto. La regola
+impedisce all'ottimizzazione di piegare un blocco così; non può raddrizzarne uno che l'allineamento ha già
+piegato: un punto di controllo nel mezzo del blocco, o almeno un punto di verifica lì, è ciò che mostra una
+cupola.
+
+Una guardia sorveglia ciò che è stato rifinito (`bundle.runaways`): una focale spostata di più del 20 % dal suo
+valore di partenza (`bundle.FOCAL_MOVE_HOLD`), o un primo termine radiale cambiato di più di 0,5
+(`bundle.K1_MOVE_HOLD`), fa ripartire l'ottimizzazione dall'inizio con la focale, o i termini radiali, tenuti. La
+compensazione di COLMAP rifinisce un gruppo per tutte le camere o per nessuna, e la distorsione tutta o per
+niente: con più sensori, ciò che è tenuto per uno lo è per tutti, e ciascun tipo di termine di distorsione porta
+con sé l'altro (la nostra compensazione tiene ogni gruppo sensore per sensore). `report["intrinsics"]` dice che
+cosa è stato giudicato, in numeri e con la chiave di ogni sensore: `checked`, `variance_factor`, `focal_sd`
+(relativo), `tangential_sd`, `principal_point_sd` e `radial_sd` (pixel all'angolo della foto; ciascuno una lista
+di `[sensore, scarto]`), `held` (i sensori tenuti, per gruppo: `focal`, `tangential`, `principal_point`,
+`radial`), `notes` (`sensor 0: focal held: undetermined, sd 11.42 %`, `sensor 0: radial held: undetermined, sd
+3.16 px at the image corner`), e `reason` quando non è stato chiesto nulla - nessun intrinseco da rifinire (una
+calibrazione fissa), rig a 360 gradi, o un core che non può dare la covarianza (assente, più vecchio dell'API 18,
+`PPG_NATIVE=0`, un modello di camera che non conosce): la calibrazione viene allora rifinita come prima e il log
+lo dice una volta. Dove la regola tiene una focale, `report["focal_held"]` vale `"the block does not determine
+the focal length"`. `hold_undetermined=False` (`ppg optimize --free-undetermined`, l'ultima spunta della
+finestra) rifinisce ogni calibrazione come dicono le altre opzioni, qualunque cosa determini il blocco, e non
+sorveglia nulla.
+
 Un'ottimizzazione che niente tiene nel suo sistema (nessun punto fisso, posizioni non abbastanza
 accurate da tenere il blocco: il GPS di un drone) lascia che la compensazione fissi a modo suo il
 riferimento del blocco, e può scalare, ruotare e spostare tutto il blocco nel sistema interno (sette volte
@@ -702,7 +835,8 @@ il risolutore nativo è già il predefinito sotto `"ppg"` - con i limiti di quel
 auto|colmap|ppg`, il *Motore* della finestra).
 
 `engine="ppg"` usa invece la nostra compensazione (sotto), con `gnss="plain"` o `"bias"` (entrambe
-rifiniscono la focale; `"auto"` vale `"plain"` con la focale tenuta quando le posizioni possono tenere il
+lasciano la focale alla compensazione, che la rifinisce dove il blocco la determina; `"auto"` vale `"plain"`
+con la focale tenuta quando le posizioni possono tenere il
 blocco e nessun punto fisso lo tiene, altrimenti `"off"`), `rolling_shutter=True` e `solver="auto"`,
 `"native"` o `"scipy"` (sotto; un'opzione della nostra compensazione: con `engine="colmap"` qualsiasi
 parola diversa da `"auto"` viene rifiutata prima di ogni lavoro). Su un blocco che nulla colloca - meno di
@@ -737,8 +871,14 @@ camera - scipy compensa il blocco, `Result.fallback` dice perché e il log ha un
 `bundle.Result` porta il blocco compensato e com'è andata la soluzione: `cost`, `gradient_max`,
 `solver`, `fallback`, `seconds`, `linear_solver` (`dense`, `sparse`, `pcg`), `termination`;
 `bundle.evaluate(problem)` dà residui, gradiente e jacobiano di un problema con il motore nativo,
-`bundle.problem_at(problem, result)` un problema che parte dove un risultato è finito. Sui problemi
-sintetici di `testing.bundle_problems` (uno per tipo di residuo e per modello di camera) il risolutore
+`bundle.problem_at(problem, result)` un problema che parte dove un risultato è finito,
+`bundle.intrinsics_covariance(problem)` la covarianza degli intrinseci liberi delle camere ai parametri del
+problema (il blocco dell'inversa della matrice normale alle loro colonne, dal sistema ridotto; `ppg_core` API 18)
+e `bundle.judge_intrinsics(problem)` lo scarto marginale di ogni gruppo di intrinseci di ogni camera - la focale
+(relativo), i termini tangenziali, il punto principale e i termini radiali (quello che ciascuno sposta all'angolo
+della foto, in pixel) - con i gruppi da tenere, scalato con il fattore di varianza dei punti di legame
+(`bundle.tie_variance_factor`): ciò con cui l'ottimizzazione delle camere giudica un blocco. Sui
+problemi sintetici di `testing.bundle_problems` (uno per tipo di residuo e per modello di camera) il risolutore
 nativo raggiunge l'ottimo di scipy - un costo non superiore a quello di scipy, i parametri entro un
 decimo della loro deviazione standard - in poche iterazioni dove scipy fa un centinaio di valutazioni.
 

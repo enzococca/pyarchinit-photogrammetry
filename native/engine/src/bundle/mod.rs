@@ -2,14 +2,16 @@
 //! of its unknowns (`problem`), its residuals and their Jacobian by forward dual numbers
 //! (`residuals`, `dual`), the normal equations reduced to the cameras by eliminating the points
 //! (`schur`, dense; `sparse`, faer's sparse Cholesky; `pcg`, the conjugate gradients without
-//! forming them), the Levenberg-Marquardt iteration over them (`solve`) and the synthetic blocks
-//! of the tests and of `ppg-bench adjust` (`synthetic`).
+//! forming them), the Levenberg-Marquardt iteration over them, generic over the residual and the
+//! size of the eliminated blocks (`lm`), the bundle adjustment as one of its models (`solve`) and
+//! the synthetic blocks of the tests and of `ppg-bench adjust` (`synthetic`).
 
 use std::ops::Neg;
 
 use crate::camera::Real;
 
 pub mod dual;
+pub mod lm;
 mod pcg;
 pub mod problem;
 pub mod residuals;
@@ -25,8 +27,8 @@ pub use problem::{
 };
 pub use residuals::{evaluate, evaluate_at, Evaluation, Loss, BEHIND_CAMERA_RESIDUAL};
 pub use solve::{
-    choose_linear_solver, solve, LinearSolver, Options, Solution, Termination, DENSE_MAX_COLUMNS, DENSE_MAX_PHOTOS,
-    PCG_ABOVE_BYTES, ROBUST_FUNCTION_TOLERANCE,
+    bias_covariance, choose_linear_solver, intrinsics_covariance, intrinsics_variances, solve, LinearSolver, Options,
+    Solution, Termination, DENSE_MAX_COLUMNS, DENSE_MAX_PHOTOS, PCG_ABOVE_BYTES, ROBUST_FUNCTION_TOLERANCE,
 };
 
 /// The scalar the residuals are written for: `f64` for the values alone (the cost of a trial

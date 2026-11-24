@@ -1287,11 +1287,19 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
              rolling_shutter: bool = typer.Option(False, help="with --engine ppg: a velocity per photo while it is read"),
              solver: str = typer.Option("auto", "--solver", hidden=True,
                                         help="with --engine ppg: auto, native (the core), scipy (the reference)"),
+             hold_undetermined: bool = typer.Option(
+                 True, "--hold-undetermined/--free-undetermined",
+                 help="keep each part of the calibration of a camera where the block does not determine it: the "
+                      "focal length (photos looking straight down over flat ground: its marginal sd above 0.5 %; "
+                      "held between the estimate of the alignment and the value the photos state, each weighed by "
+                      "how well it is known), the distortion and a principal point asked for (above "
+                      "half a pixel at the corner of the photo); the report says so per sensor. "
+                      "--free-undetermined refines every calibration whatever the block determines"),
              chunk: Optional[str] = None):
     """Optimize the cameras (global bundle adjustment), on the control points and scale bars when there are any, else
     held by the accurate GNSS positions of the photos; an optimisation that takes the cameras away from those
     positions is undone (it bent the block, or the positions disagree with the control points: switch off the camera
-    references to keep it)."""
+    references to keep it). Each part of the calibration is refined only where the block determines it."""
     from .engine.bundle import SOLVERS
     from .engine.sfm import GNSS_MODES, resolve_optimize_engine
 
@@ -1312,7 +1320,7 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     doc, ch = _open(project, chunk)
     err = ch.optimize_cameras(fit_principal_point=principal_point, use_markers=markers, marker_weight=marker_weight,
                               progress=print_progress, engine=engine, gnss=gnss, rolling_shutter=rolling_shutter,
-                              solver=solver)
+                              solver=solver, hold_undetermined=hold_undetermined)
     if any(m.reference.location for m in ch.markers) or ch.scalebars:
         ch.update_transform()
     doc.save()
@@ -1336,6 +1344,8 @@ def optimize(project: Path, markers: bool = typer.Option(True, help="control poi
     if rep.get("focal_held"):
         why = rep["focal_held"] if isinstance(rep["focal_held"], str) else ""  # the reason (yes alone before it)
         text += ", focal length of the alignment held" + (f" ({why})" if why else "")
+    for note in (rep.get("intrinsics") or {}).get("notes") or ():  # the sensors the block does not determine
+        text += f", {note}"
     ran = rep.get("solver") or {}
     if ran.get("fallback") or ran.get("used") == "native":  # scipy doing what was asked has nothing to say
         text += f", solver {ran['used']}" + (f" ({ran['fallback']})" if ran.get("fallback") else "")

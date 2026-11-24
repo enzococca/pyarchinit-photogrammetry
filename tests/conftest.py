@@ -336,10 +336,10 @@ def scene():
 PROCESSED_RANSAC_SEED = "1"
 
 
-def _process_trench(scene_dir, project, engine, surfaces=True, ransac_seed=None):
+def _process_trench(scene_dir, project, engine, surfaces=True, ransac_seed=None, align_engine=None):
     """The trench of ``scene_dir`` processed into ``project``: markers, matching with ``engine`` (COLMAP's RANSAC
     seeded with ``ransac_seed`` while the photos are matched, the variable put back as it was right after),
-    alignment, georeferencing by the targets, depth maps, dense cloud, (``surfaces``: mesh and texture,) DEM and
+    alignment (with ``align_engine``; None: the default), georeferencing by the targets, depth maps, dense cloud, (``surfaces``: mesh and texture,) DEM and
     orthomosaic. Returns ``(doc, chunk, report of the georeferencing)``."""
     import os
 
@@ -361,7 +361,7 @@ def _process_trench(scene_dir, project, engine, surfaces=True, ransac_seed=None)
             os.environ.pop(sfm.RANSAC_SEED_ENV, None)
         else:
             os.environ[sfm.RANSAC_SEED_ENV] = previous
-    ch.align_cameras()
+    ch.align_cameras(engine=align_engine)
     ch.import_reference(scene_dir / "gcp.csv", crs="EPSG:3004")
     report = ch.update_transform()
     ch.build_depth_maps(quality="high")
@@ -390,6 +390,15 @@ def processed_auto(scene_dir, tmp_path_factory):
     checks read the alignment, the DEM and the orthomosaic). For the metric gates of tests/test_pipeline.py."""
     return _process_trench(scene_dir, tmp_path_factory.mktemp("trench_auto") / "project.ppg", "auto",
                            surfaces=False)
+
+
+@pytest.fixture(scope="session")
+def processed_native(scene_dir, tmp_path_factory):
+    """The trench processed as ``processed_auto``, matched and aligned by the native engine (``engine="native"``: the
+    native matching and the native global mapper, where the native core carries them). For the metric gates of
+    tests/test_pipeline.py and tests/test_native_map.py."""
+    return _process_trench(scene_dir, tmp_path_factory.mktemp("trench_native") / "project.ppg", "native",
+                           surfaces=False, align_engine="native")
 
 
 TRENCH_ORIGIN = (2480000.0, 4500000.0)  # metre coordinates in Gauss-Boaga: float32 would round them

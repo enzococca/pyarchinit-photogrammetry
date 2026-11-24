@@ -39,7 +39,10 @@ pub struct Obs {
 /// the same meaning and units. `rotations` are world -> camera, `centres` the camera centres,
 /// `image_camera[i]` the camera of the photo `i`; `gcps` are `(marker, target, sigma)`, `bars`
 /// `(marker a, marker b, distance, sigma)`, `gnss` `(image, target, sigma per axis, flight)`.
-/// `rs_sigma` and `rs_sigma_angular` hold one value for every photo or one per photo.
+/// `rs_sigma` and `rs_sigma_angular` hold one value for every photo or one per photo. With
+/// `gnss_bias`, every flight of `gnss` has a bias but `reference_flight`, whose bias is held at zero
+/// (the frame of the positions is that flight's: without control points the biases of all the
+/// flights and a translation of the block would trade off).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Problem {
     pub rotations: Vec<[[f64; 3]; 3]>,
@@ -56,6 +59,7 @@ pub struct Problem {
     pub fixed_images: Vec<bool>,
     pub rolling_shutter: bool,
     pub gnss_bias: bool,
+    pub reference_flight: Option<i64>,
     pub pixel_sigma: f64,
     pub marker_sigma: f64,
     pub rs_sigma: Vec<f64>,
@@ -81,6 +85,7 @@ impl Default for Problem {
             fixed_images: Vec::new(),
             rolling_shutter: false,
             gnss_bias: false,
+            reference_flight: None,
             pixel_sigma: 1.0,
             marker_sigma: MARKER_PIXEL_ACCURACY,
             rs_sigma: vec![ROLLING_SHUTTER_SIGMA_M],
@@ -193,7 +198,7 @@ impl Problem {
 /// Where each unknown sits in the vector of parameters: the order of `_Layout` of bundle.py.
 /// Six columns per free photo (the rotation increment, then the centre), the free intrinsics of
 /// each camera, three per point, three per marker, six per photo (a fixed photo too) with the
-/// rolling shutter, three per flight (sorted) with the GNSS bias.
+/// rolling shutter, three per flight (sorted, but the reference flight) with the GNSS bias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     /// The photos that are not fixed, in their order.
@@ -239,7 +244,11 @@ impl Layout {
             pos += 6 * n;
             col
         });
-        let mut flights: Vec<i64> = if pb.gnss_bias { pb.gnss.iter().map(|g| g.3).collect() } else { Vec::new() };
+        let mut flights: Vec<i64> = if pb.gnss_bias {
+            pb.gnss.iter().map(|g| g.3).filter(|f| Some(*f) != pb.reference_flight).collect()
+        } else {
+            Vec::new()
+        };
         flights.sort_unstable();
         flights.dedup();
         let bias_col = pos;
@@ -458,6 +467,13 @@ mod tests {
         assert_eq!((lay.flights.clone(), lay.bias_col), (vec![1, 3], 52));
         assert_eq!((lay.bias_col_of(1), lay.bias_col_of(3), lay.bias_col_of(2)), (Some(52), Some(55), None));
         assert_eq!(lay.size, 58);
+
+        // the reference flight has no bias: its positions are the frame
+        let held = Problem { reference_flight: Some(1), ..pb.clone() };
+        let lay = Layout::new(&held);
+        let got = (lay.flights.clone(), lay.bias_col_of(1), lay.bias_col_of(3), lay.size);
+        assert_eq!(got, (vec![3], None, Some(52), 55));
+        assert_eq!(Parameters::initial(&held).bias.len(), 1);
 
         // without the rolling shutter and the biases those columns are not there
         let plain = Problem { rolling_shutter: false, gnss_bias: false, ..pb };

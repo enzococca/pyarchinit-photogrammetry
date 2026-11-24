@@ -61,10 +61,52 @@ and EXIF heights (a shift common to every position, as a base on a wrong point o
 taken up by the georeference and undoes nothing): to keep such an optimisation, untick the cameras in *Reference*
 (right click: *Do not use the references of all the cameras*) and run it again. *not used* leaves the positions out (the optimisation of earlier versions, still watched by the
 net). The engine *Own* on *automatic* holds the block the same way, focal length included; *used with their
-accuracy* and *used, with a bias per flight* refine the focal length (with a bias per flight the net judges each
-position less the bias of its flight). From the command line: `ppg optimize project.ppg --gnss auto|off`
-(`plain` and `bias` with `--engine ppg`); the output says how many photos held the block and whether the focal
-length was kept.
+accuracy* and *used, with a bias per flight* leave the focal length to the adjustment, which refines it where the
+block determines it (with a bias per flight the net judges each position less the bias of its flight). From the
+command line: `ppg optimize project.ppg --gnss auto|off` (`plain` and `bias` with `--engine ppg`); the output says
+how many photos held the block and whether the focal length was kept.
+
+**Each part of the calibration is refined only where the block determines it.** Before adjusting, the program
+measures how well the block knows each part of the calibration of each sensor (its standard deviation, from the
+covariance of the adjustment). The focal length first: above 0.5 % - photos looking straight down over flat
+ground, where the focal length cannot be told from the flying height, even with control points on that ground -
+the focal length is not refined. It is not kept where the alignment left it either - an alignment that refined
+the focal length of such a block left it anywhere - but between that estimate and the value the photos state
+(their EXIF), each weighed by how well it is known: the estimate by what the block knows of it, the value of the
+photos to 2 % (the focal lengths of the EXIF are rounded). A block that hardly knows its focal length ends at
+the value of the photos; one that nearly determines it stays near its own estimate, also when the photos state a
+value a few per cent off. The program first brings the focal length there, in small steps, with the block
+following (*focal length put at 1010 px, between the estimate of the alignment (2430 px) and the value the
+photos state (1000 px), and held: the block does not determine it*; the log has the figures), and a later
+optimisation leaves it there. Photos that state no focal length keep the one of the alignment (*focal length of
+the alignment held: the block does not determine it*). Refined there, the focal length slides with the height of
+the cameras: on a ring flown once over flat ground it ended ten times too long, the cameras 131 m too high. Then
+the distortion and a principal point that was asked for, each by what it moves at the corner of the photo: a
+part the block determines to worse than half a pixel is held as well, the others are refined. The parts are
+measured in a fixed order, each without those already held: after the focal length, from what a lens needs least
+to what it needs most - the tangential distortion, the principal point, the radial distortion last - so that of
+two parts the block cannot tell apart the less needed is the one given up, also when on its own it had passed
+(the focal length only for the radial distortion). The same ring, once its focal length is held, determines its
+radial distortion, which is refined (its check targets end at 9 mm); a grid of nadir photos over flat ground
+does not - refined there, the distortion bends the block into a dome between the control points - and keeps the
+one of the alignment. The result names what was held (*parts of the calibration held because the block does not
+determine them: radial distortion*). A focal length or a radial term that runs away during the optimisation is
+held and the optimisation run again. Oblique photos, relief or flights at two heights determine the calibration,
+and it is refined as before. Clear *Keep the parts of the calibration that the block does not determine* to
+refine everything anyway (`ppg optimize --free-undetermined`; in a batch, the same tick in the step). The check
+runs on the native core; without it the calibration is refined as before and the log says so. When the block
+gives no covariance to measure a part by, that part is kept without having been measured, and the log has a
+warning; a focal length kept so stays where the alignment put it, not moved towards the value of the photos.
+
+**Control points only at the corners of a flat block.** A block of nadir photos over flat ground can bend into a
+dome - its middle higher or lower than its edges - while the radial distortion makes up for it in the photos.
+The reprojection error does not show it, and control points at the corners of the block do not either: a dome
+passes through them all. The check above keeps the optimisation from bending such a block (on a synthetic grid
+of 40 photos with four control points at its corners, a point in the middle ends 3 mm off with the distortion
+held and 4 to 6 cm with it refined), but it cannot flatten a block that its alignment already bent. What shows
+a dome is a point in the middle: put one control point there, or at least a check point, and look at its error
+after the optimisation. Photos pitched forward on strips flown both ways, or a second flight at another height,
+remove the ambiguity itself.
 
 *Engine*: *Automatic* (the default, as for the other steps: the program's choice, COLMAP for now), *COLMAP* or *Own*
 (`ppg optimize --engine auto|colmap|ppg`). Held by nothing (the GPS of a drone, no control points) the adjustment may
