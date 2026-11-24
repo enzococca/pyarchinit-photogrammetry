@@ -501,13 +501,12 @@ def _menu_entry(w, monkeypatch, open_menu, text):
 
 def test_campaigns_from_the_workspace_menu(make, monkeypatch):
     from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QTreeWidgetItemIterator
 
     from pyarchinit_photogrammetry.engine import elevation as E
     from pyarchinit_photogrammetry.engine import elevation_groups as G
     from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
     from pyarchinit_photogrammetry.gui import dialogs
-    from PySide6.QtWidgets import QTreeWidgetItemIterator
-
     from pyarchinit_photogrammetry.gui import main_window as mw
 
     w = make(chunks=3)
@@ -516,10 +515,12 @@ def test_campaigns_from_the_workspace_menu(make, monkeypatch):
     frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
     entry = E.build_elevation(a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
     asked = []
+    answers = [{"chunks": [b.key, c.key], f"date_{a.key}": "2017-11-05", f"date_{b.key}": "2022-11-03",
+                f"date_{c.key}": ""}]
 
     def ask(parent, title, fields, intro=""):
         asked.append({f.name: f for f in fields})
-        return {"chunks": [b.key], f"date_{b.key}": "2022-11-03", f"date_{c.key}": ""}
+        return answers.pop(0)
 
     monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(ask))
     monkeypatch.setattr(dialogs, "choice", lambda *a, **k: pytest.fail("no question for chunks in a system"))
@@ -529,34 +530,68 @@ def test_campaigns_from_the_workspace_menu(make, monkeypatch):
     (fields,) = asked
     assert [v for v, _lab in fields["chunks"].choices] == [b.key, c.key] and fields["chunks"].default == [b.key]
     assert fields["chunks"].kind == "checklist" and fields[f"date_{b.key}"].kind == "text"
+    assert fields[f"date_{a.key}"].kind == "text"                          # the reference's date too
     (group,) = G.groups(a)
-    assert [(m["chunk"], m["date"]) for m in group["members"]] == [(a.key, None), (b.key, "2022-11-03")]
+    assert [(m["chunk"], m["date"]) for m in group["members"]] == [(a.key, "2017-11-05"), (b.key, "2022-11-03")]
     (new,) = E.elevations(b)
     assert new["grid_of"] == entry["id"]
-    said = " ".join(t for _k, t in w.said)
-    assert b.label in said and "1" in said
+    infos = [t for k, t in w.said if k == "message"]
+    assert len(infos) == 1
+    assert mw.tr("Costruito su {0} chunk: {1}.", 1, b.label) in infos[0]
+    assert mw.tr("«{0}» lasciato fuori: {1}.", c.label, mw.tr(
+        "è in {0}, il prospetto in {1}: la stessa griglia vuole lo stesso sistema di riferimento",
+        "EPSG:32634", "EPSG:32633")) in infos[0]
     w.workspace.populate(w.doc)                                             # the tooltip of a member
     tips = []
-    for tw in [w.workspace]:
-        it = QTreeWidgetItemIterator(tw)
-        while it.value():
-            data = it.value().data(0, 0x0100)
-            if isinstance(data, tuple) and data and data[0] == "elevation" and data[2]["id"] == new["id"]:
-                tips.append(it.value().toolTip(0))
-            it += 1
+    it = QTreeWidgetItemIterator(w.workspace)
+    while it.value():
+        data = it.value().data(0, 0x0100)
+        if isinstance(data, tuple) and data and data[0] == "elevation" and data[2]["id"] == new["id"]:
+            tips.append(it.value().toolTip(0))
+        it += 1
     assert tips and "Muro" in tips[0] and "2022-11-03" in tips[0]
 
-    # two local chunks: the question asked, declined: nothing built
+    # again: the members' dates offered as they are, a member not ticked; dates edited, nothing built
+    asked.clear()
+    answers.append({"chunks": [], f"date_{a.key}": "2017-11-06", f"date_{b.key}": "2022-11-03",
+                    f"date_{c.key}": ""})
+    w.wall_campaigns(entry, a)
+    w.runner.wait()
+    (fields,) = asked
+    assert fields["chunks"].default == [] and fields[f"date_{b.key}"].default == "2022-11-03"
+    assert [m["date"] for m in group["members"]] == ["2017-11-06", "2022-11-03"]
+    assert len(E.elevations(b)) == 1
+
+    # two local chunks: the question asked; declined: nothing built; accepted: built
     for ch in w.chs:
         ch.crs = "LOCAL"
     entry["crs"] = "LOCAL"                                                  # a project in a local frame
     questions = []
-    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: questions.append(a) or None)
+    replies = [None, 0]
+    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: questions.append(a) or replies.pop(0))
     monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
-        lambda parent, title, fields, intro="": {"chunks": [c.key], f"date_{b.key}": "", f"date_{c.key}": ""}))
+        lambda parent, title, fields, intro="": {"chunks": [c.key], f"date_{a.key}": "", f"date_{b.key}": "",
+                                                 f"date_{c.key}": ""}))
     assert not w.wall_campaigns(entry, a)
     w.runner.wait()
-    assert questions and E.elevations(c) == [] and len(G.groups(a)[0]["members"]) == 2
+    assert len(questions) == 1 and E.elevations(c) == [] and len(G.groups(a)[0]["members"]) == 2
+    assert w.wall_campaigns(entry, a)
+    w.runner.wait()
+    assert len(questions) == 2 and len(E.elevations(c)) == 1 and len(G.groups(a)[0]["members"]) == 3
+
+
+def test_reason_text_by_code():
+    from pyarchinit_photogrammetry.gui.i18n import tr
+    from pyarchinit_photogrammetry.gui.wall_path_actions import reason_text
+
+    assert reason_text({"code": "crs", "reason": "the elevation is in EPSG:32633, the chunk in EPSG:32634: x",
+                        "theirs": "EPSG:32633", "mine": "EPSG:32634"}) == tr(
+        "è in {0}, il prospetto in {1}: la stessa griglia vuole lo stesso sistema di riferimento",
+        "EPSG:32634", "EPSG:32633")
+    assert reason_text({"code": "already", "reason": "x"}) == tr("ha già un prospetto del gruppo")
+    assert reason_text({"code": "no_model", "reason": "x"}) == tr("non ha un modello")
+    assert reason_text({"code": "local", "reason": "x"}) == tr(
+        "è in un sistema locale: non è stato detto che è nello stesso sistema")
 
 
 def test_campaigns_step_of_the_pane(make, monkeypatch):

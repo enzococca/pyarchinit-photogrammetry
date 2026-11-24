@@ -54,23 +54,20 @@ def refusal_text(exc) -> str:
     return tr("La linea non può essere la traccia di un muro: tracciala di nuovo.")
 
 
-def reason_text(reason: str) -> str:
-    """The words of the window for a chunk :func:`..engine.elevation_groups.build_on_chunks` refused."""
-    from ..engine import elevation_groups as G
-
-    if reason == G.ALREADY:
+def reason_text(refused: dict) -> str:
+    """The words of the window for a chunk :func:`..engine.elevation_groups.build_on_chunks` refused (its record:
+    ``code``, ``reason`` and for ``crs`` the two systems)."""
+    code = refused.get("code")
+    if code == "already":
         return tr("ha già un prospetto del gruppo")
-    if reason == G.NO_MODEL:
+    if code == "no_model":
         return tr("non ha un modello")
-    if "same_frame" in reason:
+    if code == "local":
         return tr("è in un sistema locale: non è stato detto che è nello stesso sistema")
-    import re
-
-    m = re.match(r"the elevation is in (.+), the chunk in (.+): the same grid", reason)
-    if m:
+    if code == "crs":
         return tr("è in {0}, il prospetto in {1}: la stessa griglia vuole lo stesso sistema di riferimento",
-                  m.group(2), m.group(1))
-    return reason
+                  refused.get("mine") or tr("locale"), refused.get("theirs") or tr("locale"))
+    return str(refused.get("reason", ""))
 
 
 def campaigns_text(out: dict) -> str:
@@ -83,7 +80,7 @@ def campaigns_text(out: dict) -> str:
     else:
         lines.append(tr("Nessun prospetto costruito."))
     for r in out["refused"]:
-        lines.append(tr("«{0}» lasciato fuori: {1}.", r["chunk"], reason_text(r["reason"])))
+        lines.append(tr("«{0}» lasciato fuori: {1}.", r["chunk"], reason_text(r)))
     for label in out["empty"]:
         lines.append(tr("«{0}»: il muro non è nel suo modello (nessuna cella), lasciato fuori.", label))
     return "\n".join(lines)
@@ -383,11 +380,20 @@ class WallPathActions:
             self._warn(tr("Nessun altro chunk del progetto ha un modello: lo stesso prospetto non ha dove andare."))
             return False
         mine = entry.get("crs") or chunk.crs
-        fields = [Field("chunks", tr("Chunk (altre campagne)"), [c.key for c in others if E.same_crs(mine, c.crs)],
+        found = G.group_of(self.doc, chunk, entry["id"])
+        live = {}  # chunk key -> the record of a member whose elevation is still there
+        if found is not None:
+            for m in G.members(self.doc, found[0], found[1]):
+                if m["chunk"] is not None and m["entry"] is not None:
+                    live[m["chunk"].key] = m["record"]
+        ticked = [c.key for c in others if E.same_crs(mine, c.crs) and c.key not in live]
+        fields = [Field("chunks", tr("Chunk (altre campagne)"), ticked,
                         choices=[(c.key, f"{c.label}  ({c.crs or tr('locale')})") for c in others],
                         kind="checklist")]
-        fields += [Field(f"date_{c.key}", tr("Data di «{0}» (AAAA-MM-GG)", c.label), G.campaign_date(c) or "",
-                         kind="text") for c in others]
+        dated = [chunk, *others]
+        fields += [Field(f"date_{c.key}", tr("Data di «{0}» (AAAA-MM-GG)", c.label),
+                         (live[c.key].get("date") or "") if c.key in live else (G.campaign_date(c) or ""),
+                         kind="text") for c in dated]
         v = dialogs.ParamDialog.ask(self, tr("Stesso prospetto su altri chunk"), fields, intro=tr(
             "«{0}» costruito di nuovo, sulla stessa griglia, sui chunk spuntati: una campagna ciascuno, tenute "
             "insieme come gruppo del muro. I chunk devono essere già allineati insieme e nello stesso sistema di "
@@ -395,18 +401,27 @@ class WallPathActions:
         if v is None:
             return False
         targets = [c for c in others if c.key in (v.get("chunks") or [])]
-        if not targets:
-            return False
         dates = {}
-        for c in targets:
+        for c in dated:
             text = str(v.get(f"date_{c.key}") or "").strip()
             try:
-                day = G.parse_date(text)
+                dates[c.key] = G.parse_date(text)
             except ValueError:
                 self._warn(tr("La data di «{0}» si scrive AAAA-MM-GG, non «{1}».", c.label, text))
                 return False
-            if day is not None:
-                dates[c.key] = day
+        changed = False
+        for key, record in live.items():  # the dates of the members edited in place
+            if key in dates and dates[key] != record.get("date"):
+                G.set_date(found[1], key, record["entry"], dates[key])
+                changed = True
+        if changed:
+            self._dirty(True)
+            self.workspace.populate(self.doc)
+            if getattr(self, "wall_pane", None) is not None:
+                self.wall_pane.update_states()
+        if not targets:
+            return False
+        dates = {k: d for k, d in dates.items() if d is not None and k not in live}
         same_frame = False
         if crs_mod.is_local(mine) and any(crs_mod.is_local(c.crs) for c in targets):
             k = dialogs.choice(self, "question", tr("Stesso prospetto su altri chunk"), tr(
