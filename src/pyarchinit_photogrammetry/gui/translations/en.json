@@ -4037,6 +4037,7 @@
   "Composito delle campagne...": "Composite of the campaigns...",
   "Composito delle campagne": "Composite of the campaigns",
   "Rifai il composito": "Make the composite again",
+  "Dai una data a «{0}»: il composito ordina le campagne per data (la più recente ne è la superficie e il riferimento dei colori)": "Give a date to «{0}»: the composite orders the campaigns by date (the most recent is its surface and the reference of the colours)",
   "Costruisci prima il prospetto del muro e le altre campagne: poi il composito le unisce.": "Build the wall elevation and the other campaigns first: then the composite joins them.",
   "Una campagna più vecchia prende la cella se è più profonda di (m)": "An older campaign takes the cell where it is deeper by (m)",
   "Accorda i colori delle campagne a quelli della più recente": "Match the colours of the campaigns to the most recent one",

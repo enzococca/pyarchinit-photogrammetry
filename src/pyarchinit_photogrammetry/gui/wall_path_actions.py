@@ -549,6 +549,10 @@ class WallPathActions:
                           entry.get("name")))
             return False
         ref, group = found
+        missing = C.undated(self.doc, ref, group)
+        if missing:  # the order of the campaigns decides the surface and the colours: never guessed
+            self._warn(tr(C.UNDATED_IT, ", ".join(missing)))
+            return False
         record = group.get("composite") or {}
         old = next((e for e in E.elevations(ref) if e.get("id") == record.get("entry")), None)
         threshold = float(record.get("threshold", C.DEEPER))

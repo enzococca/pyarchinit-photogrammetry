@@ -795,7 +795,8 @@ def test_composite_step_of_the_pane(make, monkeypatch):
     assert not pane.b_composite.isEnabled() and not pane.b_recomposite.isEnabled()
     a, b = w.chs
     monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
-        lambda parent, title, fields, intro="": {"chunks": [b.key], f"date_{b.key}": "2022-11-03"}))
+        lambda parent, title, fields, intro="": {"chunks": [b.key], f"date_{a.key}": "2017-11-05",
+                                                 f"date_{b.key}": "2022-11-03"}))   # a composite needs every date
     pane.b_campaigns.click()
     w.runner.wait()
     assert pane.b_composite.isEnabled() and not pane.b_recomposite.isEnabled()
@@ -809,3 +810,27 @@ def test_composite_step_of_the_pane(make, monkeypatch):
     pane.b_recomposite.click()
     w.runner.wait()
     assert [e["id"] for e in E.elevations(a) if e["kind"] == "composite"] == [comp["id"]]
+
+
+def test_composite_refused_while_a_campaign_has_no_date(make, monkeypatch):
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import elevation_composite as C
+    from pyarchinit_photogrammetry.engine import elevation_groups as G
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+    from pyarchinit_photogrammetry.gui import dialogs
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = make(chunks=2)
+    a, b = w.chs
+    frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
+    entry = E.build_elevation(a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
+    r = G.build_on_chunks(w.doc, a, entry, [b], dates={a.key: "2017-11-05", b.key: "2022-11-03"})
+    (_ch, new), = r["built"]
+    G.set_date(r["group"], b.key, new["id"], None)
+    asked = []
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(lambda *a, **k: asked.append(1)))
+    w.said.clear()
+    assert not w.wall_composite(new, b)
+    assert asked == [] and not C.composites(a)
+    assert mw.tr(C.UNDATED_IT, b.label) in _texts(w)
+    assert mw.tr(C.UNDATED_IT, b.label).startswith(f"Dai una data a «{b.label}»")
