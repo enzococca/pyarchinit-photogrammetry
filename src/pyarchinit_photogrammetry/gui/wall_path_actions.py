@@ -86,6 +86,15 @@ def campaigns_text(out: dict) -> str:
     return "\n".join(lines)
 
 
+def _left_out_text(code: str) -> str:
+    """Why a campaign is left out of the comparison sheet, in Italian, by the engine's code."""
+    if code == "grid":
+        return tr("è su un'altra griglia, con un'altra risoluzione")
+    if code == "shift":
+        return tr("i suoi pixel sono spostati di una frazione di cella")
+    return tr("il prospetto o i suoi file non ci sono più")
+
+
 def no_surface_text() -> str:
     from ..engine.elevation import FACE_ROWS
 
@@ -462,6 +471,7 @@ class WallPathActions:
 
         from ..engine import elevation_groups as G
         from ..engine.elevation_sheet import comparison_sheet
+        from . import dialogs
 
         if entry is None:
             pane = getattr(self, "wall_pane", None)
@@ -486,6 +496,10 @@ class WallPathActions:
         out = Path(path)
         if out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
             out = out.with_name(out.name + ".png")
+        pdf = out.with_suffix(".pdf")  # the dialog confirmed the image; the PDF beside it is asked about here
+        if pdf.exists() and dialogs.choice(self, "question", tr("Scheda di confronto"), tr(
+                "Accanto all'immagine c'è già {0}: sovrascriverlo?", pdf.name), [tr("Sovrascrivi")]) != 0:
+            return False
         doc = self.doc
 
         def work(p):
@@ -494,8 +508,8 @@ class WallPathActions:
         def done(r):
             text = tr("Scheda di confronto di {0} campagne scritta:\n{1}\n{2}", len(r["bands"]), r["image"], r["pdf"])
             if r["skipped"]:
-                text += "\n" + tr("Lasciate fuori (il prospetto o i suoi file non ci sono più): {0}",
-                                   ", ".join(r["skipped"]))
+                text += "\n" + tr("Lasciate fuori: {0}", "; ".join(
+                    f"{label} ({_left_out_text(r['codes'].get(label, ''))})" for label in r["skipped"]))
             self._info(tr("Scheda di confronto"), text)
 
         return bool(self.run_task("Scheda di confronto", work, done, refresh=False, save=False))

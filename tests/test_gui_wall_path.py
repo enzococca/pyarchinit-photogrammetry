@@ -661,11 +661,21 @@ def test_the_sheet_from_the_menu(make, monkeypatch, tmp_path):
     assert not pane.b_sheet.isEnabled()
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))       # cancelled: nothing
     assert not w.wall_sheet(entry, a)
-    out.unlink()
+    out.unlink()                                                        # the PDF beside it is still there
+    pdf = tmp_path / "scheda.pdf"
+    pdf.write_bytes(b"mine")
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    questions, replies = [], [None, 0]
+    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: questions.append(a) or replies.pop(0))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
-    assert w.wall_sheet(entry, a)
+    assert not w.wall_sheet(entry, a)                                   # declined: nothing written
     w.runner.wait()
-    assert out.exists()
+    assert len(questions) == 1 and "scheda.pdf" in questions[0][3]
+    assert not out.exists() and pdf.read_bytes() == b"mine"
+    assert w.wall_sheet(entry, a)                                       # accepted: both replaced
+    w.runner.wait()
+    assert out.exists() and pdf.read_bytes()[:4] == b"%PDF"
 
 
 def test_the_sheet_step_of_the_pane(make, monkeypatch, tmp_path):

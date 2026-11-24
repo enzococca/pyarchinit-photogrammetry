@@ -4014,6 +4014,9 @@
   "Stesso prospetto su altri chunk": "Same elevation on other chunks",
   "Scheda di confronto...": "Comparison sheet...",
   "Scheda di confronto": "Comparison sheet",
+  "è su un'altra griglia, con un'altra risoluzione": "it is on another grid, at another resolution",
+  "i suoi pixel sono spostati di una frazione di cella": "its pixels are shifted by a fraction of a cell",
+  "il prospetto o i suoi file non ci sono più": "the elevation or its files are gone",
   "Costruisci prima il prospetto del muro e le altre campagne: poi la scheda le confronta.": "Build the elevation of the wall and the other campaigns first: then the sheet compares them.",
   "Le campagne una sopra l'altra sullo stesso asse, quote ogni 0,5 m e spigoli segnati: immagine e PDF": "The campaigns one above the other on the same axis, heights every 0.5 m and corners marked: image and PDF",
   "non nota": "unknown",
@@ -5349,7 +5352,8 @@
   "La data di «{0}» si scrive AAAA-MM-GG, non «{1}».": "The date of “{0}” is written YYYY-MM-DD, not “{1}”.",
   "«{0}» non è in un gruppo di campagne: costruisci prima lo stesso prospetto su altri chunk.": "“{0}” is in no group of campaigns: build the same elevation on other chunks first.",
   "Scheda di confronto di {0} campagne scritta:\n{1}\n{2}": "Comparison sheet of {0} campaigns written:\n{1}\n{2}",
-  "Lasciate fuori (il prospetto o i suoi file non ci sono più): {0}": "Left out (the elevation or its files are gone): {0}",
+  "Accanto all'immagine c'è già {0}: sovrascriverlo?": "Beside the image there is already {0}: overwrite it?",
+  "Lasciate fuori: {0}": "Left out: {0}",
   "{0} campagne nel gruppo: {1}": "{0} campaigns in the group: {1}"
  },
  "engine": {
