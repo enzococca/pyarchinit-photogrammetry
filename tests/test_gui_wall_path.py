@@ -1036,3 +1036,49 @@ def test_follow_with_sam_makes_the_mask_in_the_task(make, monkeypatch):
     assert w.wall_follow()
     w.runner.wait()
     assert made == [(2, 2)] and masks[-1] is not None and masks[-1][0].dtype == bool
+
+
+def test_a_followed_line_kept_asks_the_side_on_a_thin_margin(make, recorded, monkeypatch):
+    from pyarchinit_photogrammetry.engine import wall_trace
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    w = make()
+    pane = w.wall_pane
+    crest = np.asarray(w.info["face"], float) + CREST
+    w.next_line = np.array([crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    assert w.wall_follow()
+    w.runner.wait()
+    assert pane.proposal["which"] == "right" and recorded["snaps"][-1][2] == "right"
+    monkeypatch.setattr(wall_trace, "side_votes", lambda ch, pts: {"left": 7.0, "right": 10.0})
+    asked = []
+
+    def choice(parent, kind, title, text, options, default=0, cancel="Annulla"):
+        asked.append((text, default))
+        return 0  # the owner says: from the left
+    monkeypatch.setattr(dialogs, "choice", choice)
+    assert w.wall_follow_keep()
+    w.runner.wait()
+    assert asked and "7" in asked[0][0] and "10" in asked[0][0] and asked[0][1] == 1
+    assert pane.side.currentData() == "left"
+    assert recorded["snaps"][-1][2] == "left"  # snapped again on the side chosen
+    assert pane.state("trace") == "done" and pane.state("snap") == "done"
+
+    pane.side.setCurrentIndex(pane.side.findData("auto"))  # the kept line snapped again from the photos' side
+    w.runner.wait()
+    w.next_line = np.array([crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    assert w.wall_follow()
+    w.runner.wait()
+    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: None)  # the owner gives up: nothing kept
+    assert not w.wall_follow_keep()
+    assert pane.proposal is not None
+
+
+def test_what_cannot_be_followed_is_said_by_its_kind():
+    from pyarchinit_photogrammetry.gui.wall_path_actions import follow_error_text
+
+    assert "punto 2 è fuori dal DEM" in follow_error_text({"error": "outside", "point": 2})
+    assert "due clic" in follow_error_text({"error": "points"})
+    assert "Nessun percorso" in follow_error_text({"error": "no_path"})
+    assert "costruiscila prima" in follow_error_text({"error": "no_ortho"})
+    assert "fuori dall'ortofoto" in follow_error_text({"error": "sam_outside"})
+    assert "SAM 2.1 non ha potuto" in follow_error_text({"error": "sam", "detail": "x"})

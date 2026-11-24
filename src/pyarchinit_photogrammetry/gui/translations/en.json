@@ -4071,7 +4071,6 @@
   "Il muro si segue fra due clic almeno: clicca sui suoi due capi.": "A wall is followed between two clicks at least: click its two ends.",
   "Segui prima il muro fra due clic.": "Follow the wall between two clicks first.",
   "Clic dove passa il muro; Esc annulla": "Click where the wall passes; Esc cancels",
-  "Il muro non si può seguire: un punto cliccato è fuori dal DEM. Clicca dentro la pianta.": "The wall cannot be followed: a clicked point is outside the DEM. Click inside the plan.",
   "Nessun muro trovato sulla pianta: nessuna cresta più alta di 30 cm e lunga almeno 3 m. Segui il muro fra due clic o traccialo a mano.": "No wall found on the plan: no crest higher than 30 cm and at least 3 m long. Follow the wall between two clicks or trace it by hand.",
   "La linea proposta corre per meno di metà sulla cresta di un muro: è debole. Aggiungi punti di passaggio, clicca più vicino al muro o tracciala a mano.": "The proposed line runs on the crest of a wall for less than half its length: it is weak. Add via points, click nearer the wall or trace it by hand.",
   "Segui il muro fra due clic": "Follow the wall between two clicks",
@@ -4087,7 +4086,10 @@
   "Ricerca della linea lungo il muro...": "Finding the line along the wall...",
   "Ricerca dei muri sulla pianta...": "Finding the walls on the plan...",
   "Il muro seguito fra i clic": "The wall followed between the clicks",
-  "Muri proposti sulla pianta": "Walls proposed on the plan"
+  "Muri proposti sulla pianta": "Walls proposed on the plan",
+  "Nessun percorso fra i punti cliccati sul DEM: clicca sullo stesso muro.": "No path between the clicked points on the DEM: click on the same wall.",
+  "SAM guarda l'ortofoto: costruiscila prima, o togli «Usa SAM dove il muro è basso».": "SAM looks at the orthophoto: build it first, or untick «Usa SAM dove il muro è basso».",
+  "I punti cliccati sono fuori dall'ortofoto: SAM non può ritagliare il muro.": "The clicked points are outside the orthophoto: SAM cannot cut the wall out."
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",
@@ -5416,7 +5418,9 @@
   "Composito «{0}»": "Composite «{0}»",
   "muro {0}": "wall {0}",
   "Linea proposta: {0} vertici, {1} m, {2} % sulla cresta": "Proposed line: {0} vertices, {1} m, {2} % on the crest",
-  "{0} muri proposti: clic su uno nella vista 2D": "{0} walls proposed: click one in the 2D view"
+  "{0} muri proposti: clic su uno nella vista 2D": "{0} walls proposed: click one in the 2D view",
+  "Il muro non si può seguire: il punto {0} è fuori dal DEM. Clicca dentro la pianta.": "The wall cannot be followed: point {0} is outside the DEM. Click inside the plan.",
+  "SAM 2.1 non ha potuto ritagliare il muro: {0}": "SAM 2.1 could not cut the wall out: {0}"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

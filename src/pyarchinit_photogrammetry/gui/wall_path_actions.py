@@ -58,6 +58,23 @@ def _along(line, points) -> np.ndarray:
     return at
 
 
+def follow_error_text(out: dict) -> str:
+    """The words of the window for a line along the wall that could not be followed (the ``error`` of the task)."""
+    code = out.get("error")
+    if code == "outside":
+        return tr("Il muro non si può seguire: il punto {0} è fuori dal DEM. Clicca dentro la pianta.",
+                  out.get("point") or "?")
+    if code == "points":
+        return tr("Il muro si segue fra due clic almeno: clicca sui suoi due capi.")
+    if code == "no_path":
+        return tr("Nessun percorso fra i punti cliccati sul DEM: clicca sullo stesso muro.")
+    if code == "no_ortho":
+        return tr("SAM guarda l'ortofoto: costruiscila prima, o togli «Usa SAM dove il muro è basso».")
+    if code == "sam_outside":
+        return tr("I punti cliccati sono fuori dall'ortofoto: SAM non può ritagliare il muro.")
+    return tr("SAM 2.1 non ha potuto ritagliare il muro: {0}", out.get("detail") or "")
+
+
 def refusal_text(exc) -> str:
     """The words of the window for a line the frame of a wall refuses (:class:`..engine.wall_path.TraceRefused`)."""
     reason = getattr(exc, "reason", "")
@@ -361,6 +378,7 @@ class WallPathActions:
         """The line along the wall between ``clicks`` in one task of the worker - the mask of SAM when ticked, the
         path along the crest (:func:`..engine.wall_auto.follow`), its snap onto the face and its heights - shown
         on the plan as a proposal; a weak one said."""
+        from ..core.progress import Cancelled
         from ..engine import wall_auto, wall_trace
         from ..engine.wall_path import TraceRefused, WallPath, corner_radii, ordered
 
@@ -374,12 +392,24 @@ class WallPathActions:
             mask = None
             if use_sam:
                 p(0.0, "SAM 2.1 on the orthophoto")
-                mask = wall_auto.sam_mask(ch, self._segmenter(), clicks)
+                try:
+                    mask = wall_auto.sam_mask(ch, self._segmenter(), clicks)
+                except Cancelled:
+                    raise
+                except RuntimeError as exc:
+                    if ch.orthomosaic_path is None:
+                        return {"error": "no_ortho"}
+                    return {"error": "sam", "detail": str(exc)}
+                except ValueError:  # the clicks off the orthophoto
+                    return {"error": "sam_outside"}
+                except Exception as exc:  # noqa: BLE001 - the worker of SAM failed: said, the DEM alone not used
+                    log.warning("SAM for the wall failed: %s", exc)
+                    return {"error": "sam", "detail": str(exc)}
             p(0.1, "The line along the wall")
             try:
                 found = wall_auto.follow(ch, clicks, mask=mask, progress=p.sub(0.1, 0.6))
-            except ValueError as exc:
-                return {"error": str(exc)}
+            except wall_auto.FollowRefused as exc:
+                return {"error": exc.reason, "point": exc.point}
             out = {"points": found["points"], "on_ridge": found["on_ridge"], "cell": found["cell"],
                    "clicks": clicks, "snap": None, "heights": None, "refused": None, "which": None}
             out["weak"] = found["on_ridge"] < wall_auto.RIDGE
@@ -416,8 +446,7 @@ class WallPathActions:
                 return
             if out.get("error"):
                 pane.update_states()
-                self._warn(tr("Il muro non si può seguire: un punto cliccato è fuori dal DEM. Clicca dentro la "
-                              "pianta."))
+                self._warn(follow_error_text(out))
                 return
             pane.set_proposal(out)
             self._draw_trace_preview()
@@ -466,9 +495,23 @@ class WallPathActions:
         if p.get("refused"):
             self._warn(p["refused"])
             return False
+        from ..engine.wall_path import TraceRefused
+
         points = np.asarray(p["points"], float)
         r = p.get("snap")
-        if r is None and pane.c_snap.isChecked():  # not snapped in the task: snapped now
+        try:  # the side asked as for a line clicked by hand: the owner chooses when the photos weigh nearly the same
+            which = self._wall_side(points, pane.side.currentData())
+        except TraceRefused as exc:
+            self._warn(refusal_text(exc))
+            return False
+        if which is None:
+            return False
+        if (r is None and pane.c_snap.isChecked()) or which != p.get("which"):  # snapped now, on the side chosen
+            if which != p.get("which") and pane.side.currentData() == "auto":
+                k = pane.side.findData(which)
+                pane.side.blockSignals(True)
+                pane.side.setCurrentIndex(k)
+                pane.side.blockSignals(False)
             pane.set_trace(points, heights=p.get("heights"))
             self._draw_trace_preview()
             return self.wall_snap()
