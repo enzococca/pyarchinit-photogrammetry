@@ -2,7 +2,9 @@
 the line clicked on the 2D view, snapped onto the face of the model and given its default heights in the worker, the
 elevation built on it in the worker; the line as clicked and as snapped drawn on the plan while it waits
 (:data:`TRACE_PREVIEW_LAYER`), and the traces of the elevations of the chunk always (``TRACES_LAYER``) - a double
-click on one shows its elevation."""
+click on one shows its elevation. The line can also be followed between two clicks along the crest of the wall
+(:mod:`..engine.wall_auto`), with SAM 2.1 where the DEM is weak, or picked among the walls proposed on the whole plan
+(:data:`PROPOSALS_LAYER`)."""
 from __future__ import annotations
 
 import logging
@@ -10,16 +12,19 @@ import logging
 import numpy as np
 
 from .i18n import tr
+from .wall_path_pane import weak_text
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
 TRACE_PREVIEW_LAYER = "Traccia del muro (anteprima)"
+PROPOSALS_LAYER = "Muri proposti"
 MERGE_CLICKS = 0.001  # m: clicks closer than this are one point (a double click, a slip of the hand)
 CLOSE_CLICK = 0.05  # m: a last click this near the first closes the line on it (a room traced all round)
 THIN_SIDE = 0.6  # the photos on the weaker side weigh this share of the stronger at least: the side is asked
 COLOUR_CLICKED = "#ffd000"
 COLOUR_SNAPPED = "#00e5ff"
 COLOUR_TRACES = "#ff8c00"
+COLOUR_PROPOSED = "#ff4fd8"
 
 
 def clean_clicks(xy) -> np.ndarray:
@@ -34,6 +39,23 @@ def clean_clicks(xy) -> np.ndarray:
     if len(out) >= 4 and np.hypot(*(out[-1] - out[0])) < CLOSE_CLICK:
         out[-1] = out[0]
     return out
+
+
+def _along(line, points) -> np.ndarray:
+    """How far along the polyline ``line`` (N, 2) the foot of each of ``points`` (M, 2) is, in metres."""
+    line = np.asarray(line, float).reshape(-1, 2)
+    p = np.asarray(points, float).reshape(-1, 2)
+    if len(line) < 2:
+        return np.zeros(len(p))
+    run = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(line, axis=0).T))])
+    best, at = np.full(len(p), np.inf), np.zeros(len(p))
+    for i, (a, b) in enumerate(zip(line[:-1], line[1:])):
+        step = b - a
+        tau = np.clip((p - a) @ step / max(float(step @ step), 1e-300), 0.0, 1.0)
+        d = np.hypot(*(p - a - tau[:, None] * step).T)
+        nearer = d < best
+        best[nearer], at[nearer] = d[nearer], run[i] + tau[nearer] * np.sqrt(float(step @ step))
+    return at
 
 
 def refusal_text(exc) -> str:
@@ -301,6 +323,218 @@ class WallPathActions:
             pane.running = None
             pane.update_states()
         return bool(started)
+
+    # ------------------------------------------------------------ the line found by the program
+    def _wall_sam_ready(self) -> bool:
+        """SAM 2.1 can run (in this Python or in its own environment); nothing is offered here."""
+        from ..ai import sam_env
+
+        return sam_env.available() is not None
+
+    def wall_follow(self) -> bool:
+        """*Segui il muro fra due clic*: the two ends of the wall (and any via points) clicked on the plan, the line
+        found along its crest in the worker (:func:`_wall_follow_run`)."""
+        if not self._need_chunk(product="dem"):
+            return False
+        pane = self.wall_pane
+        pane.running = "trace"
+        pane.update_states()
+        started = self.request_geometry("line", self._wall_follow_drawn, self._wall_trace_cancelled,
+                                        tr("Clic sui due capi del muro e, se serve, su punti di passaggio; doppio "
+                                           "clic o Invio per finire, Esc annulla"))
+        if not started:
+            pane.running = None
+            pane.update_states()
+        return bool(started)
+
+    def _wall_follow_drawn(self, xy) -> bool:
+        pane = self.wall_pane
+        pane.running = None
+        points = clean_clicks(xy)
+        if len(points) < 2:
+            pane.update_states()
+            self._warn(tr("Il muro si segue fra due clic almeno: clicca sui suoi due capi."))
+            return False
+        return self._wall_follow_run(points)
+
+    def _wall_follow_run(self, clicks) -> bool:
+        """The line along the wall between ``clicks`` in one task of the worker - the mask of SAM when ticked, the
+        path along the crest (:func:`..engine.wall_auto.follow`), its snap onto the face and its heights - shown
+        on the plan as a proposal; a weak one said."""
+        from ..engine import wall_auto, wall_trace
+        from ..engine.wall_path import TraceRefused, WallPath, corner_radii, ordered
+
+        pane, ch = self.wall_pane, self.chunk
+        v = pane.values()
+        clicks = np.asarray(clicks, float).reshape(-1, 2)
+        use_sam = pane.c_sam.isChecked() and pane.c_sam.isEnabled()
+        snap, band, front, back, asked = v["snap"], v["band"], v["front"], v["back"], v["side"]
+
+        def work(p):
+            mask = None
+            if use_sam:
+                p(0.0, "SAM 2.1 on the orthophoto")
+                mask = wall_auto.sam_mask(ch, self._segmenter(), clicks)
+            p(0.1, "The line along the wall")
+            try:
+                found = wall_auto.follow(ch, clicks, mask=mask, progress=p.sub(0.1, 0.6))
+            except ValueError as exc:
+                return {"error": str(exc)}
+            out = {"points": found["points"], "on_ridge": found["on_ridge"], "cell": found["cell"],
+                   "clicks": clicks, "snap": None, "heights": None, "refused": None, "which": None}
+            out["weak"] = found["on_ridge"] < wall_auto.RIDGE
+            line = found["points"]
+            try:
+                which = wall_trace.side_of(ch, line, asked)
+                WallPath(ordered(line, which), radii=corner_radii(ordered(line, which), front, back))
+            except TraceRefused as exc:
+                out["refused"] = refusal_text(exc)
+                return out
+            out["which"] = which
+            used = line
+            if snap and ch.product_path("model"):
+                p(0.6, "Snap of the line onto the face of the wall")
+                result = wall_trace.snap_trace(ch, line, which, band=band, progress=p.sub(0.6, 0.9))
+                if result["snapped"]:
+                    try:
+                        kept = ordered(result["points"], which)
+                        WallPath(kept, radii=corner_radii(kept, front, back))
+                        used = result["points"]
+                    except TraceRefused as exc:
+                        result = dict(result, snapped=False, refused=refusal_text(exc))
+                out["snap"] = result
+            try:
+                out["heights"] = default_heights(ch, used, which, front, back)
+            except Exception as exc:  # noqa: BLE001 - the heights are typed by hand then
+                log.warning("No default heights for the wall: %s", exc)
+            return out
+
+        def done(out):
+            pane.running = None
+            if self.chunk is not ch:
+                pane.update_states()
+                return
+            if out.get("error"):
+                pane.update_states()
+                self._warn(tr("Il muro non si può seguire: un punto cliccato è fuori dal DEM. Clicca dentro la "
+                              "pianta."))
+                return
+            pane.set_proposal(out)
+            self._draw_trace_preview()
+            if out["weak"]:
+                self._warn(weak_text())
+
+        pane.running = "follow"
+        pane.update_states()
+        started = self.run_task("Il muro seguito fra i clic", work, done, refresh=False, save=False)
+        if not started:
+            pane.running = None
+            pane.update_states()
+        return bool(started)
+
+    def wall_follow_via(self) -> bool:
+        """*Aggiungi punti di passaggio*: a point clicked where the wall passes, put among the clicks in its place
+        along the line proposed, and the line found again."""
+        pane = self.wall_pane
+        if pane.proposal is None:
+            self._warn(tr("Segui prima il muro fra due clic."))
+            return False
+        return bool(self.request_geometry("point", self._wall_via_drawn, None,
+                                          tr("Clic dove passa il muro; Esc annulla")))
+
+    def _wall_via_drawn(self, xy) -> bool:
+        pane = self.wall_pane
+        if pane.proposal is None:
+            return False
+        via = np.asarray(xy, float).reshape(-1, 2)
+        clicks = np.asarray(pane.proposal["clicks"], float)
+        line = np.asarray(pane.proposal["points"], float)
+        along = _along(line, np.vstack([clicks, via]))
+        ends = along[[0, len(clicks) - 1]]
+        order = np.argsort(np.concatenate([along[:len(clicks)], np.clip(along[len(clicks):], ends[0] + 1e-9,
+                                                                         ends[1] - 1e-9)]), kind="stable")
+        merged = np.vstack([clicks, via])[order]
+        return self._wall_follow_run(clean_clicks(merged))
+
+    def wall_follow_keep(self) -> bool:
+        """*Tieni*: the line proposed becomes the line of the wall, with its snap and heights."""
+        pane = self.wall_pane
+        p = pane.proposal
+        if p is None:
+            self._warn(tr("Segui prima il muro fra due clic."))
+            return False
+        if p.get("refused"):
+            self._warn(p["refused"])
+            return False
+        points = np.asarray(p["points"], float)
+        r = p.get("snap")
+        if r is None and pane.c_snap.isChecked():  # not snapped in the task: snapped now
+            pane.set_trace(points, heights=p.get("heights"))
+            self._draw_trace_preview()
+            return self.wall_snap()
+        pane.set_trace(points, None if r is None else r["points"], r, p.get("heights"))
+        self._draw_trace_preview()
+        return True
+
+    def wall_proposals(self) -> bool:
+        """*Proponi i muri*: the walls of the whole plan (:func:`..engine.wall_auto.proposals`) in the worker, drawn
+        on the layer *Muri proposti*; a click on one makes it the line of the wall."""
+        from ..engine import wall_auto
+
+        if not self._need_chunk(product="dem"):
+            return False
+        pane, ch = self.wall_pane, self.chunk
+
+        def work(p):
+            return wall_auto.proposals(ch, progress=p)
+
+        def done(found):
+            pane.running = None
+            if self.chunk is not ch:
+                pane.update_states()
+                return
+            pane.candidates, pane.candidates_chunk = list(found), ch
+            pane.update_states()
+            self._draw_proposals()
+            if not found:
+                self._warn(tr("Nessun muro trovato sulla pianta: nessuna cresta più alta di 30 cm e lunga almeno "
+                              "3 m. Segui il muro fra due clic o traccialo a mano."))
+
+        pane.running = "proposals"
+        pane.update_states()
+        started = self.run_task("Muri proposti sulla pianta", work, done, refresh=False, save=False)
+        if not started:
+            pane.running = None
+            pane.update_states()
+        return bool(started)
+
+    def _draw_proposals(self) -> None:
+        """The walls proposed on the plan of the active chunk (never on an elevation)."""
+        from .i18n import number
+
+        view = self.ortho_view
+        view.remove_layer(PROPOSALS_LAYER)
+        pane = getattr(self, "wall_pane", None)
+        if pane is None or not pane.candidates or pane.candidates_chunk is not self.chunk or not self._on_plan():
+            return
+        from .wall_path_pane import line_length
+
+        with view.batch():
+            for i, line in enumerate(pane.candidates):
+                view.add_line(line, COLOUR_PROPOSED, tr("muro {0}", i + 1), layer=PROPOSALS_LAYER,
+                              attrs={"muro": i + 1, "lunghezza": number(line_length(line), 2)}, width=2.0,
+                              dash=True)
+
+    def _proposal_clicked(self, layer: str, attrs: dict) -> None:
+        """A click on a wall proposed: it becomes the line of the wall (checked, its side, snapped)."""
+        pane = self.wall_pane
+        if layer != PROPOSALS_LAYER or pane.candidates_chunk is not self.chunk or pane.running is not None:
+            return
+        try:
+            line = pane.candidates[int(attrs.get("muro")) - 1]
+        except (TypeError, ValueError, IndexError):
+            return
+        self._wall_trace_drawn(np.asarray(line, float))
 
     # ------------------------------------------------------------ the build
     def wall_build(self) -> bool:
@@ -694,6 +928,17 @@ class WallPathActions:
         view = self.ortho_view
         view.remove_layer(TRACE_PREVIEW_LAYER)
         pane = getattr(self, "wall_pane", None)
+        if pane is not None and pane.proposal is not None and self._on_plan():
+            p = pane.proposal
+            if p.get("chunk") is self.chunk:
+                with view.batch():
+                    view.add_line(p["points"], COLOUR_PROPOSED, tr("proposta"), layer=TRACE_PREVIEW_LAYER,
+                                  attrs={"linea": "proposta"}, width=2.0)
+                    r = p.get("snap")
+                    if r is not None and r.get("snapped"):
+                        view.add_line(np.asarray(r["points"])[::-1], COLOUR_SNAPPED, tr("agganciata"),
+                                      layer=TRACE_PREVIEW_LAYER, attrs={"linea": "agganciata"}, width=2.0)
+                return
         if pane is None or pane.clicked is None or pane.built is not None or not self._on_plan():
             return
         if self.chunk is not pane.chunk:
@@ -726,6 +971,7 @@ class WallPathActions:
                     attrs[ID_FIELD] = stable_id("trace", ch.key, f["prospetto_id"])
                     view.add_line(f["_geom"][1], COLOUR_TRACES, f["etichetta"], layer=E.TRACES_LAYER, attrs=attrs,
                                   width=2.0)
+        self._draw_proposals()
         self._draw_trace_preview()
 
     def _trace_double_clicked(self, layer: str, attrs: dict) -> None:

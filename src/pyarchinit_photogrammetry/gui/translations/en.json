@@ -4066,7 +4066,28 @@
   "I buchi fino a questa misura vengono sempre riempiti; uno più grande solo se il rilievo vi trova superficie, altrimenti è un'apertura (una porta, una finestra): resta aperto, mai muro finto": "Holes up to this size are always filled; a larger one only if the relief finds surface in it, otherwise it is an opening (a door, a window): it stays open, never fake wall",
   "{0} aperture lasciate aperte": "{0} openings left open",
   "1: la piena risoluzione; 2: metà dei pixel per lato, e così via": "1: the full resolution; 2: half the pixels a side, and so on",
-  "Un'immagine da pubblicare: buchi riempiti, fuori dal muro bianco, colore uniformato, mire coperte. Il prospetto misurato resta com'è": "An image to publish: holes filled, outside the wall white, colour levelled, targets painted over. The measured elevation stays as it is"
+  "Un'immagine da pubblicare: buchi riempiti, fuori dal muro bianco, colore uniformato, mire coperte. Il prospetto misurato resta com'è": "An image to publish: holes filled, outside the wall white, colour levelled, targets painted over. The measured elevation stays as it is",
+  "Clic sui due capi del muro e, se serve, su punti di passaggio; doppio clic o Invio per finire, Esc annulla": "Click the two ends of the wall and, if needed, via points; double click or Enter to finish, Esc cancels",
+  "Il muro si segue fra due clic almeno: clicca sui suoi due capi.": "A wall is followed between two clicks at least: click its two ends.",
+  "Segui prima il muro fra due clic.": "Follow the wall between two clicks first.",
+  "Clic dove passa il muro; Esc annulla": "Click where the wall passes; Esc cancels",
+  "Il muro non si può seguire: un punto cliccato è fuori dal DEM. Clicca dentro la pianta.": "The wall cannot be followed: a clicked point is outside the DEM. Click inside the plan.",
+  "Nessun muro trovato sulla pianta: nessuna cresta più alta di 30 cm e lunga almeno 3 m. Segui il muro fra due clic o traccialo a mano.": "No wall found on the plan: no crest higher than 30 cm and at least 3 m long. Follow the wall between two clicks or trace it by hand.",
+  "La linea proposta corre per meno di metà sulla cresta di un muro: è debole. Aggiungi punti di passaggio, clicca più vicino al muro o tracciala a mano.": "The proposed line runs on the crest of a wall for less than half its length: it is weak. Add via points, click nearer the wall or trace it by hand.",
+  "Segui il muro fra due clic": "Follow the wall between two clicks",
+  "Clic sui due capi del muro (e, se serve, su punti di passaggio in mezzo), doppio clic o Invio per finire: il programma trova la linea lungo la cresta del muro sul rilievo locale del DEM e sui bordi dell'ortofoto, poi la aggancia alla faccia": "Click the two ends of the wall (and, if needed, via points in between), double click or Enter to finish: the program finds the line along the crest of the wall on the local relief of the DEM and the edges of the orthophoto, then snaps it to the face",
+  "Proponi i muri": "Propose the walls",
+  "Le creste dei muri di tutta la pianta, dal rilievo locale del DEM, nel layer «Muri proposti»: un clic su una ne fa la traccia": "The crests of the walls of the whole plan, from the local relief of the DEM, in the layer «Muri proposti»: a click on one makes it the trace",
+  "Usa SAM dove il muro è basso": "Use SAM where the wall is low",
+  "SAM 2.1 ritaglia il muro sull'ortofoto a partire dai clic: aiuta dove il muro sporge poco dal terreno e il DEM da solo non lo vede": "SAM 2.1 cuts the wall out of the orthophoto from the clicks: it helps where the wall stands little above the ground and the DEM alone does not see it",
+  "Tieni": "Keep",
+  "La linea proposta diventa la linea del muro": "The proposed line becomes the line of the wall",
+  "Aggiungi punti di passaggio": "Add via points",
+  "Un clic dove il muro passa: la linea viene cercata di nuovo passando di lì": "A click where the wall passes: the line is found again through it",
+  "Ricerca della linea lungo il muro...": "Finding the line along the wall...",
+  "Ricerca dei muri sulla pianta...": "Finding the walls on the plan...",
+  "Il muro seguito fra i clic": "The wall followed between the clicks",
+  "Muri proposti sulla pianta": "Walls proposed on the plan"
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",
@@ -5392,7 +5413,10 @@
   "Composito di {0} campagne: una più vecchia prende la cella se è più profonda di {1} m": "Composite of {0} campaigns: an older one takes the cell where it is deeper by {1} m",
   "Per ogni cella la superficie della campagna più recente, sostituita da quella di una più vecchia dove è più profonda della soglia o dove la recente non ha nulla: il muro com'era quando era più scoperto. Il composito va nel chunk «{0}»{1}.": "In each cell the surface of the most recent campaign, replaced by that of an older one where it is deeper than the threshold or where the recent one has nothing: the wall as it was when most exposed. The composite goes into the chunk «{0}»{1}.",
   "Composito «{0}»: da rifare, una campagna è cambiata": "Composite «{0}»: to make again, a campaign has changed",
-  "Composito «{0}»": "Composite «{0}»"
+  "Composito «{0}»": "Composite «{0}»",
+  "muro {0}": "wall {0}",
+  "Linea proposta: {0} vertici, {1} m, {2} % sulla cresta": "Proposed line: {0} vertices, {1} m, {2} % on the crest",
+  "{0} muri proposti: clic su uno nella vista 2D": "{0} walls proposed: click one in the 2D view"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

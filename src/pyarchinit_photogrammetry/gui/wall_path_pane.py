@@ -49,6 +49,11 @@ def _narrow(widget, width: int = 80) -> None:
     widget.setSizePolicy(QSizePolicy.Policy.Ignored, widget.sizePolicy().verticalPolicy())
 
 
+def weak_text() -> str:
+    return tr("La linea proposta corre per meno di metà sulla cresta di un muro: è debole. Aggiungi punti di "
+              "passaggio, clicca più vicino al muro o tracciala a mano.")
+
+
 def line_length(points) -> float:
     xy = np.asarray(points, float).reshape(-1, 2)
     return float(np.hypot(*np.diff(xy, axis=0).T).sum()) if len(xy) > 1 else 0.0
@@ -68,6 +73,10 @@ class WallPathPane(QWidget):
         self.votes: dict | None = None  # the weights of the photos on either side
         self.running: str | None = None  # the step being worked on
         self.built: str | None = None  # the id of the elevation built from the line shown
+        self.proposal: dict | None = None  # the line followed between the clicks, waiting for "Tieni"
+        self.candidates: list = []  # the walls proposed on the plan of ``self.candidates_chunk``
+        self.candidates_chunk = None
+        self.sam_ready = False  # SAM 2.1 can run (the tick is enabled)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
@@ -97,16 +106,43 @@ class WallPathPane(QWidget):
             self.titles[key] = (mark, t, f"{row + 1}. {title}")
             self.states[key] = s
 
-        # 1. the line on the plan
+        # 1. the line on the plan: by hand, followed between two clicks, or one of the walls proposed
         body = QWidget()
-        b = QHBoxLayout(body)
-        b.setContentsMargins(0, 0, 0, 0)
+        tl = QVBoxLayout(body)
+        tl.setContentsMargins(0, 0, 0, 0)
+        b = QHBoxLayout()
         self.b_trace = QPushButton(icon("elevation"), tr("Traccia sulla pianta"))
         self.b_trace.setToolTip(tr("Clic sui vertici della linea del muro nella vista 2D, doppio clic o Invio per "
                                    "finire; Backspace toglie l'ultimo, Esc annulla. Per una stanza chiudi sul primo "
                                    "punto."))
         b.addWidget(self.b_trace)
         b.addStretch(1)
+        tl.addLayout(b)
+        self.b_follow = QPushButton(tr("Segui il muro fra due clic"))
+        self.b_follow.setToolTip(tr("Clic sui due capi del muro (e, se serve, su punti di passaggio in mezzo), doppio "
+                                    "clic o Invio per finire: il programma trova la linea lungo la cresta del muro "
+                                    "sul rilievo locale del DEM e sui bordi dell'ortofoto, poi la aggancia alla faccia"))
+        self.b_propose = QPushButton(tr("Proponi i muri"))
+        self.b_propose.setToolTip(tr("Le creste dei muri di tutta la pianta, dal rilievo locale del DEM, nel layer "
+                                     "«Muri proposti»: un clic su una ne fa la traccia"))
+        self.c_sam = QCheckBox(tr("Usa SAM dove il muro è basso"))
+        self.c_sam.setToolTip(tr("SAM 2.1 ritaglia il muro sull'ortofoto a partire dai clic: aiuta dove il muro "
+                                 "sporge poco dal terreno e il DEM da solo non lo vede"))
+        tl.addWidget(self.b_follow)
+        tl.addWidget(self.c_sam)
+        self.b_keep = QPushButton(tr("Tieni"))
+        self.b_keep.setToolTip(tr("La linea proposta diventa la linea del muro"))
+        self.b_via = QPushButton(tr("Aggiungi punti di passaggio"))
+        self.b_via.setToolTip(tr("Un clic dove il muro passa: la linea viene cercata di nuovo passando di lì"))
+        for button in (self.b_keep, self.b_via):  # one under the other: a narrow dock
+            row = QHBoxLayout()
+            row.addWidget(button)
+            row.addStretch(1)
+            tl.addLayout(row)
+        self.l_proposal = QLabel("")
+        self.l_proposal.setWordWrap(True)
+        tl.addWidget(self.l_proposal)
+        tl.addWidget(self.b_propose)
         step(0, "trace", tr("Linea del muro sulla pianta"), body)
 
         # 2. the snap onto the face
@@ -243,6 +279,10 @@ class WallPathPane(QWidget):
         lay.addStretch(1)
 
         self.b_trace.clicked.connect(lambda: self.window.wall_trace_start())
+        self.b_follow.clicked.connect(lambda: self.window.wall_follow())
+        self.b_propose.clicked.connect(lambda: self.window.wall_proposals())
+        self.b_keep.clicked.connect(lambda: self.window.wall_follow_keep())
+        self.b_via.clicked.connect(lambda: self.window.wall_follow_via())
         self.b_build.clicked.connect(lambda: self.window.wall_build())
         self.b_finish.clicked.connect(lambda: self.window.wall_finish())
         self.b_campaigns.clicked.connect(lambda: self.window.wall_campaigns())
@@ -255,11 +295,19 @@ class WallPathPane(QWidget):
         self.side.currentIndexChanged.connect(lambda _i: self._side_changed())
         with contextlib.suppress(AttributeError):
             window.runner.busy_changed.connect(self._busy_changed)
+        self._check_sam()
         self.update_states()
+
+    def _check_sam(self) -> None:
+        """Whether SAM 2.1 can run, asked of the window without offering to install it."""
+        try:
+            self.sam_ready = bool(self.window._wall_sam_ready())
+        except Exception:  # noqa: BLE001 - a window without it: no SAM
+            self.sam_ready = False
 
     # ------------------------------------------------------------------ state
     def _busy_changed(self, busy: bool) -> None:
-        if not busy and self.running in ("snap", "build", "campaigns", "composite"):
+        if not busy and self.running in ("snap", "build", "campaigns", "composite", "follow", "proposals"):
             with contextlib.suppress(RuntimeError):
                 self.running = None
                 self.update_states()
@@ -291,6 +339,7 @@ class WallPathPane(QWidget):
         self.snapped = None if snapped is None else np.asarray(snapped, float).reshape(-1, 2)
         self.report = report
         self.built = None
+        self.proposal = None
         if self.clicked is None:
             self.chunk = None
             self.votes = None
@@ -307,6 +356,15 @@ class WallPathPane(QWidget):
             self.r_clicked.setChecked(True)
         self.update_states()
 
+    def set_proposal(self, proposal: dict | None) -> None:
+        """The line followed between the clicks (``{"points", "on_ridge", "clicks", "snap", "heights", ...}``, see
+        :meth:`.wall_path_actions.WallPathActions.wall_follow`), shown until it is kept or another is made; None:
+        gone."""
+        self.proposal = proposal
+        if proposal is not None:
+            proposal["chunk"] = getattr(self.window, "chunk", None)
+        self.update_states()
+
     def refresh(self) -> None:
         """The pane as the active chunk has it: emptied when the line was traced on another chunk."""
         ch = getattr(self.window, "chunk", None)
@@ -314,6 +372,15 @@ class WallPathPane(QWidget):
             self.set_trace(None)
             with contextlib.suppress(AttributeError, RuntimeError):
                 self.window._draw_trace_preview()
+        if self.proposal is not None and self.proposal.get("chunk") is not ch:
+            self.proposal = None
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self.window._draw_trace_preview()
+        if self.candidates and self.candidates_chunk is not ch:
+            self.candidates, self.candidates_chunk = [], None
+            with contextlib.suppress(AttributeError, RuntimeError):
+                self.window._draw_proposals()
+        self._check_sam()
         self.update_states()
 
     def points(self) -> np.ndarray | None:
@@ -402,6 +469,21 @@ class WallPathPane(QWidget):
         entry = next((e for e in E.elevations(found[0]) if e.get("id") == record.get("entry")), None)
         return (found[0], entry) if entry is not None else None
 
+    def proposal_text(self) -> str:
+        """What the line proposed is: its vertices, its length and how much of it runs on a crest; a weak one said."""
+        if self.running == "follow":
+            return tr("Ricerca della linea lungo il muro...")
+        if self.running == "proposals":
+            return tr("Ricerca dei muri sulla pianta...")
+        p = self.proposal
+        if p is None:
+            return tr("{0} muri proposti: clic su uno nella vista 2D", len(self.candidates)) if self.candidates else ""
+        text = tr("Linea proposta: {0} vertici, {1} m, {2} % sulla cresta", len(p["points"]),
+                  number(line_length(p["points"]), 2), round(100 * float(p["on_ridge"])))
+        if p.get("weak"):
+            text += "\n" + weak_text()
+        return text
+
     def state_text(self, step: str) -> str:
         if step == "trace":
             if self.running == "trace":
@@ -476,3 +558,11 @@ class WallPathPane(QWidget):
         self.b_composite.setEnabled(self.running is None and len(self.campaigns()) > 1)
         self.b_recomposite.setEnabled(self.running is None and self.composite_entry() is not None)
         self.b_trace.setEnabled(self.running is None)
+        self.b_follow.setEnabled(self.running is None)
+        self.b_propose.setEnabled(self.running is None)
+        self.b_keep.setEnabled(self.running is None and self.proposal is not None)
+        self.b_via.setEnabled(self.running is None and self.proposal is not None)
+        self.c_sam.setEnabled(self.sam_ready)
+        if not self.sam_ready:
+            self.c_sam.setChecked(False)
+        self.l_proposal.setText(self.proposal_text())

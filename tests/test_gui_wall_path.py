@@ -932,3 +932,107 @@ def test_finish_from_the_menu_and_the_backlit_field(make, recorded, monkeypatch,
     with pytest.raises(Stop):
         w._rebuild_elevation(a, entry["id"], None)
     assert got[0]["skip_backlit"] is True
+
+
+CREST = np.array([[0.0, 0.2], [-0.2, 0.2], [-0.2, 0.0]])  # the face of the L moved half its thickness into the wall
+
+
+def test_follow_and_proposals_in_the_pane(make, monkeypatch):
+    from pyarchinit_photogrammetry.ai import sam_env
+    from pyarchinit_photogrammetry.engine import wall_auto
+    from pyarchinit_photogrammetry.gui.wall_path_actions import PROPOSALS_LAYER, TRACE_PREVIEW_LAYER
+    from wall_helpers import share_within
+
+    monkeypatch.setattr(sam_env, "available", lambda: None)
+    w = make()
+    pane = w.wall_pane
+    assert pane.b_follow.text() == "Segui il muro fra due clic"
+    assert pane.b_propose.text() == "Proponi i muri"
+    assert pane.c_sam.text() == "Usa SAM dove il muro è basso"
+    assert not pane.c_sam.isEnabled()  # no SAM: the tick is off
+    assert not pane.b_keep.isEnabled() and not pane.b_via.isEnabled()  # nothing proposed yet
+    calls = []
+    real = wall_auto.follow
+
+    def follow(chunk, points, mask=None, **kw):
+        calls.append((np.asarray(points, float).copy(), mask))
+        return real(chunk, points, mask=mask, **kw)
+    monkeypatch.setattr(wall_auto, "follow", follow)
+    crest = np.asarray(w.info["face"], float) + CREST
+    clicks = np.array([crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    w.next_line = clicks
+    assert w.wall_follow()
+    w.runner.wait()
+    assert w.requests[-1] == "line"
+    assert np.allclose(calls[-1][0], clicks) and calls[-1][1] is None  # the two clicks reach the engine
+    assert pane.proposal is not None and pane.state("trace") == "todo"  # proposed, not yet kept
+    assert share_within(pane.proposal["points"], crest, 0.2) >= 0.9
+    assert [f["linea"] for f in w.ortho_view.features(TRACE_PREVIEW_LAYER)] == ["proposta", "agganciata"]
+    assert pane.b_keep.isEnabled() and pane.b_via.isEnabled()
+    assert not _texts(w)
+
+    via = crest[1] + [-1.0, 0.0]  # a via point: the clicks again with it in between
+    w.next_line = np.array([via])
+    assert w.wall_follow_via()
+    w.runner.wait()
+    assert w.requests[-1] == "point"
+    assert np.allclose(calls[-1][0], [clicks[0], via, clicks[1]])
+
+    proposed = np.asarray(pane.proposal["points"], float).copy()
+    assert distance_to(proposed, via[None])[0] < 0.1
+    assert w.wall_follow_keep()
+    w.runner.wait()
+    assert pane.state("trace") == "done" and pane.proposal is None
+    assert np.array_equal(pane.clicked, proposed)  # the proposal's vertices are the line of the wall
+    assert [f["linea"] for f in w.ortho_view.features(TRACE_PREVIEW_LAYER)] == ["cliccata", "agganciata"]
+    assert pane.state("snap") == "done" and pane.r_snapped.isChecked()
+    assert distance_to(w.info["face"], pane.snapped).max() < 0.05
+    assert pane.s_v1.value() > pane.s_v0.value()
+    assert not _texts(w)
+
+    far = np.array([[0.0, -5.0], [4.0, -5.0]]) + np.asarray(w.info["face"][0])  # open ground: a weak line, said
+    w.next_line = far
+    assert w.wall_follow()
+    w.runner.wait()
+    assert pane.proposal is not None and pane.proposal["on_ridge"] < 0.5
+    assert any("debole" in t for t in _texts(w))
+    w.said.clear()
+
+    assert w.wall_proposals()
+    w.runner.wait()
+    feats = w.ortho_view.features(PROPOSALS_LAYER)
+    assert len(feats) == 1 and share_within(feats[0]["_geom"][1], crest, 0.2) >= 0.9
+    w.ortho_view.feature_clicked.emit(PROPOSALS_LAYER, dict(feats[0]))  # a click on the candidate: the trace
+    w.runner.wait()
+    assert pane.proposal is None and pane.state("trace") == "done"
+    assert np.allclose(pane.clicked, feats[0]["_geom"][1])
+    assert pane.state("snap") == "done"
+    assert not _texts(w)
+
+
+def test_follow_with_sam_makes_the_mask_in_the_task(make, monkeypatch):
+    from pyarchinit_photogrammetry.ai import sam_env
+    from pyarchinit_photogrammetry.engine import wall_auto
+
+    monkeypatch.setattr(sam_env, "available", lambda: "external")
+    w = make()
+    pane = w.wall_pane
+    pane.refresh()
+    assert pane.c_sam.isEnabled()
+    pane.c_sam.setChecked(True)
+    made = []
+
+    class Fake:
+        def segment_points(self, image, points, labels):
+            made.append(np.asarray(points).shape)
+            return np.zeros(np.asarray(image).shape[:2], bool)
+    monkeypatch.setattr(w, "_segmenter", lambda: Fake())
+    masks = []
+    real = wall_auto.follow
+    monkeypatch.setattr(wall_auto, "follow", lambda ch, pts, mask=None, **kw: (masks.append(mask),
+                                                                              real(ch, pts, mask=mask, **kw))[1])
+    crest = np.asarray(w.info["face"], float) + CREST
+    w.next_line = np.array([crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    assert w.wall_follow()
+    w.runner.wait()
+    assert made == [(2, 2)] and masks[-1] is not None and masks[-1][0].dtype == bool

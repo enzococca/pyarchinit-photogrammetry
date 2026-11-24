@@ -39,7 +39,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
 from .elevation_drawing_actions import ElevationDrawingActions
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .model_measure_actions import ModelMeasureActions
-from .wall_path_actions import TRACE_PREVIEW_LAYER, WallPathActions
+from .wall_path_actions import PROPOSALS_LAYER, TRACE_PREVIEW_LAYER, WallPathActions
 from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
@@ -701,6 +701,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self.ortho_view.free_finished.connect(self._free_from_2d)
         self.ortho_view.feature_double_clicked.connect(self._feature_double_clicked)
         self.ortho_view.feature_double_clicked.connect(self._trace_double_clicked)  # the trace of an elevation
+        self.ortho_view.feature_clicked.connect(self._proposal_clicked)  # a wall proposed: the line of the wall
         self.ortho_view.raster_loaded.connect(self._draw_free_2d)
         self.ortho_view.raster_loaded.connect(self._raster_loaded)  # also a raster or a frame shown by a plugin
         self.ortho_view.raster_loaded.connect(self._draw_traces)  # the traces of the elevations, on the plan only
@@ -2030,7 +2031,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             wall = getattr(self, "wall_pane", None)
             if wall is not None:  # the line of a wall is of a chunk of the project left (keys repeat across projects)
                 wall.set_trace(None)
+                wall.candidates, wall.candidates_chunk = [], None
                 self.ortho_view.remove_layer(TRACE_PREVIEW_LAYER)
+                self.ortho_view.remove_layer(PROPOSALS_LAYER)
             pane = getattr(self, "assistant", None)
             if pane is not None:  # an action of the assistant waiting or running for the project left: stopped
                 pane.project_changed()
@@ -12732,7 +12735,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         stamps = {n: lay["plan_stamp"] for n, lay in v.layers.items() if "plan_stamp" in lay}
         order = list(v.layer_order)
         modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
-                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER, E.TRACES_LAYER, TRACE_PREVIEW_LAYER}
+                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER, E.TRACES_LAYER, TRACE_PREVIEW_LAYER,
+                                            PROPOSALS_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -13762,7 +13766,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         if name in self.line_layers or name in (
                 "Sezioni", "Marker", QUOTE_LAYER, PROBE_LAYER, CROP_LAYER, PATCH_LAYER, STONES_LAYER, PROFILE_LAYER,
                 LINES_LAYER, TIN_LAYER, PREVIEW_LAYER, TIE_LAYER, PENDING_LAYER, RESIDUAL_LAYER, AREAS_VIEW_LAYER,
-                EDGE_LAYER, mosaic.AREAS_LAYER, "Unita' stratigrafiche", E.TRACES_LAYER, TRACE_PREVIEW_LAYER):
+                EDGE_LAYER, mosaic.AREAS_LAYER, "Unita' stratigrafiche", E.TRACES_LAYER, TRACE_PREVIEW_LAYER,
+                PROPOSALS_LAYER):
             return True
         if name.startswith((LAYER_PREFIX, "US ", "Sezioni", tr("Zone {0}", ""))) or name.startswith("Zone "):
             return True
