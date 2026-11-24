@@ -16,6 +16,7 @@ import re
 
 import numpy as np
 import pytest
+from cli_helpers import plain_words
 from test_optimize_gnss import K1, K2, F, _add_control_points, _rtk_block
 
 from pyarchinit_photogrammetry import _native
@@ -1653,7 +1654,7 @@ def test_the_option_holds_by_default_and_reaches_both_formulations(tmp_path, mon
     monkeypatch.undo()
 
     run = CliRunner().invoke
-    helptext = " ".join(run(app, ["optimize", "--help"]).output.replace("│", " ").split())
+    helptext = plain_words(run(app, ["optimize", "--help"]).output)
     assert "--hold-undetermined" in helptext and "--free-undetermined" in helptext
     result = run(app, ["optimize", str(doc.path), "--free-undetermined"])
     assert result.exit_code == 0, result.output
