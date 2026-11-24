@@ -463,7 +463,15 @@ fn observe_false_cancels() {
     let rotations = rotations_of(&s, 0.0);
     let gnss = gnss_of(&s, 1.0, 2.0, 82, &[]);
     for g in [Some(&gnss), None] {
-        for stop_at in [1, 3, 10] {
+        // the calls of a whole run: it is cancelled at the first, the third and the last
+        let mut total = 0;
+        position(&c.input, &c.cams, &c.graph, &rotations, &c.tracks, &c.selected, g, &Options::default(),
+                 &mut || {
+                     total += 1;
+                     true
+                 })
+        .expect("a positioning");
+        for stop_at in [1, 3, total] {
             let mut calls = 0;
             let mut observe = || {
                 calls += 1;
@@ -507,6 +515,133 @@ fn what_cannot_be_used_is_refused() {
     let out = position(&c.input, &c.cams, &graph, &rotations, &c.tracks, &c.selected, None, &Options::default(),
                        &mut || true);
     assert!(out.unwrap_err().contains("cameras"));
+}
+
+/// What the positioning starts from on a scene with noisy key points and wrong matches: `case_of`
+/// on the input of `noise_px` and `outlier_share`.
+fn noisy_case_of(s: &Scene, noise_px: f64, outlier_share: f64, seed: u64) -> Case {
+    let mut c = case_of(s);
+    c.input = s.input(&InputOptions { noise_px, outlier_share, seed, ..InputOptions::default() });
+    c.tracks = tracks::build(&c.input, &vec![true; c.input.images.len()]);
+    c.selected = (0..c.tracks.len()).collect();
+    c
+}
+
+/// The true rotations, each turned by a small random angle (up to `deg` about each axis).
+fn rotations_near(s: &Scene, deg: f64, seed: u64) -> Rotations {
+    let mut random = Random::new(seed);
+    let world_from_cam = s
+        .poses
+        .iter()
+        .map(|p| {
+            let e = Rotation3::from_euler_angles(random.uniform_in(-deg, deg).to_radians(),
+                                                 random.uniform_in(-deg, deg).to_radians(),
+                                                 random.uniform_in(-deg, deg).to_radians());
+            Some(array(&(e.into_inner() * p.rotation.transpose())))
+        })
+        .collect();
+    let n = s.poses.len();
+    Rotations { world_from_cam, placed: n, dropped: Vec::new(), components: vec![n], refused: None }
+}
+
+/// The positions of a survey flown in `flights` flights of consecutive photos: the true centres
+/// plus normal noise of `plan` and `height` metres, recorded as 5 m and 10 m, each flight after the
+/// first off by its `offsets` entry.
+fn survey_gnss(s: &Scene, plan: f64, height: f64, flights: usize, offsets: &[[f64; 3]], seed: u64) -> Gnss {
+    let mut g = gnss_with(s, plan, height, [5.0, 5.0, 10.0], seed, &[]);
+    let per = s.poses.len().div_ceil(flights);
+    for k in 0..g.image.len() {
+        let f = g.image[k] / per;
+        g.flight[k] = f as i64 + 1;
+        if f > 0 {
+            for a in 0..3 {
+                g.xyz[k][a] += offsets[f - 1][a];
+            }
+        }
+    }
+    g
+}
+
+/// The distances of the centres of `p` to the truth (no similarity: the positions hold the frame),
+/// horizontal, sorted, and the root mean square of the vertical ones.
+fn distances_to_truth(s: &Scene, p: &Positioned) -> (Vec<f64>, f64) {
+    let e: Vec<Vector3<f64>> = p
+        .centres
+        .iter()
+        .enumerate()
+        .map(|(i, c)| Vector3::from(c.unwrap_or_else(|| panic!("photo {i}"))) - s.poses[i].centre)
+        .collect();
+    let mut h: Vec<f64> = e.iter().map(|e| e.xy().norm()).collect();
+    h.sort_by(|a, b| a.total_cmp(b));
+    (h, (e.iter().map(|e| e.z * e.z).sum::<f64>() / e.len() as f64).sqrt())
+}
+
+/// The long block of the diagnosis of the gate: a corridor of 4 strips of 250 photos (3 km by
+/// 72 m, 80/70 % overlap, a mound of 15 m), a flight per strip with offsets of a few metres,
+/// positions with 3 m and 5 m of noise recorded as 5 m and 10 m, key points with 0.5 px of noise,
+/// 2 % of wrong matches. The rays alone from a random start do not converge on such a block (the
+/// block put on the positions was hundreds of metres off, 90 % of the positions outliers); from
+/// the positions it fits as the ring does (R2: the plan within 0.5 % of the length after one
+/// similarity, the heights no worse than the vertical noise of the positions), and its centres are
+/// no farther from the truth than the noise of the positions: horizontally 90 % within 7.5 m (the
+/// noise alone puts 90 % of the positions within 6.4 m), the heights within 5 m rms.
+#[test]
+fn a_long_corridor_is_placed_from_its_positions() {
+    let s = common::corridor(4, 250, 12.0, 24.0, 40.0, 15.0, 0.06, 111);
+    let c = noisy_case_of(&s, 0.5, 0.02, 112);
+    let rotations = rotations_near(&s, 0.02, 113);
+    let offsets = [[1.0, -2.0, 1.0], [-2.0, 1.0, 0.0], [2.0, 2.0, -1.0]];
+    let gnss = survey_gnss(&s, 3.0, 5.0, 4, &offsets, 114);
+    let clock = std::time::Instant::now();
+    let p = run(&c, &rotations, Some(&gnss));
+    let seconds = clock.elapsed().as_secs_f64();
+    let (h, vertical_rms) = distances_to_truth(&s, &p);
+    let h90 = h[9 * h.len() / 10];
+    let shape = shape_of(&s, &p);
+    let length = 249.0 * 12.0;
+    eprintln!("corridor of {} photos, {} tracks: {seconds:.1} s; to the truth: horizontal median {:.2} m, 90 % \
+               {h90:.2} m, largest {:.2} m, vertical rms {vertical_rms:.2} m; shape: horizontal {:.2} m, vertical \
+               rms {:.2} m; outliers {}; biases {:.2?}", s.poses.len(), c.selected.len(), h[h.len() / 2],
+              h[h.len() - 1], shape.horizontal, shape.vertical_rms, p.gnss_outliers.len(), p.bias);
+    assert_eq!(p.frame, Frame::Gnss);
+    assert!(p.notes.is_empty(), "the start at the positions passes its check: {:?}", p.notes);
+    assert!(shape.horizontal < 0.005 * length, "the plan after one similarity: {} m", shape.horizontal);
+    assert!(shape.vertical_rms < 5.0, "the heights after one similarity: {} m rms", shape.vertical_rms);
+    assert!(h90 < 7.5, "90 % of the centres within {h90} m of the truth horizontally");
+    assert!(vertical_rms < 5.0, "heights {vertical_rms} m rms from the truth");
+    assert!(p.gnss_outliers.len() < s.poses.len() / 100, "{} outliers", p.gnss_outliers.len());
+}
+
+/// A whole flight whose positions are all off by 30 m (a wrong datum, the risk of starting at the
+/// positions) does not bend the block: 6 strips of 40 photos flown in 3 flights of two strips (a
+/// flight of one strip cannot hold the roll about its axis: a height offset per strip is a roll),
+/// the second off by 30 m; against the same survey with that flight not off, every centre is where
+/// it was (within 5 cm), the bias of the flight takes the 30 m (within 5 cm of its bias there plus
+/// the offset), no position is an outlier, and the start passed its check.
+#[test]
+fn a_flight_off_by_30_m_is_taken_by_its_bias() {
+    let s = common::corridor(6, 40, 12.0, 24.0, 40.0, 15.0, 0.06, 121);
+    let c = noisy_case_of(&s, 0.5, 0.02, 122);
+    let rotations = rotations_near(&s, 0.02, 123);
+    let wrong = [30.0, -20.0, 10.0];
+    let control = run(&c, &rotations, Some(&survey_gnss(&s, 1.0, 2.0, 3, &[[0.0; 3], [-1.0, 1.0, 0.5]], 124)));
+    let p = run(&c, &rotations, Some(&survey_gnss(&s, 1.0, 2.0, 3, &[wrong, [-1.0, 1.0, 0.5]], 124)));
+    let bias_of = |p: &Positioned| {
+        Vector3::from(p.bias.iter().find(|(f, _)| *f == 2).map(|(_, b)| *b).expect("the bias of flight 2"))
+    };
+    let error = (bias_of(&p) - bias_of(&control) - Vector3::from(wrong)).norm();
+    let moved = (0..s.poses.len())
+        .map(|i| (Vector3::from(p.centres[i].unwrap()) - Vector3::from(control.centres[i].unwrap())).norm())
+        .fold(0.0, f64::max);
+    let shape = shape_of(&s, &p);
+    eprintln!("a flight off by {wrong:?}: bias {:.2?} (control {:.2?}, {error:.3} m from the offset), centres \
+               moved {moved:.3} m; shape horizontal {:.2} m, vertical rms {:.2} m; outliers {}", bias_of(&p),
+              bias_of(&control), shape.horizontal, shape.vertical_rms, p.gnss_outliers.len());
+    assert_eq!(p.frame, Frame::Gnss);
+    assert!(p.notes.is_empty() && control.notes.is_empty(), "{:?} {:?}", p.notes, control.notes);
+    assert!(error < 0.05, "bias {:?}: {error} m from the control's plus the offset", bias_of(&p));
+    assert!(moved < 0.05, "the centres moved by up to {moved} m");
+    assert!(p.gnss_outliers.is_empty(), "{:?}", p.gnss_outliers);
 }
 
 /// The scales of the observations eliminated in closed form (point blocks of 3) give the solution

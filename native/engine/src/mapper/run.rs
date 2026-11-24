@@ -346,7 +346,7 @@ impl Mapper {
             bias_covariance: Vec::new(),
             variance_factors: None,
             last_filter: (0, 0),
-            notes: Vec::new(),
+            notes: p.notes.clone(),
             focal_sd: Vec::new(),
             intrinsics_held: Vec::new(),
         };
