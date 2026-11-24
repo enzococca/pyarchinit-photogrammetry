@@ -332,6 +332,21 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                                  "was traced on; nothing else is built"),
                   deeper: Optional[float] = typer.Option(None, help="with --composite: metres an older campaign must "
                                                          "be deeper to take a cell (default 0.15)"),
+                  finish: Optional[Path] = typer.Option(None, help="with --like: that elevation finished for a "
+                                                        "publication and written here (JPEG .jpg or GeoTIFF .tif, "
+                                                        "outside the project's data): holes filled, outside the "
+                                                        "wall masked, colour levelled, targets painted over; the "
+                                                        "elevation itself stays as measured, nothing is built"),
+                  no_fill: bool = typer.Option(False, "--no-fill", help="with --finish: the holes left as they are"),
+                  no_mask: bool = typer.Option(False, "--no-mask", help="with --finish: what lies outside the "
+                                               "wall's span kept"),
+                  no_level: bool = typer.Option(False, "--no-level", help="with --finish: the colour not levelled"),
+                  no_targets: bool = typer.Option(False, "--no-targets", help="with --finish: the survey targets "
+                                                  "left visible"),
+                  reduce: int = typer.Option(1, help="with --finish: one pixel in N (a whole number; default 1, "
+                                             "the full resolution)"),
+                  skip_backlit: bool = typer.Option(False, "--skip-backlit", help="the photos taken against the "
+                                                    "light (over 2 % of their pixels blown) left out of the build"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
                                                          help="the orthophoto from the texture of the model, or from "
                                                               "the photos (default: the texture when the chunk has no "
@@ -344,7 +359,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
     With --path the wall traced on the plan as a line, bent or curved, its face developed along it.
     With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk);
     with --like and --chunks on several chunks, the campaigns of that wall as a group; with --like and
-    --compare the comparison sheet of that group; with --like and --composite the composite of its campaigns."""
+    --compare the comparison sheet of that group; with --like and --composite the composite of its campaigns;
+    with --like and --finish that elevation finished for a publication (an export: the elevation stays as measured)."""
     import numpy as np
 
     from .engine import elevation as E
@@ -355,7 +371,19 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
         return np.asarray(values)
 
+    finishing = [f"--{n.replace('_', '-')}" for n in ("no_fill", "no_mask", "no_level", "no_targets", "reduce")
+                 if getattr(ctx.get_parameter_source(n), "name", "DEFAULT") not in ("DEFAULT", "DEFAULT_MAP")]
+    if finishing and finish is None:
+        raise typer.BadParameter(f"{', '.join(finishing)} go with --finish")
+    if finish is not None and like is None:
+        raise typer.BadParameter("--finish finishes an elevation already built: give it with --like ID")
     if like is not None:
+        if skip_backlit:
+            raise typer.BadParameter("--like builds as that elevation was built (with or without the backlit "
+                                     "photos): not with --skip-backlit")
+        if finish is not None and (chunks is not None or compare is not None or composite):
+            raise typer.BadParameter("--finish exports that elevation and builds nothing else: not with --chunks, "
+                                     "--compare or --composite")
         given = [("--inside/--outside" if n == "inside" else f"--{n.replace('_', '-')}") for n in ("trace", "side", "markers", "vertical", "facing", "centre", "up",
                                                        "circle", "inside", "axis", "axis_points", "scale", "section",
                                                        "front", "back", "resolution", "path", "extend",
@@ -395,6 +423,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             return
         if composite:
             _composite(doc, source, found[0], deeper, name)
+            return
+        if finish is not None:
+            _finish(source, found[0], finish, not no_fill, not no_mask, not no_level, not no_targets, reduce)
             return
         if chunks is not None:
             _campaigns(doc, source, found[0], chunks, dates, same_frame)
@@ -451,7 +482,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
         raise typer.BadParameter("a section is made on a plane, not on --circle")
     if path is not None:
         _wall_elevation(project, chunk, path, side, front, back, extend, heights, snap, snap_band, smooth,
-                        resolution, name, scale, texture)
+                        resolution, name, scale, texture, skip_backlit)
         return
     doc, ch = _open(project, chunk)
     depth = (-back, front)
@@ -498,8 +529,12 @@ def elevation_cmd(ctx: typer.Context, project: Path,
         frame = E.plane_from_view(numbers(centre, 3, "--centre"), numbers(facing, 3, "--facing"),
                                   numbers(up, 3, "--up"))
         depth = None
-    entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
-                              progress=print_progress, scale=scale, texture=texture)
+    try:
+        entry = E.build_elevation(ch, frame, resolution, name, depth, kind="section" if section else "elevation",
+                                  progress=print_progress, scale=scale, texture=texture, skip_backlit=skip_backlit)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
     doc.save()
     ortho, relief = E.elevation_paths(ch, entry)
     w, h = entry["size"]
@@ -507,7 +542,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                + ("; v = height" if entry.get("v_is_height") else "")
                + (f"; scaled on the wall, {E.wall_length(entry):.3f} m all round" if entry.get("scale") == "wall"
                   else "")
-               + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else ""))
+               + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else "")
+               + _backlit_text(entry))
     typer.echo(f"{ortho}\n{relief}")
 
 
@@ -568,7 +604,7 @@ def _path_points(text: str):
 
 
 def _wall_elevation(project, chunk, path, side, front, back, extend, heights, snap, snap_band, smooth, resolution,
-                    name, scale, texture) -> None:
+                    name, scale, texture, skip_backlit: bool = False) -> None:
     """``ppg elevation --path``: the frame of the wall on the line given (:func:`.engine.wall_trace.path_from_trace`)
     and its elevation."""
     from .engine import elevation as E
@@ -585,8 +621,8 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
         frame, report = wall_trace.path_from_trace(ch, points, which, front, back, snap=snap, heights=heights,
                                                    smooth=float(smooth or 0.0), **kw)
         entry = E.build_elevation(ch, frame, resolution, name, (-back, front), progress=print_progress, scale=scale,
-                                  texture=texture, extend=extend, heights=heights)
-    except (TraceRefused, ValueError) as exc:
+                                  texture=texture, extend=extend, heights=heights, skip_backlit=skip_backlit)
+    except (TraceRefused, ValueError, RuntimeError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     doc.save()
@@ -597,8 +633,32 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
                + f"; {E.wall_length(entry):.3f} m along the wall; corners: {report['corners']}"
                + ("" if not report.get("snapped") else
                   f"; snapped, vertices moved {report['median_shift'] * 100:.1f} cm (median), "
-                  f"{report['max_shift'] * 100:.1f} cm at most"))
+                  f"{report['max_shift'] * 100:.1f} cm at most")
+               + _backlit_text(entry))
     typer.echo(f"{ortho}\n{relief}")
+
+
+def _backlit_text(entry: dict) -> str:
+    if not entry.get("skip_backlit"):
+        return ""
+    n = int(entry.get("backlit_skipped", 0))
+    return f"; {n} backlit photo{'' if n == 1 else 's'} left out"
+
+
+def _finish(source, entry: dict, out: Path, fill: bool, mask: bool, level: bool, targets: bool, reduce: int) -> None:
+    """``ppg elevation --like ID --finish OUT``: that elevation finished for a publication, written to OUT."""
+    from .engine.elevation_finish import finish
+
+    try:
+        r = finish(source, entry, out, fill=fill, mask=mask, level=level, targets=targets, reduce=reduce,
+                   progress=print_progress)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    w, h = r["size"]
+    typer.echo(f"{entry.get('name')} finished: {w} x {h} px; {r['filled']} cells filled, {r['masked']} masked, "
+               f"{r['targets']} targets painted over, colour {'levelled' if r['levelled'] else 'as built'}")
+    typer.echo(r["path"])
 
 
 def _compare(doc, source, entry: dict, out: Path, title: Optional[str], overwrite: bool) -> None:

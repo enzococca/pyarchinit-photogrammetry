@@ -1068,7 +1068,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
                     progress: Progress | None = None, workers: int | None = None, max_angle: float = 80.0,
                     bounds=None, kind: str = "elevation", scale: str | None = None, u_map=None,
                     texture: bool | None = None, extend: tuple[float, float] | None = None,
-                    heights: tuple[float, float] | None = None) -> dict:
+                    heights: tuple[float, float] | None = None, skip_backlit: bool = False) -> dict:
     """Orthophoto (RGBA) and DEM (depth ``d`` towards the viewer, float32) of the model on ``frame``,
     written in ``<chunk data>/elevations/<id>/`` (GeoTIFF in frame metres, no CRS; the frame in the
     tags and in ``frame.json``) and listed in ``chunk.meta["elevations"]``. Returns the entry.
@@ -1099,7 +1099,11 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     ``heights``, not with them. No section is made on it. The entry says ``extend`` when it was asked.
 
     ``texture``: the orthophoto from the texture of the model (:mod:`.texture_ortho`): None chooses it when the chunk
-    has no aligned photo (an imported or merged model), True asks for it. The relief is the same either way."""
+    has no aligned photo (an imported or merged model), True asks for it. The relief is the same either way.
+
+    ``skip_backlit``: the photos taken against the light left out - those whose share of blown pixels
+    (:func:`blown_share`) is over :data:`BACKLIT_SHARE`; the entry says ``skip_backlit`` and how many were left out
+    (``backlit_skipped``). ``RuntimeError`` when every photo is."""
     wall_path = frame.kind == "path"
     if scale is None:
         scale = "wall" if wall_path else "cylinder"
@@ -1163,6 +1167,14 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     textured = texture_ortho.TexturedModel(chunk) if from_texture else None
     progress(0.0, "Checking the photos")
     cams, _bad = ([], []) if from_texture else readable_cameras(chunk, True)
+    backlit = 0
+    if skip_backlit and cams:
+        progress(0.0, "Looking for backlit photos")
+        cams, left = _without_backlit(cams)
+        backlit = len(left)
+        if left:
+            log.info("Elevation: %d backlit photos left out (over %.0f %% of the pixels blown): %s", backlit,
+                     100 * BACKLIT_SHARE, ", ".join(c.label for c in left))
     resolution = float(resolution or (textured.texel() if from_texture else estimate_gsd(chunk)))
     correction = None if from_texture else correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
@@ -1250,6 +1262,9 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         entry["scale"] = "wall"
     if wall_path and extend is not None:
         entry["extend"] = [float(extend[0]), float(extend[1])]
+    if skip_backlit:
+        entry["skip_backlit"] = True
+        entry["backlit_skipped"] = backlit
     if kind == "section":
         progress(0.985, "Profile of the section")
         lines = cut_profile(chunk, frame, surf.bounds, simplify=resolution / 2)
@@ -1260,6 +1275,41 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     chunk.meta.setdefault("elevations", []).append(entry)
     progress(1.0, f"Elevation {w}x{h} px")
     return entry
+
+
+BACKLIT_SHARE = 0.02  # a photo with more than this share of blown pixels is backlit (left out on request)
+BLOWN_LEVEL = 250  # a pixel is blown when its three channels are all at or over this
+
+
+def blown_share(cam) -> float:
+    """The share of the pixels of the photo of ``cam`` (read reduced by 4) whose three channels are all at or over
+    :data:`BLOWN_LEVEL`: the sky or a light source burnt white behind a wall photographed against the light."""
+    import cv2
+
+    from . import visibility
+
+    img = visibility.read_photo(cam, cv2.IMREAD_REDUCED_COLOR_4)
+    if img.ndim == 2:
+        img = img[..., None]
+    if img.size == 0:
+        return 0.0
+    return float((img >= BLOWN_LEVEL).all(axis=-1).mean())
+
+
+def _without_backlit(cams: list) -> tuple[list, list]:
+    """``(kept, left out)``: the cameras whose share of blown pixels is over :data:`BACKLIT_SHARE` left out;
+    ``RuntimeError`` when that is every one."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+        shares = list(pool.map(blown_share, cams))
+    kept = [c for c, s in zip(cams, shares) if s <= BACKLIT_SHARE]
+    left = [c for c, s in zip(cams, shares) if s > BACKLIT_SHARE]
+    if not kept:
+        raise RuntimeError(f"every photo ({len(cams)}) has over {100 * BACKLIT_SHARE:.0f} % of its pixels blown "
+                           "(backlit): none is left to build from - build without leaving the backlit photos out")
+    return kept, left
 
 
 def same_crs(a, b) -> bool:
@@ -1349,7 +1399,8 @@ def build_like(chunk: Chunk, entry: dict, name: str | None = None, progress: Pro
                           colour_correction=bool(entry.get("colour_correction", False)),
                           ghosting=bool(entry.get("ghosting", False)), fill_holes=bool(entry.get("fill_holes", True)),
                           progress=progress, workers=workers, max_angle=float(entry.get("max_angle", 80.0)),
-                          bounds=tuple(entry["bounds"]), kind=kind, scale="keep")
+                          bounds=tuple(entry["bounds"]), kind=kind, scale="keep",
+                          skip_backlit=bool(entry.get("skip_backlit", False)))
     new["grid_of"] = entry["id"]
     if stale:
         new["grid_of_stale"] = True
