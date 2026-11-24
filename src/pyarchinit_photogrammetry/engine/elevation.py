@@ -1406,6 +1406,10 @@ def entry_from_rasters(chunk: Chunk, like: dict, rgba, relief, name: str | None 
 
     from ..io.files import swap_folder
 
+    missing = [k for k in ("frame", "depth", "resolution", "bounds") if like.get(k) is None]
+    if missing:
+        raise ValueError(f"the elevation whose grid is taken says no {', '.join(missing)}: no frame and grid to "
+                         "write on")
     origin, (h, w) = grid_of(like)
     rgba = np.asarray(rgba)
     relief = np.asarray(relief)

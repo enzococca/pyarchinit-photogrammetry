@@ -302,3 +302,104 @@ def test_command_line_composite(campaigns):
     doc.save()
     r = runner.invoke(app, ["elevation", project, "--like", a["id"], "--composite"])
     assert r.exit_code == 1 and "group" in r.output
+
+
+def test_flat_shared_cells_do_not_stretch_the_colours():
+    """Shared cells almost flat (deviation 0.5) against a reference of deviation 20: the gain is clamped, the stones
+    elsewhere are not stretched to the limits; under :data:`MATCH_MIN_CELLS` only the mean is moved."""
+    rng = np.random.default_rng(9)
+    h, w = 80, 120
+    rgb = 128 + rng.normal(0, 20, (1, h, w)) + rng.normal(0, 4, (3, h, w))   # stones: light and shade, some hue
+    where = np.zeros((h, w), bool)
+    where[:, :20] = True
+    rgb[:, where] = 128 + rng.normal(0, 0.5, (3, int(where.sum())))
+    rgb = np.clip(np.round(rgb), 0, 255).astype(np.uint8)
+    ref = np.clip(np.round(rng.normal(128, 20, (3, h, w))), 0, 255).astype(np.uint8)
+    info = {}
+    out = C.match_colours(rgb, ref, where, info=info)
+    stones = out[:, ~where]
+    clipped = ((stones == 0) | (stones == 255)).any(axis=0).mean()
+    assert clipped < 0.03, clipped
+    assert info["cells"] == int(where.sum()) and info["mode"] == "clamped"
+    few = np.zeros((h, w), bool)
+    few[:5, :5] = True                                                     # 25 cells
+    info = {}
+    out = C.match_colours(rgb, ref, few, info=info)
+    assert info["mode"] == "mean" and info["cells"] == 25 < C.MATCH_MIN_CELLS
+    assert abs(out[:, ~where].astype(float).std() - rgb[:, ~where].astype(float).std()) < 1.5   # not stretched
+
+
+def test_the_record_says_how_the_colours_were_matched(campaigns):
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    C.composite(doc, ref, group)
+    (older, recent) = group["composite"]["sources"]
+    assert older["colours"]["mode"] in ("full", "clamped", "mean") and older["colours"]["cells"] > 0
+    assert "colours" not in recent                                         # the reference of the colours
+    assert [s["date"] for s in group["composite"]["sources"]] == ["2017-11-05", "2022-11-03"]
+
+
+def test_stale_when_a_date_swaps_the_recent_and_the_older(campaigns):
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    entry = C.composite(doc, ref, group)
+    assert not C.is_stale(doc, ref, entry)
+    G.set_date(group, ref.key, a["id"], "2024-05-01")                     # A is now the most recent
+    assert C.is_stale(doc, ref, entry)
+    G.set_date(group, ref.key, a["id"], "2017-11-05")
+    assert not C.is_stale(doc, ref, entry)
+
+
+def test_a_campaign_without_a_date_is_refused(campaigns):
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    G.set_date(group, other.key, b["id"], None)
+    assert C.undated(doc, ref, group) == [other.label]
+    with pytest.raises(C.Undated, match=f"give a date to {other.label}") as exc:
+        C.composite(doc, ref, group)
+    assert exc.value.italian.startswith(f"Dai una data a «{other.label}»") and exc.value.english == str(exc.value)
+    assert isinstance(exc.value, ValueError) and group.get("composite") is None
+    assert not C.composites(ref)
+
+
+def test_entry_from_rasters_without_a_depth_is_a_value_error(walls):
+    _doc, (ref, _other), entry = walls
+    w, h = entry["size"]
+    like = {k: v for k, v in entry.items() if k != "depth"}
+    with pytest.raises(ValueError, match="depth"):
+        E.entry_from_rasters(ref, like, *_rasters((h, w), COLOUR_A), kind="elevation")
+    assert [e["id"] for e in E.elevations(ref)] == [entry["id"]]
+
+
+def test_a_campaign_left_out_for_another_grid_is_stamped(campaigns, walls):
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    entry = walls[2]
+    res = float(entry["resolution"])
+    u0, v0, u1, v1 = entry["bounds"]
+    shifted = dict(entry, bounds=[u0 + 7 * res, v0, u1 + 7 * res, v1])    # another grid, the same shape
+    w, h = entry["size"]
+    c = E.entry_from_rasters(other, shifted, *_rasters((h, w), COLOUR_A), kind="elevation")
+    G.add_member(group, other, c, "2019-06-01")
+    made = C.composite(doc, ref, group)
+    (left,) = group["composite"]["left_out"]
+    assert left["entry"] == c["id"] and left["stamp"] == E.source_stamp(c)
+    assert not C.is_stale(doc, ref, made)
+    c["build"] = "1" * 12                                                  # built again (on the right grid)
+    assert C.is_stale(doc, ref, made)
+
+
+def test_more_sources_than_the_raster_holds_are_refused(campaigns, monkeypatch):
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    many = [{"chunk": ref, "entry": a, "date": "2017-11-05", "label": f"c{i}", "record": {}} for i in range(255)]
+    monkeypatch.setattr(C, "_sources", lambda *_a: many)
+    with pytest.raises(ValueError, match="254"):
+        C.composite(doc, ref, group)
+
+
+def test_command_line_refuses_a_campaign_without_a_date(campaigns):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    G.set_date(group, other.key, b["id"], None)
+    doc.save()
+    r = CliRunner().invoke(app, ["elevation", str(doc.path), "--like", a["id"], "--composite"])
+    assert r.exit_code == 1 and f"give a date to {other.label}" in r.output
