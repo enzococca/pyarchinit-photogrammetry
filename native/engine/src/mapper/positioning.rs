@@ -5,10 +5,12 @@
 //! The residual of an observation is GLOMAP's (`estimators/global_positioning.cc`, the
 //! `BATAPairwiseDirectionError` of `estimators/cost_function.h`, after Zhuang et al. 2018): `s (X -
 //! C) - v`, `v` the unit ray of the observation in the world, `X` the point, `C` the centre of the
-//! photo and `s` a scale of that observation with a floor (`SCALE_FLOOR`), part of the point's
-//! block; under the Huber loss of `Options::positioning_huber`, the observations of a camera
-//! without a prior focal length weighed by a half (GLOMAP's `ScaledLoss`); tracks seen by fewer than
-//! `MIN_VIEWS` photos left out.
+//! photo and `s` a scale of that observation with a floor (`SCALE_FLOOR`): in the solve from the
+//! random start a coordinate of the point's block (GLOMAP's), in the joint solve with the positions
+//! eliminated in closed form, so that a point block is its three coordinates (`Scales`); under the
+//! Huber loss of `Options::positioning_huber`, the observations of a camera without a prior focal
+//! length weighed by a half (GLOMAP's `ScaledLoss`); tracks seen by fewer than `MIN_VIEWS` photos
+//! left out.
 //!
 //! 1. **With GNSS** (at least 3 placed photos with a position): first the rays alone, as without
 //!    GNSS (step 5), put on the positions by one robust similarity (Umeyama's, iteratively
@@ -211,9 +213,36 @@ struct RayIn {
 }
 
 enum Scale {
-    /// The coordinate of the point blocks that holds it.
+    /// The coordinate of the point blocks that holds it (`Scales::Explicit`).
     Free(usize),
     Held(f64),
+    /// Eliminated in closed form from its residual (`Scales::Eliminated`).
+    Eliminated,
+}
+
+/// How the free scales of the observations enter the solve: eliminated in closed form from each
+/// residual, so that a point block is its three coordinates (`Eliminated`, what `position` uses),
+/// or as coordinates of the point blocks (`Explicit`, GLOMAP's formulation: a point seen `k` times
+/// is a dense block of `3 + k`), kept as the reference the elimination is proved against. The
+/// two have the same minima: the scale of an observation appears in its residual alone, and the
+/// loss is a function of the norm of that residual, smallest at the scale that minimises the norm,
+/// `max(floor, v . (X - C) / |X - C|^2)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scales {
+    Eliminated,
+    Explicit,
+}
+
+/// The scale that minimises `|s d - v|` with `s` at least `SCALE_FLOOR`, and whether it is above
+/// the floor (the minimum of the unbounded problem).
+fn best_scale(d: &[f64; 3], v: &[f64; 3]) -> (f64, bool) {
+    let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let projection = (d[0] * v[0] + d[1] * v[1] + d[2] * v[2]) / dd;
+    if dd > 0.0 && projection > SCALE_FLOOR {
+        (projection, true)
+    } else {
+        (SCALE_FLOOR, false)
+    }
 }
 
 struct Ray {
@@ -268,6 +297,7 @@ impl PositionModel {
         fixes: Vec<Fix>,
         flights: usize,
         huber: f64,
+        scales: Scales,
     ) -> PositionModel {
         let n = centres.len();
         let mut in_solve = vec![false; n];
@@ -289,7 +319,7 @@ impl PositionModel {
         let cam_sizes = vec![3; photo_of_block.len() + n_bias];
         let mut point_sizes = vec![3; points.len()];
         for r in &rays {
-            if !r.held {
+            if !r.held && scales == Scales::Explicit {
                 point_sizes[r.point] += 1;
             }
         }
@@ -307,6 +337,8 @@ impl PositionModel {
             .map(|r| {
                 let scale = if r.held {
                     Scale::Held(r.scale)
+                } else if scales == Scales::Eliminated {
+                    Scale::Eliminated
                 } else {
                     let c = next[r.point];
                     next[r.point] += 1;
@@ -338,10 +370,16 @@ impl PositionModel {
         [self.params[c], self.params[c + 1], self.params[c + 2]]
     }
 
-    fn scale(&self, s: &Scale) -> f64 {
-        match *s {
-            Scale::Free(c) => self.params[c],
-            Scale::Held(v) => v,
+    /// The scale of a ray, and whether it is free above its floor (`None` for one held).
+    fn scale(&self, r: &Ray) -> (f64, Option<bool>) {
+        match r.scale {
+            Scale::Free(c) => (self.params[c], Some(self.params[c] > SCALE_FLOOR)),
+            Scale::Held(v) => (v, None),
+            Scale::Eliminated => {
+                let (x, c) = (self.point(r.point), self.centres[r.photo]);
+                let (s, above) = best_scale(&std::array::from_fn(|a| x[a] - c[a]), &r.ray);
+                (s, Some(above))
+            }
         }
     }
 
@@ -361,7 +399,7 @@ impl PositionModel {
     }
 
     fn scales_on_floor(&self) -> usize {
-        self.bounds.iter().filter(|&&(c, floor)| self.params[c] <= floor).count()
+        self.rays.iter().filter(|r| self.scale(r).1 == Some(false)).count()
     }
 }
 
@@ -381,7 +419,17 @@ impl Model for PositionModel {
     fn linearize(&self, k: usize, out: &mut BlockJacobian) {
         if k < self.rays.len() {
             let r = &self.rays[k];
-            let (x, c, s, w) = (self.point(r.point), self.centres[r.photo], self.scale(&r.scale), r.weight);
+            let (x, c, w) = (self.point(r.point), self.centres[r.photo], r.weight);
+            let d: [f64; 3] = std::array::from_fn(|a| x[a] - c[a]);
+            let (s, above) = self.scale(r);
+            // the derivative of the residual `s d - v` by `d`: `s I`, and for a scale eliminated
+            // above its floor (`s = v . d / |d|^2`) also `d (v - 2 s d)^T / |d|^2`
+            let eliminated = matches!(r.scale, Scale::Eliminated) && above == Some(true);
+            let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            let m = |a: usize, q: usize| {
+                let diagonal = if q == a { s } else { 0.0 };
+                if eliminated { diagonal + d[a] * (r.ray[q] - 2.0 * s * d[q]) / dd } else { diagonal }
+            };
             let block = self.block_of_photo[r.photo];
             if let Some(b) = block {
                 out.cameras.push(b);
@@ -390,21 +438,20 @@ impl Model for PositionModel {
             let size = self.point_sizes[r.point];
             let scale_col = match r.scale {
                 Scale::Free(col) => Some(col - self.point_col[r.point]),
-                Scale::Held(_) => None,
+                Scale::Held(_) | Scale::Eliminated => None,
             };
             for a in 0..3 {
-                let d = x[a] - c[a];
-                out.residuals.push(w * (s * d - r.ray[a]));
+                out.residuals.push(w * (s * d[a] - r.ray[a]));
                 if block.is_some() {
                     for q in 0..3 {
-                        out.jacobian.push(if q == a { -w * s } else { 0.0 });
+                        out.jacobian.push(-w * m(a, q));
                     }
                 }
                 for q in 0..size {
                     let value = if q < 3 {
-                        if q == a { w * s } else { 0.0 }
+                        w * m(a, q)
                     } else if Some(q) == scale_col {
-                        w * d
+                        w * d[a]
                     } else {
                         0.0
                     };
@@ -788,6 +835,25 @@ pub fn position(
     o: &Options,
     observe: &mut dyn FnMut() -> bool,
 ) -> Result<Positioned, String> {
+    position_with(input, cams, graph, rotations, tracks, selected, gnss, o, Scales::Eliminated, observe)
+}
+
+/// `position` with the scales of the observations of the joint solve as `scales` says
+/// (`Scales::Explicit` is the reference formulation the tests compare with).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn position_with(
+    input: &Input,
+    cams: &[Camera],
+    graph: &ViewGraph,
+    rotations: &Rotations,
+    tracks: &Tracks,
+    selected: &[usize],
+    gnss: Option<&Gnss>,
+    o: &Options,
+    scales: Scales,
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Positioned, String> {
     check(input, cams, graph, rotations, tracks, selected, gnss, o)?;
     if !observe() {
         return Err("cancelled".into());
@@ -925,7 +991,8 @@ pub fn position(
     // the flights share the rays of one component of the rotations (the photos placed are one
     // connected part of the view graph): a flight without rays to the others would let its bias
     // and its centres trade off
-    let mut m = PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber);
+    let mut m =
+        PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber, scales);
     // the translations of step 1 are measured from the first flight of all the positions; when its
     // positions were all left out, the first flight here is another one, held at zero
     let reference = flights.first().map_or([0.0; 3], |&id| bias_of(id));
@@ -1035,7 +1102,11 @@ fn free(
         (0..n).map(|i| if seen_photo[i] { random.vector(RANDOM_EXTENT) } else { [0.0; 3] }).collect();
     let points: Vec<[f64; 3]> = (0..count).map(|_| random.vector(RANDOM_EXTENT)).collect();
     let held = seen_photo.iter().position(|&s| s);
-    let mut m = PositionModel::new(rays_in, &points, centres, held, Vec::new(), 0, o.positioning_huber);
+    // GLOMAP's formulation (`Scales::Explicit`): from the random start the scales eliminated stop
+    // short (a point behind its camera, its scale on the floor, hardly moves)
+    let mut m =
+        PositionModel::new(rays_in, &points, centres, held, Vec::new(), 0, o.positioning_huber, Scales::Explicit);
+
     let cost = if m.rays.is_empty() { 0.0 } else { solve(&mut m, FREE_MAX_ITERATIONS, observe)? };
     Ok(Positioned {
         centres: (0..n).map(|i| seen_photo[i].then(|| m.centres[i])).collect(),

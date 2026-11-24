@@ -11,7 +11,7 @@ use common::{patch, ring, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
 use ppg_engine::camera::Camera;
 use ppg_engine::mapper::graph::{Edge, ViewGraph};
-use ppg_engine::mapper::positioning::{position, Frame, Gnss, Positioned};
+use ppg_engine::mapper::positioning::{position, position_with, Frame, Gnss, Positioned, Scales};
 use ppg_engine::mapper::rotation::Rotations;
 use ppg_engine::mapper::tracks::{self, Tracks};
 use ppg_engine::mapper::input::Input;
@@ -507,4 +507,83 @@ fn what_cannot_be_used_is_refused() {
     let out = position(&c.input, &c.cams, &graph, &rotations, &c.tracks, &c.selected, None, &Options::default(),
                        &mut || true);
     assert!(out.unwrap_err().contains("cameras"));
+}
+
+/// The scales of the observations eliminated in closed form (point blocks of 3) give the solution
+/// of GLOMAP's formulation with the scales in the point blocks, on the cases of this file solved
+/// with positions: the bent ring, a fix 100 m off, a second flight, photos without a position, the
+/// turned frame. Same outliers, the centres and biases within 1 mm, the points within 1 cm.
+#[test]
+fn the_eliminated_scales_give_the_explicit_solution() {
+    let turned = {
+        let s = ring(PHOTOS, DIAMETER, HEIGHT, 101);
+        let turn = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)),
+                                              30f64.to_radians())
+            .into_inner();
+        let mut rotations = rotations_of(&s, 0.0);
+        for w in rotations.world_from_cam.iter_mut() {
+            *w = Some(array(&(turn * Matrix3::from_fn(|i, j| w.unwrap()[i][j]))));
+        }
+        let gnss = gnss_of(&s, 1.0, 2.0, 102, &[]);
+        (s, rotations, gnss)
+    };
+    let bent = {
+        let s = ring(PHOTOS, DIAMETER, HEIGHT, 11);
+        let rotations = rotations_of(&s, BEND_DEG);
+        let gnss = gnss_of(&s, 1.0, 2.0, 12, &[]);
+        (s, rotations, gnss)
+    };
+    let wrong_and_flight = {
+        let s = ring(PHOTOS, DIAMETER, HEIGHT, 31);
+        let rotations = rotations_of(&s, 0.0);
+        let mut gnss = gnss_with(&s, 0.3, 0.5, [0.3, 0.3, 0.5], 34, &[]);
+        second_flight(&mut gnss, PHOTOS / 2, [3.0, -2.0, 1.0]);
+        gnss.xyz[37][0] += 100.0;
+        (s, rotations, gnss)
+    };
+    let without = {
+        let s = ring(PHOTOS, DIAMETER, HEIGHT, 41);
+        let rotations = rotations_of(&s, 0.0);
+        let gnss = gnss_of(&s, 1.0, 2.0, 42, &(0..PHOTOS).filter(|i| i % 10 == 3).collect::<Vec<_>>());
+        (s, rotations, gnss)
+    };
+    for (name, (s, rotations, gnss)) in
+        [("bent ring", bent), ("wrong fix, second flight", wrong_and_flight), ("without GPS", without),
+         ("turned frame", turned)]
+    {
+        let c = case_of(&s);
+        let solve = |scales| {
+            position_with(&c.input, &c.cams, &c.graph, &rotations, &c.tracks, &c.selected, Some(&gnss),
+                          &Options::default(), scales, &mut || true)
+            .expect("a positioning")
+        };
+        let (eliminated, explicit) = (solve(Scales::Eliminated), solve(Scales::Explicit));
+        let far = |a: &[Option<[f64; 3]>], b: &[Option<[f64; 3]>]| {
+            a.iter()
+                .zip(b)
+                .map(|(a, b)| match (a, b) {
+                    (Some(a), Some(b)) => (Vector3::from(*a) - Vector3::from(*b)).norm(),
+                    (None, None) => 0.0,
+                    _ => f64::INFINITY,
+                })
+                .fold(0.0, f64::max)
+        };
+        let centres = far(&eliminated.centres, &explicit.centres);
+        let points = far(&eliminated.points, &explicit.points);
+        let biases = eliminated
+            .bias
+            .iter()
+            .zip(&explicit.bias)
+            .map(|(a, b)| (Vector3::from(a.1) - Vector3::from(b.1)).norm())
+            .fold(0.0, f64::max);
+        eprintln!("{name}: centres {centres:.2e} m, points {points:.2e} m, biases {biases:.2e} m apart; outliers \
+                   {:?}", eliminated.gnss_outliers);
+        assert_eq!(eliminated.frame, explicit.frame, "{name}");
+        assert_eq!(eliminated.gnss_outliers, explicit.gnss_outliers, "{name}");
+        assert_eq!(eliminated.bias.len(), explicit.bias.len(), "{name}");
+        assert_eq!(eliminated.scales_on_floor, explicit.scales_on_floor, "{name}");
+        assert!(centres < 1e-3, "{name}: centres {centres} m apart");
+        assert!(biases < 1e-3, "{name}: biases {biases} m apart");
+        assert!(points < 1e-2, "{name}: points {points} m apart");
+    }
 }
