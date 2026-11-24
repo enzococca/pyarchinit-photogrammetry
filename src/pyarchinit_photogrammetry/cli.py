@@ -254,8 +254,23 @@ def cut_model_cmd(project: Path,
 @app.command("elevation")
 def elevation_cmd(ctx: typer.Context, project: Path,
                   trace: Optional[str] = typer.Option(None, help="vertical plane on the trace X1,Y1,X2,Y2 (chunk CRS)"),
-                  side: Optional[str] = typer.Option(None, help="with --trace: a point X,Y on the viewer's side "
-                                                     "(default: where the photos are)"),
+                  side: Optional[str] = typer.Option(None, help="with --trace or --path: the viewer's side - "
+                                                     "left or right of the line as given, a point X,Y on that side, "
+                                                     "or auto (default: where the photos are)"),
+                  path: Optional[str] = typer.Option(None, help="a wall traced on the plan: its line \"X1,Y1 X2,Y2 "
+                                                     "...\" (two points at least, chunk CRS), bent or curved; u "
+                                                     "runs along the wall"),
+                  extend: Optional[str] = typer.Option(None, help="with --path: A,B metres added before the first "
+                                                       "point and after the last"),
+                  heights: Optional[str] = typer.Option(None, help="with --path: V0,V1, the heights of the "
+                                                        "elevation (default: those of the wall on the model)"),
+                  snap: bool = typer.Option(True, "--snap/--no-snap", help="with --path: the line snapped onto the "
+                                            "face of the model, or kept as given"),
+                  snap_band: Optional[float] = typer.Option(None, help="with --path: metres in front of the line "
+                                                            "and behind it where the face is looked for (default "
+                                                            "2.5)"),
+                  smooth: Optional[float] = typer.Option(None, help="with --path: the length (m) the line is "
+                                                         "smoothed over (default 0: none)"),
                   markers: Optional[str] = typer.Option(None, help="plane of the markers A,B,C[,...] (labels, three "
                                                         "or more): u from A towards B, 0 at A"),
                   vertical: Optional[str] = typer.Option(None, help="with --markers: the vertical axis C,D (labels); "
@@ -275,8 +290,10 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                            "the tower's crest), points (--axis-points)"),
                   axis_points: Optional[str] = typer.Option(None, help="with --axis points: X,Y,Z,X,Y,Z of the "
                                                             "bottom and the top of the axis (chunk CRS)"),
-                  scale: str = typer.Option("cylinder", help="with --circle: cylinder (u = the arc on the "
-                                            "cylinder) or wall (u = the length along the wall)"),
+                  scale: Optional[str] = typer.Option(None, help="with --circle: cylinder (u = the arc on the "
+                                                      "cylinder, the default) or wall (u = the length along the "
+                                                      "wall); with --path: wall (u = the length on the face, the "
+                                                      "default) or trace (u = the length along the line)"),
                   section: bool = typer.Option(False, help="a section: what stands in front of the plane is taken "
                                                "away and the line of the cut saved as the profile"),
                   front: float = typer.Option(0.5, help="metres kept in front of the plane (not for a section)"),
@@ -293,6 +310,12 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   same_frame: bool = typer.Option(False, help="with --like and two LOCAL chunks: they are in the same "
                                                   "frame (aligned, merged, oriented on the same markers); without it "
                                                   "an elevation of another local chunk is refused"),
+                  chunks: Optional[str] = typer.Option(None, help="with --like: \"A,B\", the chunks (labels or "
+                                                       "keys) the elevation is built on again, one campaign each, "
+                                                       "kept together as the group of that wall; not with --chunk"),
+                  dates: Optional[str] = typer.Option(None, help="with --chunks: \"A=2017-11-05,B=2022-11-03\", the "
+                                                      "date of a campaign (default: the date of the chunk, else the "
+                                                      "median date of its photos)"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
                                                          help="the orthophoto from the texture of the model, or from "
                                                               "the photos (default: the texture when the chunk has no "
@@ -302,7 +325,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
     plane of markers with the axes chosen, or on the plane of a view - or on a cylinder (--circle: a
     well, a tower; its axis vertical, the region's, the crest's or through two points; scaled on the
     cylinder or on the wall). With --facing the whole model is kept (a section: all behind the plane).
-    With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk)."""
+    With --path the wall traced on the plan as a line, bent or curved, its face developed along it.
+    With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk);
+    with --like and --chunks on several chunks, the campaigns of that wall as a group."""
     import numpy as np
 
     from .engine import elevation as E
@@ -316,11 +341,17 @@ def elevation_cmd(ctx: typer.Context, project: Path,
     if like is not None:
         given = [("--inside/--outside" if n == "inside" else f"--{n.replace('_', '-')}") for n in ("trace", "side", "markers", "vertical", "facing", "centre", "up",
                                                        "circle", "inside", "axis", "axis_points", "scale", "section",
-                                                       "front", "back", "resolution")
+                                                       "front", "back", "resolution", "path", "extend",
+                                                       "heights", "snap", "snap_band", "smooth")
                  if getattr(ctx.get_parameter_source(n), "name", "DEFAULT") not in ("DEFAULT", "DEFAULT_MAP")]
         if given:
             raise typer.BadParameter(f"--like takes the surface, grid, depth and kind of that elevation: not with "
                                      f"{', '.join(given)}")
+        if chunks is not None and chunk is not None:
+            raise typer.BadParameter("--chunks names the chunks to build on: not with --chunk (the chunk of the "
+                                     "elevation is --like-chunk)")
+        if dates is not None and chunks is None:
+            raise typer.BadParameter("--dates goes with --chunks")
         doc, ch = _open(project, chunk)
         source = ch
         if like_chunk is not None:
@@ -333,6 +364,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             names = ", ".join(f"{e.get('name')!r} ({e.get('id')})" for e in E.elevations(source)) or "none"
             raise typer.BadParameter(f"{'no' if not found else 'more than one'} elevation {like!r} in the chunk "
                                      f"{source.label!r}; its elevations: {names}", param_hint="--like")
+        if chunks is not None:
+            _campaigns(doc, source, found[0], chunks, dates, same_frame)
+            return
         try:
             entry = E.build_like(ch, found[0], name=name, progress=print_progress, source=source,
                                  same_frame=same_frame)
@@ -350,18 +384,37 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                       else ""))
         typer.echo(f"{ortho}\n{relief}")
         return
-    if like_chunk is not None or same_frame:
-        raise typer.BadParameter("--like-chunk and --same-frame go with --like")
-    if sum(v is not None for v in (trace, markers, facing, circle)) != 1:
-        raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle or --like")
-    if circle is None and (axis != "vertical" or axis_points is not None or scale != "cylinder"):
-        raise typer.BadParameter("--axis, --axis-points and --scale are for a cylinder: give --circle")
+    if like_chunk is not None or same_frame or chunks is not None or dates is not None:
+        raise typer.BadParameter("--like-chunk, --same-frame, --chunks and --dates go with --like")
+    if sum(v is not None for v in (trace, markers, facing, circle, path)) != 1:
+        raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle, --path or --like")
+    if circle is None and (axis != "vertical" or axis_points is not None or (scale is not None and path is None)):
+        raise typer.BadParameter("--axis, --axis-points and --scale are for a cylinder: give --circle"
+                                 + (" (or --scale with --path)" if scale is not None else ""))
     if axis not in E.AXIS_METHODS:
         raise typer.BadParameter(f"--axis: one of {', '.join(E.AXIS_METHODS)}")
-    if scale not in ("cylinder", "wall"):
-        raise typer.BadParameter("--scale: cylinder or wall")
+    if path is None:
+        given = [f"--{n.replace('_', '-')}" for n in ("extend", "heights", "snap", "snap_band", "smooth")
+                 if getattr(ctx.get_parameter_source(n), "name", "DEFAULT") not in ("DEFAULT", "DEFAULT_MAP")]
+        if given:
+            raise typer.BadParameter(f"{', '.join(given)} go with --path")
+        if scale is None:
+            scale = "cylinder"
+        if scale not in ("cylinder", "wall"):
+            raise typer.BadParameter("--scale: cylinder or wall")
+    else:
+        if scale is None:
+            scale = "wall"
+        if scale not in ("wall", "trace"):
+            raise typer.BadParameter("--scale with --path: wall or trace")
+        if section:
+            raise typer.BadParameter("--section: a section is made on a plane, not with --path")
     if circle is not None and section:
         raise typer.BadParameter("a section is made on a plane, not on --circle")
+    if path is not None:
+        _wall_elevation(project, chunk, path, side, front, back, extend, heights, snap, snap_band, smooth,
+                        resolution, name, scale, texture)
+        return
     doc, ch = _open(project, chunk)
     depth = (-back, front)
     if circle is not None:
@@ -384,7 +437,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                                     if t.get("residual_m") is not None else ""))
     elif trace is not None:
         v = numbers(trace, 4, "--trace")
-        frame = E.plane_from_line(ch, v[:2], v[2:], numbers(side, 2, "--side") if side else None)
+        frame = E.plane_from_line(ch, v[:2], v[2:], _side_point(v[:2], v[2:], side))
     elif markers is not None:
         by_label = {m.label: m for m in ch.markers if m.position is not None}
         labels = [s.strip() for s in markers.split(",") if s.strip()]
@@ -418,6 +471,139 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   else "")
                + (f"; profile: {len(E.read_profile(ch, entry))} lines" if entry.get("profile") else ""))
     typer.echo(f"{ortho}\n{relief}")
+
+
+def _side_point(a, b, side: Optional[str]):
+    """The point of the viewer's side of the trace ``a``-``b`` for ``--side``: None for none or ``auto``, a point
+    1 m off its middle on the left or the right of the trace as given, or the point X,Y given."""
+    import numpy as np
+
+    if side is None or side.strip() == "auto":
+        return None
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if side.strip() in ("left", "right"):
+        along = b - a
+        right = np.array([along[1], -along[0]]) / max(float(np.hypot(*along)), 1e-12)
+        return (a + b) / 2 + (right if side.strip() == "right" else -right)
+    return _side_value(side)
+
+
+def _side_value(side: Optional[str]):
+    """``--side`` as :func:`.engine.wall_trace.side_of` takes it: ``auto``, ``left``, ``right`` or a point X,Y."""
+    import numpy as np
+
+    if side is None or side.strip() in ("auto", "left", "right"):
+        return "auto" if side is None else side.strip()
+    try:
+        values = [float(v) for v in side.replace(";", ",").split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 2:
+        raise typer.BadParameter("--side: left, right, auto or a point X,Y", param_hint="--side")
+    return np.asarray(values)
+
+
+def _pair(text: Optional[str], what: str):
+    if text is None:
+        return None
+    try:
+        values = tuple(float(v) for v in text.replace(";", ",").split(","))
+    except ValueError:
+        values = ()
+    if len(values) != 2:
+        raise typer.BadParameter(f"{what}: two numbers separated by a comma", param_hint=what)
+    return values
+
+
+def _path_points(text: str):
+    """The plan points of ``--path``: ``X,Y`` pairs separated by spaces (or semicolons)."""
+    import numpy as np
+
+    try:
+        points = [[float(v) for v in item.split(",")] for item in text.replace(";", " ").split()]
+    except ValueError:
+        points = []
+    if len(points) < 2 or any(len(p) != 2 for p in points):
+        raise typer.BadParameter("the line of the wall: two points at least, each X,Y, separated by spaces "
+                                 "(\"X1,Y1 X2,Y2 ...\")", param_hint="--path")
+    return np.asarray(points, float)
+
+
+def _wall_elevation(project, chunk, path, side, front, back, extend, heights, snap, snap_band, smooth, resolution,
+                    name, scale, texture) -> None:
+    """``ppg elevation --path``: the frame of the wall on the line given (:func:`.engine.wall_trace.path_from_trace`)
+    and its elevation."""
+    from .engine import elevation as E
+    from .engine import wall_trace
+    from .engine.wall_path import TraceRefused
+
+    points = _path_points(path)
+    extend, heights, which = _pair(extend, "--extend"), _pair(heights, "--heights"), _side_value(side)
+    if heights is not None and not heights[1] > heights[0]:
+        raise typer.BadParameter("--heights: V0,V1 from the lower to the higher", param_hint="--heights")
+    doc, ch = _open(project, chunk)
+    kw = {} if snap_band is None else {"band": float(snap_band)}
+    try:
+        frame, report = wall_trace.path_from_trace(ch, points, which, front, back, snap=snap, heights=heights,
+                                                   smooth=float(smooth or 0.0), **kw)
+        entry = E.build_elevation(ch, frame, resolution, name, (-back, front), progress=print_progress, scale=scale,
+                                  texture=texture, extend=extend, heights=heights)
+    except (TraceRefused, ValueError) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    doc.save()
+    ortho, relief = E.elevation_paths(ch, entry)
+    w, h = entry["size"]
+    typer.echo(f"{entry['name']}: {w} x {h} px at {entry['resolution']:.4g} m/px"
+               + ("; v = height" if entry.get("v_is_height") else "")
+               + f"; {E.wall_length(entry):.3f} m along the wall; corners: {report['corners']}"
+               + ("" if not report.get("snapped") else
+                  f"; snapped, vertices moved {report['median_shift'] * 100:.1f} cm (median), "
+                  f"{report['max_shift'] * 100:.1f} cm at most"))
+    typer.echo(f"{ortho}\n{relief}")
+
+
+def _campaigns(doc, source, entry: dict, chunks: str, dates: Optional[str], same_frame: bool) -> None:
+    """``ppg elevation --like ID --chunks ...``: the elevation built again on each chunk, the group of the wall."""
+    from .engine import elevation_groups as G
+
+    def find(text):
+        ch = next((c for c in doc.chunks if c.label == text or str(c.key) == text), None)
+        if ch is None:
+            names = ", ".join(f"{c.label!r} (key {c.key})" for c in doc.chunks)
+            raise typer.BadParameter(f"no chunk {text!r} in the project; its chunks: {names}", param_hint="--chunks")
+        return ch
+
+    targets = [find(t.strip()) for t in chunks.split(",") if t.strip()]
+    if not targets:
+        raise typer.BadParameter("--chunks: one chunk at least", param_hint="--chunks")
+    when = {}
+    for item in (dates or "").split(","):
+        if not item.strip():
+            continue
+        label, sep, day = item.partition("=")
+        if not sep:
+            raise typer.BadParameter("--dates: CHUNK=YYYY-MM-DD, separated by commas", param_hint="--dates")
+        try:
+            when[find(label.strip()).key] = G.parse_date(day)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--dates") from None
+    out = G.build_on_chunks(doc, source, entry, targets, same_frame=same_frame, dates=when, progress=print_progress)
+    built = {id(ch): new for ch, new in out["built"]}
+    refused = {r["chunk"]: r["reason"] for r in out["refused"]}
+    for ch in targets:
+        if id(ch) in built:
+            new = built[id(ch)]
+            typer.echo(f"{ch.label}: built {new['name']!r} ({new['id']})")
+        elif ch.label in refused:
+            typer.echo(f"{ch.label}: refused: {refused[ch.label]}")
+        elif ch.label in out["empty"]:
+            typer.echo(f"{ch.label}: empty - the wall is not in its model, left out")
+    if out["built"]:
+        doc.save()
+        typer.echo(f"group {out['group']['id']} of {entry.get('name')!r}: {len(out['group']['members'])} campaigns")
+    else:
+        raise typer.Exit(1)
 
 
 @app.command("region-markers")

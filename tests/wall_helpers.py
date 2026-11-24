@@ -153,3 +153,23 @@ def share_within(line_xy, truth_xy, tolerance: float) -> float:
     at = np.linspace(0.0, run[-1], max(2, int(np.ceil(run[-1] / 0.02)) + 1))
     points = np.column_stack([np.interp(at, run, line[:, 0]), np.interp(at, run, line[:, 1])])
     return float((distance_to(truth_xy, points) <= tolerance).mean())
+
+
+CAMPAIGN_DATES = ("2017:11:05 10:00:00", "2022:11:03 09:00:00", "2024:05:20 08:00:00")
+
+
+def wall_campaigns(folder, dataset, chunks: int = 2, crs: str = CRS, dates=CAMPAIGN_DATES[:2],
+                   resolution: float = 0.02):
+    """A wall photographed in ``chunks`` campaigns (:func:`wall_doc`, the photos of each chunk dated by ``dates``)
+    and the elevation of its face traced on the first chunk: the face in the order the viewer sees it, not snapped,
+    ``resolution`` m/px, 0.5 m kept in front of it and behind, heights 100-102 m. Returns
+    ``(doc, chunks, info, entry)``."""
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+
+    doc, made, info = wall_doc(folder, dataset, chunks=chunks, crs=crs, dates=dates)
+    frame, _report = path_from_trace(made[0], info["face"], info["viewer"], 0.5, 0.5, snap=False)
+    entry = E.build_elevation(made[0], frame, resolution, "Muro", (-0.5, 0.5), max_angle=89.0,
+                              heights=(100.0, 102.0))
+    doc.save()
+    return doc, made, info, entry
