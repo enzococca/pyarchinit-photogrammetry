@@ -857,10 +857,11 @@ def test_finish_from_the_menu_and_the_backlit_field(make, recorded, monkeypatch,
 
     def finish(chunk, entry_, out_path, **kw):
         calls.append(dict(chunk=chunk, entry=entry_, out=out_path, **kw))
-        return {"path": str(out_path), "size": [10, 5], "filled": 3, "masked": 4, "targets": 1, "levelled": False}
+        return {"path": str(out_path), "size": [10, 5], "filled": 3, "masked": 4, "targets": 1, "openings": 7,
+                "levelled": False}
 
     monkeypatch.setattr(F, "finish", finish)
-    answers = {"fill": True, "mask": False, "level": False, "targets": True, "reduce": 2}
+    answers = {"fill": True, "mask": False, "level": False, "targets": True, "reduce": 2, "max_hole": 0.3}
     asked = []
     monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
         lambda parent, title, fields, intro="": asked.append([f.name for f in fields]) or dict(answers)))
@@ -871,9 +872,11 @@ def test_finish_from_the_menu_and_the_backlit_field(make, recorded, monkeypatch,
     w.runner.wait()
     (c,) = calls
     assert c["chunk"] is a and c["entry"]["id"] == entry["id"] and str(c["out"]) == str(out)
-    assert (c["fill"], c["mask"], c["level"], c["targets"], c["reduce"]) == (True, False, False, True, 2)
-    assert set(asked[0]) >= {"fill", "mask", "level", "targets", "reduce"}
-    assert any(k == "message" and str(out) in t for k, t in w.said)
+    assert (c["fill"], c["mask"], c["level"], c["targets"], c["reduce"], c["max_hole"]) == \
+        (True, False, False, True, 2, 0.3)
+    assert set(asked[0]) >= {"fill", "mask", "level", "targets", "reduce", "max_hole"}
+    said = [t for k, t in w.said if k == "message" and str(out) in t]
+    assert said and mw.tr("{0} aperture lasciate aperte", 7) in said[0]
     # inside the project's data: refused before the work starts
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a_, **k: (str(a.data_dir / "x.jpg"), ""))
     assert not w.wall_finish(entry, a)

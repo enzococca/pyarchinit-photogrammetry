@@ -538,7 +538,12 @@ class WallPathActions:
         v = dialogs.ParamDialog.ask(self, tr("Esporta per la pubblicazione"), [
             dialogs.Field("fill", tr("Riempi i buchi (colore e trama dai bordi)"), True),
             dialogs.Field("mask", tr("Fuori dal muro bianco (trasparente in un TIFF)"), True),
-            dialogs.Field("level", tr("Uniforma il colore (luce che cambia lungo il muro)"), True),
+            dialogs.Field("level", tr("Uniforma il colore (luce che cambia lungo il muro)"), True,
+                          tip=tr("Toglie i cambi lenti di luce lungo il muro, e con loro anche la differenza vera di "
+                                 "ombra fra parti del muro esposte diversamente")),
+            dialogs.Field("max_hole", tr("Buco più grande da riempire (m)"), F.MAX_HOLE, minimum=0.0, maximum=100.0,
+                          decimals=2, tip=tr("Un buco più grande, o uno dove il rilievo non trova superficie (una "
+                                             "porta, una finestra), è un'apertura: resta aperto, mai muro finto")),
             dialogs.Field("targets", tr("Copri le mire (i marker sul prospetto, 18 cm intorno)"), True),
             dialogs.Field("reduce", tr("Un pixel ogni"), 1, minimum=1, maximum=64,
                           tip=tr("1: la piena risoluzione; 2: metà dei pixel per lato, e così via"))],
@@ -565,19 +570,20 @@ class WallPathActions:
         out = Path(path)
         if out.suffix.lower() not in (".jpg", ".jpeg", ".tif", ".tiff"):
             out = out.with_name(out.name + (".tif" if "tif" in (chosen or "").lower() else ".jpg"))
-        if F._inside(out, chunk.data_dir):
+        if F.inside_folder(out, chunk.data_dir):
             self._warn(tr("Scegli una cartella fuori dai dati del progetto: lì resta il prospetto misurato."))
             return False
 
         def work(p):
             return F.finish(chunk, entry, out, fill=bool(v.get("fill", True)), mask=bool(v.get("mask", True)),
                             level=bool(v.get("level", True)), targets=bool(v.get("targets", True)), reduce=reduce,
-                            progress=p)
+                            max_hole=float(v.get("max_hole", F.MAX_HOLE)), progress=p)
 
         def done(r):
             self._info(tr("Esporta per la pubblicazione"), tr(
                 "Prospetto per la pubblicazione scritto:\n{0}\n{1} x {2} pixel; {3} celle riempite, {4} mire coperte",
-                r["path"], r["size"][0], r["size"][1], r["filled"], r["targets"]))
+                r["path"], r["size"][0], r["size"][1], r["filled"], r["targets"])
+                + "\n" + tr("{0} aperture lasciate aperte", r.get("openings", 0)))
 
         return bool(self.run_task("Esporta per la pubblicazione", work, done, refresh=False, save=False))
 
