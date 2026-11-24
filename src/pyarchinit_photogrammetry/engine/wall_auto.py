@@ -27,6 +27,19 @@ MAX_CELLS = 4_000_000  # cells at most in what is read: coarser cells over this
 SIMPLIFY = 0.10  # m: the line found simplified within this (a trace of a few vertices, not one per cell)
 SPUR = 1.0  # m: a branch of a skeleton shorter than this, from a junction to a free end, is a spur, not a wall
 RIDGE = 0.5  # the strength over which a cell is on a ridge (``on_ridge`` of :func:`follow`)
+RIDGE_HEIGHT = 0.2  # m of local relief that make a crest at full strength (an absolute scale: a spoil heap or a
+#                     tower nearby does not flatten the low walls)
+GRADE_REACH = 1.5  # m: a cell of a ridge is graded by its distance from the ridge's edge over the largest such
+#                    distance within this (the middle of the top of a wall 3 m thick at most is the cheapest)
+
+
+class FollowRefused(ValueError):
+    """Points the wall cannot be followed between: ``reason`` "points" (fewer than two, or not numbers),
+    "outside" (``point``, from 1, is outside the DEM) or "no_path"."""
+
+    def __init__(self, reason: str, message: str, point: int | None = None):
+        super().__init__(message)
+        self.reason, self.point = reason, point
 
 
 # ---------------------------------------------------------------- the strength of the cells
@@ -42,18 +55,18 @@ def _over_p98(values: np.ndarray) -> np.ndarray:
     return np.clip(v / top, 0.0, 1.0) if top > 0 else np.zeros_like(v)
 
 
-def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = None, mask: np.ndarray | None = None,
-                 radius: float = RIDGE_RADIUS) -> np.ndarray:
-    """How much each cell of ``dem`` (h, w; NaN = no data) looks like the crest of a wall, from 0 to 1: the
-    positive local relief within ``radius`` m over its 98th percentile; with ``ortho`` (grey, the same grid) the
-    larger of it and :data:`EDGE_WEIGHT` times the Sobel magnitude over its 98th percentile; inside ``mask`` (bool,
-    the same grid) :data:`MASK_STRENGTH` at least. A cell without data counts 0 (its mask aside)."""
+def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS):
+    """``(strength, ridge)``: the strength of :func:`strength_map` and the cells on a ridge (bool: strength over
+    :data:`RIDGE` before the grading, or inside ``mask``)."""
+    from scipy.ndimage import distance_transform_edt, maximum_filter
+
     from ..archaeo.relief import compute
 
     z = np.asarray(dem, np.float64)
     if z.ndim != 2:
         raise ValueError("the DEM must be a 2D array")
-    s = _over_p98(compute(z, float(resolution), "slrm", float(radius)))
+    rel = np.nan_to_num(compute(z, float(resolution), "slrm", float(radius)), nan=0.0)
+    s = np.clip(rel / RIDGE_HEIGHT, 0.0, 1.0)
     if ortho is not None:
         import cv2
 
@@ -65,12 +78,34 @@ def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = 
             g = np.where(valid, g, float(np.nanmean(g))).astype(np.float32)
             mag = np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
             s = np.maximum(s, EDGE_WEIGHT * _over_p98(np.where(valid, mag, 0.0)))
+    m = None
     if mask is not None:
         m = np.asarray(mask, bool)
         if m.shape != z.shape:
             raise ValueError("the mask must be on the grid of the DEM")
         s = np.where(m, np.maximum(s, MASK_STRENGTH), s)
-    return s
+    ridge = s > RIDGE
+    if m is not None:
+        ridge |= m
+    if ridge.any():  # graded towards the middle: a flat top would let the path ride along its edge
+        d = distance_transform_edt(ridge)
+        reach = 2 * max(1, int(round(GRADE_REACH / float(resolution)))) + 1
+        top = maximum_filter(d, size=reach)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            s = np.where(ridge, s * np.where(top > 0, d / top, 0.0), s)
+    return s, ridge
+
+
+def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = None, mask: np.ndarray | None = None,
+                 radius: float = RIDGE_RADIUS) -> np.ndarray:
+    """How much each cell of ``dem`` (h, w; NaN = no data) looks like the crest of a wall, from 0 to 1: the
+    positive local relief within ``radius`` m over :data:`RIDGE_HEIGHT` (an absolute scale), clipped to 1; with
+    ``ortho`` (grey, the same grid) the larger of it and :data:`EDGE_WEIGHT` times the Sobel magnitude over its
+    98th percentile; inside ``mask`` (bool, the same grid) :data:`MASK_STRENGTH` at least. The cells of a ridge
+    (over :data:`RIDGE`, or in the mask) are then graded towards its middle - times their distance from its edge
+    over the largest such distance within :data:`GRADE_REACH` - so that a path keeps to the middle of the top of a
+    wall. A cell without data counts 0 (its mask aside)."""
+    return _ridge_strength(dem, resolution, ortho, mask, radius)[0]
 
 
 # ---------------------------------------------------------------- the path of least cost
@@ -80,30 +115,26 @@ def _grid_graph(strength: np.ndarray, resolution: float):
     from scipy.sparse import coo_matrix
 
     h, w = strength.shape
-    c = 1.0 + COST_GAIN * (1.0 - np.clip(np.nan_to_num(strength, nan=0.0), 0.0, 1.0))
-    index = np.arange(h * w).reshape(h, w)
+    c = (1.0 + COST_GAIN * (1.0 - np.clip(np.nan_to_num(strength, nan=0.0), 0.0, 1.0))).ravel()
+    index = np.arange(h * w, dtype=np.int32 if h * w < 2 ** 31 else np.int64).reshape(h, w)
     rows, cols, data = [], [], []
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
-        a = index[max(0, -dr):h - max(0, dr), max(0, -dc):w - max(0, dc)]
         r0, c0 = max(0, -dr), max(0, -dc)
-        b = index[r0 + dr:r0 + dr + a.shape[0], c0 + dc:c0 + dc + a.shape[1]]
-        ca = c.ravel()[a.ravel()]
-        cb = c.ravel()[b.ravel()]
-        rows.append(a.ravel())
-        cols.append(b.ravel())
-        data.append(resolution * np.hypot(dr, dc) * (ca + cb) / 2.0)
+        a = index[r0:h - max(0, dr), c0:w - max(0, dc)].ravel()
+        b = index[r0 + dr:h - max(0, dr) + dr, c0 + dc:w - max(0, dc) + dc].ravel()
+        rows.append(a)
+        cols.append(b)
+        data.append(resolution * float(np.hypot(dr, dc)) * (c[a] + c[b]) / 2.0)
     return coo_matrix((np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
                       shape=(h * w, h * w)).tocsr()
 
 
-def least_cost(strength: np.ndarray, start, goal, resolution: float) -> tuple[np.ndarray, np.ndarray]:
-    """The path of least cost from the cell ``start`` (row, col) to ``goal`` on the 8-connected grid of
-    ``strength`` (h, w, 0-1), each move costing its length (``resolution`` m a cell) times the mean of
-    ``1 + COST_GAIN (1 - strength)`` at its two cells: ``(rows, cols)`` of its cells, from start to goal."""
+def _path_on(graph, shape, start, goal) -> tuple[np.ndarray, np.ndarray]:
+    """The path of least cost on ``graph`` (:func:`_grid_graph` of a grid of ``shape``) from the cell ``start`` to
+    ``goal``."""
     from scipy.sparse.csgraph import dijkstra
 
-    s = np.asarray(strength, np.float64)
-    h, w = s.shape
+    h, w = shape
     (r0, c0), (r1, c1) = (int(v) for v in start), (int(v) for v in goal)
     for r, c in ((r0, c0), (r1, c1)):
         if not (0 <= r < h and 0 <= c < w):
@@ -111,14 +142,22 @@ def least_cost(strength: np.ndarray, start, goal, resolution: float) -> tuple[np
     a, b = r0 * w + c0, r1 * w + c1
     if a == b:
         return np.array([r0]), np.array([c0])
-    _dist, pred = dijkstra(_grid_graph(s, float(resolution)), directed=False, indices=a, return_predecessors=True)
+    _dist, pred = dijkstra(graph, directed=False, indices=a, return_predecessors=True)
     if pred[b] < 0:
-        raise ValueError("no path between the two cells")
+        raise FollowRefused("no_path", "no path between the two cells")
     path = [b]
     while path[-1] != a:
         path.append(int(pred[path[-1]]))
     path = np.asarray(path[::-1])
     return path // w, path % w
+
+
+def least_cost(strength: np.ndarray, start, goal, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+    """The path of least cost from the cell ``start`` (row, col) to ``goal`` on the 8-connected grid of
+    ``strength`` (h, w, 0-1), each move costing its length (``resolution`` m a cell) times the mean of
+    ``1 + COST_GAIN (1 - strength)`` at its two cells: ``(rows, cols)`` of its cells, from start to goal."""
+    s = np.asarray(strength, np.float64)
+    return _path_on(_grid_graph(s, float(resolution)), s.shape, start, goal)
 
 
 # ---------------------------------------------------------------- reading the plan
@@ -188,7 +227,7 @@ def _on_grid(mask, transform, shape):
 
 
 def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
-    """The strength of the cells of the plan of ``chunk`` in ``bounds``: ``(strength, transform, cell)``."""
+    """The strength of the cells of the plan of ``chunk`` in ``bounds``: ``(strength, ridge, transform, cell)``."""
     dem_path = chunk.dem_path
     transform, shape, cell = _grid_of(dem_path, bounds, cell)
     dem = _read_on(dem_path, transform, shape, bands=[1])[0]
@@ -200,7 +239,7 @@ def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
         except Exception:  # noqa: BLE001 - an orthophoto that cannot be read: the DEM alone
             grey = None
     m = _on_grid(mask, transform, shape) if mask is not None else None
-    return strength_map(dem, cell, ortho=grey, mask=m, radius=radius), transform, cell
+    return (*_ridge_strength(dem, cell, ortho=grey, mask=m, radius=radius), transform, cell)
 
 
 # ---------------------------------------------------------------- lines
@@ -243,40 +282,43 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
     ``max(its cell, MIN_CELL)`` (coarser over :data:`MAX_CELLS`); ``mask``, the wall on the orthophoto
     (``(array, transform)`` as :func:`sam_mask` gives it), raises the strength of its cells. The legs joined, each
     simplified within :data:`SIMPLIFY` with its clicked points kept. Returns ``{"points": (N, 2), "on_ridge": the
-    share of its length on cells of strength over 0.5, "cell"}``. ``RuntimeError`` without a DEM, ``ValueError``
-    for fewer than two points or a point outside the DEM."""
+    share of its length on cells of a ridge (strength over 0.5 before the grading, or in the mask), "cell"}``.
+    ``RuntimeError`` without a DEM; :class:`FollowRefused` (a ``ValueError``) for fewer than two points, a point
+    outside the DEM, no path."""
     import rasterio
 
     progress = as_progress(progress)
     p = np.asarray(points, np.float64).reshape(-1, 2)
     if len(p) < 2:
-        raise ValueError("the wall is followed between two points at least")
+        raise FollowRefused("points", "the wall is followed between two points at least")
     if not np.all(np.isfinite(p)):
-        raise ValueError("a point of the wall is not a number")
+        raise FollowRefused("points", "a point of the wall is not a number")
     if chunk.dem_path is None:
         raise RuntimeError("build the DEM first: the wall is followed on its relief")
     with rasterio.open(chunk.dem_path) as src:
         b = src.bounds
     outside = (p[:, 0] < b.left) | (p[:, 0] > b.right) | (p[:, 1] < b.bottom) | (p[:, 1] > b.top)
     if outside.any():
-        raise ValueError(f"point {int(np.argmax(outside)) + 1} is outside the DEM")
+        k = int(np.argmax(outside)) + 1
+        raise FollowRefused("outside", f"point {k} is outside the DEM", point=k)
     progress(0.0, "Relief of the DEM around the wall")
     lo, hi = p.min(axis=0) - WINDOW_MARGIN, p.max(axis=0) + WINDOW_MARGIN
-    strength, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius)
+    strength, ridge, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius)
     h, w = strength.shape
-    progress(0.4, "The path along the wall")
+    progress(0.3, "The path along the wall")
+    graph = _grid_graph(strength, cell)  # once for all the legs
     cols, rows = ~transform @ (p[:, 0], p[:, 1])
     cells = np.column_stack([np.clip(np.floor(rows), 0, h - 1), np.clip(np.floor(cols), 0, w - 1)]).astype(np.int64)
     line = [p[:1]]
     for i in range(len(p) - 1):
-        rr, cc = least_cost(strength, cells[i], cells[i + 1], cell)
+        rr, cc = _path_on(graph, (h, w), cells[i], cells[i + 1])
         x, y = transform @ (cc + 0.5, rr + 0.5)
         leg = np.column_stack([x, y])
         leg[0], leg[-1] = p[i], p[i + 1]  # the clicked points themselves, not the middles of their cells
         line.append(simplify_line(leg)[1:])
         progress(0.4 + 0.6 * (i + 1) / (len(p) - 1))
     out = np.vstack(line)
-    return {"points": out, "on_ridge": _share_on(out, strength, transform), "cell": float(cell)}
+    return {"points": out, "on_ridge": _share_on(out, ridge.astype(np.float64), transform), "cell": float(cell)}
 
 
 # ---------------------------------------------------------------- wall proposals
@@ -356,8 +398,9 @@ def _cluster(nb: dict) -> dict:
 
 
 def _prune(branches: list[list[int]], nb: dict, spur_px: float, w: int) -> list[list[int]]:
-    """Spurs (branches from a junction to a free end shorter than ``spur_px`` pixels) taken away, then the branches
-    that meet two by two at what was a junction joined into one, again until nothing changes."""
+    """Spurs (branches from a junction to a free end shorter than ``spur_px`` pixels) taken away, again while a
+    junction loses its spurs and leaves another short branch free, then the branches that meet two by two at what
+    was a junction joined into one, in one pass."""
     root = _cluster(nb)
 
     def length(run):
@@ -367,42 +410,59 @@ def _prune(branches: list[list[int]], nb: dict, spur_px: float, w: int) -> list[
     def end(k):
         return ("j", root[k]) if k in root else ("e", k)
 
-    work = [list(b) for b in branches if not (b[0] in root and b[-1] in root and root[b[0]] == root[b[-1]]
-                                             and length(b) < spur_px)]
-    changed = True
-    while changed:
-        changed = False
+    def degrees(work):
         degree: dict = {}
         for b in work:
             for k in (b[0], b[-1]):
                 degree[end(k)] = degree.get(end(k), 0) + 1
-        keep = []
-        for b in work:
-            ends = [end(b[0]), end(b[-1])]
-            free = [e for e in ends if e[0] == "e" or degree.get(e, 0) == 1]
-            junction = [e for e in ends if e[0] == "j" and degree.get(e, 0) >= 3]
-            if len(free) == 1 and junction and length(b) < spur_px:
-                changed = True
-                continue
-            keep.append(b)
-        work = keep
-        degree = {}
-        for b in work:
-            for k in (b[0], b[-1]):
-                degree[end(k)] = degree.get(end(k), 0) + 1
-        for j, d in degree.items():  # two branches meeting at a junction left with two: one branch
-            if j[0] != "j" or d != 2:
-                continue
-            pair = [b for b in work if end(b[0]) == j or end(b[-1]) == j]
-            if len(pair) != 2 or pair[0] is pair[1]:
-                continue
-            a, b = pair
-            a = a if end(a[-1]) == j else a[::-1]
-            b = b if end(b[0]) == j else b[::-1]
-            work = [x for x in work if x is not pair[0] and x is not pair[1]] + [a + b[1:]]
-            changed = True
+        return degree
+
+    work = [list(b) for b in branches if not (b[0] in root and b[-1] in root and root[b[0]] == root[b[-1]]
+                                             and length(b) < spur_px)]
+    lengths = [length(b) for b in work]
+    while True:
+        degree = degrees(work)
+        keep = [i for i, b in enumerate(work)
+                if not (lengths[i] < spur_px and sorted(degree[end(k)] >= 3 and end(k)[0] == "j"
+                                                       for k in (b[0], b[-1])) == [False, True]
+                        and min(degree[end(b[0])], degree[end(b[-1])]) == 1)]
+        if len(keep) == len(work):
             break
-    return work
+        work, lengths = [work[i] for i in keep], [lengths[i] for i in keep]
+    degree = degrees(work)
+    at: dict = {}  # a junction left with two branches: where they join
+    for i, b in enumerate(work):
+        for k in (b[0], b[-1]):
+            if end(k)[0] == "j" and degree[end(k)] == 2:
+                at.setdefault(end(k), []).append(i)
+    used = [False] * len(work)
+    out = []
+
+    def other(j, i):
+        pair = at.get(j, [])
+        return next((x for x in pair if x != i), None) if len(pair) == 2 and pair[0] != pair[1] else None
+
+    def chain(i, b):
+        """``b`` (branch ``i``, oriented) carried on through the joins at its last end."""
+        run = list(b)
+        while True:
+            j = end(run[-1])
+            nxt = other(j, i)
+            if nxt is None or used[nxt]:
+                return run
+            used[nxt] = True
+            c = work[nxt] if end(work[nxt][0]) == j else work[nxt][::-1]
+            run += c[1:]
+            i = nxt
+
+    starts = [i for i, b in enumerate(work) if other(end(b[0]), i) is None or other(end(b[-1]), i) is None]
+    for i in starts + list(range(len(work))):  # open chains from a free end first, then the loops
+        if used[i]:
+            continue
+        used[i] = True
+        b = work[i] if other(end(work[i][0]), i) is None else work[i][::-1]
+        out.append(chain(i, b))
+    return out
 
 
 def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: float = RIDGE_RADIUS,
@@ -431,10 +491,16 @@ def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: f
     progress(0.5, "Crests of the walls")
     skeleton = cv2.ximgproc.thinning(high.astype(np.uint8) * 255) > 0
     nb = _skeleton_graph(skeleton)
+    progress(0.65, "Crests of the walls")
     h, w = skeleton.shape
-    runs = _prune(_branches(nb), nb, SPUR / cell, w)
+    branches = _branches(nb)
+    progress(0.75, "Crests of the walls")
+    runs = _prune(branches, nb, SPUR / cell, w)
+    progress(0.85, "Crests of the walls")
     out = []
-    for run in runs:
+    for i, run in enumerate(runs):
+        if i % 64 == 0:
+            progress(0.85 + 0.15 * i / max(len(runs), 1))
         r, c = np.divmod(np.asarray(run), w)
         x, y = transform @ (c + 0.5, r + 0.5)
         line = simplify_line(np.column_stack([x, y]))

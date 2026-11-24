@@ -30,12 +30,13 @@ def _cells(x, y):
     return int((HALF - y) / CELL), int((x + HALF) / CELL)
 
 
-def plan_doc(folder, edit=None, rgb=None):
-    """The model of the L wall and its plan as the products of its chunk; ``edit(dem)`` changes the DEM (local
-    metres, row 0 at the top) before it is written, ``rgb`` replaces the orthophoto. Returns ``(chunk, scene)``."""
+def plan_doc(folder, edit=None, rgb=None, scene=None):
+    """The model of the L wall (or of ``scene``) and its plan as the products of its chunk; ``edit(dem)`` changes the
+    DEM (local metres, row 0 at the top) before it is written, ``rgb`` replaces the orthophoto. Returns
+    ``(chunk, scene)``."""
     from pyarchinit_photogrammetry.testing.synthetic import wall_plan
 
-    scene = _scene()
+    scene = _scene() if scene is None else scene
     _doc, ch, _info = model_doc(folder, scene)
     dem, colours, top_left = wall_plan(scene, CELL)
     dem = dem.astype(np.float64)
@@ -96,10 +97,15 @@ def test_what_cannot_be_followed_is_said(plan, tmp_path):
     _doc, bare, _info = model_doc(tmp_path / "bare", scene)
     with pytest.raises(RuntimeError, match="DEM"):
         A.follow(bare, [crest[0], crest[-1]])
-    with pytest.raises(ValueError):
+    with pytest.raises(A.FollowRefused) as out:
         A.follow(ch, [crest[0], crest[0] + [100.0, 0.0]])  # outside the DEM
-    with pytest.raises(ValueError):
+    assert isinstance(out.value, ValueError) and out.value.reason == "outside" and out.value.point == 2
+    with pytest.raises(A.FollowRefused) as out:
         A.follow(ch, [crest[0]])  # one point
+    assert out.value.reason == "points"
+    with pytest.raises(A.FollowRefused) as out:
+        A.follow(ch, [crest[0], [np.nan, 0.0]])
+    assert out.value.reason == "points"
 
     def strip(dem):  # a strip of no data 0.6 m wide across the long arm of the wall
         from pyarchinit_photogrammetry.engine.dem import NODATA
@@ -142,6 +148,14 @@ def test_the_strength_map():
     s = A.strength_map(dem, 0.05)
     assert s.min() >= 0.0 and s.max() <= 1.0
     assert s[100, 100] > 0.9 and s[50, 100] == 0.0 and s[2, 2] == 0.0
+    assert s[96, 100] < s[98, 100] < s[99, 100]  # graded towards the middle of the top: the path keeps to it
+    low = np.zeros((200, 200))
+    low[95:105, 20:180] = 0.1  # a low wall: strength on an absolute scale of relief, not on the tallest thing
+    assert A.strength_map(low, 0.05)[99, 100] == pytest.approx(0.1 / A.RIDGE_HEIGHT, abs=0.1)
+    heap = low.copy()
+    yy, xx = np.mgrid[0:200, 0:200]
+    heap += 2.5 * np.clip(1.0 - np.hypot(yy - 30, xx - 100) / 25.0, 0.0, None)  # a spoil heap 3.5 m away
+    assert A.strength_map(heap, 0.05)[99, 100] == pytest.approx(A.strength_map(low, 0.05)[99, 100], abs=0.05)
     mask = np.zeros_like(dem, bool)
     mask[50, 100] = True
     assert A.strength_map(dem, 0.05, mask=mask)[50, 100] == pytest.approx(A.MASK_STRENGTH)
@@ -181,6 +195,54 @@ def test_proposals_are_the_walls_and_only_them(tmp_path):
     assert A.proposals(ch, min_length=20.0) == []
 
 
+def test_the_joins_of_a_skeleton_are_made_in_one_pass():
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    sk = np.zeros((60, 400), bool)
+    sk[30, 5:395] = True  # a long line with a spur every 20 pixels
+    for c in range(20, 380, 20):
+        sk[25:30, c] = True
+    nb = A._skeleton_graph(sk)
+    runs = A._prune(A._branches(nb), nb, 10.0, sk.shape[1])
+    assert len(runs) == 1 and len(runs[0]) == 390
+
+
+def _wide_scene():
+    from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene
+
+    return make_wall_scene(trace=((0.0, 0.0), (10.0, 0.0), (10.0, 10.0)), thickness=1.2, marks=())
+
+
+def test_a_wide_wall_is_followed_along_the_middle_of_its_top(tmp_path):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    ch, scene = plan_doc(tmp_path, scene=_wide_scene())
+    crest = crest_of(scene)
+    r = A.follow(ch, [crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    assert share_within(r["points"], crest, 0.2) >= 0.9
+    assert r["on_ridge"] > 0.9
+
+
+def test_a_spoil_heap_does_not_flatten_the_wall(tmp_path):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    def heap(dem):  # a heap 2.5 m high, 4 m across, 10 m from the wall
+        yy, xx = np.mgrid[0:dem.shape[0], 0:dem.shape[1]]
+        r, c = _cells(3.0, -10.0)
+        dem += 2.5 * np.clip(1.0 - np.hypot(yy - r, xx - c) * CELL / 2.0, 0.0, None)
+    plain = np.random.default_rng(3).integers(140, 160, (3, 1500, 1500)).astype(np.uint8)
+    lower = _scene()
+
+    def low(dem):  # the wall 0.4 m high
+        dem[dem > 0] = 0.4
+        heap(dem)
+    ch, scene = plan_doc(tmp_path, edit=low, rgb=plain, scene=lower)
+    crest = crest_of(scene)
+    r = A.follow(ch, [crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]])
+    assert share_within(r["points"], crest, 0.2) >= 0.9
+    assert r["on_ridge"] > 0.9
+
+
 class FakeSegmenter:
     """A segmenter that gives back the footprint of the wall on the image it is handed, whatever the points."""
 
@@ -198,7 +260,8 @@ class FakeSegmenter:
         raise AssertionError
 
 
-def test_sam_helps_where_the_dem_is_weak(tmp_path):
+@pytest.mark.parametrize("wide", [False, True], ids=["0.4 m", "1.2 m"])
+def test_sam_helps_where_the_dem_is_weak(tmp_path, wide):
     from scipy.ndimage import gaussian_filter
     from shapely import contains_xy
     from shapely.geometry import Polygon
@@ -214,7 +277,7 @@ def test_sam_helps_where_the_dem_is_weak(tmp_path):
         noise = gaussian_filter(rng.normal(0.0, 1.0, dem.shape), 10.0)
         dem[:] = np.where(wall, 0.05, 0.0) + 0.05 * noise / noise.std()
     plain = rng.integers(140, 160, (3, 1500, 1500)).astype(np.uint8)  # the orthophoto does not show it either
-    ch, scene = plan_doc(tmp_path, edit=edit, rgb=plain)
+    ch, scene = plan_doc(tmp_path, edit=edit, rgb=plain, scene=_wide_scene() if wide else None)
     crest = crest_of(scene)
     clicks = [crest[0] + [0.3, 0.1], crest[-1] + [-0.1, -0.3]]
     alone = A.follow(ch, clicks)
@@ -249,4 +312,5 @@ def test_sam_helps_where_the_dem_is_weak(tmp_path):
     assert np.all(labels == 1)
     helped = A.follow(ch, clicks, mask=(mask, tr))
     assert share_within(helped["points"], crest, 0.2) >= 0.9
+    assert helped["on_ridge"] > 0.9
     assert "torch" not in sys.modules
