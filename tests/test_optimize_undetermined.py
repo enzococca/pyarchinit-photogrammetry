@@ -1927,42 +1927,55 @@ def test_the_weak_ring_meets_the_four_lines_of_its_gate(weak_ring, tmp_path, eng
     ch.optimize_cameras(engine=engine)
     assert ch.meta["sfm"]["optimize"]["engine_choice"] == {"requested": engine,
                                                            "used": "colmap" if engine == "auto" else "ppg"}
-    assert _calibration(ch)[0][4] == pytest.approx(-0.04, abs=0.005)  # the lens the photos were rendered with
-    errors = _marker_rmse(ch)
+    calibration, errors = _calibration(ch)[0], _marker_rmse(ch)
+    print(f"weak ring gate ({engine}): PPG_GPU {_native.gpu_setting()}, "
+          f"focal {calibration[0]:.3f} px, k1 {calibration[4]:.5f}, "
+          f"control {errors['optimized_control_rmse'] * 1000:.2f} mm, check {errors['optimized_check_rmse'] * 1000:.2f} mm")
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm (COLMAP's), 1.22 mm (ours)
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.87 mm and 8.88 mm
+    assert calibration[4] == pytest.approx(-0.04, abs=0.005)  # the lens the photos were rendered with
 
 
 @needs_core
 @pytest.mark.slow
 def test_the_weak_ring_with_many_tie_points_gives_up_its_tangential_terms_for_the_radial_ones(weak_ring, tmp_path,
                                                                                                monkeypatch):
-    """The ring with twelve times the weight of its tie points - a block of thousands of tie points a photo, here
-    their variance factor over twelve - and our formulation: every sd is 3.5 times smaller. The tangential terms
-    now pass (0.47 px at the corner) and stay free; the radial terms, judged with them free, fail (0.89 px).
-    Held there, they would stay at the zero of the mapper and the check targets at 17 mm. They are judged again
-    without the tangential terms, pass (0.04 px) and are refined; the tangential terms are held for them: both
-    lines of the gate hold."""
+    """The ring with many times the weight of its tie points - a block of thousands of tie points a photo, here
+    their variance factor divided - and our formulation: every sd is smaller by the root of the divisor. The divisor
+    is taken from the ring itself, so that the tangential terms, held at the ring's own weight, now pass clearly
+    (0.35 px at the corner) and stay free: the tie points of a platform differ in their last bits (the CPU's SIFT
+    against a GPU's, OpenCV's rendering of the texture), and a fixed divisor left the case 6 % under the line on one
+    computer and over it on another. The radial terms, judged with them free, fail; held there, they would stay at
+    the zero of the mapper and the check targets at 17 mm. They are judged again without the tangential terms, pass
+    and are refined; the tangential terms are held for them: both lines of the gate hold."""
     from pyarchinit_photogrammetry.testing.synthetic import WEAK_RING_GATE
 
+    plain = _copy_of(weak_ring.project, tmp_path / "plain").chunk
+    plain.optimize_cameras(engine="ppg")
+    held_at = plain.meta["sfm"]["optimize"]["intrinsics"]["tangential_sd"][0][1]  # 1.61 px measured (Mac)
+    assert held_at > bundle.GROUP_SD_HOLD_PX
+    divisor = (held_at / 0.35) ** 2  # about 21
     real = bundle.tie_variance_factor
-    monkeypatch.setattr(bundle, "tie_variance_factor", lambda pb: real(pb) / 12.0)
+    monkeypatch.setattr(bundle, "tie_variance_factor", lambda pb: real(pb) / divisor)
     ch = _copy_of(weak_ring.project, tmp_path / "many").chunk
     ch.optimize_cameras(engine="ppg")
     check = ch.meta["sfm"]["optimize"]["intrinsics"]
     sensor = check["focal_sd"][0][0]
+    print(f"many tie points: divisor {divisor:.1f}, notes {check['notes']}, tangential sd {check['tangential_sd']}, "
+          f"radial sd {check['radial_sd']}")
     assert check["held"] == {**NOTHING_HELD, "focal": [sensor], "tangential": [sensor]}
-    assert 0.4 < check["tangential_sd"][0][1] < bundle.GROUP_SD_HOLD_PX and 0 < check["radial_sd"][0][1] < 0.1
-    # the sd with the tangential terms free sits at 0.905 px: the native alignment under load rounds it to 0.90
-    # or 0.91 in the note, so the figure is read back and bounded rather than spelt
+    assert 0.3 < check["tangential_sd"][0][1] < 0.4 and 0 < check["radial_sd"][0][1] < 0.1
+    # the sd with the tangential terms free (0.68 px measured) is read back from the note and bounded, not spelt
     said = re.fullmatch(rf"sensor {sensor}: tangential held: given up for the radial terms \((\d\.\d\d) px at the "
-                        r"image corner with it free, 0\.04 px without\)", check["notes"][1])
-    assert len(check["notes"]) == 2 and said and 0.85 < float(said.group(1)) < 0.95
-    calibration = _calibration(ch)[0]
-    assert calibration[4] == pytest.approx(-0.04, abs=0.005) and calibration[6:] == [0.0, 0.0]
-    errors = _marker_rmse(ch)
+                        r"image corner with it free, 0\.0\d px without\)", check["notes"][1])
+    assert len(check["notes"]) == 2 and said and bundle.GROUP_SD_HOLD_PX < float(said.group(1)) < 1.0
+    calibration, errors = _calibration(ch)[0], _marker_rmse(ch)
+    print(f"many tie points: k1 {calibration[4]:.5f}, control {errors['optimized_control_rmse'] * 1000:.2f} mm, "
+          f"check {errors['optimized_check_rmse'] * 1000:.2f} mm")
+    assert calibration[6:] == [0.0, 0.0]
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]
+    assert calibration[4] == pytest.approx(-0.04, abs=0.005)
 
 
 @pytest.fixture(scope="module")
