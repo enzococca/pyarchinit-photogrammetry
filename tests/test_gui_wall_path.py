@@ -834,3 +834,98 @@ def test_composite_refused_while_a_campaign_has_no_date(make, monkeypatch):
     assert asked == [] and not C.composites(a)
     assert mw.tr(C.UNDATED_IT, b.label) in _texts(w)
     assert mw.tr(C.UNDATED_IT, b.label).startswith(f"Dai una data a «{b.label}»")
+
+
+def test_finish_from_the_menu_and_the_backlit_field(make, recorded, monkeypatch, tmp_path):
+    """*Esporta per la pubblicazione...* in the menu of an elevation and in the pane: the dialog's choices and the path
+    reach the finishing; the field of the backlit photos in every elevation dialog and in the pane reaches the build,
+    and the rebuild of an elevation passes its own setting on."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QFileDialog
+
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import elevation_finish as F
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+    from pyarchinit_photogrammetry.gui import dialogs
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = make()
+    a = w.chs[0]
+    frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
+    entry = recorded["real_build"](a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
+    calls = []
+
+    def finish(chunk, entry_, out_path, **kw):
+        calls.append(dict(chunk=chunk, entry=entry_, out=out_path, **kw))
+        return {"path": str(out_path), "size": [10, 5], "filled": 3, "masked": 4, "targets": 1, "levelled": False}
+
+    monkeypatch.setattr(F, "finish", finish)
+    answers = {"fill": True, "mask": False, "level": False, "targets": True, "reduce": 2}
+    asked = []
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": asked.append([f.name for f in fields]) or dict(answers)))
+    out = tmp_path / "muro.jpg"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a_, **k: (str(out), ""))
+    _menu_entry(w, monkeypatch, lambda: w._workspace_menu("elevation", a, entry, QPoint(0, 0)),
+                mw.tr("Esporta per la pubblicazione..."))
+    w.runner.wait()
+    (c,) = calls
+    assert c["chunk"] is a and c["entry"]["id"] == entry["id"] and str(c["out"]) == str(out)
+    assert (c["fill"], c["mask"], c["level"], c["targets"], c["reduce"]) == (True, False, False, True, 2)
+    assert set(asked[0]) >= {"fill", "mask", "level", "targets", "reduce"}
+    assert any(k == "message" and str(out) in t for k, t in w.said)
+    # inside the project's data: refused before the work starts
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a_, **k: (str(a.data_dir / "x.jpg"), ""))
+    assert not w.wall_finish(entry, a)
+    assert len(calls) == 1 and w.said[-1][0] == "warn"
+    # from the pane: waits for an elevation built
+    pane = w.wall_pane
+    assert not pane.b_finish.isEnabled()
+    assert not w.wall_finish()
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a_, **k: (str(tmp_path / "pane.tif"), ""))
+    pane.chunk, pane.built = a, entry["id"]
+    pane.update_states()
+    assert pane.b_finish.isEnabled()
+    pane.b_finish.click()
+    w.runner.wait()
+    assert len(calls) == 2 and str(calls[1]["out"]) == str(tmp_path / "pane.tif")
+
+    # the field of the backlit photos: in every elevation dialog, to the build
+    label = mw.tr("Lascia fuori le foto in controluce (oltre il 2 % di pixel bruciati)")
+    for kind in ("plane", "cylinder", "view", "points"):
+        field = next(f for f in w._elevation_fields(kind) if f.name == "skip_backlit")
+        assert field.label == label and field.default is False
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"extent": "all", "skip_backlit": True, "name": "",
+                                                 "resolution": None, "blending": "mosaic", "colour": True}))
+    w.build_elevation(view={"centre": [500003.0, 4400000.0, 101.0], "toward": [0.0, -1.0, 0.0],
+                            "up": [0.0, 0.0, 1.0], "corners": []})
+    w.runner.wait()
+    assert recorded["builds"][-1]["skip_backlit"] is True
+    pane.set_values({"skip_backlit": True})
+    assert pane.c_backlit.isChecked() and pane.l_backlit.text() == label
+    pane.c_snap.setChecked(False)
+    _trace(w)
+    assert w.wall_build()
+    w.runner.wait()
+    assert recorded["builds"][-1]["skip_backlit"] is True
+    pane.c_backlit.setChecked(False)
+    assert w.wall_build()
+    w.runner.wait()
+    assert recorded["builds"][-1]["skip_backlit"] is False
+
+    # the rebuild passes the elevation's own setting on
+    got = []
+
+    class Stop(Exception):
+        pass
+
+    def capture(*a_, **k):
+        got.append(k)
+        raise Stop
+
+    monkeypatch.setattr(E, "build_elevation", capture)
+    entry["skip_backlit"] = True
+    with pytest.raises(Stop):
+        w._rebuild_elevation(a, entry["id"], None)
+    assert got[0]["skip_backlit"] is True

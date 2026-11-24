@@ -196,12 +196,25 @@ class WallPathPane(QWidget):
         self.c_colour = QCheckBox(tr("Correzione colore"))
         self.c_colour.setChecked(True)
         form.addRow("", self.c_colour)
+        self.c_backlit = QCheckBox(tr("Senza le foto in controluce"))  # the full rule below it: a narrow dock
+        self.c_backlit.setToolTip(tr("Le foto scattate contro luce, con il cielo bruciato dietro il muro, non "
+                                     "dipingono il prospetto; quante ne sono state lasciate fuori resta scritto nel "
+                                     "prospetto"))
+        form.addRow("", self.c_backlit)
+        self.l_backlit = QLabel(tr("Lascia fuori le foto in controluce (oltre il 2 % di pixel bruciati)"))
+        self.l_backlit.setWordWrap(True)
+        self.l_backlit.setEnabled(False)
+        form.addRow("", self.l_backlit)
         self.e_name = QLineEdit()
         _narrow(self.e_name)
         self.e_name.setPlaceholderText(tr("Prospetto del muro"))
         form.addRow(tr("Nome"), self.e_name)
         self.b_build = QPushButton(icon("elevation"), tr("Costruisci il prospetto"))
         form.addRow("", self.b_build)
+        self.b_finish = QPushButton(icon("export"), tr("Esporta per la pubblicazione..."))
+        self.b_finish.setToolTip(tr("Un'immagine da pubblicare: buchi riempiti, fuori dal muro bianco, colore "
+                                    "uniformato, mire coperte. Il prospetto misurato resta com'è"))
+        form.addRow("", self.b_finish)
         step(3, "build", tr("Prospetto"), body)
 
         # 5. the other campaigns
@@ -231,6 +244,7 @@ class WallPathPane(QWidget):
 
         self.b_trace.clicked.connect(lambda: self.window.wall_trace_start())
         self.b_build.clicked.connect(lambda: self.window.wall_build())
+        self.b_finish.clicked.connect(lambda: self.window.wall_finish())
         self.b_campaigns.clicked.connect(lambda: self.window.wall_campaigns())
         self.b_sheet.clicked.connect(lambda: self.window.wall_sheet())
         self.b_composite.clicked.connect(lambda: self.window.wall_composite())
@@ -317,11 +331,13 @@ class WallPathPane(QWidget):
                 "back": self.s_back.value(), "extend": (self.s_before.value(), self.s_after.value()),
                 "smooth": self.s_smooth.value(), "band": self.s_band.value(),
                 "resolution": res if res > 0 else None, "blending": self.c_blending.currentData(),
-                "colour": self.c_colour.isChecked(), "name": self.e_name.text().strip(),
+                "colour": self.c_colour.isChecked(), "skip_backlit": self.c_backlit.isChecked(),
+                "name": self.e_name.text().strip(),
                 "snap": self.c_snap.isChecked()}
 
     def set_values(self, v: dict) -> None:
-        """The answers of the elevation dialog: depths, resolution, blending, colour, name (and side)."""
+        """The answers of the elevation dialog: depths, resolution, blending, colour, backlit photos, name (and
+        side)."""
         if v.get("front") is not None:
             self.s_front.setValue(float(v["front"]))
         if v.get("back") is not None:
@@ -331,6 +347,7 @@ class WallPathPane(QWidget):
         if k >= 0:
             self.c_blending.setCurrentIndex(k)
         self.c_colour.setChecked(bool(v.get("colour", True)))
+        self.c_backlit.setChecked(bool(v.get("skip_backlit", False)))
         self.e_name.setText(str(v.get("name") or ""))
         k = self.side.findData(v.get("side"))
         if k >= 0:
@@ -454,6 +471,7 @@ class WallPathPane(QWidget):
         self.b_snap.setEnabled(has and self.c_snap.isChecked())
         self.b_build.setEnabled(has)
         self.b_campaigns.setEnabled(self.running is None and self.built_entry() is not None)
+        self.b_finish.setEnabled(self.running is None and self.built_entry() is not None)
         self.b_sheet.setEnabled(self.running is None and len(self.campaigns()) > 1)
         self.b_composite.setEnabled(self.running is None and len(self.campaigns()) > 1)
         self.b_recomposite.setEnabled(self.running is None and self.composite_entry() is not None)

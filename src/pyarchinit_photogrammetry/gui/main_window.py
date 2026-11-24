@@ -5672,7 +5672,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                                 scale=scale, u_map=frame.u_map if wall else None,  # the grid on the wall kept
                                 blending=settings["blending"],
                                 colour_correction=settings["colour_correction"], ghosting=settings["ghosting"],
-                                fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p)
+                                fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p,
+                                skip_backlit=bool(old.get("skip_backlit", False)))
         nid = new["id"]
         root = ch.data_dir / "elevations"
         entries = ch.meta["elevations"]
@@ -9566,6 +9567,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             Field("blending", "Fusione", "mosaic",
                   choices=[("mosaic", "Mosaico senza cuciture"), ("disabled", "Nessuna (una foto per cella)")]),
             Field("colour", "Correzione colore", True),
+            Field("skip_backlit", tr("Lascia fuori le foto in controluce (oltre il 2 % di pixel bruciati)"), False,
+                  tip=tr("Le foto scattate contro luce, con il cielo bruciato dietro il muro, non dipingono il "
+                         "prospetto; quante ne sono state lasciate fuori resta scritto nel prospetto")),
             Field("name", "Nome", "", kind="text")]
 
     def build_elevation(self, section: dict | None = None, view: dict | None = None, points=None,
@@ -9740,7 +9744,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         scale = "wall" if frame.kind == "cylinder" and v.get("wall_scale") else "cylinder"
         self.run_task("Prospetto", lambda p: E.build_elevation(
             ch, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
-            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what, scale=scale), self.show_elevation,
+            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what, scale=scale,
+            skip_backlit=bool(v.get("skip_backlit", False))), self.show_elevation,
             refresh=False)
 
     def show_elevation(self, entry: dict) -> None:
@@ -16946,6 +16951,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         elif kind == "elevation":
             menu.addAction(icon("view"), tr("Mostra"), on(lambda: self.show_elevation(payload)))
             menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_elevation(payload)))
+            menu.addAction(icon("export"), tr("Esporta per la pubblicazione..."),
+                           lambda: self.wall_finish(payload, chunk))
             menu.addAction(icon("line"), tr("Disegni da un altro prospetto..."),
                            on(lambda: self.transfer_elevation_drawings(payload, chunk)))
             menu.addAction(icon("elevation"), tr("Stesso prospetto su altri chunk..."),

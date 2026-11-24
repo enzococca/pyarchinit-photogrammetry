@@ -334,7 +334,7 @@ class WallPathActions:
             try:
                 entry = E.build_elevation(ch, frame, v["resolution"], v["name"] or None, (-v["back"], v["front"]),
                                           v["blending"], bool(v["colour"]), progress=p, extend=extend,
-                                          heights=(v["v0"], v["v1"]))
+                                          heights=(v["v0"], v["v1"]), skip_backlit=bool(v.get("skip_backlit")))
             except E.NoSurface as exc:
                 return {"no_surface": exc}
             return {"entry": entry}
@@ -513,6 +513,73 @@ class WallPathActions:
             self._info(tr("Scheda di confronto"), text)
 
         return bool(self.run_task("Scheda di confronto", work, done, refresh=False, save=False))
+
+    def wall_finish(self, entry=None, chunk=None) -> bool:
+        """*Esporta per la pubblicazione...*: the elevation ``entry`` of ``chunk`` (default: the one the pane built)
+        finished for a publication - holes filled, outside the wall masked, colour levelled, survey targets painted
+        over, as the dialog says (:func:`..engine.elevation_finish.finish`) - and written where the save dialog
+        says, a JPEG or a TIFF, in one task. An export: the elevation stays as measured, nothing is saved in the
+        project."""
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        from ..engine import elevation_finish as F
+        from . import dialogs
+
+        if entry is None:
+            pane = getattr(self, "wall_pane", None)
+            entry = pane.built_entry() if pane is not None else None
+            chunk = pane.chunk if entry is not None else None
+        chunk = chunk if chunk is not None else self.chunk
+        if entry is None or chunk is None:
+            self._warn(tr("Costruisci prima il prospetto: poi si può esportare per la pubblicazione."))
+            return False
+        v = dialogs.ParamDialog.ask(self, tr("Esporta per la pubblicazione"), [
+            dialogs.Field("fill", tr("Riempi i buchi (colore e trama dai bordi)"), True),
+            dialogs.Field("mask", tr("Fuori dal muro bianco (trasparente in un TIFF)"), True),
+            dialogs.Field("level", tr("Uniforma il colore (luce che cambia lungo il muro)"), True),
+            dialogs.Field("targets", tr("Copri le mire (i marker sul prospetto, 18 cm intorno)"), True),
+            dialogs.Field("reduce", tr("Un pixel ogni"), 1, minimum=1, maximum=64,
+                          tip=tr("1: la piena risoluzione; 2: metà dei pixel per lato, e così via"))],
+            intro=tr("Un'immagine del prospetto «{0}» da pubblicare. Il prospetto misurato (ortofoto e rilievo) "
+                     "resta com'è.", entry.get("name")))
+        if not v:
+            return False
+        reduce = max(1, int(v.get("reduce") or 1))
+        w, h = (int(n) for n in entry.get("size") or (0, 0))
+        if -(-w // reduce) * -(-h // reduce) > F.MAX_PIXELS:
+            need = reduce
+            while -(-w // need) * -(-h // need) > F.MAX_PIXELS:
+                need += 1
+            self._warn(tr("Il prospetto è troppo grande per un'immagine sola ({0} x {1} pixel): scegli un pixel ogni "
+                          "{2} o più.", w, h, need))
+            return False
+        folder = Path(self.doc.path).parent if getattr(self.doc, "path", None) else Path.home()
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(entry.get("name") or "prospetto"))
+        path, chosen = QFileDialog.getSaveFileName(self, tr("Esporta per la pubblicazione"),
+                                                   str(folder / f"{safe}_pubblicazione.jpg"),
+                                                   "JPEG (*.jpg *.jpeg);;GeoTIFF (*.tif *.tiff)")
+        if not path:
+            return False
+        out = Path(path)
+        if out.suffix.lower() not in (".jpg", ".jpeg", ".tif", ".tiff"):
+            out = out.with_name(out.name + (".tif" if "tif" in (chosen or "").lower() else ".jpg"))
+        if F._inside(out, chunk.data_dir):
+            self._warn(tr("Scegli una cartella fuori dai dati del progetto: lì resta il prospetto misurato."))
+            return False
+
+        def work(p):
+            return F.finish(chunk, entry, out, fill=bool(v.get("fill", True)), mask=bool(v.get("mask", True)),
+                            level=bool(v.get("level", True)), targets=bool(v.get("targets", True)), reduce=reduce,
+                            progress=p)
+
+        def done(r):
+            self._info(tr("Esporta per la pubblicazione"), tr(
+                "Prospetto per la pubblicazione scritto:\n{0}\n{1} x {2} pixel; {3} celle riempite, {4} mire coperte",
+                r["path"], r["size"][0], r["size"][1], r["filled"], r["targets"]))
+
+        return bool(self.run_task("Esporta per la pubblicazione", work, done, refresh=False, save=False))
 
     def _composite_group(self, entry, chunk):
         """``(reference chunk, group)`` of the elevation ``entry`` of ``chunk``: the group it is a campaign of, or the
