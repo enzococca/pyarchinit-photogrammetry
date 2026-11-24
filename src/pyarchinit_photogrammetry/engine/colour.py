@@ -330,18 +330,21 @@ def solve(obs: dict, rounds: int = 3, vignetting: bool = True) -> dict:
 
 
 def estimate(chunk: Chunk, samples: int = SAMPLES, vignetting: bool = True, occlusion: bool = True,
-             progress: Progress | None = None) -> dict:
+             progress: Progress | None = None, cams=None, store: bool = True) -> dict:
     """Measure the gains of the photos and the vignetting of the lenses, store them in
     ``chunk.meta["colour"]`` (used by the orthomosaic and the texture) and return them. A
     correction that does not lower the colour scatter is not applied: ``applied`` False, no gains
-    and no falloff (the orthomosaic and the texture then use the photos as they are)."""
+    and no falloff (the orthomosaic and the texture then use the photos as they are).
+
+    ``cams``: measured on these photos only (default: every readable aligned photo); ``store`` False: returned
+    without being stored (a correction for one product, as an elevation built without its backlit photos)."""
     progress = as_progress(progress)
     raycaster = None
     if occlusion:
         from .visibility import raycaster_for_chunk
 
         raycaster = raycaster_for_chunk(chunk)
-    obs = observations(chunk, samples=samples, raycaster=raycaster, progress=progress.sub(0.0, 0.85))
+    obs = observations(chunk, cams=cams, samples=samples, raycaster=raycaster, progress=progress.sub(0.0, 0.85))
     progress(0.86, f"Colour correction: {len(obs['point']):,} observations")
     sol = solve(obs, vignetting=vignetting)
     applied = sol["applied"]
@@ -357,7 +360,8 @@ def estimate(chunk: Chunk, samples: int = SAMPLES, vignetting: bool = True, occl
         # the photos with too few observations: their gain comes from their neighbours
         "from_neighbours": [c.key for i, c in enumerate(cams) if not sol["measured"][i]],
     }
-    chunk.meta["colour"] = info
+    if store:
+        chunk.meta["colour"] = info
     if applied:
         progress(1.0, f"Colour correction: log-colour scatter {info['rms_before']:.3f} -> {info['rms_after']:.3f}"
                  + (f"; {len(info['from_neighbours'])} photos with too few observations take the gain of their "

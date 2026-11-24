@@ -1176,7 +1176,17 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
             log.info("Elevation: %d backlit photos left out (over %.0f %% of the pixels blown): %s", backlit,
                      100 * BACKLIT_SHARE, ", ".join(c.label for c in left))
     resolution = float(resolution or (textured.texel() if from_texture else estimate_gsd(chunk)))
-    correction = None if from_texture else correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
+    if from_texture:
+        correction = None
+    elif backlit and colour_correction is not False and (colour_correction or chunk.meta.get("colour")):
+        # the gains measured again without the backlit photos, for this build only (the chunk's own stay)
+        from .colour import Correction
+        from .colour import estimate as estimate_colour
+
+        info = estimate_colour(chunk, cams=cams, store=False, progress=progress.sub(0.0, 0.02))
+        correction = Correction(chunk, info) or None
+    else:
+        correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked

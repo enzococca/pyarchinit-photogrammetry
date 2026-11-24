@@ -340,11 +340,17 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   no_fill: bool = typer.Option(False, "--no-fill", help="with --finish: the holes left as they are"),
                   no_mask: bool = typer.Option(False, "--no-mask", help="with --finish: what lies outside the "
                                                "wall's span kept"),
-                  no_level: bool = typer.Option(False, "--no-level", help="with --finish: the colour not levelled"),
+                  no_level: bool = typer.Option(False, "--no-level", help="with --finish: the colour not levelled "
+                                                "(levelling takes away the slow changes of light along the wall, and "
+                                                "with them the real shading between parts that face the light "
+                                                "differently)"),
                   no_targets: bool = typer.Option(False, "--no-targets", help="with --finish: the survey targets "
                                                   "left visible"),
                   reduce: int = typer.Option(1, help="with --finish: one pixel in N (a whole number; default 1, "
                                              "the full resolution)"),
+                  max_hole: float = typer.Option(0.5, help="with --finish: metres - a hole larger than this across, "
+                                                 "or one without surface in the depth band (a door, a window), is "
+                                                 "an opening and stays open"),
                   skip_backlit: bool = typer.Option(False, "--skip-backlit", help="the photos taken against the "
                                                     "light (over 2 % of their pixels blown) left out of the build"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
@@ -371,7 +377,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             raise typer.BadParameter(f"{what}: {n} numbers separated by commas")
         return np.asarray(values)
 
-    finishing = [f"--{n.replace('_', '-')}" for n in ("no_fill", "no_mask", "no_level", "no_targets", "reduce")
+    finishing = [f"--{n.replace('_', '-')}" for n in ("no_fill", "no_mask", "no_level", "no_targets", "reduce",
+                                                              "max_hole")
                  if getattr(ctx.get_parameter_source(n), "name", "DEFAULT") not in ("DEFAULT", "DEFAULT_MAP")]
     if finishing and finish is None:
         raise typer.BadParameter(f"{', '.join(finishing)} go with --finish")
@@ -425,7 +432,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             _composite(doc, source, found[0], deeper, name)
             return
         if finish is not None:
-            _finish(source, found[0], finish, not no_fill, not no_mask, not no_level, not no_targets, reduce)
+            _finish(source, found[0], finish, not no_fill, not no_mask, not no_level, not no_targets, reduce,
+                    max_hole)
             return
         if chunks is not None:
             _campaigns(doc, source, found[0], chunks, dates, same_frame)
@@ -645,18 +653,21 @@ def _backlit_text(entry: dict) -> str:
     return f"; {n} backlit photo{'' if n == 1 else 's'} left out"
 
 
-def _finish(source, entry: dict, out: Path, fill: bool, mask: bool, level: bool, targets: bool, reduce: int) -> None:
+def _finish(source, entry: dict, out: Path, fill: bool, mask: bool, level: bool, targets: bool, reduce: int,
+            max_hole: float = 0.5) -> None:
     """``ppg elevation --like ID --finish OUT``: that elevation finished for a publication, written to OUT."""
     from .engine.elevation_finish import finish
 
     try:
         r = finish(source, entry, out, fill=fill, mask=mask, level=level, targets=targets, reduce=reduce,
-                   progress=print_progress)
+                   max_hole=max_hole, progress=print_progress)
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     w, h = r["size"]
-    typer.echo(f"{entry.get('name')} finished: {w} x {h} px; {r['filled']} cells filled, {r['masked']} masked, "
+    n = r["openings"]
+    typer.echo(f"{entry.get('name')} finished: {w} x {h} px; {r['filled']} cells filled, "
+               f"{n} opening{'' if n == 1 else 's'} left open, {r['masked']} masked, "
                f"{r['targets']} targets painted over, colour {'levelled' if r['levelled'] else 'as built'}")
     typer.echo(r["path"])
 

@@ -8,7 +8,10 @@ In this order, on the orthophoto of the elevation:
 2. **the holes filled** inside the wall's span (:func:`span`: per column, from its lowest to its highest cell with
    surface, specks of fewer than :data:`SPECK_CELLS` cells left out): the colour from the pyramid of the cells that
    have one (push-pull), plus the detail of the texture mirrored through the nearest cell with colour
-   (:func:`fill_holes`);
+   (:func:`fill_holes`). **An opening is never made into wall**: a hole is filled only when it is at most
+   :data:`MAX_HOLE` metres across and the surface is there in it (the relief has a depth in the band somewhere across
+   it: the wall was measured, only its colour is missing); a door, a window, a hole through the wall stays open
+   (:func:`fillable`);
 3. **the colour levelled** in Lab: each channel less its Gaussian mean of :data:`LEVEL_SIGMA_PX` pixels over the cells
    with colour, plus its global mean - the slow changes of light along a wall taken away, its texture kept
    (:func:`level_colours`);
@@ -32,6 +35,7 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 LEVEL_SIGMA_PX = 250.0  # pixels: the colour changes slower than this are levelled
 TARGET_HALF_SIDE = 0.18  # m: half the side of the square painted over around a survey target
 SPECK_CELLS = 64  # cells: a piece of surface smaller than this is a speck, not of the wall's span
+MAX_HOLE = 0.5  # m: a hole larger than this across is an opening (a door, a window), never filled
 MAX_PIXELS = 400_000_000  # the largest image finished in one piece (about 6 GB of memory at work)
 DETAIL_SIGMA = 2.0  # cells: the low pass the detail of the texture is measured against
 JPEG_SIDE = 65_500  # pixels: the longest side a JPEG takes
@@ -150,6 +154,27 @@ def _fill(rgb: np.ndarray, valid: np.ndarray, holes: np.ndarray) -> tuple[np.nda
     return out, done
 
 
+def fillable(holes, measured, cell: tuple[float, float], max_hole: float = MAX_HOLE) -> tuple[np.ndarray, int]:
+    """``(the cells of the holes that may be filled, how many holes are openings)``. A hole (a connected piece of
+    ``holes``) may be filled when its largest extent - ``cell`` (width, height of a cell, metres) times its bounding
+    box - is at most ``max_hole`` and ``measured`` (the cells with a depth in the band: the relief) has a cell in it;
+    else it is an opening - a door, a window, a hole through the wall, where nothing stands in the depth band - and
+    stays open. ``measured`` None: the size alone decides."""
+    import cv2
+
+    holes = np.asarray(holes, bool)
+    count, labels, stats, _c = cv2.connectedComponentsWithStats(holes.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return np.zeros(holes.shape, bool), 0
+    extent = np.maximum(stats[:, cv2.CC_STAT_WIDTH] * abs(cell[0]), stats[:, cv2.CC_STAT_HEIGHT] * abs(cell[1]))
+    ok = extent <= max_hole + 1e-9
+    if measured is not None:
+        seen = np.bincount(labels[np.asarray(measured, bool) & holes], minlength=count) > 0
+        ok &= seen
+    ok[0] = False
+    return ok[labels], int(count - 1 - ok[1:].sum())
+
+
 def fill_holes(rgb, valid, holes) -> np.ndarray:
     """``rgb`` (h, w, 3) uint8 with the cells of ``holes`` filled from those of ``valid`` (the cells whose colour is
     known): the colour of a hole from the pyramid of the valid cells (push-pull), plus the detail of the texture - the
@@ -243,9 +268,9 @@ def _up(coarse: np.ndarray, f: int, r0: int, r1: int, w: int) -> np.ndarray:
 
 # ------------------------------------------------------------------ the export
 def _load(ortho: Path, relief: Path, reduce: int, rows: int = 2048):
-    """``(rgb (h, w, 3) uint8, coloured, surface)`` of the elevation reduced by ``reduce`` (read a strip of rows at a
-    time): a cell's colour the mean of the coloured cells of its block (alpha over 0), coloured or with surface (a
-    relief) when one of them is."""
+    """``(rgb (h, w, 3) uint8, coloured, measured)`` of the elevation reduced by ``reduce`` (read a strip of rows at a
+    time): a cell's colour the mean of the coloured cells of its block (alpha over 0), coloured or measured (a depth in
+    the relief) when one of them is; ``measured`` None for an elevation without its relief."""
     import rasterio
     from rasterio.windows import Window
 
@@ -266,9 +291,7 @@ def _load(ortho: Path, relief: Path, reduce: int, rows: int = 2048):
                 block = src.read([1, 2, 3, 4], window=win)
                 c = np.moveaxis(block[:3], 0, -1)
                 m = block[3] > 0
-                s = m.copy()
-                if dem is not None:
-                    s |= np.isfinite(dem.read(1, window=win))
+                s = np.isfinite(dem.read(1, window=win)) if dem is not None else np.zeros_like(m)
                 k0, k1 = r0 // reduce, r0 // reduce + -(-win.height // reduce)
                 if reduce == 1:
                     rgb[k0:k1], coloured[k0:k1], surface[k0:k1] = c, m, s
@@ -279,10 +302,11 @@ def _load(ortho: Path, relief: Path, reduce: int, rows: int = 2048):
                 rgb[k0:k1] = np.clip(np.round(sums / np.maximum(n, 1)[..., None]), 0, 255).astype(np.uint8)
                 coloured[k0:k1] = n > 0
                 surface[k0:k1] = _half_f(s.astype(np.float32), reduce) > 0
+            known = dem is not None
         finally:
             if dem is not None:
                 dem.close()
-    return rgb, coloured, surface
+    return rgb, coloured, (surface if known else None)
 
 
 def _target_cells(chunk: Chunk, entry: dict, transform, shape) -> tuple[np.ndarray, int]:
@@ -304,25 +328,29 @@ def _target_cells(chunk: Chunk, entry: dict, transform, shape) -> tuple[np.ndarr
     return cells, n
 
 
-def _inside(path: Path, folder: Path) -> bool:
-    path, folder = path.resolve(), folder.resolve()
+def inside_folder(path, folder) -> bool:
+    """Whether ``path`` is ``folder`` or lies in it (both resolved): the finishing refuses the folder of a chunk."""
+    path, folder = Path(path).resolve(), Path(folder).resolve()
     return path == folder or folder in path.parents
 
 
 def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = True, level: bool = True,
-           targets: bool = True, reduce: int = 1, quality: int = 92, progress: Progress | None = None) -> dict:
+           targets: bool = True, reduce: int = 1, quality: int = 92, max_hole: float = MAX_HOLE,
+           progress: Progress | None = None) -> dict:
     """The elevation ``entry`` of ``chunk`` finished for a publication and written to ``out_path`` - a JPEG
     (``.jpg``/``.jpeg``, ``quality``) or an RGBA GeoTIFF (``.tif``/``.tiff``) in frame metres with the elevation's
     transform and tags - at full resolution, or reduced by the integer ``reduce``. In this order: the square of
     :data:`TARGET_HALF_SIDE` around every marker on the elevation made a hole (``targets``); the holes inside the
-    wall's span filled (``fill``, :func:`fill_holes`); the colour levelled in Lab (``level``, :func:`level_colours`,
+    wall's span filled (``fill``, :func:`fill_holes`) - those up to ``max_hole`` metres across with the surface measured
+    in them; the larger ones and those without surface are openings and stay open (:func:`fillable`); the colour
+    levelled in Lab (``level``, :func:`level_colours`,
     :data:`LEVEL_SIGMA_PX` pixels of the full resolution); what lies outside the span masked (``mask``: white in a
     JPEG, transparent in a TIFF; without it a cell without colour is still white or transparent).
 
     An export: nothing is written in the chunk's folder (``ValueError`` for a path there) and the entry and the
     chunk's meta are not changed. ``ValueError`` over :data:`MAX_PIXELS` (with the ``reduce`` that fits). Returns
     ``{"path", "size" ([w, h] written), "filled" (cells), "masked" (cells outside the span), "targets" (markers
-    painted over), "levelled"}``."""
+    painted over), "openings" (holes left open), "levelled"}``."""
     import rasterio
     from rasterio.enums import ColorInterp
     from rasterio.transform import Affine
@@ -338,7 +366,7 @@ def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = 
     if int(reduce) != reduce or int(reduce) < 1:
         raise ValueError(f"reduce: a whole number, 1 or more (it was {reduce!r})")
     reduce = int(reduce)
-    if _inside(out, chunk.data_dir):
+    if inside_folder(out, chunk.data_dir):
         raise ValueError("the finishing is an export: it is not written in the folder of the chunk, where the "
                          "measured elevation stays as it was measured - choose another folder")
     ortho, relief = elevation_paths(chunk, entry)
@@ -359,7 +387,8 @@ def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = 
         raise ValueError(f"a JPEG takes at most {JPEG_SIDE} px a side, the elevation would be {ow} x {oh}: reduce it "
                          f"(reduce={need} or more) or write a TIFF")
     progress(0.0, f"Finishing {entry.get('name')}: reading {w} x {h} px")
-    rgb, coloured, surface = _load(ortho, relief, reduce)
+    rgb, coloured, measured = _load(ortho, relief, reduce)
+    surface = coloured | measured if measured is not None else coloured.copy()
     transform = transform @ Affine.scale(reduce, reduce)
     n_targets = 0
     if targets:
@@ -368,9 +397,10 @@ def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = 
     progress(0.1, "Span of the wall")
     sp = span(surface)
     filled = 0
+    to_fill, openings = fillable(sp & ~coloured, measured, (transform.a, transform.e), max_hole)
     if fill:
         progress(0.2, "Filling the holes")
-        rgb, done = _fill(rgb, coloured, sp & ~coloured)
+        rgb, done = _fill(rgb, coloured, to_fill)
         filled = int(done.sum())
         coloured |= done
     keep = coloured & sp if mask else coloured
@@ -398,13 +428,14 @@ def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = 
         with rasterio.open(out, "w", **profile) as dst:
             dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
             finish_tag = json.dumps({"elevation": entry.get("id"), "fill": bool(fill), "mask": bool(mask),
-                                     "level": bool(level), "targets": bool(targets), "reduce": reduce})
+                                     "level": bool(level), "targets": bool(targets), "reduce": reduce,
+                                     "max_hole": float(max_hole), "openings": openings})
             dst.update_tags(**{k: v for k, v in tags.items() if k.startswith("ppg_")}, ppg_finish=finish_tag)
             dst.write(np.moveaxis(rgb, -1, 0), [1, 2, 3])
             dst.write((keep * np.uint8(255)).astype(np.uint8), 4)
     progress(1.0, f"Finished: {out.name}")
     oh, ow = keep.shape
-    log.info("Elevation %s finished: %s (%d x %d px; %d cells filled, %d targets painted over)", entry.get("name"),
-             out, ow, oh, filled, n_targets)
+    log.info("Elevation %s finished: %s (%d x %d px; %d cells filled, %d openings left open, %d targets painted "
+             "over)", entry.get("name"), out, ow, oh, filled, openings, n_targets)
     return {"path": str(out), "size": [ow, oh], "filled": filled, "masked": masked, "targets": n_targets,
-            "levelled": levelled}
+            "openings": openings, "levelled": levelled}

@@ -20,7 +20,9 @@ from pyarchinit_photogrammetry.engine import elevation_finish as F
 from wall_helpers import model_doc
 
 RES = 0.01
-HOLE = (slice(100, 120), slice(200, 220))  # 20 x 20 cells: a hole in the middle of the wall
+HOLE = (slice(100, 120), slice(200, 220))  # 20 x 20 cells (0.2 m): the surface measured, no photo painted it
+WINDOW = (slice(80, 170), slice(440, 590))  # 1.5 m x 0.9 m: an opening through the wall, with wall above and below
+GAP = (slice(150, 160), slice(50, 60))  # 0.1 m: no surface at all in the depth band - a hole through the wall
 SPECK = (slice(5, 10), slice(500, 505))  # 25 cells of surface floating above the wall: a speck
 TARGET_UV = (4.0, 101.0)  # the marker on the face: u along the first leg, v the height
 
@@ -62,9 +64,12 @@ def strip(tmp_path_factory):
     rgba[:, above] = 0
     rgba[:3][(slice(None), *SPECK)] = 200
     rgba[3][SPECK] = 255
-    rgba[:, HOLE[0], HOLE[1]] = 0
     relief = np.zeros((h, w), np.float32)
     relief[rgba[3] == 0] = np.nan
+    rgba[:, HOLE[0], HOLE[1]] = 0                                     # the relief stays: the surface is there
+    for cut in (WINDOW, GAP):
+        rgba[:, cut[0], cut[1]] = 0
+        relief[cut] = np.nan
     world = np.array([a[0] + TARGET_UV[0], a[1], TARGET_UV[1]])
     ch.add_marker("T1", ch.to_internal(world[None])[0])
     entry = E.entry_from_rasters(ch, plane, rgba, relief, name="Striscia", kind="elevation")
@@ -128,12 +133,15 @@ def test_holes_filled_sky_masked(strip, tmp_path):
     above = np.arange(h)[:, None] < info["top"][None, :]
     assert (out[3][above] == 0).all()                                 # the speck too
     assert r["filled"] >= 400 and r["masked"] > 0 and r["size"] == [w, h]
+    # the window and the hole through the wall stay open: never fake wall
+    assert (out[3][WINDOW] == 0).all() and (out[3][GAP] == 0).all() and r["openings"] == 2
     # the JPEG: outside the span white
     F.finish(ch, entry, tmp_path / "f.jpg", level=False)
     jpg = cv2.imread(str(tmp_path / "f.jpg"))
     assert jpg.shape[:2] == (h, w)
     far = np.arange(h)[:, None] < info["top"][None, :] - 8              # JPEG ringing: one block off the wall
     assert (jpg[far] > 250).all()
+    assert (jpg[WINDOW[0].start + 8:WINDOW[0].stop - 8, WINDOW[1].start + 8:WINDOW[1].stop - 8] > 250).all()
     # not filled: the hole stays transparent; not masked: nothing is
     _r = F.finish(ch, entry, tmp_path / "nofill.tif", fill=False, level=False)
     assert (_tif(tmp_path / "nofill.tif")[0][3][hole] == 0).all() and _r["filled"] == 0
@@ -302,6 +310,22 @@ def test_backlit_photos_are_left_out_and_counted(processed, tmp_path, monkeypatc
     assert again["skip_backlit"] is True and again["backlit_skipped"] == 3
     plain = E.build_elevation(ch, _trench_frame(ch), **kw)
     assert "backlit_skipped" not in plain and "skip_backlit" not in plain
+    # the colour correction is measured without them too, for this build only (the chunk's own stays as it was)
+    from pyarchinit_photogrammetry.engine import colour
+
+    seen = []
+    real = colour.observations
+
+    def observations(chunk, cams=None, **kw):
+        seen.append(None if cams is None else {c.key for c in cams})
+        return real(chunk, cams=cams, **kw)
+
+    monkeypatch.setattr(colour, "observations", observations)
+    stored = json.dumps(ch.meta.get("colour"), sort_keys=True)
+    E.build_elevation(ch, _trench_frame(ch), skip_backlit=True, colour_correction=True, **kw)
+    assert seen and seen[-1] is not None and not seen[-1] & {cams[0].key, cams[3].key, cams[6].key}
+    assert cams[9].key in seen[-1]
+    assert json.dumps(ch.meta.get("colour"), sort_keys=True) == stored
     _backlit_photos(monkeypatch, ch, {c.key: 0.05 for c in ch.cameras})
     with pytest.raises(RuntimeError):
         E.build_elevation(ch, _trench_frame(ch), skip_backlit=True, **kw)
@@ -323,7 +347,11 @@ def test_command_line_finish_and_skip_backlit(strip, processed, tmp_path, monkey
 
     out = tmp_path / "muro.jpg"
     text = go("elevation", project, "--like", entry["id"], "--finish", out, "--no-level", "--reduce", 2)
-    assert out.exists() and str(out) in text and "filled" in text
+    assert out.exists() and str(out) in text and "filled" in text and "2 openings left open" in text
+    text = go("elevation", project, "--like", entry["id"], "--finish", tmp_path / "wide.tif", "--max-hole", 2.0)
+    assert "2 openings left open" in text                             # the window has no surface: still open
+    assert "--finish" in go("elevation", project, "--like", entry["id"], "--max-hole", 1.0, code=2)
+    assert "real shading" in " ".join(go("elevation", "--help").replace("│", " ").split())
     w, h = entry["size"]
     assert cv2.imread(str(out)).shape[:2] == ((h + 1) // 2, (w + 1) // 2)
     go("elevation", project, "--like", entry["id"], "--finish", tmp_path / "muro.tif", "--no-fill", "--no-mask",
@@ -344,3 +372,25 @@ def test_command_line_finish_and_skip_backlit(strip, processed, tmp_path, monkey
 
     made = E.elevations(ppg.Document.open(doc.path).chunk)[-1]
     assert made["skip_backlit"] is True and made["backlit_skipped"] == 2
+
+
+def test_openings_are_never_filled(strip, tmp_path):
+    """A hole is filled only up to ``max_hole`` metres and when the surface is there across it: the 1.5 m window stays
+    open (and with surface measured across it, still too large), the 0.2 m hole is filled; a larger max_hole fills a
+    window that has surface."""
+    ch, entry, info = strip
+    assert F.MAX_HOLE == 0.5
+    r = F.finish(ch, entry, tmp_path / "a.tif", level=False, targets=False)
+    out = _tif(tmp_path / "a.tif")[0]
+    assert (out[3][HOLE] == 255).all() and (out[3][WINDOW] == 0).all() and r["openings"] == 2
+    # the window with its surface measured (the photos missed it): too large at 0.5 m, filled at 2 m
+    rgba, relief = info["rgba"].copy(), _tif(ch.data_dir / entry["relief"])[0][0]
+    relief[WINDOW] = 0.0
+    seen = E.entry_from_rasters(ch, entry, rgba, relief, name="Finestra vista", kind="elevation")
+    try:
+        r = F.finish(ch, seen, tmp_path / "b.tif", level=False, targets=False)
+        assert (_tif(tmp_path / "b.tif")[0][3][WINDOW] == 0).all() and r["openings"] == 2
+        r = F.finish(ch, seen, tmp_path / "c.tif", level=False, targets=False, max_hole=2.0)
+        assert (_tif(tmp_path / "c.tif")[0][3][WINDOW] == 255).all() and r["openings"] == 1   # the gap still open
+    finally:
+        E.remove_elevation(ch, seen["id"])
