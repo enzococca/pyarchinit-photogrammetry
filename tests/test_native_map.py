@@ -474,9 +474,12 @@ def test_the_reduced_weak_ring(matched_ring, tmp_path):
             "write"} <= set(stages)
     report = native["report"]
     assert report["intrinsics_held"] == [cam[0] for cam in report["focal_sd"]]  # the flat ring: focal held (R16)
-    # the marginal sd (R18: every term the last round frees free with it; 17.6 % measured), not the conditional
-    # one with them held (1.8 %)
-    assert report["focal_sd"][0][1] > 0.05
+    # the marginal sd (R18: every term the last round frees free with it; 17.6 % measured on a GPU's tie points,
+    # 4.5 % on the CPU's of a Linux runner, 4.9-17.6 % over rings of this size): four times the line it is held at
+    # (2 %), which is also above the conditional one with them held (1.8 %)
+    from pyarchinit_photogrammetry.engine import bundle
+
+    assert report["focal_sd"][0][1] > 4 * bundle.FOCAL_SD_HOLD
     assert any(note.startswith("camera 0: focal held: ") for note in report["notes"])
     shape = truth.ring_shape(doc, scene)
     assert shape["truth_targets"] >= 6
