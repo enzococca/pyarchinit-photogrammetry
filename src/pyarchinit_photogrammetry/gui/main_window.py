@@ -16941,6 +16941,10 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                            on(lambda: self.transfer_elevation_drawings(payload, chunk)))
             menu.addAction(icon("elevation"), tr("Stesso prospetto su altri chunk..."),
                            lambda: self.wall_campaigns(payload, chunk))
+            from ..engine.elevation_groups import group_of
+
+            if group_of(self.doc, chunk, payload.get("id")) is not None:
+                menu.addAction(icon("export"), tr("Scheda di confronto..."), lambda: self.wall_sheet(payload, chunk))
             remove(tr("Rimuovi"))
         if menu.actions():
             menu.exec(pos)

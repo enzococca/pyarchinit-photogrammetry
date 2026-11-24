@@ -451,6 +451,55 @@ class WallPathActions:
             pane.update_states()
         return bool(started)
 
+    def wall_sheet(self, entry=None, chunk=None) -> bool:
+        """*Scheda di confronto...*: the comparison sheet of the group of the elevation ``entry`` of ``chunk``
+        (default: the one the pane built) - the campaigns stacked on one ``u`` axis
+        (:func:`..engine.elevation_sheet.comparison_sheet`) - written where the save dialog says, a PDF beside it,
+        in one task; the two paths said at its end."""
+        from pathlib import Path
+
+        from PySide6.QtWidgets import QFileDialog
+
+        from ..engine import elevation_groups as G
+        from ..engine.elevation_sheet import comparison_sheet
+
+        if entry is None:
+            pane = getattr(self, "wall_pane", None)
+            entry = pane.built_entry() if pane is not None else None
+            chunk = pane.chunk if entry is not None else None
+        chunk = chunk if chunk is not None else self.chunk
+        if entry is None or chunk is None:
+            self._warn(tr("Costruisci prima il prospetto del muro e le altre campagne: poi la scheda le confronta."))
+            return False
+        found = G.group_of(self.doc, chunk, entry["id"])
+        if found is None:
+            self._warn(tr("«{0}» non è in un gruppo di campagne: costruisci prima lo stesso prospetto su altri chunk.",
+                          entry.get("name")))
+            return False
+        ref, group = found
+        folder = Path(self.doc.path).parent if getattr(self.doc, "path", None) else Path.home()
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(group.get("name") or "muro"))
+        path, _f = QFileDialog.getSaveFileName(self, tr("Scheda di confronto"), str(folder / f"confronto_{safe}.png"),
+                                               "PNG (*.png);;JPEG (*.jpg *.jpeg)")
+        if not path:
+            return False
+        out = Path(path)
+        if out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            out = out.with_name(out.name + ".png")
+        doc = self.doc
+
+        def work(p):
+            return comparison_sheet(doc, ref, group, out, progress=p)
+
+        def done(r):
+            text = tr("Scheda di confronto di {0} campagne scritta:\n{1}\n{2}", len(r["bands"]), r["image"], r["pdf"])
+            if r["skipped"]:
+                text += "\n" + tr("Lasciate fuori (il prospetto o i suoi file non ci sono più): {0}",
+                                   ", ".join(r["skipped"]))
+            self._info(tr("Scheda di confronto"), text)
+
+        return bool(self.run_task("Scheda di confronto", work, done, refresh=False, save=False))
+
     # ------------------------------------------------------------ the lines on the plan
     def _on_plan(self) -> bool:
         view = self.ortho_view

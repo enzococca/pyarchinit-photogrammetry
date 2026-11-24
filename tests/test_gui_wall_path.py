@@ -616,3 +616,79 @@ def test_campaigns_step_of_the_pane(make, monkeypatch):
     w.runner.wait()
     assert len(G.groups(a)[0]["members"]) == 2
     assert pane.state("campaigns") == "done" and "2" in pane.state_text("campaigns")
+
+
+def test_the_sheet_from_the_menu(make, monkeypatch, tmp_path):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QFileDialog
+
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import elevation_groups as G
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = make(chunks=2)
+    a, b = w.chs
+    frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
+    entry = E.build_elevation(a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
+    entries = []
+
+    def entries_of_menu():
+        class Spy(mw.QMenu):
+            def exec(self, *_a, **_k):
+                entries.extend(x.text() for x in self.actions())
+
+        monkeypatch.setattr(mw, "QMenu", Spy)
+        w._workspace_menu("elevation", a, entry, QPoint(0, 0))
+        return entries
+
+    original = mw.QMenu
+    assert mw.tr("Scheda di confronto...") not in entries_of_menu()     # alone: no sheet
+    monkeypatch.setattr(mw, "QMenu", original)
+    (_ch, new), = G.build_on_chunks(w.doc, a, entry, [b])["built"]
+    out = tmp_path / "scheda.png"
+    asked = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: asked.append(a) or (str(out), ""))
+    _menu_entry(w, monkeypatch, lambda: w._workspace_menu("elevation", b, new, QPoint(0, 0)),
+                mw.tr("Scheda di confronto..."))
+    w.runner.wait()
+    assert len(asked) == 1 and out.exists() and (tmp_path / "scheda.pdf").exists()
+    infos = [t for k, t in w.said if k == "message"]
+    assert len(infos) == 1 and str(out) in infos[0] and str(tmp_path / "scheda.pdf") in infos[0]
+
+    # from the pane: its button waits for a group of two
+    pane = w.wall_pane
+    assert not pane.b_sheet.isEnabled()
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))       # cancelled: nothing
+    assert not w.wall_sheet(entry, a)
+    out.unlink()
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    assert w.wall_sheet(entry, a)
+    w.runner.wait()
+    assert out.exists()
+
+
+def test_the_sheet_step_of_the_pane(make, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog
+
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    w = make(chunks=2)
+    pane = w.wall_pane
+    pane.s_resolution.setValue(RES)
+    pane.c_snap.setChecked(False)
+    _trace(w)
+    assert w.wall_build()
+    w.runner.wait()
+    assert not pane.b_sheet.isEnabled()
+    a, b = w.chs
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"chunks": [b.key], f"date_{b.key}": "2022-11-03"}))
+    pane.b_campaigns.click()
+    w.runner.wait()
+    assert pane.b_sheet.isEnabled()
+    out = tmp_path / "pane.jpg"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), ""))
+    pane.b_sheet.click()
+    w.runner.wait()
+    assert open(out, "rb").read(3) == b"\xff\xd8\xff" and (tmp_path / "pane.pdf").exists()

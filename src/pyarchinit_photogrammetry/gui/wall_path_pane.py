@@ -214,12 +214,17 @@ class WallPathPane(QWidget):
         form.addWidget(note)
         self.b_campaigns = QPushButton(icon("elevation"), tr("Stesso prospetto su altri chunk..."))
         form.addWidget(self.b_campaigns)
+        self.b_sheet = QPushButton(icon("export"), tr("Scheda di confronto..."))
+        self.b_sheet.setToolTip(tr("Le campagne una sopra l'altra sullo stesso asse, quote ogni 0,5 m e spigoli "
+                                   "segnati: immagine e PDF"))
+        form.addWidget(self.b_sheet)
         step(4, "campaigns", tr("Altre campagne"), body)
         lay.addStretch(1)
 
         self.b_trace.clicked.connect(lambda: self.window.wall_trace_start())
         self.b_build.clicked.connect(lambda: self.window.wall_build())
         self.b_campaigns.clicked.connect(lambda: self.window.wall_campaigns())
+        self.b_sheet.clicked.connect(lambda: self.window.wall_sheet())
         self.b_snap.clicked.connect(lambda: self.window.wall_snap())
         self.c_snap.toggled.connect(self._snap_toggled)
         self.r_snapped.toggled.connect(lambda _on: self._line_changed())
@@ -417,4 +422,5 @@ class WallPathPane(QWidget):
         self.b_snap.setEnabled(has and self.c_snap.isChecked())
         self.b_build.setEnabled(has)
         self.b_campaigns.setEnabled(self.running is None and self.built_entry() is not None)
+        self.b_sheet.setEnabled(self.running is None and len(self.campaigns()) > 1)
         self.b_trace.setEnabled(self.running is None)
