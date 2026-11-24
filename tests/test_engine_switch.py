@@ -9,21 +9,15 @@ an unknown one before it opens the project."""
 from __future__ import annotations
 
 import inspect
-import re
 
 import pytest
+from cli_helpers import plain_words
 from typer.testing import CliRunner
 
 import pyarchinit_photogrammetry as ppg
 from pyarchinit_photogrammetry.cli import app
 from pyarchinit_photogrammetry.core.chunk import Chunk
 from pyarchinit_photogrammetry.engine import switch
-
-
-def _plain_words(output: str) -> str:
-    """What a command printed, as plain words on one line: Typer prints a usage error in a box that wraps the
-    message at the width of the terminal, which is not the same on every computer."""
-    return " ".join(re.sub("[\u2500-\u257f]", " ", output).split())
 
 
 class _Ran(list):
@@ -571,14 +565,14 @@ def test_the_cli_refuses_an_unknown_engine(tmp_path, monkeypatch):
     for command in commands:
         result = run(app, [*command, "--engine", "colmap"])
         assert result.exit_code == 2, result.output
-        said = _plain_words(result.output)
+        said = plain_words(result.output)
         assert "unknown engine 'colmap': use auto, classic or native" in said, result.output
         assert "--engine" in said, result.output
     monkeypatch.setenv("PPG_ENGINE", "fast")  # the variable is checked like the option, and named
     for command in commands:
         result = run(app, command)
         assert result.exit_code == 2, result.output
-        said = _plain_words(result.output)
+        said = plain_words(result.output)
         assert "unknown engine 'fast'" in said and "PPG_ENGINE" in said, result.output
         assert "use auto, classic or native" in said, result.output
     assert not missing.exists() and not missing.with_name("missing.ppg.files").exists()

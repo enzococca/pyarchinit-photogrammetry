@@ -1908,7 +1908,7 @@ def test_cli_crs_and_stations_refuse_what_they_would_ignore_and_say_what_proj_ca
     from typer.testing import CliRunner
 
     from pyarchinit_photogrammetry.cli import app
-    from test_gnss_ppk import _plain_words
+    from cli_helpers import plain_words as _plain_words
 
     project, _folder = _project(tmp_path)
     run = CliRunner().invoke
