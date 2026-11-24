@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use nalgebra::{Matrix3, Rotation3, Vector3};
+use nalgebra::{Matrix3, Rotation3, Vector2, Vector3};
 use ppg_engine::geometry::solvers::fundamental_eight_point;
 use ppg_engine::mapper::input::{CameraIn, ImageIn, Input, PairIn};
 
@@ -296,6 +296,68 @@ pub fn patch(nx: usize, ny: usize, spacing: f64, height: f64, seed: u64) -> Scen
     Scene { kind: Kind::Patch, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
 }
 
+/// A lawnmower nadir survey: `strips` strips of `per_strip` photos along y, flown in turn up and
+/// down, `along` metres apart in a strip and `across` metres between strips, at `height` over a
+/// ground with a mound of `mound` metres (a Gaussian of 100 m) in the middle of the corridor and a
+/// metre of relief; a tilt of up to 3 degrees and a yaw of up to 10 drawn per photo. The points are
+/// drawn uniformly over the corridor, `density` per square metre, and each photo sees those inside
+/// it.
+pub fn corridor(strips: usize, per_strip: usize, along: f64, across: f64, height: f64, mound: f64, density: f64,
+                seed: u64) -> Scene {
+    let mut random = Random::new(seed);
+    let down = Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0);
+    let half_turn = Matrix3::new(-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0);
+    let length = (per_strip - 1) as f64 * along;
+    let mut poses = Vec::new();
+    for j in 0..strips {
+        for k in 0..per_strip {
+            let y = if j % 2 == 0 { k as f64 * along } else { length - k as f64 * along };
+            let (roll, pitch) = (random.uniform_in(-3.0, 3.0), random.uniform_in(-3.0, 3.0));
+            let yaw = random.uniform_in(-10.0, 10.0);
+            let tilt = rotation_xyz(roll.to_radians(), pitch.to_radians(), yaw.to_radians());
+            let heading = if j % 2 == 0 { down } else { down * half_turn };
+            poses.push(Pose { rotation: tilt * heading, centre: Vector3::new(j as f64 * across, y, height) });
+        }
+    }
+    let (x0, x1) = (-height, (strips - 1) as f64 * across + height);
+    let (y0, y1) = (-height, length + height);
+    let count = (density * (x1 - x0) * (y1 - y0)) as usize;
+    let middle = Vector2::new(0.5 * (x0 + x1), 0.5 * length);
+    let points: Vec<Vector3<f64>> = (0..count)
+        .map(|_| {
+            let (x, y) = (random.uniform_in(x0, x1), random.uniform_in(y0, y1));
+            let r2 = (Vector2::new(x, y) - middle).norm_squared();
+            Vector3::new(x, y, mound * (-r2 / (2.0 * 100.0 * 100.0)).exp() + random.uniform_in(-1.0, 1.0))
+        })
+        .collect();
+    // the points by cells of the ground, so that a photo looks only at those under it
+    let cell = height;
+    let key = |x: f64, y: f64| (((x - x0) / cell).floor() as i64, ((y - y0) / cell).floor() as i64);
+    let mut cells: std::collections::HashMap<(i64, i64), Vec<usize>> = std::collections::HashMap::new();
+    for (p, x) in points.iter().enumerate() {
+        cells.entry(key(x.x, x.y)).or_default().push(p);
+    }
+    let views = poses
+        .iter()
+        .map(|pose| {
+            let (cx, cy) = key(pose.centre.x, pose.centre.y);
+            let mut seen: Vec<(usize, [f64; 2])> = Vec::new();
+            for i in cx - 2..=cx + 2 {
+                for j in cy - 2..=cy + 2 {
+                    for &p in cells.get(&(i, j)).map_or(&[][..], |v| &v[..]) {
+                        if let Some(px) = pixel_of(pose, &points[p]) {
+                            seen.push((p, px));
+                        }
+                    }
+                }
+            }
+            seen.sort_by_key(|&(p, _)| p);
+            seen
+        })
+        .collect();
+    Scene { kind: Kind::Patch, poses, focal: FOCAL, cx: WIDTH / 2.0, cy: HEIGHT / 2.0, points, views }
+}
+
 /// A turntable seen from outside: `n` photos on a circle of 10 m radius 6 m above the ground,
 /// each looking at the centre of the circle from above, over an object of points spread in a box
 /// 8 m x 8 m x 4 m around that centre: a convergent block whose depths vary, which tells the focal
@@ -337,23 +399,28 @@ impl Scene {
     }
 
     /// The pairs that share enough points (`MIN_SHARED`, `MIN_SHARED_SHARE`), `a < b`, with the shared points as
-    /// `(index in the view of a, index in the view of b)`.
+    /// `(index in the view of a, index in the view of b)`, in the order of the view of `a`.
     pub fn shared(&self) -> Vec<(usize, usize, Vec<(u32, u32)>)> {
+        // per point the photos that see it, with its index in their view
+        let mut seen_by: Vec<Vec<(usize, u32)>> = vec![Vec::new(); self.points.len()];
+        for (i, view) in self.views.iter().enumerate() {
+            for (k, &(p, _)) in view.iter().enumerate() {
+                seen_by[p].push((i, k as u32));
+            }
+        }
         let mut out = Vec::new();
+        let mut with: std::collections::BTreeMap<usize, Vec<(u32, u32)>> = std::collections::BTreeMap::new();
         for a in 0..self.poses.len() {
-            for b in a + 1..self.poses.len() {
-                let mut at_b = std::collections::HashMap::new();
-                for (k, &(p, _)) in self.views[b].iter().enumerate() {
-                    at_b.insert(p, k as u32);
+            with.clear();
+            for (k, &(p, _)) in self.views[a].iter().enumerate() {
+                for &(b, kb) in seen_by[p].iter().filter(|(b, _)| *b > a) {
+                    with.entry(b).or_default().push((k as u32, kb));
                 }
-                let common: Vec<(u32, u32)> = self.views[a]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(k, &(p, _))| at_b.get(&p).map(|&kb| (k as u32, kb)))
-                    .collect();
+            }
+            for (&b, common) in with.iter_mut() {
                 let smaller = self.views[a].len().min(self.views[b].len());
                 if common.len() >= MIN_SHARED && common.len() as f64 >= MIN_SHARED_SHARE * smaller as f64 {
-                    out.push((a, b, common));
+                    out.push((a, b, std::mem::take(common)));
                 }
             }
         }
