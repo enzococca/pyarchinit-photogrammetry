@@ -21,6 +21,7 @@ INK = (20, 20, 20)
 CORNER = (230, 20, 20)
 PAPER = (255, 255, 255)
 EPS = 1e-9
+GRID_TOLERANCE = 1e-3  # pixel: the offset of a member's grid from the sheet's must be whole within this
 
 
 def _font(size: int, bold: bool = False):
@@ -81,14 +82,34 @@ def _corners(entry: dict, u_left: float, u_right: float) -> list[float]:
     return [float(c["u"]) for c in frame.corners() if u_left - EPS <= c["u"] <= u_right + EPS]
 
 
+def _other_grid(path: Path, grid) -> tuple[str, str] | None:
+    """``(code, reason)``: why the orthophoto at ``path`` is not on the grid ``grid`` - ``"grid"`` another
+    resolution, ``"shift"`` pixels shifted by a fraction of a cell; None when it is."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        t = src.transform
+    res = abs(grid.a)
+    if abs(abs(t.a) - res) > 1e-9 * res or abs(abs(t.e) - abs(grid.e)) > 1e-9 * res or t.b or t.d:
+        return "grid", f"another grid: {abs(t.a):.6g} m/px, the sheet's {res:.6g} m/px"
+    for offset in ((grid.c - t.c) / res, (t.f - grid.f) / res):
+        if abs(offset - round(offset)) > GRID_TOLERANCE:
+            return "shift", f"its pixels are shifted by {abs(offset - round(offset)):.3g} pixel from the sheet's grid"
+    return None
+
+
 def comparison_sheet(doc, chunk, group: dict, out_path, title: str | None = None, max_width: int = 6000,
-                     dpi: int = 200, progress=None) -> dict:
+                     dpi: int = 200, progress=None, overwrite: bool = True) -> dict:
     """The comparison sheet of ``group`` (kept in ``chunk``) written as ``out_path`` (JPEG for ``.jpg``/``.jpeg``,
     else PNG) and, beside it, the same as ``.pdf``. Returns the layout: ``image``, ``pdf`` (paths), ``factor`` (the
     grid read one pixel in ``factor``), ``px_per_m``, ``bands`` (``label``, ``date``, ``left``, ``top``,
     ``width``, ``height`` of each campaign, the oldest first), ``v_ticks`` (``(value, y)`` on the first band),
-    ``u_ticks`` (``(u, x)``), ``corners`` (``(u, x)``) and ``skipped`` (the labels of the members without files).
-    ``ValueError`` when no member has its files."""
+    ``u_ticks`` (``(u, x)``), ``corners`` (``(u, x)``), ``skipped`` (the labels of the members left out) and
+    ``reasons`` (label -> why: no files, or a grid that is not the sheet's - another resolution, pixels shifted by
+    a fraction of a cell - never drawn at another scale) and ``codes`` (label -> ``"gone"``, ``"grid"`` or
+    ``"shift"``). The grid is that of the group's reference elevation (else
+    of the oldest campaign with its files). ``ValueError`` when no member can be drawn; ``FileExistsError``
+    (nothing written) when ``overwrite`` is false and the image or the PDF beside it exists."""
     import rasterio
     from PIL import Image, ImageDraw
 
@@ -98,18 +119,33 @@ def comparison_sheet(doc, chunk, group: dict, out_path, title: str | None = None
 
     progress = as_progress(progress)
     out_path = Path(out_path)
-    usable, skipped = [], []
+    pdf = out_path.with_suffix(".pdf")
+    if not overwrite:
+        there = [p.name for p in (out_path, pdf) if p.exists()]
+        if there:
+            raise FileExistsError(f"already there, kept: {', '.join(there)}")
+    found, reasons, codes = [], {}, {}
     for m in G.members(doc, chunk, group):
         ortho = elevation_paths(m["chunk"], m["entry"])[0] if m["chunk"] is not None and m["entry"] else None
         if ortho is None or not ortho.exists():
-            skipped.append(m["label"])
+            reasons[m["label"]], codes[m["label"]] = "its elevation or its files are gone", "gone"
         else:
-            usable.append((m, ortho))
-    if not usable:
+            found.append((m, ortho))
+    if not found:
         raise ValueError(f"no campaign of the group {group.get('name')!r} has its elevation files")
-    ref_entry = usable[0][0]["entry"]
-    with rasterio.open(usable[0][1]) as src:
+    ref = next((x for x in found if x[0]["record"].get("chunk") == chunk.key
+                and x[0]["record"].get("entry") == group.get("reference")), found[0])
+    ref_entry = ref[0]["entry"]
+    with rasterio.open(ref[1]) as src:
         grid, shape = src.transform, (src.height, src.width)
+    usable = []
+    for item in found:
+        why = None if item is ref else _other_grid(item[1], grid)
+        if why is None:
+            usable.append(item)
+        else:
+            codes[item[0]["label"]], reasons[item[0]["label"]] = why
+    skipped = [m["label"] for m in G.members(doc, chunk, group) if m["label"] in reasons]
     res = abs(grid.a)
     h, w = shape
     factor = max(1, math.ceil(w / max(1, int(max_width))))
@@ -205,8 +241,8 @@ def comparison_sheet(doc, chunk, group: dict, out_path, title: str | None = None
         sheet.save(out_path, "JPEG", quality=92, dpi=(dpi, dpi))
     else:
         sheet.save(out_path, "PNG", dpi=(dpi, dpi))
-    pdf = out_path.with_suffix(".pdf")
     sheet.save(pdf, "PDF", resolution=float(dpi))
     progress(1.0, "Comparison sheet written")
     return {"image": str(out_path), "pdf": str(pdf), "factor": factor, "px_per_m": px_per_m, "bands": bands,
-            "v_ticks": v_ticks, "u_ticks": u_ticks, "corners": corner_out, "skipped": skipped}
+            "v_ticks": v_ticks, "u_ticks": u_ticks, "corners": corner_out, "skipped": skipped,
+            "reasons": reasons, "codes": codes}

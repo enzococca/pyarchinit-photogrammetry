@@ -322,6 +322,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                                          "axis; nothing is built"),
                   title: Optional[str] = typer.Option(None, help="with --compare: the title of the sheet (default "
                                                       "the name of the group)"),
+                  overwrite: bool = typer.Option(False, help="with --compare: replace the image and the PDF beside "
+                                                 "it when they exist (without it they are kept and nothing is "
+                                                 "written)"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
                                                          help="the orthophoto from the texture of the model, or from "
                                                               "the photos (default: the texture when the chunk has no "
@@ -361,8 +364,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             raise typer.BadParameter("--dates goes with --chunks")
         if compare is not None and chunks is not None:
             raise typer.BadParameter("--compare draws the sheet of the group and builds nothing: not with --chunks")
-        if title is not None and compare is None:
-            raise typer.BadParameter("--title goes with --compare")
+        if (title is not None or overwrite) and compare is None:
+            raise typer.BadParameter("--title and --overwrite go with --compare")
         doc, ch = _open(project, chunk)
         source = ch
         if like_chunk is not None:
@@ -376,7 +379,7 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             raise typer.BadParameter(f"{'no' if not found else 'more than one'} elevation {like!r} in the chunk "
                                      f"{source.label!r}; its elevations: {names}", param_hint="--like")
         if compare is not None:
-            _compare(doc, source, found[0], compare, title)
+            _compare(doc, source, found[0], compare, title, overwrite)
             return
         if chunks is not None:
             _campaigns(doc, source, found[0], chunks, dates, same_frame)
@@ -400,8 +403,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
         return
     if like_chunk is not None or same_frame or chunks is not None or dates is not None:
         raise typer.BadParameter("--like-chunk, --same-frame, --chunks and --dates go with --like")
-    if compare is not None or title is not None:
-        raise typer.BadParameter("--compare and --title go with --like (the sheet of the group of that elevation)")
+    if compare is not None or title is not None or overwrite:
+        raise typer.BadParameter("--compare, --title and --overwrite go with --like (the sheet of the group of that "
+                                 "elevation)")
     if sum(v is not None for v in (trace, markers, facing, circle, path)) != 1:
         raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle, --path or --like")
     if circle is None and (axis != "vertical" or axis_points is not None or (scale is not None and path is None)):
@@ -579,7 +583,7 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
     typer.echo(f"{ortho}\n{relief}")
 
 
-def _compare(doc, source, entry: dict, out: Path, title: Optional[str]) -> None:
+def _compare(doc, source, entry: dict, out: Path, title: Optional[str], overwrite: bool) -> None:
     """``ppg elevation --like ID --compare OUT``: the comparison sheet of the group of that elevation."""
     from .engine import elevation_groups as G
     from .engine.elevation_sheet import comparison_sheet
@@ -590,12 +594,16 @@ def _compare(doc, source, entry: dict, out: Path, title: Optional[str]) -> None:
                    "chunks first (--like ID --chunks ...)", err=True)
         raise typer.Exit(1)
     try:
-        r = comparison_sheet(doc, found[0], found[1], out, title=title, progress=print_progress)
+        r = comparison_sheet(doc, found[0], found[1], out, title=title, progress=print_progress,
+                             overwrite=overwrite)
+    except FileExistsError as exc:
+        typer.echo(f"Error: {exc} (--overwrite replaces them)", err=True)
+        raise typer.Exit(1)
     except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
     for label in r["skipped"]:
-        typer.echo(f"{label}: left out - its elevation or its files are gone")
+        typer.echo(f"{label}: left out - {r['reasons'][label]}")
     typer.echo(f"{len(r['bands'])} campaigns at {1 / r['px_per_m']:.4g} m/px (one pixel in {r['factor']})")
     typer.echo(f"{r['image']}\n{r['pdf']}")
 

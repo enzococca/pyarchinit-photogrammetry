@@ -115,6 +115,7 @@ def test_a_member_without_files_is_skipped_and_said(tmp_path, wall_dataset):
     assert E.remove_elevation(b, new["id"])
     r = S.comparison_sheet(doc, a, group, tmp_path / "one.png")
     assert [x["label"] for x in r["bands"]] == [a.label] and r["skipped"] == [b.label]
+    assert r["codes"] == {b.label: "gone"}
     assert E.remove_elevation(a, entry["id"])
     with pytest.raises(ValueError):
         S.comparison_sheet(doc, a, group, tmp_path / "none.png")
@@ -152,6 +153,12 @@ def test_command_line_compare(tmp_path, wall_dataset):
     assert out.exists() and (tmp_path / "out.pdf").exists()
     assert str(out) in r.output and str(tmp_path / "out.pdf") in r.output
     assert [len(E.elevations(c)) for c in Document.open(project).chunks] == before
+    r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--compare", str(out)])
+    assert r.exit_code == 1 and "out.png" in r.output and "--overwrite" in r.output    # kept: both exist
+    r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--compare", str(out), "--overwrite"])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--overwrite"])
+    assert r.exit_code == 2 and "--overwrite" in r.output
     r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--compare", str(out), "--chunks", "X"])
     assert r.exit_code == 2 and "--compare" in r.output
     r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--title", "T"])
@@ -163,3 +170,68 @@ def test_command_line_compare(tmp_path, wall_dataset):
     doc.save()
     r = runner.invoke(app, ["elevation", project, "--like", alone["id"], "--compare", str(tmp_path / "x.png")])
     assert r.exit_code == 1 and "group" in r.output
+
+
+def test_marks_stay_in_one_column_at_a_reduced_scale(built, tmp_path):
+    doc, (a, _b), _info, entry, _new, group, _r = built
+    w = entry["size"][0]
+    r = S.comparison_sheet(doc, a, group, tmp_path / "half.png", max_width=int(np.ceil(w / 2)))
+    assert r["factor"] == 2
+    image = np.asarray(Image.open(r["image"]).convert("RGB")).astype(int)
+    v1 = entry["bounds"][3]
+    expected = r["bands"][0]["left"] + (3.0 - entry["bounds"][0]) * r["px_per_m"]
+    columns = []
+    for band in r["bands"]:
+        y = int(band["top"] + (v1 - 100.6) * r["px_per_m"])
+        x0 = int(expected) - 6
+        strip = image[y - 1:y + 2, x0:x0 + 13].max(axis=2).min(axis=0)       # darkest of three rows, by column
+        columns.append(x0 + int(np.argmin(strip)))
+        assert strip.min() < 60
+    assert columns[0] == columns[1] and abs(columns[0] - expected) <= 1.0
+
+
+def test_hole_edges_keep_their_colour_at_a_reduced_scale(tmp_path, wall_dataset):
+    doc, (a, b), _info, entry, new, group = _make_group(tmp_path / "doc", wall_dataset)
+    path = b.data_dir / new["orthophoto"]
+    with rasterio.open(path, "r+") as dst:                                       # a hole from column 101 on
+        arr = dst.read()
+        arr[:, :, 101:140] = 0
+        dst.write(arr)
+    r = S.comparison_sheet(doc, a, group, tmp_path / "hole.png", max_width=int(np.ceil(entry["size"][0] / 3)))
+    assert r["factor"] == 3
+    image = np.asarray(Image.open(r["image"]).convert("RGB")).astype(float)
+    band = r["bands"][1]
+    cell = image[band["top"] + 10, band["left"] + 33]          # reduced cell (10, 33): source rows 30-32, columns
+    src = arr[:3, 30:33, 99:102].astype(float)                   # 99-101, of which 99 and 100 are kept
+    alpha = arr[3, 30:33, 99:102].astype(float)
+    weighted = (src * alpha).sum(axis=(1, 2)) / alpha.sum()
+    assert np.allclose(cell, weighted, atol=1.5)                                 # no darkening by the empty cells
+    assert image[band["top"] + 10, band["left"] + 40].min() == 255               # all hole: paper
+
+
+def test_a_member_on_another_grid_is_skipped_with_its_reason(tmp_path, wall_dataset):
+    doc, (a, b), _info, entry, new, group = _make_group(tmp_path / "doc", wall_dataset)
+    other = E.build_elevation(b, E.frame_from_dict(entry["frame"]), 0.03, "Altra griglia", (-0.5, 0.5),
+                              max_angle=89.0, heights=(100.0, 102.0))
+    record = next(m for m in group["members"] if m["chunk"] == b.key)
+    record["entry"] = other["id"]
+    r = S.comparison_sheet(doc, a, group, tmp_path / "grid.png")
+    assert [x["label"] for x in r["bands"]] == [a.label] and r["skipped"] == [b.label]
+    assert "0.03" in r["reasons"][b.label] and "0.02" in r["reasons"][b.label]
+    assert r["codes"] == {b.label: "grid"}
+    record["entry"] = new["id"]                                                  # half a cell off: refused too
+    with rasterio.open(b.data_dir / new["orthophoto"], "r+") as dst:
+        t = dst.transform
+        dst.transform = rasterio.Affine(t.a, t.b, t.c + 0.01, t.d, t.e, t.f)
+    r = S.comparison_sheet(doc, a, group, tmp_path / "shift.png")
+    assert r["skipped"] == [b.label] and "pixel" in r["reasons"][b.label] and r["codes"] == {b.label: "shift"}
+
+
+def test_an_existing_sheet_is_kept_unless_overwrite(built, tmp_path):
+    doc, (a, _b), _info, _entry, _new, group, _r = built
+    (tmp_path / "s.pdf").write_bytes(b"mine")
+    with pytest.raises(FileExistsError, match="s.pdf"):
+        S.comparison_sheet(doc, a, group, tmp_path / "s.png", overwrite=False)
+    assert not (tmp_path / "s.png").exists() and (tmp_path / "s.pdf").read_bytes() == b"mine"
+    S.comparison_sheet(doc, a, group, tmp_path / "s.png", overwrite=True)
+    assert (tmp_path / "s.pdf").read_bytes()[:4] == b"%PDF"
