@@ -514,6 +514,98 @@ class WallPathActions:
 
         return bool(self.run_task("Scheda di confronto", work, done, refresh=False, save=False))
 
+    def _composite_group(self, entry, chunk):
+        """``(reference chunk, group)`` of the elevation ``entry`` of ``chunk``: the group it is a campaign of, or the
+        group a composite was made of; None for none."""
+        from ..engine import elevation_groups as G
+
+        if entry.get("kind") == "composite":
+            group = next((g for g in G.groups(chunk) if g.get("id") == entry.get("group")), None)
+            return (chunk, group) if group is not None else None
+        return G.group_of(self.doc, chunk, entry["id"])
+
+    def wall_composite(self, entry=None, chunk=None, ask: bool = True) -> bool:
+        """*Composito delle campagne...* (``ask``: the threshold, the name and the colours asked) and *Rifai il
+        composito* (not asked: as it was made): the composite of the campaigns of the group of the elevation
+        ``entry`` of ``chunk`` (a campaign, or the composite itself; default: the one the pane built) -
+        :func:`..engine.elevation_composite.composite` - in one task, written in the chunk the wall was traced on
+        and shown at its end."""
+        from ..engine import elevation as E
+        from ..engine import elevation_composite as C
+        from . import dialogs
+        from .dialogs import Field
+
+        if entry is None:
+            pane = getattr(self, "wall_pane", None)
+            entry = pane.built_entry() if pane is not None else None
+            chunk = pane.chunk if entry is not None else None
+        chunk = chunk if chunk is not None else self.chunk
+        if entry is None or chunk is None:
+            self._warn(tr("Costruisci prima il prospetto del muro e le altre campagne: poi il composito le unisce."))
+            return False
+        found = self._composite_group(entry, chunk)
+        if found is None:
+            self._warn(tr("«{0}» non è in un gruppo di campagne: costruisci prima lo stesso prospetto su altri chunk.",
+                          entry.get("name")))
+            return False
+        ref, group = found
+        record = group.get("composite") or {}
+        old = next((e for e in E.elevations(ref) if e.get("id") == record.get("entry")), None)
+        threshold = float(record.get("threshold", C.DEEPER))
+        match = bool(old.get("colours_matched", True)) if old is not None else True
+        name = None
+        if ask:
+            v = dialogs.ParamDialog.ask(self, tr("Composito delle campagne"), [
+                Field("threshold", tr("Una campagna più vecchia prende la cella se è più profonda di (m)"), threshold,
+                      minimum=0.0, maximum=10.0, decimals=3),
+                Field("name", tr("Nome"), old.get("name") if old is not None else "", kind="text"),
+                Field("match", tr("Accorda i colori delle campagne a quelli della più recente"), match)],
+                intro=tr("Per ogni cella la superficie della campagna più recente, sostituita da quella di una più "
+                         "vecchia dove è più profonda della soglia o dove la recente non ha nulla: il muro com'era "
+                         "quando era più scoperto. Il composito va nel chunk «{0}»{1}.", ref.label,
+                         tr(" al posto di quello fatto prima") if old is not None else ""))
+            if v is None:
+                return False
+            threshold, match = float(v.get("threshold", threshold)), bool(v.get("match", match))
+            name = str(v.get("name") or "").strip() or None
+        elif old is None:
+            self._warn(tr("Il composito di questo gruppo non c'è ancora: fallo con «Composito delle campagne...»."))
+            return False
+        doc = self.doc
+        pane = getattr(self, "wall_pane", None)
+
+        def work(p):
+            return C.composite(doc, ref, group, threshold=threshold, name=name, match=match, progress=p)
+
+        def done(made):
+            if pane is not None:
+                pane.running = None
+                pane.update_states()
+            if self._activate_chunk(ref):
+                self.show_elevation(made)
+
+        if pane is not None:
+            pane.running = "composite"
+            pane.update_states()
+        started = self.run_task("Composito delle campagne", work, done)
+        if not started and pane is not None:
+            pane.running = None
+            pane.update_states()
+        return bool(started)
+
+    def composite_stale(self, chunk, entry) -> bool:
+        """The composite ``entry`` of ``chunk`` is to be made again (:func:`..engine.elevation_composite.is_stale`);
+        False for any other elevation."""
+        from ..engine import elevation_composite as C
+
+        if entry is None or entry.get("kind") != "composite" or chunk is None:
+            return False
+        try:
+            return C.is_stale(self.doc, chunk, entry)
+        except Exception as exc:  # noqa: BLE001 - a notice: never in the way of showing it
+            log.warning("Stato del composito non letto: %s", exc)
+            return False
+
     # ------------------------------------------------------------ the lines on the plan
     def _on_plan(self) -> bool:
         view = self.ortho_view

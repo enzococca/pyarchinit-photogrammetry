@@ -218,6 +218,14 @@ class WallPathPane(QWidget):
         self.b_sheet.setToolTip(tr("Le campagne una sopra l'altra sullo stesso asse, quote ogni 0,5 m e spigoli "
                                    "segnati: immagine e PDF"))
         form.addWidget(self.b_sheet)
+        self.b_composite = QPushButton(icon("elevation"), tr("Composito delle campagne..."))
+        self.b_composite.setToolTip(tr("Per ogni cella la campagna più recente, una più vecchia dove è più profonda "
+                                       "della soglia: il muro com'era quando era più scoperto"))
+        form.addWidget(self.b_composite)
+        self.b_recomposite = QPushButton(icon("refresh"), tr("Rifai il composito"))
+        self.b_recomposite.setToolTip(tr("Il composito fatto di nuovo come era stato fatto, dalle campagne come "
+                                         "sono ora"))
+        form.addWidget(self.b_recomposite)
         step(4, "campaigns", tr("Altre campagne"), body)
         lay.addStretch(1)
 
@@ -225,6 +233,8 @@ class WallPathPane(QWidget):
         self.b_build.clicked.connect(lambda: self.window.wall_build())
         self.b_campaigns.clicked.connect(lambda: self.window.wall_campaigns())
         self.b_sheet.clicked.connect(lambda: self.window.wall_sheet())
+        self.b_composite.clicked.connect(lambda: self.window.wall_composite())
+        self.b_recomposite.clicked.connect(lambda: self.window.wall_composite(ask=False))
         self.b_snap.clicked.connect(lambda: self.window.wall_snap())
         self.c_snap.toggled.connect(self._snap_toggled)
         self.r_snapped.toggled.connect(lambda _on: self._line_changed())
@@ -235,7 +245,7 @@ class WallPathPane(QWidget):
 
     # ------------------------------------------------------------------ state
     def _busy_changed(self, busy: bool) -> None:
-        if not busy and self.running in ("snap", "build", "campaigns"):
+        if not busy and self.running in ("snap", "build", "campaigns", "composite"):
             with contextlib.suppress(RuntimeError):
                 self.running = None
                 self.update_states()
@@ -360,6 +370,21 @@ class WallPathPane(QWidget):
         found = G.group_of(doc, self.chunk, self.built)
         return list(found[1]["members"]) if found is not None else []
 
+    def composite_entry(self):
+        """``(chunk, entry)`` of the composite of the group of the elevation built, None while there is none."""
+        from ..engine import elevation as E
+        from ..engine import elevation_groups as G
+
+        doc = getattr(self.window, "doc", None)
+        if self.built_entry() is None or doc is None:
+            return None
+        found = G.group_of(doc, self.chunk, self.built)
+        record = (found[1].get("composite") or {}) if found is not None else {}
+        if not record:
+            return None
+        entry = next((e for e in E.elevations(found[0]) if e.get("id") == record.get("entry")), None)
+        return (found[0], entry) if entry is not None else None
+
     def state_text(self, step: str) -> str:
         if step == "trace":
             if self.running == "trace":
@@ -395,11 +420,18 @@ class WallPathPane(QWidget):
         if step == "campaigns":
             if self.running == "campaigns":
                 return tr("Prospetto sugli altri chunk...")
+            if self.running == "composite":
+                return tr("Composito delle campagne...")
             members = self.campaigns()
             if len(members) < 2:
                 return ""
-            return tr("{0} campagne nel gruppo: {1}", len(members), "; ".join(
+            text = tr("{0} campagne nel gruppo: {1}", len(members), "; ".join(
                 f"{m.get('label')} ({m.get('date') or tr('data non nota')})" for m in members))
+            comp = self.composite_entry()
+            if comp is not None:
+                text += "\n" + (tr("Composito «{0}»: da rifare, una campagna è cambiata", comp[1].get("name"))
+                                 if self.window.composite_stale(*comp) else tr("Composito «{0}»", comp[1].get("name")))
+            return text
         if self.running == "build":
             return tr("Costruzione del prospetto...")
         return ""
@@ -423,4 +455,6 @@ class WallPathPane(QWidget):
         self.b_build.setEnabled(has)
         self.b_campaigns.setEnabled(self.running is None and self.built_entry() is not None)
         self.b_sheet.setEnabled(self.running is None and len(self.campaigns()) > 1)
+        self.b_composite.setEnabled(self.running is None and len(self.campaigns()) > 1)
+        self.b_recomposite.setEnabled(self.running is None and self.composite_entry() is not None)
         self.b_trace.setEnabled(self.running is None)

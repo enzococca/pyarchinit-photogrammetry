@@ -5464,7 +5464,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
         by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
         each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
-        calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
+        calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it, a composite of
+        campaigns); ``versions`` the
         kept versions made in another system - not those a rebuild kept itself (``"by_rebuild"``: made in the old
         system on purpose, kept only to look back at). The DEM and the orthomosaic replaced are kept as versions
         first when :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the
@@ -5540,7 +5541,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                     by_hand.append(name)
             elif kind == "elevation":
                 entry = next((e for e in ch.meta.get("elevations") or [] if e.get("id") == item.get("id")), None)
-                if entry is not None:
+                if entry is not None and (entry.get("kind") == "composite" or entry.get("source") == "rasters"):
+                    by_hand.append(name)  # made from the rasters of others: made again from them, by hand
+                elif entry is not None:
                     steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
             elif kind == "relief":
                 name = product_name(product)  # the names of the relief menu, not the codes of the methods
@@ -9776,6 +9779,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         else:
             text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = rilievo verso chi "
                       "guarda", entry['name'])
+        if self.composite_stale(self.chunk, entry):
+            text += "  -  " + tr("Composito da rifare: una campagna è cambiata dopo che è stato fatto")
         self.statusBar().showMessage(text, 15000)
         if clean:  # what reading and drawing it added (identities, default layers) is no edit
             h.rebase()
@@ -16244,10 +16249,14 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         return tex
 
     def _texture_painted(self, frame: str | None = None) -> bool:
-        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model:
-        said in the window's words (patches choose photos, there are none). True when it was."""
+        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model,
+        or the elevation was made from the rasters of others (a composite of campaigns): said in the window's words
+        (patches choose photos, there are none). True when it was."""
         from ..engine import patches as P
 
+        if self.chunk is not None and P.from_rasters(self.chunk, frame):  # a composite of campaigns: no photos
+            self._warn(tr("Patch: {0}.", tr(P.COMPOSITE_IT)))
+            return True
         if self.chunk is not None and P.texture_painted(self.chunk, frame):
             self._warn(tr("Patch: {0}.", tr(P.TEXTURE_IT)))
             return True
@@ -16945,6 +16954,14 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
 
             if group_of(self.doc, chunk, payload.get("id")) is not None:
                 menu.addAction(icon("export"), tr("Scheda di confronto..."), lambda: self.wall_sheet(payload, chunk))
+                menu.addAction(icon("elevation"), tr("Composito delle campagne..."),
+                               lambda: self.wall_composite(payload, chunk))
+            elif payload.get("kind") == "composite":
+                menu.addAction(icon("elevation"), tr("Composito delle campagne..."),
+                               lambda: self.wall_composite(payload, chunk))
+            if payload.get("kind") == "composite":
+                menu.addAction(icon("refresh"), tr("Rifai il composito"),
+                               lambda: self.wall_composite(payload, chunk, ask=False))
             remove(tr("Rimuovi"))
         if menu.actions():
             menu.exec(pos)

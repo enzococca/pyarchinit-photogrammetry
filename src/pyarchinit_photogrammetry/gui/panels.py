@@ -423,7 +423,7 @@ class WorkspaceTree(QTreeWidget):
                                         tr("Muro tracciato in pianta: u = lunghezza lungo la traccia"))
                     elif e.get("scale") == "wall":
                         tip += "\n" + tr("Scala sulla parete: u = lunghezza lungo il muro")
-                    tip += campaign_tip(document, ch, e)
+                    tip += campaign_tip(document, ch, e) + composite_tip(document, ch, e)
                     it.setToolTip(0, tip)
                     el.addChild(it)
                     for child in elevation_drawing_items(ch, e):  # the drawings kept with it, under it
@@ -3107,6 +3107,24 @@ def campaign_tip(document, chunk, entry: dict) -> str:
     record = next(m for m in group["members"] if m.get("chunk") == chunk.key and m.get("entry") == entry.get("id"))
     return "\n" + tr("Campagna del gruppo «{0}» ({1} campagne), data {2}", group.get("name") or group["id"],
                      len(group["members"]), record.get("date") or tr("non nota"))
+
+
+def composite_tip(document, chunk, entry: dict) -> str:
+    """The lines of the tooltip of a composite of campaigns (:mod:`..engine.elevation_composite`): how many
+    campaigns and the threshold, and whether it is to be made again; empty for any other elevation."""
+    if entry.get("kind") != "composite":
+        return ""
+    from ..engine import elevation_composite as C
+
+    tip = "\n" + tr("Composito di {0} campagne: una più vecchia prende la cella se è più profonda di {1} m",
+                     len(entry.get("sources") or []), f"{float(entry.get('threshold', C.DEEPER)):g}")
+    try:
+        stale = document is not None and C.is_stale(document, chunk, entry)
+    except Exception:  # noqa: BLE001 - a broken record: the tree is shown all the same
+        stale = False
+    if stale:
+        tip += "\n" + tr("Composito da rifare: una campagna è cambiata dopo che è stato fatto")
+    return tip
 
 
 # the drawings kept with an elevation, as rows under it in the workspace: (kind, label, icon)

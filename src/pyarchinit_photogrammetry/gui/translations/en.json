@@ -4032,7 +4032,19 @@
   "Sì, sono nello stesso sistema": "Yes, they are in the same frame",
   "Lo stesso prospetto, sulla stessa griglia, sugli altri chunk del muro (altre campagne già allineate insieme): le ortofoto si confrontano pixel per pixel.": "The same elevation, on the same grid, on the other chunks of the wall (other campaigns already aligned together): the orthophotos compare pixel by pixel.",
   "Altre campagne": "Other campaigns",
-  "Prospetto sugli altri chunk...": "Elevation on the other chunks..."
+  "Prospetto sugli altri chunk...": "Elevation on the other chunks...",
+  "Composito da rifare: una campagna è cambiata dopo che è stato fatto": "Composite to make again: a campaign has changed since it was made",
+  "Composito delle campagne...": "Composite of the campaigns...",
+  "Composito delle campagne": "Composite of the campaigns",
+  "Rifai il composito": "Make the composite again",
+  "Costruisci prima il prospetto del muro e le altre campagne: poi il composito le unisce.": "Build the wall elevation and the other campaigns first: then the composite joins them.",
+  "Una campagna più vecchia prende la cella se è più profonda di (m)": "An older campaign takes the cell where it is deeper by (m)",
+  "Accorda i colori delle campagne a quelli della più recente": "Match the colours of the campaigns to the most recent one",
+  " al posto di quello fatto prima": " in place of the one made before",
+  "Il composito di questo gruppo non c'è ancora: fallo con «Composito delle campagne...».": "This group has no composite yet: make it with «Composite of the campaigns...».",
+  "Per ogni cella la campagna più recente, una più vecchia dove è più profonda della soglia: il muro com'era quando era più scoperto": "In each cell the most recent campaign, an older one where it is deeper than the threshold: the wall as it was when most exposed",
+  "Il composito fatto di nuovo come era stato fatto, dalle campagne come sono ora": "The composite made again as it was made, from the campaigns as they are now",
+  "le patch scelgono le foto di un'area, ma questo prospetto è fatto dai raster di altri prospetti (il composito delle campagne): metti le patch sulle campagne e rifai il composito": "patches choose the photos of an area, but this elevation is made from the rasters of other elevations (the composite of the campaigns): patch the campaigns and make the composite again"
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",
@@ -5354,7 +5366,11 @@
   "Scheda di confronto di {0} campagne scritta:\n{1}\n{2}": "Comparison sheet of {0} campaigns written:\n{1}\n{2}",
   "Accanto all'immagine c'è già {0}: sovrascriverlo?": "Beside the image there is already {0}: overwrite it?",
   "Lasciate fuori: {0}": "Left out: {0}",
-  "{0} campagne nel gruppo: {1}": "{0} campaigns in the group: {1}"
+  "{0} campagne nel gruppo: {1}": "{0} campaigns in the group: {1}",
+  "Composito di {0} campagne: una più vecchia prende la cella se è più profonda di {1} m": "Composite of {0} campaigns: an older one takes the cell where it is deeper by {1} m",
+  "Per ogni cella la superficie della campagna più recente, sostituita da quella di una più vecchia dove è più profonda della soglia o dove la recente non ha nulla: il muro com'era quando era più scoperto. Il composito va nel chunk «{0}»{1}.": "In each cell the surface of the most recent campaign, replaced by that of an older one where it is deeper than the threshold or where the recent one has nothing: the wall as it was when most exposed. The composite goes into the chunk «{0}»{1}.",
+  "Composito «{0}»: da rifare, una campagna è cambiata": "Composite «{0}»: to make again, a campaign has changed",
+  "Composito «{0}»": "Composite «{0}»"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",

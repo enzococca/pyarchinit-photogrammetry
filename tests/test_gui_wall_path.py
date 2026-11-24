@@ -702,3 +702,110 @@ def test_the_sheet_step_of_the_pane(make, monkeypatch, tmp_path):
     pane.b_sheet.click()
     w.runner.wait()
     assert open(out, "rb").read(3) == b"\xff\xd8\xff" and (tmp_path / "pane.pdf").exists()
+
+
+def _tip_of(w, eid) -> str:
+    from PySide6.QtWidgets import QTreeWidgetItemIterator
+
+    w.workspace.populate(w.doc)
+    it = QTreeWidgetItemIterator(w.workspace)
+    while it.value():
+        data = it.value().data(0, 0x0100)
+        if isinstance(data, tuple) and data and data[0] == "elevation" and data[2]["id"] == eid:
+            return it.value().toolTip(0)
+        it += 1
+    raise AssertionError(f"no elevation {eid} in the workspace")
+
+
+def test_composite_from_the_menu_stale_said_and_left_by_hand(make, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import elevation_composite as C
+    from pyarchinit_photogrammetry.engine import elevation_groups as G
+    from pyarchinit_photogrammetry.engine import patches as P
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+    from pyarchinit_photogrammetry.gui import dialogs
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = make(chunks=2)
+    a, b = w.chs
+    frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
+    entry = E.build_elevation(a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
+    (_ch, new), = G.build_on_chunks(w.doc, a, entry, [b], dates={a.key: "2017-11-05", b.key: "2022-11-03"})["built"]
+    asked = []
+
+    def ask(parent, title, fields, intro=""):
+        asked.append({f.name: f for f in fields})
+        return {"threshold": 0.2, "name": "Composito del muro", "match": True}
+
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(ask))
+    _menu_entry(w, monkeypatch, lambda: w._workspace_menu("elevation", b, new, QPoint(0, 0)),
+                mw.tr("Composito delle campagne..."))
+    w.runner.wait()
+    (fields,) = asked
+    assert fields["threshold"].default == C.DEEPER and fields["match"].default is True
+    (comp,) = [e for e in E.elevations(a) if e["kind"] == "composite"]
+    assert comp["name"] == "Composito del muro" and comp["threshold"] == 0.2
+    assert w.chunk is a and w.drawings_frame == comp["id"]                 # shown
+    assert not C.is_stale(w.doc, a, comp)
+    stale_text = mw.tr("Composito da rifare: una campagna è cambiata dopo che è stato fatto")
+    assert stale_text not in _tip_of(w, comp["id"])
+
+    new["build"] = "0" * 12                                                # a campaign built again
+    assert stale_text in _tip_of(w, comp["id"])
+    w.show_elevation(comp)
+    assert stale_text in w.statusBar().currentMessage()
+
+    # made again from the menu of the composite: the same entry, current
+    _menu_entry(w, monkeypatch, lambda: w._workspace_menu("elevation", a, comp, QPoint(0, 0)),
+                mw.tr("Rifai il composito"))
+    w.runner.wait()
+    (again,) = [e for e in E.elevations(a) if e["kind"] == "composite"]
+    assert again["id"] == comp["id"] and again["threshold"] == 0.2 and len(asked) == 1   # no dialog
+    assert not C.is_stale(w.doc, a, again) and stale_text not in _tip_of(w, comp["id"])
+
+    # the patch tool on it warns
+    w.show_elevation(again)
+    w.said.clear()
+    w.start_patch()
+    assert any(mw.tr(P.COMPOSITE_IT) in t for t in _texts(w))
+    assert not w.draw_actions["patch"].isChecked() if "patch" in w.draw_actions else True
+
+    # the chunk moved: the composite is listed to be made by hand, with no step for it
+    t = np.array(a.transform, float)
+    t[0, 3] += 0.05
+    a.transform = t
+    steps, by_hand, _versions = w._rebuild_plan(a)
+    assert again["name"] in by_hand and again["name"] not in [name for name, _fn in steps]
+    assert entry["name"] in [name for name, _fn in steps]
+
+
+def test_composite_step_of_the_pane(make, monkeypatch):
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.gui import dialogs
+
+    w = make(chunks=2)
+    pane = w.wall_pane
+    pane.s_resolution.setValue(RES)
+    pane.c_snap.setChecked(False)
+    _trace(w)
+    assert w.wall_build()
+    w.runner.wait()
+    assert not pane.b_composite.isEnabled() and not pane.b_recomposite.isEnabled()
+    a, b = w.chs
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"chunks": [b.key], f"date_{b.key}": "2022-11-03"}))
+    pane.b_campaigns.click()
+    w.runner.wait()
+    assert pane.b_composite.isEnabled() and not pane.b_recomposite.isEnabled()
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"threshold": 0.15, "name": "", "match": False}))
+    pane.b_composite.click()
+    w.runner.wait()
+    (comp,) = [e for e in E.elevations(a) if e["kind"] == "composite"]
+    assert comp["colours_matched"] is False and pane.b_recomposite.isEnabled()
+    assert "composito" in pane.state_text("campaigns").lower()
+    pane.b_recomposite.click()
+    w.runner.wait()
+    assert [e["id"] for e in E.elevations(a) if e["kind"] == "composite"] == [comp["id"]]
