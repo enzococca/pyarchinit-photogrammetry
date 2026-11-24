@@ -588,7 +588,13 @@ def _campaigns(doc, source, entry: dict, chunks: str, dates: Optional[str], same
             when[find(label.strip()).key] = G.parse_date(day)
         except ValueError as exc:
             raise typer.BadParameter(str(exc), param_hint="--dates") from None
-    out = G.build_on_chunks(doc, source, entry, targets, same_frame=same_frame, dates=when, progress=print_progress)
+    failure = None
+    try:
+        out = G.build_on_chunks(doc, source, entry, targets, same_frame=same_frame, dates=when,
+                                progress=print_progress)
+    except Exception as exc:  # the campaigns built before it are kept, said and saved
+        failure = exc
+        out = getattr(exc, "campaigns", None) or {"group": None, "built": [], "refused": [], "empty": []}
     built = {id(ch): new for ch, new in out["built"]}
     refused = {r["chunk"]: r["reason"] for r in out["refused"]}
     for ch in targets:
@@ -602,7 +608,10 @@ def _campaigns(doc, source, entry: dict, chunks: str, dates: Optional[str], same
     if out["built"]:
         doc.save()
         typer.echo(f"group {out['group']['id']} of {entry.get('name')!r}: {len(out['group']['members'])} campaigns")
-    else:
+    if failure is not None:
+        typer.echo(f"Error: {failure}", err=True)
+        raise typer.Exit(1)
+    if not out["built"]:
         raise typer.Exit(1)
 
 

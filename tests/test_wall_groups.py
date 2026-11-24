@@ -40,6 +40,7 @@ def test_the_second_campaign_lies_on_the_same_pixels(two):
     assert group["id"].startswith("g") and len(group["id"]) == 9 and group["composite"] is None
     again = G.build_on_chunks(doc, b, new, [a, b])                              # from a member: the same group
     assert again["built"] == [] and [r["reason"] for r in again["refused"]] == ["already in the group"] * 2
+    assert [r["code"] for r in again["refused"]] == ["already"] * 2
     assert G.groups(a) == [group] and G.groups(b) == []
 
 
@@ -91,7 +92,7 @@ def test_local_chunks_need_the_same_frame_said(tmp_path, wall_dataset):
     out = G.build_on_chunks(doc, a, entry, [b])
     assert out["built"] == [] and out["empty"] == []
     (refused,) = out["refused"]
-    assert refused["chunk"] == b.label and "same_frame" in refused["reason"]
+    assert refused["chunk"] == b.label and "same_frame" in refused["reason"] and refused["code"] == "local"
     assert E.elevations(b) == [] and G.groups(a) == []
     out = G.build_on_chunks(doc, a, entry, [b], same_frame=True)
     assert [c for c, _e in out["built"]] == [b] and len(G.groups(a)[0]["members"]) == 2
@@ -103,6 +104,7 @@ def test_another_system_is_refused_and_the_others_are_built(tmp_path, wall_datas
     out = G.build_on_chunks(doc, a, entry, [b, c])
     (refused,) = out["refused"]
     assert refused["chunk"] == b.label and "EPSG:32633" in refused["reason"] and "EPSG:32634" in refused["reason"]
+    assert refused["code"] == "crs"
     assert [ch for ch, _e in out["built"]] == [c] and E.elevations(b) == []
     assert [m["chunk"] for m in G.groups(a)[0]["members"]] == [a.key, c.key]
 
@@ -177,9 +179,13 @@ def test_command_line_path_and_campaigns(two):
     r = runner.invoke(app, ["elevation", project, "--trace", "1,2,3,4", "--scale", "wall"])
     assert r.exit_code == 2 and "--circle" in r.output
     (x0, y0), (x1, y1) = info["face"][:2]
-    r = runner.invoke(app, ["elevation", project, "--trace", f"{x0},{y0},{x1},{y1}", "--side", "left",
-                            "--resolution", "0.05", "--front", "0.3", "--back", "0.3", "--name", "Lato"])
-    assert r.exit_code == 0, r.output
+    for side, name in (("left", "Lato sinistro"), ("right", "Lato destro")):
+        r = runner.invoke(app, ["elevation", project, "--trace", f"{x0},{y0},{x1},{y1}", "--side", side,
+                                "--resolution", "0.05", "--front", "0.3", "--back", "0.3", "--name", name])
+        assert r.exit_code == 0, r.output
+    planes = {e["name"]: e["frame"] for e in E.elevations(Document.open(project).chunks[0])}
+    assert x1 > x0 and y1 == y0                                                 # the first leg runs east
+    assert planes["Lato sinistro"]["u_axis"][0] < -0.99 and planes["Lato destro"]["u_axis"][0] > 0.99
 
     r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--chunks", "Campagna 2",
                             "--dates", "Campagna 2=2022-11-04"])
@@ -194,3 +200,71 @@ def test_command_line_path_and_campaigns(two):
     assert r.exit_code == 2 and "--chunk" in r.output
     r = runner.invoke(app, ["elevation", project, "--like", entry["id"], "--chunks", "Campagna 2", "--snap-band", "1"])
     assert r.exit_code == 2 and "--snap-band" in r.output
+
+
+def test_a_chunk_without_a_model_is_refused_with_its_code(two):
+    doc, (a, b), _info, entry = two
+    (b.data_dir / "model.ply").unlink()
+    (refused,) = G.build_on_chunks(doc, a, entry, [b])["refused"]
+    assert refused == {"chunk": b.label, "reason": G.NO_MODEL, "code": "no_model"}
+
+
+def test_a_replaced_member_keeps_its_date_and_the_reference_follows(two):
+    doc, (a, b), _info, entry = two
+    (_ch, new), = G.build_on_chunks(doc, a, entry, [b])["built"]
+    (group,) = G.groups(a)
+    G.set_date(group, b.key, new["id"], "2022-12-25")                          # set by hand
+    E.remove_elevation(b, new["id"])
+    (_ch, newer), = G.build_on_chunks(doc, a, entry, [b])["built"]
+    assert [(m["entry"], m["date"]) for m in group["members"] if m["chunk"] == b.key] == [(newer["id"], "2022-12-25")]
+    E.remove_elevation(b, newer["id"])
+    G.build_on_chunks(doc, a, entry, [b], dates={b.key: "2023-03-03"})        # a date given wins
+    assert [m["date"] for m in group["members"] if m["chunk"] == b.key] == ["2023-03-03"]
+
+    (member,) = [e for e in E.elevations(b)]
+    E.remove_elevation(a, entry["id"])                                         # the reference's own elevation
+    (_ch, again), = G.build_on_chunks(doc, b, member, [a])["built"]
+    assert G.groups(a) == [group] and group["reference"] == again["id"]
+    assert [m["entry"] for m in group["members"] if m["chunk"] == a.key] == [again["id"]]
+
+
+def test_the_reference_date_given_when_the_group_is_made(two):
+    doc, (a, b), _info, entry = two
+    G.build_on_chunks(doc, a, entry, [b], dates={a.key: "2016-01-02"})
+    assert [m["date"] for m in G.groups(a)[0]["members"]] == ["2016-01-02", "2022-11-03"]
+
+
+def test_a_duplicate_of_the_reference_takes_no_group(two):
+    from pyarchinit_photogrammetry.engine.chunks import duplicate_chunk
+
+    doc, (a, b), _info, entry = two
+    G.build_on_chunks(doc, a, entry, [b])
+    dup = duplicate_chunk(doc, a)
+    assert G.groups(dup) == [] and len(G.groups(a)) == 1
+
+
+def test_command_line_campaigns_stop_on_an_error_and_keep_what_was_built(tmp_path, wall_dataset, monkeypatch):
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.document import Document
+
+    doc, (a, b, c), _info, entry = wall_campaigns(tmp_path / "doc", wall_dataset, chunks=3, dates=CAMPAIGN_DATES)
+    project = str(doc.path)
+    real = E.build_like
+
+    def build_like(chunk, *args, **kw):
+        if chunk.label == c.label:
+            raise ValueError("the third campaign broke")
+        return real(chunk, *args, **kw)
+
+    monkeypatch.setattr(E, "build_like", build_like)
+    r = CliRunner().invoke(app, ["elevation", project, "--like", entry["id"], "--chunks", f"{b.label},{c.label}"])
+    assert r.exit_code == 1 and isinstance(r.exception, SystemExit), (r.output, r.exception)
+    assert f"{b.label}: built" in r.output and "Error: the third campaign broke" in r.output
+    saved = Document.open(project)
+    (group,) = G.groups(saved.chunks[0])
+    assert [m["chunk"] for m in group["members"]] == [a.key, b.key]
+    (kept,) = E.elevations(saved.chunks[1])
+    assert (saved.chunks[1].data_dir / "elevations" / kept["id"]).is_dir()
+    assert E.elevations(saved.chunks[2]) == []

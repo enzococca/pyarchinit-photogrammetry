@@ -14,6 +14,7 @@ Members are ``(chunk key, elevation id)`` pairs: an elevation removed from its c
 chunk."""
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import uuid
@@ -30,6 +31,7 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 KEY = "elevation_groups"
 ALREADY = "already in the group"
 NO_MODEL = "the chunk has no model"
+CODES = ("already", "no_model", "crs", "local")  # why a chunk is refused, in the records of build_on_chunks
 
 
 # ---------------------------------------------------------------- dates
@@ -138,20 +140,24 @@ def members(doc, chunk: Chunk, group: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- the build
-def _refusal(source: Chunk, entry: dict, chunk: Chunk, same_frame: bool) -> str | None:
-    """Why ``build_like`` would refuse the elevation ``entry`` of ``source`` on ``chunk`` (the same words), None
-    when it would not."""
+def _refusal(source: Chunk, entry: dict, chunk: Chunk, same_frame: bool) -> dict | None:
+    """Why ``build_like`` would refuse the elevation ``entry`` of ``source`` on ``chunk``: ``{"code", "reason"}``
+    (``code`` one of :data:`CODES`; for ``crs`` also ``theirs`` and ``mine``, the two systems), None when it would
+    not."""
     from ..core import crs as crs_mod
 
     model = chunk.product_path("model")
     if not model or not model.exists():
-        return NO_MODEL
+        return {"code": "no_model", "reason": NO_MODEL}
     theirs, mine = entry.get("crs") or getattr(source, "crs", None), getattr(chunk, "crs", None)
     if not E.same_crs(theirs, mine):
-        return f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same reference system"
+        return {"code": "crs", "theirs": theirs, "mine": mine,
+                "reason": f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same "
+                          "reference system"}
     if chunk is not source and crs_mod.is_local(mine) and not same_frame:
-        return ("both chunks are in a local frame: their worlds need not agree; if they are in the same frame "
-                "(aligned, merged, oriented on the same markers) say it (same_frame)")
+        return {"code": "local", "reason": "both chunks are in a local frame: their worlds need not agree; if they "
+                                           "are in the same frame (aligned, merged, oriented on the same markers) "
+                                           "say it (same_frame)"}
     return None
 
 
@@ -177,12 +183,16 @@ def build_on_chunks(doc, chunk: Chunk, entry: dict, chunks, same_frame: bool = F
     (:func:`.elevation.build_like`), each build a member of the group of ``entry`` (:func:`group_of`, else
     :func:`new_group` on ``chunk`` once a first build is done), the group written after every chunk.
 
-    Returns ``{"group", "built": [(chunk, entry)], "refused": [{"chunk": label, "reason"}], "empty": [labels]}``:
+    Returns ``{"group", "built": [(chunk, entry)], "refused": [{"chunk": label, "code", "reason"}], "empty":
+    [labels]}`` (``code``: :data:`CODES`; a ``crs`` refusal says ``theirs`` and ``mine`` too):
     refused, a chunk whose elevation is already a member (``already in the group``), one in another reference
     system, two local chunks without ``same_frame``, a chunk without a model; empty, a chunk whose relief has no
     finite cell on the grid (the wall is not in its model): that build is removed again. A build that fails or is
-    cancelled leaves no entry and no folder behind and its exception goes on; the chunks built before it stay in
-    the group. ``dates``: ``{chunk key: "YYYY-MM-DD"}`` in place of :func:`campaign_date`."""
+    cancelled leaves no entry and no folder behind and its exception goes on, with what was done before it as its
+    attribute ``campaigns`` (the dictionary returned otherwise); the chunks built before it stay in the group.
+    ``dates``: ``{chunk key: "YYYY-MM-DD"}`` in place of :func:`campaign_date` (the key of ``chunk``: the
+    date of the reference when the group is made); a member whose elevation was removed and is built again keeps its
+    record and its date (unless ``dates`` gives one)."""
     progress = as_progress(progress)
     dates = dates or {}
     chunks = list(chunks)
@@ -193,10 +203,10 @@ def build_on_chunks(doc, chunk: Chunk, entry: dict, chunks, same_frame: bool = F
         taken = group["members"] if group is not None else [{"chunk": chunk.key, "entry": entry["id"]}]
         live = [m for m in taken if m.get("chunk") == ch.key
                 and any(e.get("id") == m.get("entry") for e in E.elevations(ch))]
-        reason = ALREADY if live else _refusal(chunk, entry, ch, same_frame)
-        if reason is not None:
-            out["refused"].append({"chunk": ch.label, "reason": reason})
-            log.info("Elevation %s on %s refused: %s", entry.get("name"), ch.label, reason)
+        refusal = {"code": "already", "reason": ALREADY} if live else _refusal(chunk, entry, ch, same_frame)
+        if refusal is not None:
+            out["refused"].append({"chunk": ch.label, **refusal})
+            log.info("Elevation %s on %s refused: %s", entry.get("name"), ch.label, refusal["reason"])
             continue
         before = _folders(ch)
         n = len(E.elevations(ch))
@@ -205,8 +215,10 @@ def build_on_chunks(doc, chunk: Chunk, entry: dict, chunks, same_frame: bool = F
                                workers=workers, source=chunk, same_frame=same_frame)
         except E.NoSurface:
             new = None
-        except BaseException:
+        except BaseException as exc:
             _clean(ch, before, n)
+            with contextlib.suppress(AttributeError, TypeError):
+                exc.campaigns = out  # what was done before it, for the caller to say and save
             raise
         if new is None or _empty(ch, new):
             if new is not None:
@@ -217,11 +229,31 @@ def build_on_chunks(doc, chunk: Chunk, entry: dict, chunks, same_frame: bool = F
             continue
         if group is None:
             group = out["group"] = new_group(chunk, entry)
-        group["members"] = [m for m in group["members"] if m.get("chunk") != ch.key]  # a removed one replaced
-        day = dates.get(ch.key, dates.get(str(ch.key)))
-        add_member(group, ch, new, day)
+            own = _given(dates, chunk.key)
+            if own is not None:
+                set_date(group, chunk.key, entry["id"], own)
+        _place(group, ch, new, _given(dates, ch.key))
         out["built"].append((ch, new))
     return out
+
+
+def _given(dates: dict, key):
+    return dates.get(key, dates.get(str(key)))
+
+
+def _place(group: dict, chunk: Chunk, entry: dict, date) -> None:
+    """The elevation ``entry`` of ``chunk`` a member of ``group``: in the place of the record of that chunk whose
+    elevation was removed - its date kept unless ``date`` is given, the group's ``reference`` following it when
+    it was the reference - else a new record."""
+    old = next((m for m in group["members"] if m.get("chunk") == chunk.key), None)
+    if old is None:
+        add_member(group, chunk, entry, date)
+        return
+    group["members"] = [m for m in group["members"] if m is old or m.get("chunk") != chunk.key]
+    if group.get("reference") == old.get("entry"):
+        group["reference"] = entry["id"]
+    old.update({"entry": entry["id"], "label": chunk.label,
+                "date": parse_date(date) if date is not None else old.get("date")})
 
 
 def _clean(chunk: Chunk, before: set[str], count: int) -> None:
