@@ -423,6 +423,7 @@ class WorkspaceTree(QTreeWidget):
                                         tr("Muro tracciato in pianta: u = lunghezza lungo la traccia"))
                     elif e.get("scale") == "wall":
                         tip += "\n" + tr("Scala sulla parete: u = lunghezza lungo il muro")
+                    tip += campaign_tip(document, ch, e)
                     it.setToolTip(0, tip)
                     el.addChild(it)
                     for child in elevation_drawing_items(ch, e):  # the drawings kept with it, under it
@@ -3092,6 +3093,20 @@ def _label_style_dialog_class():
 
 LabelStyleDialog = _label_style_dialog_class()
 LayersPane.LabelStyleDialog = LabelStyleDialog
+
+
+def campaign_tip(document, chunk, entry: dict) -> str:
+    """The line of the tooltip of an elevation that is a campaign of a wall (a member of a group,
+    :mod:`..engine.elevation_groups`): its group and its date; empty for one in no group."""
+    from ..engine import elevation_groups as G
+
+    found = G.group_of(document, chunk, entry.get("id")) if document is not None else None
+    if found is None:
+        return ""
+    _ref, group = found
+    record = next(m for m in group["members"] if m.get("chunk") == chunk.key and m.get("entry") == entry.get("id"))
+    return "\n" + tr("Campagna del gruppo «{0}» ({1} campagne), data {2}", group.get("name") or group["id"],
+                     len(group["members"]), record.get("date") or tr("non nota"))
 
 
 # the drawings kept with an elevation, as rows under it in the workspace: (kind, label, icon)

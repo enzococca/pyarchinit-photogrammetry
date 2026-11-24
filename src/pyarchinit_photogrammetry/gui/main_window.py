@@ -16939,6 +16939,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_elevation(payload)))
             menu.addAction(icon("line"), tr("Disegni da un altro prospetto..."),
                            on(lambda: self.transfer_elevation_drawings(payload, chunk)))
+            menu.addAction(icon("elevation"), tr("Stesso prospetto su altri chunk..."),
+                           lambda: self.wall_campaigns(payload, chunk))
             remove(tr("Rimuovi"))
         if menu.actions():
             menu.exec(pos)

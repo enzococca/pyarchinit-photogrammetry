@@ -474,3 +474,110 @@ def test_the_pane_fits_the_right_dock(make, qapp):
     w.show_wall_path_pane()
     qapp.processEvents()
     assert pane.minimumSizeHint().width() <= 260
+
+
+def _menu_entry(w, monkeypatch, open_menu, text):
+    """Trigger the entry ``text`` of the context menu ``open_menu()`` opens (the window's QMenu stood in by one whose
+    exec triggers that entry)."""
+    from PySide6.QtWidgets import QMenu
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    found = []
+
+    class Menu(QMenu):
+        def exec(self, *_a, **_k):
+            for a in self.actions():
+                if a.text() == text:
+                    found.append(a)
+                    a.trigger()
+                    return a
+            return None
+
+    monkeypatch.setattr(mw, "QMenu", Menu)
+    open_menu()
+    assert found, f"no menu entry {text!r}"
+
+
+def test_campaigns_from_the_workspace_menu(make, monkeypatch):
+    from PySide6.QtCore import QPoint
+
+    from pyarchinit_photogrammetry.engine import elevation as E
+    from pyarchinit_photogrammetry.engine import elevation_groups as G
+    from pyarchinit_photogrammetry.engine.wall_trace import path_from_trace
+    from pyarchinit_photogrammetry.gui import dialogs
+    from PySide6.QtWidgets import QTreeWidgetItemIterator
+
+    from pyarchinit_photogrammetry.gui import main_window as mw
+
+    w = make(chunks=3)
+    a, b, c = w.chs
+    c.crs = "EPSG:32634"                                                    # another system: offered, not ticked
+    frame, _r = path_from_trace(a, w.info["face"], "right", snap=False)
+    entry = E.build_elevation(a, frame, RES, "Muro", (-0.5, 0.5), max_angle=89.0, heights=(100.0, 102.0))
+    asked = []
+
+    def ask(parent, title, fields, intro=""):
+        asked.append({f.name: f for f in fields})
+        return {"chunks": [b.key], f"date_{b.key}": "2022-11-03", f"date_{c.key}": ""}
+
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(ask))
+    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: pytest.fail("no question for chunks in a system"))
+    _menu_entry(w, monkeypatch, lambda: w._workspace_menu("elevation", a, entry, QPoint(0, 0)),
+                mw.tr("Stesso prospetto su altri chunk..."))
+    w.runner.wait()
+    (fields,) = asked
+    assert [v for v, _lab in fields["chunks"].choices] == [b.key, c.key] and fields["chunks"].default == [b.key]
+    assert fields["chunks"].kind == "checklist" and fields[f"date_{b.key}"].kind == "text"
+    (group,) = G.groups(a)
+    assert [(m["chunk"], m["date"]) for m in group["members"]] == [(a.key, None), (b.key, "2022-11-03")]
+    (new,) = E.elevations(b)
+    assert new["grid_of"] == entry["id"]
+    said = " ".join(t for _k, t in w.said)
+    assert b.label in said and "1" in said
+    w.workspace.populate(w.doc)                                             # the tooltip of a member
+    tips = []
+    for tw in [w.workspace]:
+        it = QTreeWidgetItemIterator(tw)
+        while it.value():
+            data = it.value().data(0, 0x0100)
+            if isinstance(data, tuple) and data and data[0] == "elevation" and data[2]["id"] == new["id"]:
+                tips.append(it.value().toolTip(0))
+            it += 1
+    assert tips and "Muro" in tips[0] and "2022-11-03" in tips[0]
+
+    # two local chunks: the question asked, declined: nothing built
+    for ch in w.chs:
+        ch.crs = "LOCAL"
+    entry["crs"] = "LOCAL"                                                  # a project in a local frame
+    questions = []
+    monkeypatch.setattr(dialogs, "choice", lambda *a, **k: questions.append(a) or None)
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"chunks": [c.key], f"date_{b.key}": "", f"date_{c.key}": ""}))
+    assert not w.wall_campaigns(entry, a)
+    w.runner.wait()
+    assert questions and E.elevations(c) == [] and len(G.groups(a)[0]["members"]) == 2
+
+
+def test_campaigns_step_of_the_pane(make, monkeypatch):
+    from pyarchinit_photogrammetry.engine import elevation_groups as G
+    from pyarchinit_photogrammetry.gui import dialogs
+    from pyarchinit_photogrammetry.gui.wall_path_pane import STEPS
+
+    assert STEPS[-1] == "campaigns"
+    w = make(chunks=2)
+    pane = w.wall_pane
+    pane.s_resolution.setValue(RES)
+    pane.c_snap.setChecked(False)
+    _trace(w)
+    assert pane.state("campaigns") == "todo" and not pane.b_campaigns.isEnabled()
+    assert w.wall_build()
+    w.runner.wait()
+    assert pane.b_campaigns.isEnabled()
+    a, b = w.chs
+    monkeypatch.setattr(dialogs.ParamDialog, "ask", staticmethod(
+        lambda parent, title, fields, intro="": {"chunks": [b.key], f"date_{b.key}": "2022-11-03"}))
+    pane.b_campaigns.click()
+    w.runner.wait()
+    assert len(G.groups(a)[0]["members"]) == 2
+    assert pane.state("campaigns") == "done" and "2" in pane.state_text("campaigns")

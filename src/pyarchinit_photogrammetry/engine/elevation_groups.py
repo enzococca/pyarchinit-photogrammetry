@@ -29,6 +29,7 @@ log = logging.getLogger("pyarchinit_photogrammetry")
 
 KEY = "elevation_groups"
 ALREADY = "already in the group"
+NO_MODEL = "the chunk has no model"
 
 
 # ---------------------------------------------------------------- dates
@@ -144,7 +145,7 @@ def _refusal(source: Chunk, entry: dict, chunk: Chunk, same_frame: bool) -> str 
 
     model = chunk.product_path("model")
     if not model or not model.exists():
-        return "the chunk has no model"
+        return NO_MODEL
     theirs, mine = entry.get("crs") or getattr(source, "crs", None), getattr(chunk, "crs", None)
     if not E.same_crs(theirs, mine):
         return f"the elevation is in {theirs}, the chunk in {mine}: the same grid needs the same reference system"

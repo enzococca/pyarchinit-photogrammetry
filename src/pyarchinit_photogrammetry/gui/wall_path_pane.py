@@ -1,7 +1,8 @@
 """*Muro tracciato in pianta* as a pane that stays open: the elevation of a wall whose line is clicked on the plan
 (:mod:`..engine.wall_trace`, :class:`..engine.wall_path.WallPath`) in four steps, each with its state - the line
 traced on the orthophoto or the DEM, the line snapped onto the face of the model (or kept as clicked), the side the
-wall is seen from with the heights and the depths, and the build.
+wall is seen from with the heights and the depths, the build, and the same elevation on the other campaigns of the
+wall (other chunks of the project, already placed together) as its group.
 
 The pane holds the widgets and the line of the active chunk; the work - the drawing lent by the 2D view, the snap
 and the build in the worker, the lines on the plan - is the window's (:mod:`.wall_path_actions`)."""
@@ -18,7 +19,7 @@ from ..engine.wall_trace import SNAP_BAND
 from .i18n import number, tr
 from .icons import icon
 
-STEPS = ("trace", "snap", "side", "build")
+STEPS = ("trace", "snap", "side", "build", "campaigns")
 STATE_ICONS = {"todo": "step_todo", "done": "step_done", "running": "step_running"}
 SIDES = (("auto", "Dove sono le foto"), ("left", "A sinistra della traccia"), ("right", "A destra della traccia"))
 
@@ -202,10 +203,23 @@ class WallPathPane(QWidget):
         self.b_build = QPushButton(icon("elevation"), tr("Costruisci il prospetto"))
         form.addRow("", self.b_build)
         step(3, "build", tr("Prospetto"), body)
+
+        # 5. the other campaigns
+        body = QWidget()
+        form = QVBoxLayout(body)
+        form.setContentsMargins(0, 0, 0, 0)
+        note = QLabel(tr("Lo stesso prospetto, sulla stessa griglia, sugli altri chunk del muro (altre campagne "
+                         "già allineate insieme): le ortofoto si confrontano pixel per pixel."))
+        note.setWordWrap(True)
+        form.addWidget(note)
+        self.b_campaigns = QPushButton(icon("elevation"), tr("Stesso prospetto su altri chunk..."))
+        form.addWidget(self.b_campaigns)
+        step(4, "campaigns", tr("Altre campagne"), body)
         lay.addStretch(1)
 
         self.b_trace.clicked.connect(lambda: self.window.wall_trace_start())
         self.b_build.clicked.connect(lambda: self.window.wall_build())
+        self.b_campaigns.clicked.connect(lambda: self.window.wall_campaigns())
         self.b_snap.clicked.connect(lambda: self.window.wall_snap())
         self.c_snap.toggled.connect(self._snap_toggled)
         self.r_snapped.toggled.connect(lambda _on: self._line_changed())
@@ -216,7 +230,7 @@ class WallPathPane(QWidget):
 
     # ------------------------------------------------------------------ state
     def _busy_changed(self, busy: bool) -> None:
-        if not busy and self.running in ("snap", "build"):
+        if not busy and self.running in ("snap", "build", "campaigns"):
             with contextlib.suppress(RuntimeError):
                 self.running = None
                 self.update_states()
@@ -320,7 +334,26 @@ class WallPathPane(QWidget):
             return "done" if (self.snapped is not None or not self.c_snap.isChecked()) else "todo"
         if step == "side":
             return "done" if self.clicked is not None and self.s_v1.value() > self.s_v0.value() else "todo"
+        if step == "campaigns":
+            return "done" if len(self.campaigns()) > 1 else "todo"
         return "done" if self.built is not None else "todo"
+
+    def built_entry(self) -> dict | None:
+        """The elevation built from the line shown, while it is in its chunk."""
+        if self.built is None or self.chunk is None:
+            return None
+        return next((e for e in (self.chunk.meta or {}).get("elevations") or [] if e.get("id") == self.built), None)
+
+    def campaigns(self) -> list[dict]:
+        """The member records of the group of the elevation built (:mod:`..engine.elevation_groups`), empty when
+        it is in none."""
+        from ..engine import elevation_groups as G
+
+        doc = getattr(self.window, "doc", None)
+        if self.built_entry() is None or doc is None:
+            return []
+        found = G.group_of(doc, self.chunk, self.built)
+        return list(found[1]["members"]) if found is not None else []
 
     def state_text(self, step: str) -> str:
         if step == "trace":
@@ -354,6 +387,14 @@ class WallPathPane(QWidget):
                 text += "\n" + tr("Peso delle foto: a sinistra {0}, a destra {1}", number(self.votes["left"], 2),
                                   number(self.votes["right"], 2))
             return text
+        if step == "campaigns":
+            if self.running == "campaigns":
+                return tr("Prospetto sugli altri chunk...")
+            members = self.campaigns()
+            if len(members) < 2:
+                return ""
+            return tr("{0} campagne nel gruppo: {1}", len(members), "; ".join(
+                f"{m.get('label')} ({m.get('date') or tr('data non nota')})" for m in members))
         if self.running == "build":
             return tr("Costruzione del prospetto...")
         return ""
@@ -375,4 +416,5 @@ class WallPathPane(QWidget):
         has = self.clicked is not None and self.running is None
         self.b_snap.setEnabled(has and self.c_snap.isChecked())
         self.b_build.setEnabled(has)
+        self.b_campaigns.setEnabled(self.running is None and self.built_entry() is not None)
         self.b_trace.setEnabled(self.running is None)

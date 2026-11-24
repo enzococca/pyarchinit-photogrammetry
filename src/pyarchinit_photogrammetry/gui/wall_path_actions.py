@@ -54,6 +54,41 @@ def refusal_text(exc) -> str:
     return tr("La linea non può essere la traccia di un muro: tracciala di nuovo.")
 
 
+def reason_text(reason: str) -> str:
+    """The words of the window for a chunk :func:`..engine.elevation_groups.build_on_chunks` refused."""
+    from ..engine import elevation_groups as G
+
+    if reason == G.ALREADY:
+        return tr("ha già un prospetto del gruppo")
+    if reason == G.NO_MODEL:
+        return tr("non ha un modello")
+    if "same_frame" in reason:
+        return tr("è in un sistema locale: non è stato detto che è nello stesso sistema")
+    import re
+
+    m = re.match(r"the elevation is in (.+), the chunk in (.+): the same grid", reason)
+    if m:
+        return tr("è in {0}, il prospetto in {1}: la stessa griglia vuole lo stesso sistema di riferimento",
+                  m.group(2), m.group(1))
+    return reason
+
+
+def campaigns_text(out: dict) -> str:
+    """The message at the end of *Stesso prospetto su altri chunk...*: the chunks built, refused (with their reasons)
+    and empty."""
+    lines = []
+    if out["built"]:
+        names = ", ".join(c.label for c, _e in out["built"])
+        lines.append(tr("Costruito su {0} chunk: {1}.", len(out["built"]), names))
+    else:
+        lines.append(tr("Nessun prospetto costruito."))
+    for r in out["refused"]:
+        lines.append(tr("«{0}» lasciato fuori: {1}.", r["chunk"], reason_text(r["reason"])))
+    for label in out["empty"]:
+        lines.append(tr("«{0}»: il muro non è nel suo modello (nessuna cella), lasciato fuori.", label))
+    return "\n".join(lines)
+
+
 def no_surface_text() -> str:
     from ..engine.elevation import FACE_ROWS
 
@@ -318,6 +353,85 @@ class WallPathActions:
         pane.update_states()
         started = self.run_task("Prospetto del muro tracciato", work, done, refresh=False)
         if not started:
+            pane.running = None
+            pane.update_states()
+        return bool(started)
+
+    # ------------------------------------------------------------ the other campaigns
+    def wall_campaigns(self, entry=None, chunk=None) -> bool:
+        """*Stesso prospetto su altri chunk...*: the elevation ``entry`` of ``chunk`` (default: the one the pane
+        built, in its chunk) built again on the other chunks ticked, each with its date, as the group of the wall
+        (:func:`..engine.elevation_groups.build_on_chunks`) in one task; at its end the built, the refused with
+        their reasons and the empty ones in one message."""
+        from ..core import crs as crs_mod
+        from ..engine import elevation as E
+        from ..engine import elevation_groups as G
+        from . import dialogs
+        from .dialogs import Field
+
+        if entry is None:
+            pane = getattr(self, "wall_pane", None)
+            entry = pane.built_entry() if pane is not None else None
+            chunk = pane.chunk if entry is not None else None
+        chunk = chunk if chunk is not None else self.chunk
+        if entry is None or chunk is None:
+            self._warn(tr("Costruisci prima il prospetto del muro: poi lo stesso prospetto va sugli altri chunk."))
+            return False
+        others = [c for c in self.doc.chunks if c is not chunk and c.product_path("model")
+                  and c.product_path("model").exists()]
+        if not others:
+            self._warn(tr("Nessun altro chunk del progetto ha un modello: lo stesso prospetto non ha dove andare."))
+            return False
+        mine = entry.get("crs") or chunk.crs
+        fields = [Field("chunks", tr("Chunk (altre campagne)"), [c.key for c in others if E.same_crs(mine, c.crs)],
+                        choices=[(c.key, f"{c.label}  ({c.crs or tr('locale')})") for c in others],
+                        kind="checklist")]
+        fields += [Field(f"date_{c.key}", tr("Data di «{0}» (AAAA-MM-GG)", c.label), G.campaign_date(c) or "",
+                         kind="text") for c in others]
+        v = dialogs.ParamDialog.ask(self, tr("Stesso prospetto su altri chunk"), fields, intro=tr(
+            "«{0}» costruito di nuovo, sulla stessa griglia, sui chunk spuntati: una campagna ciascuno, tenute "
+            "insieme come gruppo del muro. I chunk devono essere già allineati insieme e nello stesso sistema di "
+            "riferimento.", entry.get("name")))
+        if v is None:
+            return False
+        targets = [c for c in others if c.key in (v.get("chunks") or [])]
+        if not targets:
+            return False
+        dates = {}
+        for c in targets:
+            text = str(v.get(f"date_{c.key}") or "").strip()
+            try:
+                day = G.parse_date(text)
+            except ValueError:
+                self._warn(tr("La data di «{0}» si scrive AAAA-MM-GG, non «{1}».", c.label, text))
+                return False
+            if day is not None:
+                dates[c.key] = day
+        same_frame = False
+        if crs_mod.is_local(mine) and any(crs_mod.is_local(c.crs) for c in targets):
+            k = dialogs.choice(self, "question", tr("Stesso prospetto su altri chunk"), tr(
+                "I chunk sono in un sistema locale: le loro coordinate coincidono solo se sono stati allineati, uniti "
+                "o orientati sugli stessi marker. Lo sono?"), [tr("Sì, sono nello stesso sistema")])
+            if k != 0:
+                return False
+            same_frame = True
+        doc = self.doc
+        pane = getattr(self, "wall_pane", None)
+
+        def work(p):
+            return G.build_on_chunks(doc, chunk, entry, targets, same_frame=same_frame, dates=dates, progress=p)
+
+        def done(out):
+            if pane is not None:
+                pane.running = None
+                pane.update_states()
+            self._info(tr("Stesso prospetto su altri chunk"), campaigns_text(out))
+
+        if pane is not None and pane.built == entry.get("id"):
+            pane.running = "campaigns"
+            pane.update_states()
+        started = self.run_task("Stesso prospetto su altri chunk", work, done)
+        if not started and pane is not None:
             pane.running = None
             pane.update_states()
         return bool(started)

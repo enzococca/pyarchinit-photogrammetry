@@ -4009,7 +4009,23 @@
   "Quota più alta": "Highest height",
   "Prolunga prima": "Extend before",
   "Prolunga dopo": "Extend after",
-  "Su un muro tracciato in pianta non si fa una sezione: viene costruito il prospetto del muro.": "No section is made on a wall traced on the plan: the elevation of the wall is built."
+  "Su un muro tracciato in pianta non si fa una sezione: viene costruito il prospetto del muro.": "No section is made on a wall traced on the plan: the elevation of the wall is built.",
+  "Stesso prospetto su altri chunk...": "Same elevation on other chunks...",
+  "Stesso prospetto su altri chunk": "Same elevation on other chunks",
+  "non nota": "unknown",
+  "data non nota": "date unknown",
+  "ha già un prospetto del gruppo": "already has an elevation of the group",
+  "non ha un modello": "has no model",
+  "è in un sistema locale: non è stato detto che è nello stesso sistema": "is in a local frame: it was not said to be in the same frame",
+  "Nessun prospetto costruito.": "No elevation built.",
+  "Costruisci prima il prospetto del muro: poi lo stesso prospetto va sugli altri chunk.": "Build the elevation of the wall first: then the same elevation goes on the other chunks.",
+  "Nessun altro chunk del progetto ha un modello: lo stesso prospetto non ha dove andare.": "No other chunk of the project has a model: the same elevation has nowhere to go.",
+  "Chunk (altre campagne)": "Chunks (other campaigns)",
+  "I chunk sono in un sistema locale: le loro coordinate coincidono solo se sono stati allineati, uniti o orientati sugli stessi marker. Lo sono?": "The chunks are in a local frame: their coordinates agree only if they were aligned, merged or oriented on the same markers. Are they?",
+  "Sì, sono nello stesso sistema": "Yes, they are in the same frame",
+  "Lo stesso prospetto, sulla stessa griglia, sugli altri chunk del muro (altre campagne già allineate insieme): le ortofoto si confrontano pixel per pixel.": "The same elevation, on the same grid, on the other chunks of the wall (other campaigns already aligned together): the orthophotos compare pixel by pixel.",
+  "Altre campagne": "Other campaigns",
+  "Prospetto sugli altri chunk...": "Elevation on the other chunks..."
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",
@@ -5318,7 +5334,16 @@
   "Vertici spostati in media di {0} cm, al massimo di {1} cm": "Vertices moved by {0} cm on average, {1} cm at most",
   "Quote da {0} a {1} m": "Heights from {0} to {1} m",
   "Spostamento di ogni vertice: {0}": "Shift of each vertex: {0}",
-  "Peso delle foto: a sinistra {0}, a destra {1}": "Weight of the photos: on the left {0}, on the right {1}"
+  "Peso delle foto: a sinistra {0}, a destra {1}": "Weight of the photos: on the left {0}, on the right {1}",
+  "Campagna del gruppo «{0}» ({1} campagne), data {2}": "Campaign of the group “{0}” ({1} campaigns), date {2}",
+  "è in {0}, il prospetto in {1}: la stessa griglia vuole lo stesso sistema di riferimento": "is in {0}, the elevation in {1}: the same grid needs the same reference system",
+  "Costruito su {0} chunk: {1}.": "Built on {0} chunks: {1}.",
+  "«{0}» lasciato fuori: {1}.": "“{0}” left out: {1}.",
+  "«{0}»: il muro non è nel suo modello (nessuna cella), lasciato fuori.": "“{0}”: the wall is not in its model (no cell), left out.",
+  "Data di «{0}» (AAAA-MM-GG)": "Date of “{0}” (YYYY-MM-DD)",
+  "«{0}» costruito di nuovo, sulla stessa griglia, sui chunk spuntati: una campagna ciascuno, tenute insieme come gruppo del muro. I chunk devono essere già allineati insieme e nello stesso sistema di riferimento.": "“{0}” built again, on the same grid, on the chunks ticked: one campaign each, kept together as the group of the wall. The chunks must already be aligned together and in the same reference system.",
+  "La data di «{0}» si scrive AAAA-MM-GG, non «{1}».": "The date of “{0}” is written YYYY-MM-DD, not “{1}”.",
+  "{0} campagne nel gruppo: {1}": "{0} campaigns in the group: {1}"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",
