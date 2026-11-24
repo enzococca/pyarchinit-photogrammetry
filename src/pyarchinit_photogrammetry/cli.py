@@ -348,9 +348,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                                   "left visible"),
                   reduce: int = typer.Option(1, help="with --finish: one pixel in N (a whole number; default 1, "
                                              "the full resolution)"),
-                  max_hole: float = typer.Option(0.5, help="with --finish: metres - a hole larger than this across, "
-                                                 "or one without surface in the depth band (a door, a window), is "
-                                                 "an opening and stays open"),
+                  max_hole: float = typer.Option(0.5, help="with --finish: metres - a hole up to this across is "
+                                                 "filled; a larger one only where the relief has surface in it, "
+                                                 "else it is an opening (a door, a window) and stays open"),
                   skip_backlit: bool = typer.Option(False, "--skip-backlit", help="the photos taken against the "
                                                     "light (over 2 % of their pixels blown) left out of the build"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",

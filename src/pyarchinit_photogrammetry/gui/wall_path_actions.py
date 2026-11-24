@@ -542,8 +542,9 @@ class WallPathActions:
                           tip=tr("Toglie i cambi lenti di luce lungo il muro, e con loro anche la differenza vera di "
                                  "ombra fra parti del muro esposte diversamente")),
             dialogs.Field("max_hole", tr("Buco più grande da riempire (m)"), F.MAX_HOLE, minimum=0.0, maximum=100.0,
-                          decimals=2, tip=tr("Un buco più grande, o uno dove il rilievo non trova superficie (una "
-                                             "porta, una finestra), è un'apertura: resta aperto, mai muro finto")),
+                          decimals=2, tip=tr("I buchi fino a questa misura vengono sempre riempiti; uno più grande "
+                                             "solo se il rilievo vi trova superficie, altrimenti è un'apertura "
+                                             "(una porta, una finestra): resta aperto, mai muro finto")),
             dialogs.Field("targets", tr("Copri le mire (i marker sul prospetto, 18 cm intorno)"), True),
             dialogs.Field("reduce", tr("Un pixel ogni"), 1, minimum=1, maximum=64,
                           tip=tr("1: la piena risoluzione; 2: metà dei pixel per lato, e così via"))],

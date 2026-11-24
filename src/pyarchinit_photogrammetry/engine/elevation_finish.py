@@ -8,10 +8,10 @@ In this order, on the orthophoto of the elevation:
 2. **the holes filled** inside the wall's span (:func:`span`: per column, from its lowest to its highest cell with
    surface, specks of fewer than :data:`SPECK_CELLS` cells left out): the colour from the pyramid of the cells that
    have one (push-pull), plus the detail of the texture mirrored through the nearest cell with colour
-   (:func:`fill_holes`). **An opening is never made into wall**: a hole is filled only when it is at most
-   :data:`MAX_HOLE` metres across and the surface is there in it (the relief has a depth in the band somewhere across
-   it: the wall was measured, only its colour is missing); a door, a window, a hole through the wall stays open
-   (:func:`fillable`);
+   (:func:`fill_holes`). **An opening is never made into wall**: a hole up to :data:`MAX_HOLE` metres across is
+   always filled (a hole in the mesh, a gap in the colour); a larger one only when the relief has a depth in the band
+   somewhere in it (a gap in the texture on measured geometry); a larger hole with no surface - a door, a window -
+   stays open (:func:`fillable`);
 3. **the colour levelled** in Lab: each channel less its Gaussian mean of :data:`LEVEL_SIGMA_PX` pixels over the cells
    with colour, plus its global mean - the slow changes of light along a wall taken away, its texture kept
    (:func:`level_colours`);
@@ -156,10 +156,10 @@ def _fill(rgb: np.ndarray, valid: np.ndarray, holes: np.ndarray) -> tuple[np.nda
 
 def fillable(holes, measured, cell: tuple[float, float], max_hole: float = MAX_HOLE) -> tuple[np.ndarray, int]:
     """``(the cells of the holes that may be filled, how many holes are openings)``. A hole (a connected piece of
-    ``holes``) may be filled when its largest extent - ``cell`` (width, height of a cell, metres) times its bounding
-    box - is at most ``max_hole`` and ``measured`` (the cells with a depth in the band: the relief) has a cell in it;
-    else it is an opening - a door, a window, a hole through the wall, where nothing stands in the depth band - and
-    stays open. ``measured`` None: the size alone decides."""
+    ``holes``) whose largest extent - ``cell`` (width, height of a cell, metres) times its bounding box - is at most
+    ``max_hole`` is always filled; a larger one only when ``measured`` (the cells with a depth in the band: the
+    relief) has a cell in it - a gap in the texture on measured geometry. A larger hole with no surface is an opening
+    (a door, a window) and stays open. ``measured`` None: the size alone decides."""
     import cv2
 
     holes = np.asarray(holes, bool)
@@ -169,8 +169,7 @@ def fillable(holes, measured, cell: tuple[float, float], max_hole: float = MAX_H
     extent = np.maximum(stats[:, cv2.CC_STAT_WIDTH] * abs(cell[0]), stats[:, cv2.CC_STAT_HEIGHT] * abs(cell[1]))
     ok = extent <= max_hole + 1e-9
     if measured is not None:
-        seen = np.bincount(labels[np.asarray(measured, bool) & holes], minlength=count) > 0
-        ok &= seen
+        ok |= np.bincount(labels[np.asarray(measured, bool) & holes], minlength=count) > 0
     ok[0] = False
     return ok[labels], int(count - 1 - ok[1:].sum())
 
@@ -341,8 +340,9 @@ def finish(chunk: Chunk, entry: dict, out_path, fill: bool = True, mask: bool = 
     (``.jpg``/``.jpeg``, ``quality``) or an RGBA GeoTIFF (``.tif``/``.tiff``) in frame metres with the elevation's
     transform and tags - at full resolution, or reduced by the integer ``reduce``. In this order: the square of
     :data:`TARGET_HALF_SIDE` around every marker on the elevation made a hole (``targets``); the holes inside the
-    wall's span filled (``fill``, :func:`fill_holes`) - those up to ``max_hole`` metres across with the surface measured
-    in them; the larger ones and those without surface are openings and stay open (:func:`fillable`); the colour
+    wall's span filled (``fill``, :func:`fill_holes`) - every one up to ``max_hole`` metres across, a larger one when
+    the relief has surface in it; a larger one without surface is an opening and stays open (:func:`fillable`); the
+    colour
     levelled in Lab (``level``, :func:`level_colours`,
     :data:`LEVEL_SIGMA_PX` pixels of the full resolution); what lies outside the span masked (``mask``: white in a
     JPEG, transparent in a TIFF; without it a cell without colour is still white or transparent).

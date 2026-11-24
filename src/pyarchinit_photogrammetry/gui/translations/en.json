@@ -4063,7 +4063,7 @@
   "Senza le foto in controluce": "Without the backlit photos",
   "Toglie i cambi lenti di luce lungo il muro, e con loro anche la differenza vera di ombra fra parti del muro esposte diversamente": "Takes away the slow changes of light along the wall, and with them the real difference of shade between parts of the wall that face the light differently",
   "Buco più grande da riempire (m)": "Largest hole to fill (m)",
-  "Un buco più grande, o uno dove il rilievo non trova superficie (una porta, una finestra), è un'apertura: resta aperto, mai muro finto": "A larger hole, or one where the relief finds no surface (a door, a window), is an opening: it stays open, never fake wall",
+  "I buchi fino a questa misura vengono sempre riempiti; uno più grande solo se il rilievo vi trova superficie, altrimenti è un'apertura (una porta, una finestra): resta aperto, mai muro finto": "Holes up to this size are always filled; a larger one only if the relief finds surface in it, otherwise it is an opening (a door, a window): it stays open, never fake wall",
   "{0} aperture lasciate aperte": "{0} openings left open",
   "1: la piena risoluzione; 2: metà dei pixel per lato, e così via": "1: the full resolution; 2: half the pixels a side, and so on",
   "Un'immagine da pubblicare: buchi riempiti, fuori dal muro bianco, colore uniformato, mire coperte. Il prospetto misurato resta com'è": "An image to publish: holes filled, outside the wall white, colour levelled, targets painted over. The measured elevation stays as it is"

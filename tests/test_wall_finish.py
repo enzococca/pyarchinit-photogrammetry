@@ -133,8 +133,8 @@ def test_holes_filled_sky_masked(strip, tmp_path):
     above = np.arange(h)[:, None] < info["top"][None, :]
     assert (out[3][above] == 0).all()                                 # the speck too
     assert r["filled"] >= 400 and r["masked"] > 0 and r["size"] == [w, h]
-    # the window and the hole through the wall stay open: never fake wall
-    assert (out[3][WINDOW] == 0).all() and (out[3][GAP] == 0).all() and r["openings"] == 2
+    # the window without surface stays open, the small mesh hole is filled
+    assert (out[3][WINDOW] == 0).all() and (out[3][GAP] == 255).all() and r["openings"] == 1
     # the JPEG: outside the span white
     F.finish(ch, entry, tmp_path / "f.jpg", level=False)
     jpg = cv2.imread(str(tmp_path / "f.jpg"))
@@ -347,9 +347,9 @@ def test_command_line_finish_and_skip_backlit(strip, processed, tmp_path, monkey
 
     out = tmp_path / "muro.jpg"
     text = go("elevation", project, "--like", entry["id"], "--finish", out, "--no-level", "--reduce", 2)
-    assert out.exists() and str(out) in text and "filled" in text and "2 openings left open" in text
+    assert out.exists() and str(out) in text and "filled" in text and "1 opening left open" in text
     text = go("elevation", project, "--like", entry["id"], "--finish", tmp_path / "wide.tif", "--max-hole", 2.0)
-    assert "2 openings left open" in text                             # the window has no surface: still open
+    assert "0 openings left open" in text                             # max 2 m: the window is filled too
     assert "--finish" in go("elevation", project, "--like", entry["id"], "--max-hole", 1.0, code=2)
     assert "real shading" in " ".join(go("elevation", "--help").replace("│", " ").split())
     w, h = entry["size"]
@@ -375,22 +375,25 @@ def test_command_line_finish_and_skip_backlit(strip, processed, tmp_path, monkey
 
 
 def test_openings_are_never_filled(strip, tmp_path):
-    """A hole is filled only up to ``max_hole`` metres and when the surface is there across it: the 1.5 m window stays
-    open (and with surface measured across it, still too large), the 0.2 m hole is filled; a larger max_hole fills a
-    window that has surface."""
+    """A hole up to ``max_hole`` metres across is always filled - the 0.2 m hole whose surface was measured and the
+    0.1 m hole in the mesh without relief; a larger one only when the relief finds surface in it (a gap in the
+    texture on the geometry): the 1.5 m window without surface stays open, with its surface measured it is filled; a
+    smaller max_hole makes the small mesh hole an opening too."""
     ch, entry, info = strip
     assert F.MAX_HOLE == 0.5
     r = F.finish(ch, entry, tmp_path / "a.tif", level=False, targets=False)
     out = _tif(tmp_path / "a.tif")[0]
-    assert (out[3][HOLE] == 255).all() and (out[3][WINDOW] == 0).all() and r["openings"] == 2
-    # the window with its surface measured (the photos missed it): too large at 0.5 m, filled at 2 m
+    assert (out[3][HOLE] == 255).all() and (out[3][GAP] == 255).all() and (out[3][WINDOW] == 0).all()
+    assert r["openings"] == 1
+    r = F.finish(ch, entry, tmp_path / "small.tif", level=False, targets=False, max_hole=0.05)
+    out = _tif(tmp_path / "small.tif")[0]
+    assert (out[3][HOLE] == 255).all() and (out[3][GAP] == 0).all() and r["openings"] == 2
+    # the window with its surface measured (the photos missed it): a gap in the texture, filled
     rgba, relief = info["rgba"].copy(), _tif(ch.data_dir / entry["relief"])[0][0]
     relief[WINDOW] = 0.0
     seen = E.entry_from_rasters(ch, entry, rgba, relief, name="Finestra vista", kind="elevation")
     try:
         r = F.finish(ch, seen, tmp_path / "b.tif", level=False, targets=False)
-        assert (_tif(tmp_path / "b.tif")[0][3][WINDOW] == 0).all() and r["openings"] == 2
-        r = F.finish(ch, seen, tmp_path / "c.tif", level=False, targets=False, max_hole=2.0)
-        assert (_tif(tmp_path / "c.tif")[0][3][WINDOW] == 255).all() and r["openings"] == 1   # the gap still open
+        assert (_tif(tmp_path / "b.tif")[0][3][WINDOW] == 255).all() and r["openings"] == 0
     finally:
         E.remove_elevation(ch, seen["id"])
