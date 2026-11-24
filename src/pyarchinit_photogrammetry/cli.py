@@ -316,6 +316,12 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                   dates: Optional[str] = typer.Option(None, help="with --chunks: \"A=2017-11-05,B=2022-11-03\", the "
                                                       "date of a campaign (default: the date of the chunk, else the "
                                                       "median date of its photos)"),
+                  compare: Optional[Path] = typer.Option(None, help="with --like: the comparison sheet of the "
+                                                         "group of that elevation written here (PNG, or JPEG for "
+                                                         ".jpg), a PDF beside it: the campaigns stacked on one u "
+                                                         "axis; nothing is built"),
+                  title: Optional[str] = typer.Option(None, help="with --compare: the title of the sheet (default "
+                                                      "the name of the group)"),
                   texture: Optional[bool] = typer.Option(None, "--texture/--photos",
                                                          help="the orthophoto from the texture of the model, or from "
                                                               "the photos (default: the texture when the chunk has no "
@@ -327,7 +333,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
     cylinder or on the wall). With --facing the whole model is kept (a section: all behind the plane).
     With --path the wall traced on the plan as a line, bent or curved, its face developed along it.
     With --like the frame and grid of an elevation already built (of this chunk or of --like-chunk);
-    with --like and --chunks on several chunks, the campaigns of that wall as a group."""
+    with --like and --chunks on several chunks, the campaigns of that wall as a group; with --like and
+    --compare the comparison sheet of that group."""
     import numpy as np
 
     from .engine import elevation as E
@@ -352,6 +359,10 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                      "elevation is --like-chunk)")
         if dates is not None and chunks is None:
             raise typer.BadParameter("--dates goes with --chunks")
+        if compare is not None and chunks is not None:
+            raise typer.BadParameter("--compare draws the sheet of the group and builds nothing: not with --chunks")
+        if title is not None and compare is None:
+            raise typer.BadParameter("--title goes with --compare")
         doc, ch = _open(project, chunk)
         source = ch
         if like_chunk is not None:
@@ -364,6 +375,9 @@ def elevation_cmd(ctx: typer.Context, project: Path,
             names = ", ".join(f"{e.get('name')!r} ({e.get('id')})" for e in E.elevations(source)) or "none"
             raise typer.BadParameter(f"{'no' if not found else 'more than one'} elevation {like!r} in the chunk "
                                      f"{source.label!r}; its elevations: {names}", param_hint="--like")
+        if compare is not None:
+            _compare(doc, source, found[0], compare, title)
+            return
         if chunks is not None:
             _campaigns(doc, source, found[0], chunks, dates, same_frame)
             return
@@ -386,6 +400,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
         return
     if like_chunk is not None or same_frame or chunks is not None or dates is not None:
         raise typer.BadParameter("--like-chunk, --same-frame, --chunks and --dates go with --like")
+    if compare is not None or title is not None:
+        raise typer.BadParameter("--compare and --title go with --like (the sheet of the group of that elevation)")
     if sum(v is not None for v in (trace, markers, facing, circle, path)) != 1:
         raise typer.BadParameter("give one surface: --trace, --markers, --facing, --circle, --path or --like")
     if circle is None and (axis != "vertical" or axis_points is not None or (scale is not None and path is None)):
@@ -561,6 +577,27 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
                   f"; snapped, vertices moved {report['median_shift'] * 100:.1f} cm (median), "
                   f"{report['max_shift'] * 100:.1f} cm at most"))
     typer.echo(f"{ortho}\n{relief}")
+
+
+def _compare(doc, source, entry: dict, out: Path, title: Optional[str]) -> None:
+    """``ppg elevation --like ID --compare OUT``: the comparison sheet of the group of that elevation."""
+    from .engine import elevation_groups as G
+    from .engine.elevation_sheet import comparison_sheet
+
+    found = G.group_of(doc, source, entry["id"])
+    if found is None:
+        typer.echo(f"Error: {entry.get('name')!r} ({entry['id']}) is in no group of campaigns: build it on the other "
+                   "chunks first (--like ID --chunks ...)", err=True)
+        raise typer.Exit(1)
+    try:
+        r = comparison_sheet(doc, found[0], found[1], out, title=title, progress=print_progress)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+    for label in r["skipped"]:
+        typer.echo(f"{label}: left out - its elevation or its files are gone")
+    typer.echo(f"{len(r['bands'])} campaigns at {1 / r['px_per_m']:.4g} m/px (one pixel in {r['factor']})")
+    typer.echo(f"{r['image']}\n{r['pdf']}")
 
 
 def _campaigns(doc, source, entry: dict, chunks: str, dates: Optional[str], same_frame: bool) -> None:
