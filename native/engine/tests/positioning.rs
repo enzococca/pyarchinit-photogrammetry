@@ -577,7 +577,8 @@ fn distances_to_truth(s: &Scene, p: &Positioned) -> (Vec<f64>, f64) {
 }
 
 /// The long block of the diagnosis of the gate: a corridor of 4 strips of 250 photos (3 km by
-/// 72 m, 80/70 % overlap, a mound of 15 m), a flight per strip with offsets of a few metres,
+/// 72 m, 80/70 % overlap, a mound of 15 m), two flights of two strips (a flight of one strip cannot
+/// hold the roll about its axis), the second off by a few metres,
 /// positions with 3 m and 5 m of noise recorded as 5 m and 10 m, key points with 0.5 px of noise,
 /// 2 % of wrong matches. The rays alone from a random start do not converge on such a block (the
 /// block put on the positions was hundreds of metres off, 90 % of the positions outliers); from
@@ -590,8 +591,8 @@ fn a_long_corridor_is_placed_from_its_positions() {
     let s = common::corridor(4, 250, 12.0, 24.0, 40.0, 15.0, 0.06, 111);
     let c = noisy_case_of(&s, 0.5, 0.02, 112);
     let rotations = rotations_near(&s, 0.02, 113);
-    let offsets = [[1.0, -2.0, 1.0], [-2.0, 1.0, 0.0], [2.0, 2.0, -1.0]];
-    let gnss = survey_gnss(&s, 3.0, 5.0, 4, &offsets, 114);
+    let offset = [1.0, -2.0, 1.0];
+    let gnss = survey_gnss(&s, 3.0, 5.0, 2, &[offset], 114);
     let clock = std::time::Instant::now();
     let p = run(&c, &rotations, Some(&gnss));
     let seconds = clock.elapsed().as_secs_f64();
@@ -610,6 +611,42 @@ fn a_long_corridor_is_placed_from_its_positions() {
     assert!(h90 < 7.5, "90 % of the centres within {h90} m of the truth horizontally");
     assert!(vertical_rms < 5.0, "heights {vertical_rms} m rms from the truth");
     assert!(p.gnss_outliers.len() < s.poses.len() / 100, "{} outliers", p.gnss_outliers.len());
+    let bias = Vector3::from(p.bias[1].1);
+    // between two flights joined across a strip, the across-strip component of the bias is held
+    // by the rays alone at this level (the directions of those pairs run along it)
+    assert!((bias - Vector3::from(offset)).norm() < 2.0, "the bias of the second flight: {bias:?}");
+}
+
+/// The corridor with a seventh of its positions wrong by 100 m (more than the start's check
+/// allows): the rays alone from the random start bend on such a block (see above), and a bent block
+/// can name fewer outliers by taking wrong positions into the translations of its flights; the
+/// start at the positions is kept, every wrong position an outlier, the corridor placed as without
+/// them.
+#[test]
+fn many_wrong_fixes_on_a_corridor_keep_the_start_at_the_positions() {
+    let s = common::corridor(4, 250, 12.0, 24.0, 40.0, 15.0, 0.06, 111);
+    let c = noisy_case_of(&s, 0.5, 0.02, 112);
+    let rotations = rotations_near(&s, 0.02, 113);
+    let mut gnss = survey_gnss(&s, 3.0, 5.0, 2, &[[1.0, -2.0, 1.0]], 114);
+    let mut random = Random::new(115);
+    let wrong: Vec<usize> = (0..s.poses.len()).filter(|i| i % 7 == 3).collect();
+    for &k in &wrong {
+        let angle = random.uniform_in(0.0, std::f64::consts::TAU);
+        gnss.xyz[k][0] += 100.0 * angle.cos();
+        gnss.xyz[k][1] += 100.0 * angle.sin();
+        gnss.xyz[k][2] += random.uniform_in(-50.0, 50.0);
+    }
+    let p = run(&c, &rotations, Some(&gnss));
+    let (h, vertical_rms) = distances_to_truth(&s, &p);
+    let h90 = h[9 * h.len() / 10];
+    eprintln!("corridor with {} wrong fixes: frame {:?}, outliers {}, to the truth horizontal 90 % {h90:.2} m, \
+               vertical rms {vertical_rms:.2} m; notes {:?}", wrong.len(), p.frame, p.gnss_outliers.len(), p.notes);
+    assert_eq!(p.frame, Frame::Gnss);
+    assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+    assert!(p.notes[0].contains("kept the start at the positions"), "{:?}", p.notes);
+    assert_eq!(p.gnss_outliers, wrong);
+    assert!(h90 < 7.5, "90 % of the centres within {h90} m of the truth horizontally");
+    assert!(vertical_rms < 5.0, "heights {vertical_rms} m rms from the truth");
 }
 
 /// A whole flight whose positions are all off by 30 m (a wrong datum, the risk of starting at the
@@ -721,4 +758,63 @@ fn the_eliminated_scales_give_the_explicit_solution() {
         assert!(biases < 1e-3, "{name}: biases {biases} m apart");
         assert!(points < 1e-2, "{name}: points {points} m apart");
     }
+}
+
+/// A sixth of the positions wrong by 100 m in all directions on the bent ring (more than the
+/// start's check allows): the rays of each photo, resected from the points of the others, find the
+/// wrong positions before the joint solve; the check fails on their number, the rays alone run and
+/// are not clearly better on the cost of a ray, so the start at the positions is kept: every wrong
+/// position an outlier, the ring held, in the frame of the positions.
+#[test]
+fn many_wrong_fixes_on_a_ring_keep_the_start_at_the_positions() {
+    let s = ring(PHOTOS, DIAMETER, HEIGHT, 131);
+    let c = case_of(&s);
+    let mut gnss = gnss_of(&s, 1.0, 2.0, 132, &[]);
+    let mut random = Random::new(133);
+    let wrong: Vec<usize> = (0..PHOTOS).filter(|i| i % 6 == 2).collect();
+    for &k in &wrong {
+        let angle = random.uniform_in(0.0, std::f64::consts::TAU);
+        gnss.xyz[k][0] += 100.0 * angle.cos();
+        gnss.xyz[k][1] += 100.0 * angle.sin();
+        gnss.xyz[k][2] += random.uniform_in(-50.0, 50.0);
+    }
+    let p = run(&c, &rotations_of(&s, BEND_DEG), Some(&gnss));
+    let shape = shape_of(&s, &p);
+    eprintln!("{} wrong fixes of 100 m: frame {:?}, outliers {}, horizontal {:.2} m, vertical rms {:.2} m, ray cost \
+               {:.3e}; notes {:?}", wrong.len(), p.frame, p.gnss_outliers.len(), shape.horizontal, shape.vertical_rms,
+              p.ray_cost, p.notes);
+    assert_eq!(p.frame, Frame::Gnss);
+    assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+    assert!(p.notes[0].contains("kept the start at the positions"), "{:?}", p.notes);
+    assert_eq!(p.gnss_outliers, wrong);
+    assert!(shape.horizontal < 0.005 * DIAMETER, "{} m", shape.horizontal);
+    assert!(shape.vertical_rms < 2.0, "{} m", shape.vertical_rms);
+}
+
+/// With noisy key points and a tenth of wrong matches the rows of a wrong ray lie beyond the Huber
+/// scale, where the closed-form scale (the least-squares one) is not the minimiser of the robust
+/// cost: the two formulations then differ by a little, here the centres within 10 cm and the cost
+/// within 2 %.
+#[test]
+fn the_eliminated_scales_with_wrong_matches() {
+    let s = ring(PHOTOS, DIAMETER, HEIGHT, 141);
+    let c = noisy_case_of(&s, 0.5, 0.1, 142);
+    let rotations = rotations_of(&s, BEND_DEG);
+    let gnss = gnss_of(&s, 1.0, 2.0, 143, &[]);
+    let solve = |scales| {
+        position_with(&c.input, &c.cams, &c.graph, &rotations, &c.tracks, &c.selected, Some(&gnss),
+                      &Options::default(), scales, &mut || true)
+        .expect("a positioning")
+    };
+    let (eliminated, explicit) = (solve(Scales::Eliminated), solve(Scales::Explicit));
+    let centres = (0..PHOTOS)
+        .map(|i| (Vector3::from(eliminated.centres[i].unwrap()) - Vector3::from(explicit.centres[i].unwrap())).norm())
+        .fold(0.0, f64::max);
+    let cost = (eliminated.cost - explicit.cost).abs() / explicit.cost;
+    eprintln!("a tenth of wrong matches: centres {centres:.4} m apart, cost {:.5} vs {:.5} ({:.2} %)",
+              eliminated.cost, explicit.cost, 100.0 * cost);
+    assert_eq!(eliminated.frame, explicit.frame);
+    assert_eq!(eliminated.gnss_outliers, explicit.gnss_outliers);
+    assert!(centres < 0.1, "centres {centres} m apart");
+    assert!(cost < 0.02, "costs {} and {}", eliminated.cost, explicit.cost);
 }
