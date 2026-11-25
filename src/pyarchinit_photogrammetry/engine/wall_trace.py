@@ -376,7 +376,9 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
     Two lines that each pass within ``band`` of a vertex meet within ``band`` over the cosine of half the angle
     between them: the band itself for two lines that turn a little, 1.41 times it at a right angle. Where they meet
     further - lines that turn a little, found at different depths, meet far along the wall - the vertex goes
-    between them, as above.
+    between them, as above. A turn of a right angle or more (a hairpin), whose lines can meet far beyond the band,
+    keeps the bound of the right angle: where they meet further than 1.41 times the band its vertex goes half way
+    between them.
 
     None when no segment has a line, and when the order cannot be kept even so."""
     start = v[:-1] + fits[:, :1] * towards  # each fitted line at the two ends of its segment
@@ -406,7 +408,10 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
             if abs(cross) >= np.sin(np.radians(SAME_WALL_DEG)):
                 gap = start[b] - end[a]
                 meet[j] = end[a] + heading[a] * (gap[0] * heading[b, 1] - gap[1] * heading[b, 0]) / cross
-                if np.hypot(*(meet[j] - v[j])) > band / np.sqrt(max((1.0 + cos) / 2.0, 1e-12)):
+                # at a right angle and beyond (cos <= 0) the bound is that of the right angle: a hairpin's lines can
+                # meet far beyond the band, and its vertex then goes between them
+                limit = band / np.sqrt((1.0 + cos) / 2.0) if cos > 0.0 else np.sqrt(2.0) * band
+                if np.hypot(*(meet[j] - v[j])) > limit:
                     meet[j] = np.nan  # further than two lines within the band of the vertex can meet: not there
         elif found[a]:
             between[j] = end[a]

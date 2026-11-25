@@ -283,6 +283,26 @@ def test_no_vertex_goes_further_than_the_band():
     assert T._apart(two, np.full(6, 3.0), np.ones(6, bool)).tolist() == [False, False, True, True, False, False]
 
 
+@pytest.mark.parametrize("turn", [90.0, 120.0, 150.0, 170.0])
+def test_a_hairpin_vertex_stays_near_its_click(turn):
+    """Two lines within the band of a vertex that turn by a right angle or more (a hairpin) can meet far beyond the
+    band - at 150 degrees, 3.9 times it: the vertex goes half way between them, never further than 1.41 times the
+    band from its click, whatever the depths of the two lines."""
+    band = 2.5
+    h = np.radians(turn)
+    v = np.array([[0.0, 0.0], [10.0, 0.0], [10.0 + 10.0 * np.cos(h), 10.0 * np.sin(h)]])
+    d = np.diff(v, axis=0)
+    length = np.hypot(*d.T)
+    t = d / length[:, None]
+    towards = np.column_stack([-t[:, 1], t[:, 0]])
+    for da in np.linspace(-band, band, 9):
+        for db in np.linspace(-band, band, 9):
+            out = T._moved(v, length, t, towards, np.array([[da, 0.0], [db, 0.0]]), np.array([True, True]),
+                           band=band)
+            assert out is not None
+            assert np.hypot(*(out - v).T).max() <= 1.42 * band
+
+
 @pytest.mark.parametrize("trace, viewer, by", [
     (CORRIDOR, "right", 0.10),            # 60 cm between its two long walls
     (CORRIDOR, "right", -0.15),           # ... clicked on the crests
