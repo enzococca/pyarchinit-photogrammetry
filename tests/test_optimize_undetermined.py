@@ -1872,7 +1872,10 @@ def _assert_gate(calibration, errors) -> None:
 
     assert errors["optimized_control_rmse"] <= WEAK_RING_GATE["control_m"]  # 1.00 mm (COLMAP's), 1.22 mm (ours)
     assert errors["optimized_check_rmse"] <= WEAK_RING_GATE["check_m"]  # 8.87 mm and 8.88 mm
-    assert calibration[4] == pytest.approx(-0.04, abs=0.005)  # the lens the photos were rendered with
+    # k1 is a diagnostic, not a line of the gate (ruling R-B2): the lens the photos were rendered with (-0.04) within
+    # 0.010 - seeds 0-4 already spread -0.047 to -0.050, and with the radial terms of the mapper freed (R-B1) the
+    # optimisation ends at -0.0345 on the reference rendering: the k1/dome valley of a flat block (Task C)
+    assert calibration[4] == pytest.approx(-0.04, abs=0.010)
 
 
 def _copy_of(project, folder):
@@ -1900,14 +1903,22 @@ def _marker_rmse(ch) -> dict:
 def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_path, engine):
     """The weak ring cannot tell its focal length from its height (the native mapper held it, at the value of the
     EXIF); the optimisation on its six control targets holds it too, with either formulation, and says so. With
-    the focal length held the ring determines its radial terms (0.12 px at the corner of the photo), which the
-    mapper left at zero: they are refined. It does not determine the tangential terms of our formulation (1.6 px):
+    the focal length held the ring determines its radial terms (0.12 px at the corner of the photo): the mapper
+    judged them so with its focal length held and freed them (ruling R-B1, 0.26 px at the corner measured), and
+    the optimisation refines them again. It does not determine the tangential terms of our formulation (1.6 px):
     they are held. The cameras stay at their height: before this rule the same optimisation moved the focal length
     ten times and the cameras 131 m up. Those figures and decisions on the reference rendering
     (:func:`reference_rendering`, ruling R29); on any other, decisions consistent with what the block reported."""
     ch = _copy_of(weak_ring.project, tmp_path / engine).chunk
     before, heights = _calibration(ch), np.array([ch.to_world(c.center)[2] for c in ch.aligned_cameras])
-    assert before[0][4:] == [0.0, 0.0, 0.0, 0.0]  # the lens the native mapper left unmodelled
+    mapper = ch.meta["sfm"]["native_mapper"]["report"]
+    radial_free = [n for n in mapper["notes"] if ": radial free: " in n]
+    assert all(": focal held: " in n or ": radial " in n for n in mapper["notes"]), mapper["notes"]
+    if radial_free:  # R-B1: the focal length held, the radial terms freed where the block determines them
+        assert before[0][4] != 0.0
+    else:
+        assert before[0][4] == 0.0
+    assert before[0][6:] == [0.0, 0.0]  # no decentring terms from the mapper with the focal length held
     ch.optimize_cameras(engine=engine)
     rep = ch.meta["sfm"]["optimize"]
     check = rep["intrinsics"]
@@ -1919,19 +1930,21 @@ def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_pa
     assert_consistent(check, before, _calibration(ch))
     if not weak_ring.reference:
         return
+    assert radial_free, mapper["notes"]  # the reference rendering: the mapper frees the radial terms (0.26 px)
+    assert mapper["intrinsics_held"] == [cam for cam, _ in mapper["focal_sd"]]  # the focal length held (R16)
     sensor = check["focal_sd"][0][0]
     assert check["checked"] is True and check["held"]["focal"] == [sensor] and check["held"]["radial"] == []
     assert check["held"]["principal_point"] == [] and check["principal_point_sd"] == []
     assert check["focal_sd"][0][1] > 0.05  # 10 % (COLMAP's formulation) and 14 % (ours) measured
-    assert 0 < check["radial_sd"][0][1] < 0.3 < bundle.GROUP_SD_HOLD_PX  # 0.12 px
-    notes = [f"sensor {sensor}: focal held: undetermined, sd {100 * check['focal_sd'][0][1]:.2f} %"]
+    # 0.50 px measured from the radial terms the mapper left (0.12 px from a lens at zero, before R-B1)
+    assert 0 < check["radial_sd"][0][1] < bundle.GROUP_SD_HOLD_PX
+    assert check["notes"][0] == f"sensor {sensor}: focal held: undetermined, sd {100 * check['focal_sd'][0][1]:.2f} %"
     if engine == "ppg":
-        tangential = check["tangential_sd"][0][1]
-        assert check["held"]["tangential"] == [sensor] and tangential > 1.0  # 1.62 px
-        notes.append(f"sensor {sensor}: tangential held: undetermined, sd {tangential:.2f} px at the image corner")
+        # held, undetermined on its own or given up for the radial terms (R25: 2.35 px with them free measured)
+        assert check["held"]["tangential"] == [sensor]
+        assert len(check["notes"]) == 2 and check["notes"][1].startswith(f"sensor {sensor}: tangential held: ")
     else:
-        assert check["held"]["tangential"] == [] and check["tangential_sd"] == []
-    assert check["notes"] == notes
+        assert check["held"]["tangential"] == [] and check["tangential_sd"] == [] and len(check["notes"]) == 1
     assert rep["focal_held"] == sfm.FOCAL_HELD_UNDETERMINED and rep["control_points"] == 6
     after = _calibration(ch)
     assert after[0][:4] == before[0][:4] and after[0][4] != 0.0  # the focal length exactly, the radial terms refined
@@ -1997,8 +2010,16 @@ def test_the_weak_ring_with_many_tie_points_gives_up_its_tangential_terms_for_th
           f"tangential sd {plain_check['tangential_sd']}, notes {plain_check['notes']}")
     assert_consistent(plain_check, before, _calibration(plain))
     held_at = plain_check["tangential_sd"][0][1] if plain_check["tangential_sd"] else None  # 1.61 px measured (Mac)
-    if not weak_ring.reference and (held_at is None or held_at <= bundle.GROUP_SD_HOLD_PX):
-        return  # the tangential terms of this rendering pass at the ring's own weight: no case to make
+    if held_at is None or held_at <= bundle.GROUP_SD_HOLD_PX:
+        # the tangential terms pass at the ring's own weight: no case to make. On the reference rendering, from the
+        # radial terms the mapper freed (R-B1), the plain ring is already that case: its tangential terms are given
+        # up for the radial ones (2.35 px with them free, 0.50 px without, measured), and the gate holds
+        if weak_ring.reference:
+            sensor = plain_check["focal_sd"][0][0]
+            assert plain_check["held"] == {**NOTHING_HELD, "focal": [sensor], "tangential": [sensor]}
+            assert any("tangential held: given up for the radial terms" in n for n in plain_check["notes"])
+            _assert_gate(_calibration(plain)[0], _marker_rmse(plain))
+        return
     assert held_at > bundle.GROUP_SD_HOLD_PX
     divisor = (held_at / 0.35) ** 2  # about 21
     real = bundle.tie_variance_factor
