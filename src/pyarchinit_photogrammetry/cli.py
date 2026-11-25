@@ -641,7 +641,9 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
                + f"; {E.wall_length(entry):.3f} m along the wall; corners: {report['corners']}"
                + ("" if not report.get("snapped") else
                   f"; snapped, vertices moved {report['median_shift'] * 100:.1f} cm (median), "
-                  f"{report['max_shift'] * 100:.1f} cm at most")
+                  f"{report['max_shift'] * 100:.1f} cm at most"
+                  + (f"; {report['kept']} segment(s) kept as clicked (the face found there is another one)"
+                     if report.get("kept") else ""))
                + _backlit_text(entry))
     typer.echo(f"{ortho}\n{relief}")
 

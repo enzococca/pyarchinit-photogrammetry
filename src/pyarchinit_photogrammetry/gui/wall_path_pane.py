@@ -507,7 +507,9 @@ class WallPathPane(QWidget):
                     "\n" + str(r["refused"]) if r.get("refused") else "")
             return tr("Vertici spostati in media di {0} cm, al massimo di {1} cm", number(100 * r.get("median_shift",
                                                                                                 0.0), 1),
-                      number(100 * r.get("max_shift", 0.0), 1))
+                      number(100 * r.get("max_shift", 0.0), 1)) + (
+                "\n" + tr("Tratti lasciati come cliccati: {0} (la faccia trovata lì è un'altra)", r["kept"])
+                if r.get("kept") else "")
         if step == "side":
             if self.clicked is None:
                 return ""

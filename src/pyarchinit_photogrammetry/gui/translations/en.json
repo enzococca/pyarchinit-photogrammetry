@@ -5405,6 +5405,7 @@
   "Le foto vedono il muro quasi allo stesso modo dai due lati della linea (peso a sinistra {0}, a destra {1}, rispetto al verso in cui è stata cliccata): da che lato si guarda la faccia del muro?": "The photos see the wall nearly as well from both sides of the line (weight on the left {0}, on the right {1}, as to the direction it was clicked in): from which side is the face of the wall seen?",
   "{0} vertici, {1} m": "{0} vertices, {1} m",
   "Vertici spostati in media di {0} cm, al massimo di {1} cm": "Vertices moved by {0} cm on average, {1} cm at most",
+  "Tratti lasciati come cliccati: {0} (la faccia trovata lì è un'altra)": "Segments kept as clicked: {0} (the face found there is another one)",
   "Quote da {0} a {1} m": "Heights from {0} to {1} m",
   "Spostamento di ogni vertice: {0}": "Shift of each vertex: {0}",
   "Peso delle foto: a sinistra {0}, a destra {1}": "Weight of the photos: on the left {0}, on the right {1}",
