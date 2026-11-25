@@ -207,7 +207,7 @@ def test_a_transfer_keeps_what_falls_off_the_wall(built, caplog):
     with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry"):
         done = D.transfer(ch, plane["id"], entry["id"])
     assert done["units"] == 1
-    assert any("cadono fuori" in r.getMessage() for r in caplog.records)
+    assert any("fall outside" in r.getMessage() and "units" in r.getMessage() for r in caplog.records)
     (moved,) = D.drawings(ch, entry["id"])["units"]
     assert moved["us"] == "1"
     # the same world place: the plane's point on its surface, the path's on its own

@@ -292,7 +292,7 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
             left["units"].append(rec)
             continue
         except Exception as exc:  # noqa: BLE001 - a broken record stays where it is, said
-            log.warning("Unità non spostata sull'altro prospetto: %s", exc)
+            log.warning("Unit not moved to the other elevation: %s", exc)
             left["units"].append(rec)
             continue
         rec = {**rec, "wkt": geom.wkt, "attributes": dict(rec.get("attributes") or {})}
@@ -340,12 +340,12 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
             left["stones"].append(text)
             continue
         except Exception as exc:  # noqa: BLE001
-            log.warning("Pietra non spostata sull'altro prospetto: %s", exc)
+            log.warning("Stone not moved to the other elevation: %s", exc)
             left["stones"].append(text)
             continue
         out["stones"].append(geom.wkt)
     if any(off.values()):
-        log.warning("Disegni del prospetto %s che cadono fuori dal prospetto %s: restano dove sono (%s)",
+        log.warning("Drawings of the elevation %s that fall outside the elevation %s: they stay where they are (%s)",
                     a.get("name") or source, b.get("name") or target,
                     ", ".join(f"{n} {_KIND_WORDS[k]}" for k, n in off.items() if n))
     frames = _frames(chunk, create=True)
@@ -376,7 +376,7 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
     return done
 
 
-_KIND_WORDS = {"units": "unità", "quote": "quote", "points": "punti", "lines": "linee", "stones": "pietre"}
+_KIND_WORDS = {"units": "units", "quote": "heights", "points": "points", "lines": "lines", "stones": "stones"}
 
 
 class _OffTarget(Exception):
