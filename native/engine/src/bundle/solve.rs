@@ -1,15 +1,18 @@
-//! Levenberg-Marquardt over the reduced camera system: the diagonal of the normal equations
-//! damped (Marquardt), a step taken when the cost falls, the damping moved by the quality of
-//! the step (Nielsen's rule, as in Madsen, Nielsen and Tingleff), the rotations updated on
-//! their manifold by `exp(delta) R`. Stops on the relative decrease of the cost, the largest
-//! entry of the gradient, the size of the step, the number of iterations, or when no damping
-//! gives a step that lowers the cost.
+//! The bundle adjustment of milestone 1 as a model of the generic Levenberg-Marquardt
+//! (`lm::solve_model`): the camera blocks are the photos (the pose of a free photo, then its
+//! rolling shutter), the markers and, as the border, the free intrinsics of each camera and the
+//! biases of the flights; the point blocks are the tie points; the residual blocks are the tie and
+//! marker observations, the control points, the scale bars, the GNSS positions and the priors of
+//! the rolling shutter, in the order of the rows of `_Model.residuals` of bundle.py. The rotations
+//! are updated on their manifold by `exp(delta) R`; the points their inliers do not hold are
+//! re-solved on their own after every accepted step (`residuals::refine_unheld_points`).
 
-use super::pcg::pcg_step;
+use super::lm::{covariance_block, solve_model_with_limits, BlockJacobian, Model, Report};
 use super::problem::{Layout, Parameters, Problem};
-use super::residuals::{evaluate_blocks, gradient_and_diagonal, refine_unheld_points, Evaluated, Loss, Structure};
-use super::schur::{dense_step, Reduced};
-use super::sparse::SparseSystem;
+use super::residuals::{
+    bar, control, gnss, observation_linearized, observation_values, refine_unheld_points, rs_prior, variables, Loss,
+    Structure, BEHIND_CAMERA_RESIDUAL, OFF_DELTA, OFF_INTR, OFF_POINT,
+};
 
 /// The free photos up to which the reduced system is factorised dense (spec 8.1), when nothing
 /// but their poses is adjusted: the limit `Auto` applies is `DENSE_MAX_COLUMNS`.
@@ -27,17 +30,6 @@ pub const ROBUST_FUNCTION_TOLERANCE: f64 = 1e-6;
 /// 16 GB) is replaced by the conjugate gradients; the pattern of the matrix and faer's workspace
 /// are not counted.
 pub const PCG_ABOVE_BYTES: u64 = 4 << 30;
-
-/// The damping starts here (a trust region of 1e4 of Marquardt's scaled units) ...
-const INITIAL_DAMPING: f64 = 1e-4;
-/// ... never goes below this ...
-const MIN_DAMPING: f64 = 1e-16;
-/// ... and above this the iteration has made no progress.
-const MAX_DAMPING: f64 = 1e32;
-/// The diagonal that scales the damping is clamped to this range, so that a column without
-/// information (a point without usable observations) is still damped and does not move.
-const DIAGONAL_MIN: f64 = 1e-6;
-const DIAGONAL_MAX: f64 = 1e32;
 
 /// How the reduced system is solved: `Auto` chooses by `choose_linear_solver`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,77 +133,6 @@ pub fn choose_linear_solver(
     }
 }
 
-/// The solver of the reduced system a run uses, with what it keeps between the iterations.
-enum Stepper {
-    Dense,
-    Sparse(SparseSystem),
-    Pcg,
-}
-
-impl Stepper {
-    /// The solver asked for, or the one `Auto` stands for on this problem within the limits
-    /// given (`solve` passes `DENSE_MAX_COLUMNS` and `PCG_ABOVE_BYTES`): `choose_linear_solver` on
-    /// the columns of the reduced system and the bytes of its sparse factor. The pattern and the
-    /// symbolic factorisation, which say how big the factor would be, are built only above the
-    /// dense limit; the values are allocated only once the sparse Cholesky is chosen; when either
-    /// cannot be built (memory) the conjugate gradients are taken.
-    fn choose(
-        pb: &Problem,
-        st: &Structure,
-        red: &Reduced,
-        asked: LinearSolver,
-        dense_max_columns: usize,
-        pcg_above: u64,
-    ) -> Result<Stepper, String> {
-        match asked {
-            LinearSolver::Dense => Ok(Stepper::Dense),
-            LinearSolver::Sparse => {
-                let mut system = SparseSystem::new(pb, st, red)?;
-                system.allocate()?;
-                Ok(Stepper::Sparse(system))
-            }
-            LinearSolver::Pcg => Ok(Stepper::Pcg),
-            LinearSolver::Auto => {
-                if choose_linear_solver(red.size, 0, dense_max_columns, pcg_above) == LinearSolver::Dense {
-                    return Ok(Stepper::Dense);
-                }
-                let Ok(mut system) = SparseSystem::new(pb, st, red) else { return Ok(Stepper::Pcg) };
-                let chosen = choose_linear_solver(red.size, system.factor_bytes(), dense_max_columns, pcg_above);
-                if chosen == LinearSolver::Pcg || system.allocate().is_err() {
-                    return Ok(Stepper::Pcg);
-                }
-                Ok(Stepper::Sparse(system))
-            }
-        }
-    }
-
-    fn solver(&self) -> LinearSolver {
-        match self {
-            Stepper::Dense => LinearSolver::Dense,
-            Stepper::Sparse(_) => LinearSolver::Sparse,
-            Stepper::Pcg => LinearSolver::Pcg,
-        }
-    }
-
-    /// One step of the damped normal equations, in the columns of the layout.
-    fn step(
-        &mut self,
-        pb: &Problem,
-        lay: &Layout,
-        st: &Structure,
-        red: &Reduced,
-        ev: &Evaluated,
-        g: &[f64],
-        damping: &[f64],
-    ) -> Result<Vec<f64>, String> {
-        match self {
-            Stepper::Dense => dense_step(pb, lay, st, red, ev, g, damping),
-            Stepper::Sparse(system) => system.step(pb, lay, st, red, ev, g, damping),
-            Stepper::Pcg => pcg_step(pb, lay, st, red, ev, g, damping),
-        }
-    }
-}
-
 /// The function tolerance `solve` applies: the option's, floored at `ROBUST_FUNCTION_TOLERANCE`
 /// under a robust loss.
 pub(crate) fn effective_function_tolerance(loss: Loss, function_tolerance: f64) -> f64 {
@@ -219,10 +140,6 @@ pub(crate) fn effective_function_tolerance(loss: Loss, function_tolerance: f64) 
         Loss::None => function_tolerance,
         Loss::Huber(_) | Loss::Cauchy(_) => function_tolerance.max(ROBUST_FUNCTION_TOLERANCE),
     }
-}
-
-fn max_abs(values: &[f64]) -> f64 {
-    values.iter().fold(0.0, |a: f64, x| a.max(x.abs()))
 }
 
 /// Adjusts `pb` from the parameters it holds. `observe(iteration, cost)` is called after every
@@ -240,102 +157,492 @@ pub(crate) fn solve_with_limits(
     pcg_above: u64,
 ) -> Result<Solution, String> {
     pb.check()?;
-    let lay = Layout::new(pb);
-    let st = Structure::new(pb);
-    let red = Reduced::new(pb, &lay);
-    let mut stepper = Stepper::choose(pb, &st, &red, opts.linear_solver, dense_max_columns, pcg_above)?;
-    let linear_solver = stepper.solver();
+    let mut model = BundleModel::new(pb, opts.loss);
+    let report = solve_model_with_limits(&mut model, opts, observe, dense_max_columns, pcg_above)?;
+    Ok(model.solution(report))
+}
 
-    let function_tolerance = effective_function_tolerance(opts.loss, opts.function_tolerance);
-    let mut params = Parameters::initial(pb);
-    let mut ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
-    if !ev.cost.is_finite() {
-        return Err(format!("the cost of the problem as given is {}", ev.cost));
+/// The covariance of the bias of each flight of the solution `sol` of `pb` (the flights of
+/// `Layout::flights`, sorted): the 3 x 3 blocks of the inverse of the normal matrix at the
+/// solution (`lm::covariance_block`, the robust curvature of `loss` on the tie points). The
+/// accuracies of `pb` are taken as they are, with no variance factor after the inverse: a caller
+/// whose groups of observations have their own variance components puts them into the sigmas
+/// first (`pixel_sigma`, the sigmas of the positions), so that the normal matrix is the sum of the
+/// groups' each over its own factor (the mapper does, `rounds`). Dense: for blocks of a few
+/// thousand photos.
+pub fn bias_covariance(pb: &Problem, sol: &Solution, loss: Loss) -> Result<Vec<(i64, [[f64; 3]; 3])>, String> {
+    pb.check()?;
+    let mut model = BundleModel::new(pb, loss);
+    let params = sol.parameters();
+    params.fits(pb, &model.lay)?;
+    model.params = params;
+    let start: Vec<usize> = model
+        .cam_size
+        .iter()
+        .scan(0, |at, &s| {
+            let c = *at;
+            *at += s;
+            Some(c)
+        })
+        .collect();
+    let flights = model.lay.flights.clone();
+    let cols: Vec<usize> = (0..flights.len())
+        .flat_map(|f| {
+            let c = start[model.bias_block + f];
+            c..c + 3
+        })
+        .collect();
+    let block = covariance_block(&model, &cols)?;
+    let k = cols.len();
+    let out = flights
+        .iter()
+        .enumerate()
+        .map(|(f, &id)| {
+            let at = |a: usize, b: usize| block[(3 * f + a) * k + 3 * f + b];
+            (id, std::array::from_fn(|a| std::array::from_fn(|b| at(a, b))))
+        })
+        .collect();
+    Ok(out)
+}
+
+/// The covariance of the free intrinsics of the cameras of `pb` at its own parameters: the block
+/// of the inverse of the normal matrix at their columns (`lm::covariance_block`, as
+/// `bias_covariance` takes its blocks), in the order of the cameras and, within each, of
+/// `CameraBlock::free` - row-major, `k x k` with `k` the free intrinsics of all the cameras - and
+/// how many of its columns each camera has (none for a camera with none free). The off-diagonal
+/// terms are what a function of several intrinsics needs (the displacement of a pixel by the
+/// radial terms together) and what holding some of them leaves of the others (their covariance
+/// conditional on the held ones). The accuracies of `pb` are taken as they are (a caller with
+/// variance factors puts them into the sigmas first). `Err` when the reduced system is not
+/// positive definite (a gauge left free, an intrinsic the observations do not hold). Dense up to
+/// `lm::COVARIANCE_DENSE_MAX_COLUMNS` reduced columns, the conjugate gradients per column above.
+pub fn intrinsics_covariance(pb: &Problem, loss: Loss) -> Result<(Vec<f64>, Vec<usize>), String> {
+    pb.check()?;
+    let model = BundleModel::new(pb, loss);
+    let (cols, counts) = intrinsic_columns(&model, pb);
+    if cols.is_empty() {
+        return Ok((Vec::new(), counts));
     }
-    let cost_initial = ev.cost;
-    // the points that their inliers do not hold (wrong tracks) are settled on their own first
-    if refine_unheld_points(pb, &st, &mut params, opts.loss) > 0 {
-        ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
-    }
-    let (mut g, mut diag) = gradient_and_diagonal(pb, &lay, &st, &ev);
-    let mut gradient_max = max_abs(&g);
-    let mut lambda = INITIAL_DAMPING;
-    let mut nu = 2.0;
-    let mut iterations = 0;
-    let mut termination = (gradient_max <= opts.gradient_tolerance).then_some(Termination::Gradient);
-    while termination.is_none() {
-        if iterations >= opts.max_iterations {
-            termination = Some(Termination::MaxIterations);
-            break;
+    Ok((covariance_block(&model, &cols)?, counts))
+}
+
+/// The reduced columns of the free intrinsics of the cameras of `pb` in `model`, in the order of
+/// `intrinsics_covariance`, and how many of them each camera has.
+fn intrinsic_columns(model: &BundleModel, pb: &Problem) -> (Vec<usize>, Vec<usize>) {
+    let start: Vec<usize> = model
+        .cam_size
+        .iter()
+        .scan(0, |at, &s| {
+            let c = *at;
+            *at += s;
+            Some(c)
+        })
+        .collect();
+    let mut cols = Vec::new();
+    let mut counts = Vec::with_capacity(pb.cameras.len());
+    for c in 0..pb.cameras.len() {
+        let from = cols.len();
+        if let Some(block) = model.intr_block[c] {
+            cols.extend(start[block]..start[block] + model.cam_size[block]);
         }
-        iterations += 1;
-        let damping: Vec<f64> = diag.iter().map(|d| lambda * d.clamp(DIAGONAL_MIN, DIAGONAL_MAX)).collect();
-        let mut accepted = false;
-        if let Ok(delta) = stepper.step(pb, &lay, &st, &red, &ev, &g, &damping) {
-            if delta.iter().all(|x| x.is_finite()) {
-                let candidate = params.step(pb, &lay, &delta);
-                let trial = evaluate_blocks(pb, &lay, &st, &candidate, opts.loss, false);
-                let decrease = ev.cost - trial.cost;
-                // what the quadratic model promised: 0.5 delta^T (damping delta - g)
-                let model_decrease =
-                    0.5 * delta.iter().zip(&damping).zip(&g).map(|((d, m), gk)| d * (m * d - gk)).sum::<f64>();
-                let step_norm = delta.iter().map(|x| x * x).sum::<f64>().sqrt();
-                let ptol = opts.parameter_tolerance;
-                let tiny_step = step_norm <= ptol * (params.norm(pb, &lay) + ptol);
-                // measured against the cost a step can change: not the constant of the observations
-                // behind their camera, which would loosen the tolerance by orders of magnitude; and
-                // only on a step that is not damped (after rejections, a damped step is small by
-                // construction, not because the cost has converged)
-                let live_cost = ev.cost - ev.behind_cost;
-                let undamped = lambda <= INITIAL_DAMPING;
-                let tiny_change =
-                    undamped && trial.cost.is_finite() && decrease.abs() <= function_tolerance * live_cost;
-                if trial.cost.is_finite() && decrease > 0.0 {
-                    accepted = true;
-                    let rho = if model_decrease > 0.0 { decrease / model_decrease } else { 1.0 };
-                    params = candidate;
-                    refine_unheld_points(pb, &st, &mut params, opts.loss);
-                    ev = evaluate_blocks(pb, &lay, &st, &params, opts.loss, true);
-                    (g, diag) = gradient_and_diagonal(pb, &lay, &st, &ev);
-                    gradient_max = max_abs(&g);
-                    lambda = (lambda * (1.0 / 3.0f64).max(1.0 - (2.0 * rho - 1.0).powi(3))).max(MIN_DAMPING);
-                    nu = 2.0;
-                }
-                if tiny_change {
-                    termination = Some(Termination::Function);
-                } else if accepted && gradient_max <= opts.gradient_tolerance {
-                    termination = Some(Termination::Gradient);
-                } else if tiny_step {
-                    termination = Some(Termination::Parameters);
-                }
+        counts.push(cols.len() - from);
+    }
+    (cols, counts)
+}
+
+/// The variances of the free intrinsics of each camera of `pb` at its own parameters (the
+/// diagonal of `intrinsics_covariance`): per camera, one value per column of `CameraBlock::free`,
+/// in its order (none for a camera with none free). `Err` as `intrinsics_covariance`.
+pub fn intrinsics_variances(pb: &Problem, loss: Loss) -> Result<Vec<Vec<f64>>, String> {
+    let (block, counts) = intrinsics_covariance(pb, loss)?;
+    let k: usize = counts.iter().sum();
+    let mut at = 0;
+    Ok(counts
+        .iter()
+        .map(|&n| {
+            let variances = (at..at + n).map(|j| block[j * k + j]).collect();
+            at += n;
+            variances
+        })
+        .collect())
+}
+
+/// The bundle adjustment of a problem as a `Model`: the parameters it is at, the layout of their
+/// columns, and the camera blocks of the reduced system with the layout column of each of their
+/// columns.
+pub(crate) struct BundleModel<'a> {
+    pb: &'a Problem,
+    lay: Layout,
+    st: Structure,
+    pub(crate) params: Parameters,
+    loss: Loss,
+    cam_size: Vec<usize>,
+    point_size: Vec<usize>,
+    /// The camera block of each photo (none for a fixed photo without rolling shutter), of each
+    /// marker from `marker_block`, of the free intrinsics of each camera, of the bias of each
+    /// flight from `bias_block`.
+    photo_block: Vec<Option<usize>>,
+    marker_block: usize,
+    intr_block: Vec<Option<usize>>,
+    bias_block: usize,
+    border: usize,
+    /// The layout column of each column of the reduced system.
+    layout_col: Vec<usize>,
+    /// The first residual block of the marker observations, the control points, the bars, the
+    /// GNSS positions, the priors of the rolling shutter, and the end.
+    mobs_block: usize,
+    gcp_block: usize,
+    bar_block: usize,
+    gnss_block: usize,
+    rs_block: usize,
+    n_blocks: usize,
+}
+
+impl<'a> BundleModel<'a> {
+    /// The model of `pb` (which passes `Problem::check`) at its own parameters, `loss` on the tie
+    /// points.
+    pub(crate) fn new(pb: &'a Problem, loss: Loss) -> BundleModel<'a> {
+        let lay = Layout::new(pb);
+        let st = Structure::new(pb);
+        let params = Parameters::initial(pb);
+        let (mut cam_size, mut layout_col) = (Vec::new(), Vec::new());
+        let mut photo_block = Vec::with_capacity(pb.centres.len());
+        for i in 0..pb.centres.len() {
+            let start = layout_col.len();
+            if let Some(c0) = lay.image_col[i] {
+                layout_col.extend(c0..c0 + 6);
+            }
+            if let Some(r0) = lay.rs_col_of(i) {
+                layout_col.extend(r0..r0 + 6);
+            }
+            let len = layout_col.len() - start;
+            photo_block.push((len > 0).then(|| {
+                cam_size.push(len);
+                cam_size.len() - 1
+            }));
+        }
+        let marker_block = cam_size.len();
+        for m in 0..pb.markers.len() {
+            cam_size.push(3);
+            layout_col.extend(lay.marker_col + 3 * m..lay.marker_col + 3 * m + 3);
+        }
+        let border_block = cam_size.len();
+        let mut intr_block = Vec::with_capacity(pb.cameras.len());
+        for c in 0..pb.cameras.len() {
+            let cols = lay.camera_cols(c);
+            intr_block.push((!cols.is_empty()).then(|| {
+                cam_size.push(cols.len());
+                layout_col.extend(cols);
+                cam_size.len() - 1
+            }));
+        }
+        let bias_block = cam_size.len();
+        for f in 0..lay.flights.len() {
+            cam_size.push(3);
+            layout_col.extend(lay.bias_col + 3 * f..lay.bias_col + 3 * f + 3);
+        }
+        let border = cam_size.len() - border_block;
+        let mobs_block = pb.obs.len();
+        let gcp_block = mobs_block + pb.mobs.len();
+        let bar_block = gcp_block + pb.gcps.len();
+        let gnss_block = bar_block + pb.bars.len();
+        let rs_block = gnss_block + pb.gnss.len();
+        let n_blocks = rs_block + if pb.rolling_shutter { pb.centres.len() } else { 0 };
+        BundleModel {
+            pb,
+            lay,
+            st,
+            params,
+            loss,
+            cam_size,
+            point_size: vec![3; pb.points.len()],
+            photo_block,
+            marker_block,
+            intr_block,
+            bias_block,
+            border,
+            layout_col,
+            mobs_block,
+            gcp_block,
+            bar_block,
+            gnss_block,
+            rs_block,
+            n_blocks,
+        }
+    }
+
+    /// A step in the columns of the model (the reduced system, then the points) in the columns of
+    /// the layout.
+    pub(crate) fn to_layout(&self, delta_cameras: &[f64], delta_points: &[f64]) -> Vec<f64> {
+        let mut delta = vec![0.0; self.lay.size];
+        for (&lc, &x) in self.layout_col.iter().zip(delta_cameras) {
+            delta[lc] = x;
+        }
+        delta[self.lay.point_col..self.lay.point_col + delta_points.len()].copy_from_slice(delta_points);
+        delta
+    }
+
+    /// The adjusted block, from the parameters reached and the report of the solver.
+    fn solution(self, report: Report) -> Solution {
+        let params = self.params;
+        Solution {
+            rotations: params.rotations,
+            centres: params.centres,
+            camera_params: params.camera_params,
+            points: params.points,
+            markers: params.markers,
+            rolling_shutter: self.pb.rolling_shutter.then_some(params.rolling_shutter),
+            bias: self.lay.flights.iter().copied().zip(params.bias).collect(),
+            cost_initial: report.cost_initial,
+            cost: report.cost,
+            gradient_max: report.gradient_max,
+            iterations: report.iterations,
+            termination: report.termination,
+            linear_solver: report.linear_solver,
+        }
+    }
+
+    /// A tie (`marker` false) or marker observation `j`: its camera blocks, the rows of its
+    /// Jacobian from the rows of `Structure::row_len` of the residuals (the pose and the rolling
+    /// shutter of its photo, the marker, the free intrinsics of its camera, the point).
+    fn observation(&self, j: usize, marker: bool, out: &mut BlockJacobian) {
+        let (pb, st, params) = (self.pb, &self.st, &self.params);
+        let o = if marker { &pb.mobs[j] } else { &pb.obs[j] };
+        let (x, sigma) =
+            if marker { (params.markers[o.point], pb.marker_sigma) } else { (params.points[o.point], pb.pixel_sigma) };
+        let (i, c) = (o.image, pb.image_camera[o.image]);
+        let mut res = [0.0; 2];
+        let mut rows = [0.0; 2 * (OFF_INTR + 12 + 6)];
+        let rows = &mut rows[..2 * st.row_len];
+        out.constant = observation_linearized(pb, st, params, o, x, sigma, &mut res, rows);
+        out.residuals.extend_from_slice(&res);
+        out.loss = if marker { Loss::None } else { self.loss };
+        out.cameras.extend(self.photo_block[i]);
+        if marker {
+            out.cameras.push(self.marker_block + o.point);
+        } else {
+            out.point = Some(o.point);
+        }
+        out.cameras.extend(self.intr_block[c]);
+        let k = pb.cameras[c].free.len();
+        for jr in rows.chunks_exact(st.row_len) {
+            if self.lay.image_col[i].is_some() {
+                out.jacobian.extend_from_slice(&jr[OFF_DELTA..OFF_DELTA + 6]);
+            }
+            if pb.rolling_shutter {
+                out.jacobian.extend_from_slice(&jr[st.off_rs..st.off_rs + 6]);
+            }
+            if marker {
+                out.jacobian.extend_from_slice(&jr[OFF_POINT..OFF_POINT + 3]);
+            }
+            out.jacobian.extend_from_slice(&jr[OFF_INTR..OFF_INTR + k]);
+            if !marker {
+                out.jacobian.extend_from_slice(&jr[OFF_POINT..OFF_POINT + 3]);
             }
         }
-        if !accepted && termination.is_none() {
-            lambda *= nu;
-            nu *= 2.0;
-            if lambda > MAX_DAMPING {
-                termination = Some(Termination::NoProgress);
-            }
-        }
-        if !observe(iterations, ev.cost) {
-            return Err("cancelled".into());
+    }
+
+    /// The bias of the flight of the GNSS position `j` and its camera block, if it has one.
+    fn bias(&self, j: usize) -> ([f64; 3], Option<usize>) {
+        match self.lay.flight_index(self.pb.gnss[j].3) {
+            Some(f) => (self.params.bias[f], Some(self.bias_block + f)),
+            None => ([0.0; 3], None),
         }
     }
-    Ok(Solution {
-        rotations: params.rotations,
-        centres: params.centres,
-        camera_params: params.camera_params,
-        points: params.points,
-        markers: params.markers,
-        rolling_shutter: pb.rolling_shutter.then_some(params.rolling_shutter),
-        bias: lay.flights.iter().copied().zip(params.bias).collect(),
-        cost_initial,
-        cost: ev.cost,
-        gradient_max,
-        iterations,
-        termination: termination.expect("the loop ends with a termination"),
-        linear_solver,
-    })
+}
+
+impl Model for BundleModel<'_> {
+    fn camera_blocks(&self) -> &[usize] {
+        &self.cam_size
+    }
+
+    fn point_blocks(&self) -> &[usize] {
+        &self.point_size
+    }
+
+    fn residual_blocks(&self) -> usize {
+        self.n_blocks
+    }
+
+    fn linearize(&self, k: usize, out: &mut BlockJacobian) {
+        let (pb, params) = (self.pb, &self.params);
+        if k < self.mobs_block {
+            self.observation(k, false, out);
+        } else if k < self.gcp_block {
+            self.observation(k - self.mobs_block, true, out);
+        } else if k < self.bar_block {
+            let (m, target, sigma) = pb.gcps[k - self.gcp_block];
+            let r = control(variables::<3>(params.markers[m], 0), target, sigma);
+            out.cameras.push(self.marker_block + m);
+            for value in r {
+                out.residuals.push(value.v);
+                out.jacobian.extend_from_slice(&value.d);
+            }
+        } else if k < self.gnss_block {
+            let (a, b, distance, sigma) = pb.bars[k - self.bar_block];
+            let (ma, mb) = (variables::<6>(params.markers[a], 0), variables::<6>(params.markers[b], 3));
+            let r = bar(ma, mb, distance, sigma);
+            out.cameras.extend([self.marker_block + a, self.marker_block + b]);
+            out.residuals.push(r.v);
+            out.jacobian.extend_from_slice(&r.d);
+        } else if k < self.rs_block {
+            let j = k - self.gnss_block;
+            let (i, target, sigma, _) = pb.gnss[j];
+            let (bias, bias_block) = self.bias(j);
+            let r = gnss(variables::<6>(params.centres[i], 0), variables::<6>(bias, 3), target, sigma);
+            let photo = self.lay.image_col[i].is_some().then(|| self.photo_block[i].expect("a free photo has a block"));
+            out.cameras.extend(photo);
+            out.cameras.extend(bias_block);
+            for value in r {
+                out.residuals.push(value.v);
+                if let Some(b) = photo {
+                    let mut row = [0.0; 12];
+                    row[3..6].copy_from_slice(&value.d[..3]);
+                    out.jacobian.extend_from_slice(&row[..self.cam_size[b]]);
+                }
+                if bias_block.is_some() {
+                    out.jacobian.extend_from_slice(&value.d[3..6]);
+                }
+            }
+        } else {
+            let i = k - self.rs_block;
+            let rs = params.rolling_shutter[i];
+            let (sigma, sigma_angular) = pb.rs_sigmas(i);
+            let (v, w) = (variables::<6>([rs[0], rs[1], rs[2]], 0), variables::<6>([rs[3], rs[4], rs[5]], 3));
+            let r = rs_prior([v[0], v[1], v[2], w[0], w[1], w[2]], sigma, sigma_angular);
+            let block = self.photo_block[i].expect("a photo with rolling shutter has a block");
+            out.cameras.push(block);
+            let off = self.cam_size[block] - 6;
+            for value in r {
+                out.residuals.push(value.v);
+                let mut row = [0.0; 12];
+                row[off..off + 6].copy_from_slice(&value.d);
+                out.jacobian.extend_from_slice(&row[..self.cam_size[block]]);
+            }
+        }
+    }
+
+    fn residuals(&self, k: usize, out: &mut BlockJacobian) {
+        let (pb, params) = (self.pb, &self.params);
+        if k < self.gcp_block {
+            let marker = k >= self.mobs_block;
+            let (o, x, sigma) = if marker {
+                let o = &pb.mobs[k - self.mobs_block];
+                (o, params.markers[o.point], pb.marker_sigma)
+            } else {
+                (&pb.obs[k], params.points[pb.obs[k].point], pb.pixel_sigma)
+            };
+            out.loss = if marker { Loss::None } else { self.loss };
+            match observation_values(pb, params, o, x, sigma) {
+                Some(r) => out.residuals.extend_from_slice(&r),
+                None => {
+                    out.residuals.extend_from_slice(&[BEHIND_CAMERA_RESIDUAL; 2]);
+                    out.constant = true;
+                }
+            }
+        } else if k < self.bar_block {
+            let (m, target, sigma) = pb.gcps[k - self.gcp_block];
+            out.residuals.extend_from_slice(&control(params.markers[m], target, sigma));
+        } else if k < self.gnss_block {
+            let (a, b, distance, sigma) = pb.bars[k - self.bar_block];
+            out.residuals.push(bar(params.markers[a], params.markers[b], distance, sigma));
+        } else if k < self.rs_block {
+            let j = k - self.gnss_block;
+            let (i, target, sigma, _) = pb.gnss[j];
+            out.residuals.extend_from_slice(&gnss(params.centres[i], self.bias(j).0, target, sigma));
+        } else {
+            let i = k - self.rs_block;
+            let (sigma, sigma_angular) = pb.rs_sigmas(i);
+            out.residuals.extend_from_slice(&rs_prior(params.rolling_shutter[i], sigma, sigma_angular));
+        }
+    }
+
+    fn apply(&mut self, delta_cameras: &[f64], delta_points: &[f64]) {
+        let delta = self.to_layout(delta_cameras, delta_points);
+        self.params = self.params.step(self.pb, &self.lay, &delta);
+    }
+
+    fn save(&self) -> Vec<f64> {
+        let p = &self.params;
+        let mut out = Vec::new();
+        out.extend(p.rotations.iter().flatten().flatten());
+        out.extend(p.centres.iter().flatten());
+        out.extend(p.camera_params.iter().flatten());
+        out.extend(p.points.iter().chain(&p.markers).chain(&p.bias).flatten());
+        out.extend(p.rolling_shutter.iter().flatten());
+        out
+    }
+
+    fn restore(&mut self, saved: &[f64]) {
+        let mut values = saved.iter().copied();
+        let p = &mut self.params;
+        let slots = p.rotations.iter_mut().flatten().flatten().chain(p.centres.iter_mut().flatten());
+        let slots = slots.chain(p.camera_params.iter_mut().flatten());
+        let slots = slots.chain(p.points.iter_mut().chain(p.markers.iter_mut()).chain(p.bias.iter_mut()).flatten());
+        for slot in slots.chain(p.rolling_shutter.iter_mut().flatten()) {
+            *slot = values.next().expect("the saved parameters");
+        }
+    }
+
+    fn point_coordinate(&self, index: usize) -> f64 {
+        self.params.points[index / 3][index % 3]
+    }
+
+    fn border_blocks(&self) -> usize {
+        self.border
+    }
+
+    fn settle(&mut self) -> bool {
+        refine_unheld_points(self.pb, &self.st, &mut self.params, self.loss) > 0
+    }
+
+    fn parameter_norm(&self) -> f64 {
+        self.params.norm(self.pb, &self.lay)
+    }
+}
+
+/// The linear system of the small blocks of the tests, as the solver sees it.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::bundle::lm::{first_linearization, gradient_and_diagonal, Lin, Shape};
+    use crate::bundle::schur::Reduced;
+
+    pub(crate) struct System<'a> {
+        pub model: BundleModel<'a>,
+        pub shape: Shape,
+        pub lin: Lin,
+        pub g: Vec<f64>,
+        pub d: Vec<f64>,
+        pub held: Vec<bool>,
+    }
+
+    /// `pb` at `params` with `loss` on its tie points, linearised: the gradient and the diagonal in
+    /// the columns of the model.
+    pub(crate) fn system(pb: &Problem, params: Parameters, loss: Loss) -> System<'_> {
+        let mut model = BundleModel::new(pb, loss);
+        model.params = params;
+        let (shape, lin) = first_linearization(&model).unwrap();
+        let (g, d) = gradient_and_diagonal(&shape, &lin);
+        let held = vec![false; shape.n_point_cols];
+        System { model, shape, lin, g, d, held }
+    }
+
+    impl System<'_> {
+        pub(crate) fn reduced(&self) -> Reduced<'_> {
+            Reduced { shape: &self.shape, lin: &self.lin, held: &self.held }
+        }
+
+        /// The damping `lambda` times the diagonal floored at 1e-6.
+        pub(crate) fn damping(&self, lambda: f64) -> Vec<f64> {
+            self.d.iter().map(|x| lambda * x.max(1e-6)).collect()
+        }
+
+        /// A vector in the columns of the model in the columns of the layout.
+        pub(crate) fn to_layout(&self, x: &[f64]) -> Vec<f64> {
+            self.model.to_layout(&x[..self.shape.n], &x[self.shape.n..])
+        }
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +650,44 @@ mod tests {
     use super::*;
     use crate::bundle::problem::{CameraBlock, Obs};
     use crate::camera::Model;
+
+    /// A weak block - a nadir flight over gentle relief, its positions loose (2 m), no control
+    /// point, every intrinsic free: the focal length hardly told from the flying height, the poorly
+    /// determined direction the covariance is asked for. The columns the conjugate gradients give
+    /// (the dense limit forced to 0) are those of the dense inverse; stopped before they converge
+    /// they are refused, never a truncated (smaller) variance in that direction.
+    #[test]
+    fn the_covariance_by_the_conjugate_gradients_is_the_dense_one_on_a_weak_block_or_refused() {
+        use crate::bundle::lm::{covariance_block_with_limits, COVARIANCE_PCG_ITERATIONS};
+        let (mut pb, _) = crate::bundle::synthetic::grid_block(12, 200, 3);
+        pb.gcps.clear();
+        pb.mobs.clear();
+        pb.markers.clear();
+        for g in pb.gnss.iter_mut() {
+            g.2 = [2.0; 3];
+        }
+        pb.cameras[0].free = (0..8).collect();
+        pb.check().unwrap();
+        let model = BundleModel::new(&pb, Loss::None);
+        let (cols, counts) = intrinsic_columns(&model, &pb);
+        assert_eq!(counts, vec![8]);
+        let k = cols.len();
+        let dense = covariance_block_with_limits(&model, &cols, usize::MAX, COVARIANCE_PCG_ITERATIONS).unwrap();
+        let pcg = covariance_block_with_limits(&model, &cols, 0, COVARIANCE_PCG_ITERATIONS).unwrap();
+        // the focal length (1000 px): a sd of more than 1 % per pixel of the observations - the weak
+        // direction
+        assert!(dense[0].sqrt() > 10.0, "sd of the focal {}", dense[0].sqrt());
+        for i in 0..k {
+            for j in 0..k {
+                let scale = (dense[i * k + i] * dense[j * k + j]).sqrt();
+                let (a, b) = (pcg[i * k + j], dense[i * k + j]);
+                assert!((a - b).abs() <= 1e-5 * scale, "({i}, {j}): {a} vs {b}");
+            }
+        }
+        // a few iterations do not reach the inverse: refused, not returned short
+        let short = covariance_block_with_limits(&model, &cols, 0, 3);
+        assert!(short.is_err(), "{short:?}");
+    }
 
     #[test]
     fn auto_chooses_by_the_limits_it_is_given() {
@@ -367,15 +712,17 @@ mod tests {
     /// beyond; a solver asked by name is taken as it is.
     #[test]
     fn auto_takes_the_sparse_solver_above_the_dense_limit_and_the_conjugate_gradients_above_the_bytes() {
+        use crate::bundle::lm::Stepper;
         use crate::bundle::schur::tests::small_block;
+        use crate::bundle::sparse::SparseSystem;
         let pb = small_block();
-        let st = Structure::new(&pb);
-        let red = Reduced::new(&pb, &Layout::new(&pb));
-        assert_eq!(red.size, 48);
+        let sys = testing::system(&pb, Parameters::initial(&pb), Loss::None);
+        let shape = &sys.shape;
+        assert_eq!(shape.n, 48);
         let choose = |asked, dense_max_columns, pcg_above| {
-            Stepper::choose(&pb, &st, &red, asked, dense_max_columns, pcg_above).unwrap().solver()
+            Stepper::choose(shape, asked, dense_max_columns, pcg_above).unwrap().solver()
         };
-        let factor_bytes = SparseSystem::new(&pb, &st, &red).unwrap().factor_bytes();
+        let factor_bytes = SparseSystem::new(shape).unwrap().factor_bytes();
         assert!(factor_bytes > 0);
         assert_eq!(choose(LinearSolver::Auto, 48, u64::MAX), LinearSolver::Dense);
         assert_eq!(choose(LinearSolver::Auto, 47, u64::MAX), LinearSolver::Sparse);
@@ -388,7 +735,7 @@ mod tests {
         }
         // the sparse system `Auto` keeps has its values; through `solve`, the solution says which
         // solver `Auto` took
-        let kept = Stepper::choose(&pb, &st, &red, LinearSolver::Auto, 47, u64::MAX).unwrap();
+        let kept = Stepper::choose(shape, LinearSolver::Auto, 47, u64::MAX).unwrap();
         assert!(matches!(kept, Stepper::Sparse(ref system) if system.allocated_bytes() > 0));
         let through = |dense_max_columns, pcg_above| {
             let sol = solve_with_limits(&pb, &Options::default(), &mut |_, _| true, dense_max_columns, pcg_above);

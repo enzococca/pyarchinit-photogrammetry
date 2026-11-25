@@ -25,6 +25,7 @@ from pyarchinit_photogrammetry import _native
 from pyarchinit_photogrammetry.gnss import apply as gnss_apply
 from pyarchinit_photogrammetry.gnss import atx, dji, download, frames, positions, ppk, rinex, stations
 import gnss_helpers
+from cli_helpers import plain_words
 from gnss_helpers import (EPOCHS, MRK_LAT, POS_COLUMNS, POS_LEGEND, POS_ROWS, PPK_BASE, PPK_NAV, PPK_ROVER, START_2005,
                           WEEK, needs_rtklib)
 from gnss_helpers import drone_rows as _drone_rows
@@ -2453,17 +2454,6 @@ def _ppk_command(project: Path, folder: Path, *options: str) -> list[str]:
             "--base", str(PPK_BASE), *options]
 
 
-_TERMINAL_CODES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")  # the colors and styles a terminal is told (CSI sequences)
-
-
-def _plain_words(output: str) -> str:
-    """What a command printed, as plain words on one line. Typer prints a usage error in a box that wraps the message
-    and, where GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS is set (GitHub's runners), in forced colors that cut
-    ``--base-position`` into three styled pieces: the codes, the box and the line breaks are not what a test of the
-    message is about."""
-    return " ".join(re.sub("[\u2500-\u257f]", " ", _TERMINAL_CODES.sub("", output)).split())
-
-
 def test_ppk_command_line(tmp_path, fake_rtklib, monkeypatch):
     """ppg gnss ppk with RTKLIB's solution of a drone (the fake rnx2rtkp: no native core needed): the counts per
     status, the base, the warnings - the base at the position of its header among them - and what took no position;
@@ -2651,7 +2641,7 @@ def test_ppk_command_line_says_what_went_wrong_and_changes_nothing(tmp_path, fak
         result = run(app, command)
         assert result.exit_code == code, result.output
         assert _snapshot(ppg.Document.open(project).chunk) == before
-        return _plain_words(result.output)
+        return plain_words(result.output)
 
     # files that are not there, or a folder named as a file: refused before anything is read (a usage error)
     for option in ("--mrk", "--rover", "--base"):
@@ -3880,7 +3870,7 @@ def test_cli_ppk_with_a_station_base(tmp_path, fake_rtklib, monkeypatch):
                            "one of"),
                           ([*command, "--base-station", "NOPE"], "NOPE")):
         result = run(app, options)
-        assert result.exit_code != 0 and said in _plain_words(result.output), result.output
+        assert result.exit_code != 0 and said in plain_words(result.output), result.output
     # a typed base in ITRF2020 takes the epoch given, or that of the middle of the flight
     result = run(app, [*command, "--base", str(PPK_BASE), "--base-position", "35.1609,139.6138,71.25",
                        "--base-frame", "ITRF2020"])
@@ -4018,7 +4008,7 @@ def test_cli_ppk_with_the_base_placed_by_a_baseline_or_a_ppp(tmp_path, fake_rtkl
         assert result.exit_code == 0 and placed == [("baseline", "0759", gnss / "baseline", None)], result.output
     else:
         assert result.exit_code == 2 and placed == [], result.output
-        assert "a static PPP needs the antenna calibrations of the IGS" in _plain_words(result.output)
+        assert "a static PPP needs the antenna calibrations of the IGS" in plain_words(result.output)
 
 
 def test_cli_ppk_refuses_options_it_would_ignore(tmp_path, fake_rtklib, monkeypatch):
@@ -4041,7 +4031,7 @@ def test_cli_ppk_refuses_options_it_would_ignore(tmp_path, fake_rtklib, monkeypa
                     ["--base-station", "0759", "--base-frame", "ETRF2000"]):
         result = run(app, [*command, *options])
         assert result.exit_code == 2, result.output
-        assert "--base-frame and --base-epoch are those of --base-position" in _plain_words(result.output)
+        assert "--base-frame and --base-epoch are those of --base-position" in plain_words(result.output)
     assert downloads == {"observations": [], "coordinates": [], "navigation": [], "atx": []}
     result = run(app, [*command, "--base-station", "0759", "--atx", "off"])
     assert result.exit_code == 0, result.output
@@ -4148,7 +4138,7 @@ def test_cli_atx(tmp_path, monkeypatch):
     assert f"igs20.atx: {atx.atx_dir() / atx.FILE_NAME}" in result.output
     result = run(app, ["gnss", "ppk", str(tmp_path / "x.ppg"), "--mrk", str(PPK_NAV), "--rover", str(PPK_ROVER),
                        "--base", str(PPK_BASE), "--atx", "sometimes"])
-    assert result.exit_code != 0 and "--atx" in _plain_words(result.output)
+    assert result.exit_code != 0 and "--atx" in plain_words(result.output)
 
 
 # --- ppg doctor ---------------------------------------------------------------------------------------------------

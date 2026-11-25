@@ -329,6 +329,16 @@ pub(crate) fn refine_essential(report: Report<Essential>, x1: &[[f64; 2]], x2: &
     }
 }
 
+/// The pose `(r, t)` (cam2_from_cam1, `t` of unit norm) refined by least squares on the Sampson
+/// error of the correspondences, normalised coordinates, as `refine_essential` refines it but kept
+/// whatever its support: the relative pose of a pair of the mapper's view graph, refined on inliers
+/// already chosen, where the accuracy of the pose matters and not one inlier more or less.
+pub(crate) fn refine_pose(r: &Matrix3<f64>, t: &Vector3<f64>, x1: &[[f64; 2]], x2: &[[f64; 2]])
+                          -> (Matrix3<f64>, Vector3<f64>) {
+    let pose = levenberg_marquardt(&EssentialPose::new(*r, *t), x1, x2);
+    (pose.r, pose.t)
+}
+
 /// The fundamental matrix refined on its inliers by least squares on the Sampson error, its rank
 /// kept at two.
 pub(crate) fn refine_fundamental(report: Report<Fundamental>, x1: &[[f64; 2]], x2: &[[f64; 2]], max_error: f64)

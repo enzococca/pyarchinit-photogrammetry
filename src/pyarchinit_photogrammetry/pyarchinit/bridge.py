@@ -85,12 +85,14 @@ class PyArchInit(TopographicMixin):
         return int(rows[0]["id_us"])
 
     # ------------------------------------------------------------------ US form
+    # the physical relations in words; the posteriority as PyArchInit's US form and s3dgraphy write and
+    # read it: ``>`` (this unit is later than the other), ``<`` (earlier), for every kind of unit
     RELATIONS = ["Copre", "Coperto da", "Taglia", "Tagliato da", "Riempie", "Riempito da", "Si appoggia a",
-                 "Gli si appoggia", "Si lega a", "Uguale a", "Anteriore a", "Posteriore a"]
+                 "Gli si appoggia", "Si lega a", "Uguale a", ">", "<"]
     INVERSE = {"Copre": "Coperto da", "Coperto da": "Copre", "Taglia": "Tagliato da", "Tagliato da": "Taglia",
                "Riempie": "Riempito da", "Riempito da": "Riempie", "Si appoggia a": "Gli si appoggia",
                "Gli si appoggia": "Si appoggia a", "Si lega a": "Si lega a", "Uguale a": "Uguale a",
-               "Anteriore a": "Posteriore a", "Posteriore a": "Anteriore a"}
+               ">": "<", "<": ">", "Posteriore a": "<", "Anteriore a": ">"}
 
     def next_us(self, sito: str) -> int:
         """The number after the highest US of the site (numeric ones; 1 for a site without forms)."""
@@ -164,11 +166,11 @@ class PyArchInit(TopographicMixin):
         if rec is None:
             return None
         current = parse_relationships(rec.get("rapporti"))
-        have = {(r[0], r[1], r[2] or str(area), r[3] or sito) for r in current}
+        have = {(relation_word(r[0]), r[1], r[2] or str(area), r[3] or sito) for r in current}
         new = []
         for r in rels:
             r = [str(x) if x is not None else "" for x in r] + ["", ""]
-            row = [r[0], r[1], r[2] or str(area), r[3] or sito]
+            row = [relation_word(r[0]), r[1], r[2] or str(area), r[3] or sito]
             if tuple(row) not in have:
                 have.add(tuple(row))
                 new.append(row)
@@ -782,7 +784,18 @@ class PyArchInit(TopographicMixin):
 RELATION_WORDS = {"copre": "Copre", "coperto da": "Coperto da", "taglia": "Taglia", "tagliato da": "Tagliato da",
                   "riempie": "Riempie", "riempito da": "Riempito da", "si appoggia a": "Si appoggia a",
                   "gli si appoggia": "Gli si appoggia", "si lega a": "Si lega a", "uguale a": "Uguale a",
-                  "anteriore a": "Anteriore a", "posteriore a": "Posteriore a"}
+                  ">": ">", "<": "<", "posteriore a": ">", "anteriore a": "<"}
+# «Posteriore a» / «Anteriore a» belong to PyArchInit's *struttura* form, not to its US form: neither
+# PyArchInit's matrix nor s3dgraphy reads them in ``rapporti``. Written by earlier versions of this
+# program, they go back as what they always meant, ``>`` / ``<``, when a form is written again.
+LEGACY_RELATIONS = {"posteriore a": ">", "anteriore a": "<"}
+
+
+def relation_word(name) -> str:
+    """The relation as it is written into ``rapporti``: ``>`` / ``<`` for the legacy «Posteriore a» /
+    «Anteriore a» (any case), every other relation as it is."""
+    text = "" if name is None else str(name)
+    return LEGACY_RELATIONS.get(text.strip().lower(), text)
 
 
 _US_REFERENCE: list[tuple[str, str]] | None = None
@@ -825,9 +838,10 @@ def parse_relationships(text: str | None) -> list[list[str]]:
     except (ValueError, SyntaxError):
         out = []
         for part in re.split(r"[;,\n]+", str(text)):
-            m = re.match(r"\s*([A-Za-z' ]+?)\s+(\S+)\s*$", part)
-            if m and m.group(1).lower() in RELATION_WORDS:
-                out.append([RELATION_WORDS[m.group(1).lower()], m.group(2), "", ""])
+            m = re.match(r"\s*(?:([A-Za-z' ]+?)\s+|([<>])\s*)(\S+)\s*$", part)
+            word = m and (m.group(1) or m.group(2)).lower()
+            if word in RELATION_WORDS:
+                out.append([RELATION_WORDS[word], m.group(3), "", ""])
         return out
     if not isinstance(data, (list, tuple)):
         return []
@@ -840,11 +854,12 @@ def parse_relationships(text: str | None) -> list[list[str]]:
 
 
 def format_relationships(rels, default_site: str | None = None, default_area: str | None = None) -> str:
-    """``[[relation, us, area, sito], ...]`` as PyArchInit stores it."""
+    """``[[relation, us, area, sito], ...]`` as PyArchInit stores it; the legacy «Posteriore a» /
+    «Anteriore a» as ``>`` / ``<`` (:func:`relation_word`)."""
     rows = []
     for r in rels:
         r = [str(x) if x is not None else "" for x in r]
-        rel, us = r[0], r[1]
+        rel, us = relation_word(r[0]), r[1]
         area = r[2] if len(r) > 2 and r[2] else (default_area or "")
         site = r[3] if len(r) > 3 and r[3] else (default_site or "")
         rows.append([rel, us, area, site])

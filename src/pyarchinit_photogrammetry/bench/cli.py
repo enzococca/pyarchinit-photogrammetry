@@ -23,18 +23,33 @@ bench_app = typer.Typer(help="The bench: a version of the program measured on a 
                              "child process, their memory, their results, one record per run -, on the synthetic sets "
                              "with the errors against their truth, and the table of a folder of records")
 
-SETS = ("trench", "ring")
+SETS = ("trench", "ring", "weak-ring")
+# the chains --steps chooses from for the weak ring, the first its default (the other sets have their own chain)
+WEAK_RING_STEPS = ("align", "optimize")
 STEPS_HELP = ("align (the matching, the alignment, the georeferencing when the photos carry a GPS position), all "
               "(the default targets detected first; then depth maps, dense cloud, model, texture, DEM, orthophoto) "
               "or match (the matching alone, without the mapper: the time of the native matching against the "
               "classic one on a large set)")
 MAPPER_HELP = ("the mapper of the alignment: auto (the one ppg process picks for the set), incremental or global; the "
                "record keeps it as mapper_requested beside the mapper the run used")
-ENGINE_HELP = ("the engine of the matching: auto (the choice of the program), classic or native; the alignment stays "
-               "classic. The record keeps it as engine_requested; the engine of the step says what ran")
+ENGINE_HELP = ("the engine of the matching: auto (the choice of the program), classic or native; the alignment has "
+               "its own, --align-engine. The record keeps it as engine_requested; the engine of the step says what ran")
+ALIGN_ENGINE_HELP = ("the engine of the alignment: auto (the choice of the program), classic or native (the global "
+                     "mapper of the native engine, the classic alignment behind it). The record keeps it as "
+                     "align_engine_requested; the engine of the step says what ran, native_fallback why the native "
+                     "mapper gave its block up")
 SEED_HELP = ("the seed of the RANSAC of the geometric verification of the matches (PPG_RANSAC_SEED in the child): runs "
              "with the same seed verify the same pairs; without it a seed from the clock, and the record says -1")
 RECORDS_HELP = "the folder of the records (default: OUT)"
+MATCHES_FROM_HELP = ("a work folder kept by --keep (OUT/<name>-<i>): each run copies its project, its database and "
+                     "its native stores, drops the alignment and starts at the alignment, without matching again; "
+                     "the kept folder is only read. The record says matches_reused")
+MARKERS_HELP = ("a project (.ppg, opened and never saved) whose chunk has markers measured on the photos: they are "
+                "copied into the run's chunk before the alignment (label, reference, check flag, projections by "
+                "the label of the photo); the record keeps how many (markers, checks), never a label")
+OPTIMIZE_HELP = ("--steps optimize: the formulation of the optimization, colmap (the default, the published one) or "
+                 "ppg; kept as optimize_engine")
+SOLVER_HELP = "--steps optimize with --optimize ppg: auto (the default), native or scipy; kept as optimize_solver"
 
 
 @bench_app.command("run")
@@ -46,10 +61,15 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
               steps: str = typer.Option("align", "--steps", help=STEPS_HELP),
               mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
               engine: str = typer.Option("auto", "--engine", help=ENGINE_HELP),
+              align_engine: str = typer.Option("auto", "--align-engine", help=ALIGN_ENGINE_HELP),
               seed: Optional[int] = typer.Option(None, "--seed", min=0, help=SEED_HELP),
               repeat: int = typer.Option(1, "--repeat", help="how many runs: a figure is a baseline with three"),
               keep: bool = typer.Option(False, "--keep", help="keep the work folders (the projects) after the runs"),
-              records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
+              records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP),
+              matches_from: Optional[Path] = typer.Option(None, "--matches-from", help=MATCHES_FROM_HELP),
+              markers: Optional[Path] = typer.Option(None, "--markers", help=MARKERS_HELP),
+              optimize: Optional[str] = typer.Option(None, "--optimize", help=OPTIMIZE_HELP),
+              solver: Optional[str] = typer.Option(None, "--solver", help=SOLVER_HELP)):
     """Runs of a set of photos: the steps in a child process, each timed, with its peak memory, the stages of the
     engine and the results of the run; one record per run, valid or not and why. The record holds no path, no photo
     name, no coordinate and no CRS."""
@@ -61,14 +81,21 @@ def bench_run(photos: Path = typer.Argument(..., help="the folder of the photos"
     if mapper not in child.MAPPERS:
         raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
     _engine(engine)
+    _engine(align_engine, "--align-engine")
+    for option, value in (("--optimize", optimize), ("--solver", solver)):
+        if value is not None and steps != "optimize":
+            raise typer.BadParameter(f"{option} is an option of --steps optimize", param_hint=option)
+    # the options of the real sets go to the runner only when given: a run without them is the run of before
+    real = {key: value for key, value in (("matches_from", matches_from), ("markers", markers),
+                                          ("optimize", optimize), ("solver", solver)) if value is not None}
     _, records_folder = _check(runner.check, out, name, steps, repeat, records, photos=photos, mapper=mapper,
-                               engine=engine)
+                               engine=engine, align_engine=align_engine, **real)
     _say(_run(runner.run, records_folder, name, photos, out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, mapper=mapper, seed=seed, engine=engine))
+              records=records, mapper=mapper, seed=seed, engine=engine, align_engine=align_engine, **real))
 
 
 @bench_app.command("synthetic")
-def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
+def bench_synthetic(which: str = typer.Argument(..., help="trench, ring or weak-ring"),
                     out: Path = typer.Argument(..., help="the folder of the set (OUT/synthetic-<set>-set, which must "
                                                          "not exist yet), of the work folders and, without "
                                                          "--records, of the records"),
@@ -77,6 +104,12 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
                                                                     "runs: the project of a kept run is what ppg "
                                                                     "bench adjust and ppg bench pairs take"),
                     engine: str = typer.Option("auto", "--engine", help=ENGINE_HELP),
+                    align_engine: str = typer.Option("auto", "--align-engine", help=ALIGN_ENGINE_HELP),
+                    mapper: str = typer.Option("auto", "--mapper", help=MAPPER_HELP),
+                    steps: Optional[str] = typer.Option(None, "--steps", help="weak-ring only: align (the default) or "
+                                                                              "optimize (align, then the optimization "
+                                                                              "of the cameras with the defaults of "
+                                                                              "ppg optimize)"),
                     records: Optional[Path] = typer.Option(None, "--records", help=RECORDS_HELP)):
     """A synthetic set written in a folder of its own under OUT and run as synthetic-trench or synthetic-ring, the
     errors against the truth of the set among the results (the keys that start with truth_). The set stays after
@@ -89,29 +122,52 @@ def bench_synthetic(which: str = typer.Argument(..., help="trench or ring"),
     ring: 72 photos around a mound, a GPS position in the EXIF of each, the steps of align with its targets detected,
     georeferenced by the positions of the photos; truth_target_rmse (over truth_targets targets found),
     truth_camera_rmse, truth_camera_height_mean (estimated minus true) and truth_camera_height_rmse against the true
-    targets and poses of the scene."""
+    targets and poses of the scene.
+
+    weak-ring: 80 nadir photos along one closed circular strip 60 m across, flown once, noisy GPS in the EXIF without
+    its accuracy, 12 targets under the strip; its targets detected and its gcp.csv imported, the odd codes check
+    points. truth_target_shape (and _rmse): the largest (the RMS) residual of the triangulated targets after one
+    similarity, over the diameter, measured right after the georeferencing and before any optimization; with
+    --steps optimize also optimized_control_rmse and optimized_check_rmse; the errors of the ring at the end."""
     from . import runner, truth
     from . import steps as child
     from ..testing import synthetic
 
     if which not in SETS:
-        raise typer.BadParameter(f"{' or '.join(SETS)}, not {which!r}")
+        raise typer.BadParameter(f"{_choices(SETS)}, not {which!r}")
     _engine(engine)
+    _engine(align_engine, "--align-engine")
+    if mapper not in child.MAPPERS:
+        raise typer.BadParameter(f"{_choices(child.MAPPERS)}, not {mapper!r}", param_hint="--mapper")
+    if steps is not None and which != "weak-ring":
+        raise typer.BadParameter(f"the chain of {which} is its own: --steps is for weak-ring", param_hint="--steps")
+    if steps is not None and steps not in WEAK_RING_STEPS:
+        raise typer.BadParameter(f"{_choices(WEAK_RING_STEPS)}, not {steps!r}", param_hint="--steps")
     out = Path(out)
     name = f"synthetic-{which}"
     set_dir = _check(_set_folder, out, name, records)
-    steps = "all" if which == "trench" else "align"
-    _, records_folder = _check(runner.check, out, name, steps, repeat, records, engine=engine)
+    chain = {"trench": "all", "ring": "align"}.get(which) or steps or WEAK_RING_STEPS[0]
+    _, records_folder = _check(runner.check, out, name, chain, repeat, records, mapper=mapper, engine=engine,
+                               align_engine=align_engine)
     if which == "trench":
         scene = synthetic.write_dataset(set_dir)
         kwargs = dict(reference=set_dir / "gcp.csv", crs=scene.crs, extra_results=truth.trench_truth)
-    else:
+    elif which == "ring":
         scene = synthetic.write_ring_dataset(set_dir)
         kwargs = dict(extra_results=lambda doc: truth.ring_truth(doc, scene))
+    else:
+        scene = synthetic.write_weak_ring_dataset(set_dir)
+        # the shape right after the georeferencing (before any optimization), the errors of the ring at the end
+        kwargs = dict(reference=set_dir / "gcp.csv", crs=scene.crs,
+                      check_points=tuple(str(c) for c in truth.WEAK_RING_CHECK),
+                      after={"update_transform": lambda doc: truth.ring_shape(doc, scene)},
+                      extra_results=lambda doc: truth.ring_truth(doc, scene))
+    if mapper != child.MAPPERS[0]:
+        kwargs["mapper"] = mapper
     typer.echo(f"the set is written: {len(scene.cameras)} photos")
     # the synthetic sets are stamped with the targets ppg process detects by default (testing.synthetic._stamp_target)
-    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=steps, repeat=repeat, keep=keep,
-              records=records, targets=child.DEFAULT_TARGETS, engine=engine, **kwargs))
+    _say(_run(runner.run, records_folder, name, set_dir / "photos", out, name, steps=chain, repeat=repeat, keep=keep,
+              records=records, targets=child.DEFAULT_TARGETS, engine=engine, align_engine=align_engine, **kwargs))
 
 
 @bench_app.command("adjust")
@@ -180,12 +236,13 @@ def _choices(words) -> str:
     return f"{', '.join(words[:-1])} or {words[-1]}"
 
 
-def _engine(engine: str) -> None:
-    """``--engine`` checked before anything runs: one of :data:`.steps.ENGINES`, else a usage error."""
+def _engine(engine: str, option: str = "--engine") -> None:
+    """``--engine`` or ``--align-engine`` (``option``) checked before anything runs: one of :data:`.steps.ENGINES`,
+    else a usage error that names the option."""
     from . import steps as child
 
     if engine not in child.ENGINES:
-        raise typer.BadParameter(f"{_choices(child.ENGINES)}, not {engine!r}", param_hint="--engine")
+        raise typer.BadParameter(f"{_choices(child.ENGINES)}, not {engine!r}", param_hint=option)
 
 
 def _set_folder(out: Path, name: str, records: Optional[Path]) -> Path:

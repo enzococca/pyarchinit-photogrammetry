@@ -51,10 +51,18 @@ Its `Description` is the edge of the Extended Matrix:
 | Copre, Coperto da / Covers, Covered by / Liegt über, Liegt unter | Copre | `overlies` |
 | Taglia, Tagliato da / Cuts, Cut by / Schneidet, Wird geschnitten | Taglia | `cuts` |
 | Riempie, Riempito da / Fills, Filled by / Verfüllt, Wird verfüllt durch | Riempie | `fills` |
-| Si appoggia a, Gli si appoggia / Abuts, Supports / Stützt sich auf, Wird gestüzt von | Si appoggia a | `abuts` |
-| Posteriore a, Anteriore a | Posteriore a | `is_after` |
+| Si appoggia a, Gli si appoggia / Abuts, Supports / Stützt sich auf, Wird gestützt von | Si appoggia a | `abuts` |
+| `>`, `<` (any kind of unit) | `>` | `is_after` |
+| Continuità successiva a, Continuità precedente a / Subsequent continuity of, Prior continuity of / Nachfolgende Kontinuität von, Vorherige Kontinuität von | Continuità successiva a | `is_after` |
+| Posteriore a, Anteriore a (written by earlier versions of this program) | Posteriore a | `is_after` |
 | Uguale a / Same as / Entspricht | Uguale a (once per pair) | `equals` |
 | Si lega a / Connected to / Bindet an | Si lega a (once per pair) | `bonded_to` |
+
+A temporal relation stays temporal and a physical one stays physical: `>` / `<` say only that a unit
+is later or earlier, never that it covers; `Si appoggia a` (abuts) is a physical contact whose unit is
+the more recent one, not two units of the same time. `>>` / `<<` link a unit to its paradata
+(documents, extractors, properties): they are not stratigraphic relations and are not written. The old
+spelling *Wird gestüzt von* is still read.
 
 The survey export with units (*Esporta IFC*, units drawn or from a PyArchInit site) carries the
 same identifiers and relationships; the polygons of one unit make one element.

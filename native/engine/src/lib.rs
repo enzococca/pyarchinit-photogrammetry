@@ -5,10 +5,10 @@
 //! GPUs and the CPU (`sched`), the features step built on them (`features`), the minimal solvers
 //! of two views and the geometric verification of a pair (`geometry`), the generic preselection
 //! of the pairs to match (`preselect`), the two-stage matching of the selected pairs and the
-//! match store (`pairs`, `store`) - so that they are built and tested on their own
-//! (`cargo test -p ppg_engine`) and timed by the binary `ppg-bench` (folder bench). The Python
-//! extension `ppg_core`, the root package of the workspace, turns numpy arrays into their
-//! arguments.
+//! match store (`pairs`, `store`), the native global mapper (`mapper`) - so that they are built
+//! and tested on their own (`cargo test -p ppg_engine`) and timed by the binary `ppg-bench`
+//! (folder bench). The Python extension `ppg_core`, the root package of the workspace, turns
+//! numpy arrays into their arguments.
 
 pub mod bundle;
 pub mod camera;
@@ -20,6 +20,7 @@ pub mod gpu_fuse;
 pub mod gpu_patchmatch;
 pub mod gpu_sift;
 pub mod image;
+pub mod mapper;
 pub mod matching;
 pub mod pairs;
 pub mod patchmatch;

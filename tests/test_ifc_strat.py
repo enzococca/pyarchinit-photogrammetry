@@ -23,6 +23,22 @@ def test_each_relation_once_as_an_edge():
         [("9", "Si appoggia a", "2", "abuts")]
 
 
+
+def test_time_stays_time_and_paradata_are_not_relations():
+    """``>`` / ``<`` (PyArchInit's US form, s3dgraphy) are ``is_after`` for every kind of unit, one fact
+    from both ends; the legacy «Posteriore a» / «Anteriore a» are still read; ``>>`` / ``<<`` link a unit
+    to its paradata and are no stratigraphic connection; abuts stays abuts (posteriority, not the same time)."""
+    declared = [("1", [[">", "2", "1", "S"], [">>", "D.01", "1", "S"]]), ("2", [["<", "1", "1", "S"]]),
+                ("3", [["Posteriore a", "4"]]), ("4", [["Anteriore a", "3"], ["<", "3"]]),
+                ("5", [["<<", "D.02"], ["Si appoggia a", "6"]])]
+    assert stratigraphic_edges(declared) == [("1", ">", "2", "is_after"), ("3", "Posteriore a", "4", "is_after"),
+                                             ("5", "Si appoggia a", "6", "abuts")]
+    german = [("7", [["Wird gestützt von", "8"]]), ("9", [["Wird gestüzt von", "10"]])]
+    assert stratigraphic_edges(german) == [("8", "Stützt sich auf", "7", "abuts"),
+                                           ("10", "Stützt sich auf", "9", "abuts")]
+    continuity = [("CON1", [["Continuità successiva a", "12"]]), ("12", [["Continuità precedente a", "CON1"]])]
+    assert stratigraphic_edges(continuity) == [("CON1", "Continuità successiva a", "12", "is_after")]
+
 class _Chunk:
     """What export_chunk_ifc reads of a chunk: a flat model 4 x 3 m at 100 m, in EPSG:3004."""
 

@@ -58,6 +58,37 @@ def test_relationships_round_trip():
     assert parse_relationships(None) == [] and parse_relationships("") == []
 
 
+def test_posteriority_is_written_as_pyarchinit_reads_it():
+    """The US form offers and writes ``>`` / ``<`` (PyArchInit's US form and s3dgraphy read them), not
+    «Posteriore a» / «Anteriore a» (words of PyArchInit's struttura form), which go back as ``>`` / ``<``
+    when a form is written again; the physical relations stay words."""
+    from pyarchinit_photogrammetry.pyarchinit.bridge import PyArchInit
+
+    assert {">", "<"} <= set(PyArchInit.RELATIONS)
+    assert not {"Posteriore a", "Anteriore a", ">>", "<<"} & set(PyArchInit.RELATIONS)
+    assert all(PyArchInit.INVERSE[PyArchInit.INVERSE[r]] == r for r in PyArchInit.RELATIONS)
+    text = format_relationships([["Posteriore a", "2"], ["anteriore a", "3"], ["Copre", "4"], [">>", "D.01"]],
+                                default_site="Scavo", default_area="1")
+    assert [r[0] for r in parse_relationships(text)] == [">", "<", "Copre", ">>"]
+    assert parse_relationships("> 3; posteriore a 4; <5; copre 6") == [
+        [">", "3", "", ""], [">", "4", "", ""], ["<", "5", "", ""], ["Copre", "6", "", ""]]
+
+    class Form(PyArchInit):  # a US form in memory: what add_relationships reads and writes
+        def __init__(self, rapporti):
+            self.rec = {"id_us": 1, "rapporti": rapporti}
+
+        def us_record(self, *a, **k):
+            return self.rec
+
+        def update_us(self, id_us, rapporti):
+            self.rec["rapporti"] = format_relationships(rapporti)
+
+    pa = Form(format_relationships([["Posteriore a", "2", "1", "Scavo"]]))
+    assert pa.add_relationships("Scavo", "1", "1", [[">", "2", "1", "Scavo"]]) == 0  # the same fact
+    assert pa.add_relationships("Scavo", "1", "1", [["Anteriore a", "5", "1", "Scavo"]]) == 1
+    assert parse_relationships(pa.rec["rapporti"]) == [[">", "2", "1", "Scavo"], ["<", "5", "1", "Scavo"]]
+
+
 def test_ifc_proxies_have_quantities_materials_and_relations(pit_dem, tmp_path):
     pytest.importorskip("ifcopenshell")
     import ifcopenshell

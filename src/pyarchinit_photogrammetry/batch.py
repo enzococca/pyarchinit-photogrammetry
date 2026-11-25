@@ -34,7 +34,8 @@ OPERATIONS: dict[str, dict] = {
     "match_photos": {"quality": "high", "keypoint_limit": 40000, "tiepoint_limit": 8000, "pair_selection": "auto"},
     "align_cameras": {},
     "update_transform": {},
-    "optimize_cameras": {"fit_principal_point": False, "use_markers": True},
+    # hold_undetermined: each part of the calibration refined only where the block determines it (engine.sfm)
+    "optimize_cameras": {"fit_principal_point": False, "use_markers": True, "hold_undetermined": True},
     "field_check": {"min_photos": 3},
     "build_depth_maps": {"quality": "medium", "filter_mode": "moderate", "skip_unreadable": False},
     "build_point_cloud": {},

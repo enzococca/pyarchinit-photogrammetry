@@ -187,6 +187,10 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "p_steps": ("Passi verso i riferimenti", "Steps towards the references"),
     "p_gnss_positions": ("Posizioni GNSS nella compensazione", "GNSS positions in the adjustment"),
     "p_focal_held": ("Focale dell'allineamento tenuta", "Focal length of the alignment held"),
+    "p_intrinsics": ("Altre parti della calibrazione tenute", "Other parts of the calibration held"),
+    "held_tangential": ("distorsione tangenziale", "tangential distortion"),
+    "held_principal_point": ("punto principale", "principal point"),
+    "held_radial": ("distorsione radiale", "radial distortion"),
     "p_reverted": ("Annullata dalla rete di sicurezza", "Undone by the safety net"),
     "p_backend": ("Motore", "Engine"),
     "p_filter": ("Filtro", "Filter"),
@@ -1107,7 +1111,8 @@ PARAM_STEPS = [  # (key in chunk.meta, title, parameters in order)
                          "stationary_removed", "mapper", "global_fallback", "masked_tie_points", "gpu", "gpu_pairs",
                          "cpu_pairs", "reprojection_error"]),
     ("optimize", "step_optimize", ["engine", "solver", "reprojection_error", "reverted", "iterations", "converged",
-                                   "control_points", "scale_bars", "steps", "gnss_positions", "focal_held"]),
+                                   "control_points", "scale_bars", "steps", "gnss_positions", "focal_held",
+                                   "intrinsics"]),
     ("dense", "step_dense", ["backend", "quality", "filter", "fusion", "skipped_photos"]),
     ("point_cloud_source", "step_point_cloud", []),
     ("model", "step_model", ["source", "surface", "classes", "face_count"]),
@@ -1131,6 +1136,18 @@ def _focal_held_value(w: Words, value) -> str:
     if isinstance(value, str) and value:
         return f"{w.yes_no(True)} ({value})"
     return w.yes_no(bool(value))
+
+
+def _calibration_held_value(w: Words, value) -> str | None:
+    """The *other parts of the calibration held* row of the optimisation, from its check of the calibrations
+    (``report["intrinsics"]``): the groups it held for a sensor beside the focal length, which has its own row -
+    the tangential distortion, the principal point, the radial distortion -, by name; None (no row) when it held
+    none of them."""
+    held = value.get("held") if isinstance(value, dict) else None
+    if not isinstance(held, dict):
+        return None
+    names = [w(f"held_{group}") for group in ("tangential", "principal_point", "radial") if held.get(group)]
+    return ", ".join(names) or None
 
 
 def _param_value(w: Words, key: str, value) -> str | None:
@@ -1216,6 +1233,8 @@ def parameter_rows(chunk, w: Words) -> list[tuple[str, str, str]]:
                 text, label = _solver_value(meta[k]), w("p_solver_used")
             elif key == "optimize" and k == "focal_held":
                 text, label = _focal_held_value(w, meta[k]), w("p_focal_held")
+            elif key == "optimize" and k == "intrinsics":
+                text, label = _calibration_held_value(w, meta[k]), w("p_intrinsics")
             else:
                 text, label = _param_value(w, k, meta[k]), (w(f"p_{k}") if f"p_{k}" in TEXT else k)
             if text is None:

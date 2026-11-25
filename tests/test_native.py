@@ -848,6 +848,14 @@ def test_ppk_numbers_use_a_point_whatever_the_locale(tmp_path):
 
 
 # ------------------------------------------------------------------------------- the bundle adjustment
+def test_a_core_with_the_mapper_declares_its_api():
+    """A core built from this branch carries the native mapper and declares at least the API ``_native`` asks for it."""
+    if not hasattr(ppg_core, "NativeMapper"):
+        pytest.skip("the native core with the mapper (API 16) is not installed")
+    assert ppg_core.API >= _native.MAPPER_API == 16
+    assert callable(ppg_core.native_mapper_defaults)
+
+
 def test_a_core_with_the_bundle_adjustment_declares_api_12():
     if not _native.has("bundle"):
         pytest.skip("the native core with the bundle adjustment (API 12) is not installed")

@@ -15,8 +15,13 @@ US_TYPES = ["US", "USM", "USR", "USD", "USV", "USVs", "USVn", "SF", "VSF", "CON"
 UNIT_FIELDS = ("stratigraph_index_us", "tipo_us_s", "rilievo_originale", "disegnatore", "data", "tipo_doc", "nome_doc")
 # the stratigraphic relations of PyArchInit's US forms (Italian, English, German, as its own table of
 # reciprocal relations) -> (the relation said from the start of the edge, the edge of the Extended
-# Matrix / s3dgraphy, declared from the other end: True; None for the relations without a direction)
+# Matrix / s3dgraphy, declared from the other end: True; None for the relations without a direction).
+# Time stays time, a physical relation stays physical: ``>`` / ``<`` are the posteriority of PyArchInit's
+# US form and of s3dgraphy (``A > B``: A is later than B, ``is_after``), for every kind of unit; the
+# physical relations are the words, never derived from a temporal one. «Posteriore a» / «Anteriore a»
+# (words of PyArchInit's *struttura* form, written here by earlier versions) are still read.
 RELATION_EDGES = {
+    ">": (">", "is_after", False), "<": (">", "is_after", True),
     "copre": ("Copre", "overlies", False), "coperto da": ("Copre", "overlies", True),
     "taglia": ("Taglia", "cuts", False), "tagliato da": ("Taglia", "cuts", True),
     "riempie": ("Riempie", "fills", False), "riempito da": ("Riempie", "fills", True),
@@ -31,9 +36,20 @@ RELATION_EDGES = {
     "liegt über": ("Liegt über", "overlies", False), "liegt unter": ("Liegt über", "overlies", True),
     "schneidet": ("Schneidet", "cuts", False), "wird geschnitten": ("Schneidet", "cuts", True),
     "verfüllt": ("Verfüllt", "fills", False), "wird verfüllt durch": ("Verfüllt", "fills", True),
-    "stützt sich auf": ("Stützt sich auf", "abuts", False), "wird gestüzt von": ("Stützt sich auf", "abuts", True),
+    "stützt sich auf": ("Stützt sich auf", "abuts", False), "wird gestützt von": ("Stützt sich auf", "abuts", True),
+    "wird gestüzt von": ("Stützt sich auf", "abuts", True),  # the old spelling of PyArchInit's reciprocal tables
     "bindet an": ("Bindet an", "bonded_to", None), "entspricht": ("Entspricht", "equals", None),
+    # the continuity of a unit (PyArchInit's continuity forms, CON): a posteriority too
+    "continuità successiva a": ("Continuità successiva a", "is_after", False),
+    "continuità precedente a": ("Continuità successiva a", "is_after", True),
+    "subsequent continuity of": ("Subsequent continuity of", "is_after", False),
+    "prior continuity of": ("Subsequent continuity of", "is_after", True),
+    "nachfolgende kontinuität von": ("Nachfolgende Kontinuität von", "is_after", False),
+    "vorherige kontinuität von": ("Nachfolgende Kontinuität von", "is_after", True),
 }
+# ``>>`` / ``<<`` of the US form link a unit to its paradata (documents, extractors, properties): not a
+# stratigraphic relation, so never an edge between two units
+PARADATA_LINKS = frozenset({">>", "<<"})
 # columns of pyarchinit_quote (spot heights)
 QUOTE_FIELDS = ("sito_q", "area_q", "us_q", "unita_tipo_q", "quota_q", "unita_misu_q", "data", "disegnatore",
                 "rilievo_originale")
@@ -193,13 +209,13 @@ def stratigraphic_edges(declarations) -> list[tuple[str, str, str, str | None]]:
     relation, to, edge)``: the relation said from the start of the edge (``Coperto da 1`` in the
     form of US 2 is ``1 Copre 2``, the same edge as ``Copre 2`` in the form of US 1) and its edge of
     the Extended Matrix (:data:`RELATION_EDGES`; None for a relation it does not know, kept as it
-    was declared)."""
+    was declared). The links to the paradata (``>>`` / ``<<``, :data:`PARADATA_LINKS`) are left out."""
     out, seen = [], set()
     for us, rels in declarations:
         us = str(us).strip()
         for rel in rels or []:
             name, other = str(rel[0]).strip(), str(rel[1]).strip() if len(rel) > 1 else ""
-            if not name or not other or other == us:
+            if not name or not other or other == us or name in PARADATA_LINKS:
                 continue
             forward, edge, inverse = RELATION_EDGES.get(name.lower(), (name, None, False))
             a, b = (other, us) if inverse else (us, other)

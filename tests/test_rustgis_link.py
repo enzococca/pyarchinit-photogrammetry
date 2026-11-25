@@ -4319,17 +4319,33 @@ def _version_of(text: str) -> tuple:
 
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")
 def test_a_system_the_real_engine_misplaces_is_refused(tmp_path):
-    """RustGIS (0.4 to 0.7 at least) puts the South African Lo25 system (EPSG:22275, Cape datum) about 107 m from
-    where it is - a datum shift it does not convert: the link refuses it, naming it, and leaves nothing in RustGIS."""
+    """RustGIS 0.4 to 0.7 put the South African Lo25 system (EPSG:22275, Cape datum) about 107 m from where it is - a
+    datum shift they do not convert: the link refuses it, naming it, and leaves nothing in RustGIS. RustGIS 0.8
+    converts it: the link takes it, and RustGIS's own export of the unit, in longitude and latitude, lies where pyproj
+    puts it."""
     from pyproj import Transformer
 
     x, y = Transformer.from_crs("EPSG:4326", "EPSG:22275", always_xy=True).transform(25.0, -30.0)
     live = LiveLink(tmp_path / "qgis", "EPSG:22275")
     live.write(_drawings([_unit(1, x, y)]))
     with link.StdioTransport(Path(CLI), ["mcp", "--yes"]) as engine:
-        with pytest.raises(link.RustGisRefused, match="EPSG:22275"):
-            link.RustGisLink(live, engine, "Saggio 1", "EPSG:22275").start([])
-        assert engine.call("list_layers", {})["layers"] == []
+        rl = link.RustGisLink(live, engine, "Saggio 1", "EPSG:22275")
+        if _version_of(engine.initialize()) < (0, 8):
+            with pytest.raises(link.RustGisRefused, match="EPSG:22275"):
+                rl.start([])
+            assert engine.call("list_layers", {})["layers"] == []
+            return
+        try:
+            rl.start([])
+            out = tmp_path / "unita.geojson"
+            engine.call("run_command", {"command": "share.exportLayer", "params": {
+                "layer": int(rl.layers["unita"]), "path": str(out)}})
+            (feature,) = json.loads(out.read_text(encoding="utf-8"))["features"]
+            seen = shapely.geometry.shape(feature["geometry"]).centroid
+            lon, lat = Transformer.from_crs("EPSG:22275", "EPSG:4326", always_xy=True).transform(x + 0.25, y + 0.25)
+            assert link._distance(lon, lat, seen.x, seen.y) <= 0.01
+        finally:
+            rl.stop(withdraw=True)
 
 
 @pytest.mark.skipif(not CLI, reason="PPG_RUSTGIS_CLI does not name a rustgis-cli")

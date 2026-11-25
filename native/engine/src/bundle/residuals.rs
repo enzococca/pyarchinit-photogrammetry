@@ -22,7 +22,7 @@ const MIN_DEPTH: f64 = 1e-9;
 
 /// The least weight of a residual in the normal matrix, as a fraction of its weight in the
 /// gradient, where the curvature of the loss is the weight (`Loss::curvature`, `evaluate_blocks`).
-const CURVATURE_FLOOR: f64 = 0.01;
+pub(crate) const CURVATURE_FLOOR: f64 = 0.01;
 
 /// Where the derivatives of an observation sit in its two Jacobian rows (`Structure::row_len`
 /// long): the rotation increment, the centre, the point (or marker), the free intrinsics of its
@@ -35,8 +35,9 @@ pub(crate) const OFF_INTR: usize = 9;
 /// The robust loss on the tie-point residuals: `rho(s)` of the squared residual `s`, its scale
 /// in the units of the residuals (pixels divided by `pixel_sigma`). The cost is what scipy's
 /// `loss="huber"` and `"cauchy"` give with `f_scale` = the scale.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Loss {
+    #[default]
     None,
     Huber(f64),
     Cauchy(f64),
@@ -194,11 +195,9 @@ impl Structure {
 /// The residuals at a point of the parameters and, when asked, the blocks of their Jacobian:
 /// two rows of `Structure::row_len` per tie and marker observation, the few entries of the
 /// other rows as they are. For each tie row, `weights` holds its weight in the normal matrix
-/// (`Loss::curvature`) and `slopes` its weight in the gradient (`Loss::slope`); `behind_cost` is
-/// the part of the cost that comes from observations behind their camera, which no step can change.
+/// (`Loss::curvature`) and `slopes` its weight in the gradient (`Loss::slope`).
 pub(crate) struct Evaluated {
     pub cost: f64,
-    pub behind_cost: f64,
     pub residuals: Vec<f64>,
     pub weights: Vec<f64>,
     pub slopes: Vec<f64>,
@@ -278,13 +277,13 @@ fn reprojection<T: Scalar>(
 }
 
 /// A control point: the marker pulled towards `target` by its `sigma`.
-fn control<T: Scalar>(m: [T; 3], target: [f64; 3], sigma: [f64; 3]) -> [T; 3] {
+pub(crate) fn control<T: Scalar>(m: [T; 3], target: [f64; 3], sigma: [f64; 3]) -> [T; 3] {
     [(m[0] - target[0]) / sigma[0], (m[1] - target[1]) / sigma[1], (m[2] - target[2]) / sigma[2]]
 }
 
 /// A scale bar: the distance between two markers against the measured one. Two markers at the
 /// same place have no direction: the residual is `-distance / sigma` without derivatives.
-fn bar<T: Scalar>(a: [T; 3], b: [T; 3], distance: f64, sigma: f64) -> T {
+pub(crate) fn bar<T: Scalar>(a: [T; 3], b: [T; 3], distance: f64, sigma: f64) -> T {
     let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     let n2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
     let n = if n2.value() > 0.0 { n2.sqrt() } else { T::from_f64(0.0) };
@@ -292,7 +291,7 @@ fn bar<T: Scalar>(a: [T; 3], b: [T; 3], distance: f64, sigma: f64) -> T {
 }
 
 /// A GNSS position: measured = true position + bias of the flight.
-fn gnss<T: Scalar>(centre: [T; 3], bias: [T; 3], target: [f64; 3], sigma: [f64; 3]) -> [T; 3] {
+pub(crate) fn gnss<T: Scalar>(centre: [T; 3], bias: [T; 3], target: [f64; 3], sigma: [f64; 3]) -> [T; 3] {
     [
         (centre[0] + bias[0] - target[0]) / sigma[0],
         (centre[1] + bias[1] - target[1]) / sigma[1],
@@ -301,11 +300,11 @@ fn gnss<T: Scalar>(centre: [T; 3], bias: [T; 3], target: [f64; 3], sigma: [f64; 
 }
 
 /// The prior of the rolling shutter: a still camera, within `sigma` and `sigma_angular`.
-fn rs_prior<T: Scalar>(rs: [T; 6], sigma: f64, sigma_angular: f64) -> [T; 6] {
+pub(crate) fn rs_prior<T: Scalar>(rs: [T; 6], sigma: f64, sigma_angular: f64) -> [T; 6] {
     [rs[0] / sigma, rs[1] / sigma, rs[2] / sigma, rs[3] / sigma_angular, rs[4] / sigma_angular, rs[5] / sigma_angular]
 }
 
-fn variables<const N: usize>(v: [f64; 3], off: usize) -> [Dual<N>; 3] {
+pub(crate) fn variables<const N: usize>(v: [f64; 3], off: usize) -> [Dual<N>; 3] {
     [Dual::variable(v[0], off), Dual::variable(v[1], off + 1), Dual::variable(v[2], off + 2)]
 }
 
@@ -649,6 +648,42 @@ fn observation_rows<const N: usize>(
     }
 }
 
+/// The two residuals of the observation `o` of the point (or marker) at `x` and their Jacobian
+/// rows (two of `Structure::row_len`, into `jac`); `true` when the point is behind the camera.
+pub(crate) fn observation_linearized(
+    pb: &Problem,
+    st: &Structure,
+    params: &Parameters,
+    o: &Obs,
+    x: [f64; 3],
+    sigma: f64,
+    res: &mut [f64],
+    jac: &mut [f64],
+) -> bool {
+    let cam = &pb.cameras[pb.image_camera[o.image]];
+    match OFF_INTR + cam.free.len() + if pb.rolling_shutter { 6 } else { 0 } {
+        0..=9 => observation_rows::<9>(pb, st, params, o, x, sigma, res, jac),
+        10..=15 => observation_rows::<15>(pb, st, params, o, x, sigma, res, jac),
+        16..=21 => observation_rows::<21>(pb, st, params, o, x, sigma, res, jac),
+        _ => observation_rows::<27>(pb, st, params, o, x, sigma, res, jac),
+    }
+}
+
+/// The two residuals of the observation `o` of the point (or marker) at `x`, `None` behind the
+/// camera.
+pub(crate) fn observation_values(
+    pb: &Problem,
+    params: &Parameters,
+    o: &Obs,
+    x: [f64; 3],
+    sigma: f64,
+) -> Option<[f64; 2]> {
+    let cam = &pb.cameras[pb.image_camera[o.image]];
+    let view = view_f64(pb, params, o.image, x);
+    let tau = o.xy[1] / cam.height - 0.5;
+    reprojection(cam.model, &params.rotations[o.image], &view, o.xy, tau, sigma)
+}
+
 /// The residuals of the observations `list` of the points `world` (two per observation, into
 /// `res`, `behind` set where the point is behind its camera) and, when `jac` is given, their
 /// Jacobian rows; in parallel over the observations.
@@ -818,11 +853,8 @@ pub(crate) fn evaluate_blocks(
             }
         }
     }
-    let behind = BEHIND_CAMERA_RESIDUAL * BEHIND_CAMERA_RESIDUAL;
-    let behind_cost = behind_obs.iter().filter(|b| **b).count() as f64 * loss.rho(behind)
-        + behind_mobs.iter().filter(|b| **b).count() as f64 * behind;
     let cost = 0.5 * cost;
-    Evaluated { cost, behind_cost, residuals, weights, slopes, obs_jac, mobs_jac, gcp_jac, bar_jac, gnss_jac, rs_jac }
+    Evaluated { cost, residuals, weights, slopes, obs_jac, mobs_jac, gcp_jac, bar_jac, gnss_jac, rs_jac }
 }
 
 /// Sums of one photo over its observations: the pose, the rolling shutter and the free

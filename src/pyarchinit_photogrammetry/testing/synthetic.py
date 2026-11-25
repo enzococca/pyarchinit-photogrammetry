@@ -5,9 +5,11 @@ at known coordinates is rendered from a set of cameras by ray casting. The
 ground truth (surface, targets in a projected CRS) is returned so that the
 whole pipeline can be checked metrically. A larger scene, a mound with targets
 around it flown in a ring with noisy GPS in the EXIF, is made the same way
-(:func:`make_ring_scene`, :func:`write_ring_dataset`). A wall that follows a line of
-the plan round its corners, with marks at known lengths along its face, is a mesh
-scene photographed from known poses (:func:`make_wall_scene`,
+(:func:`make_ring_scene`, :func:`write_ring_dataset`), and a flat one flown once
+along a closed circular strip of nadir photos with the targets under it, the
+weak ring of the native mapper (:func:`write_weak_ring_dataset`). A wall that follows
+a line of the plan round its corners, with marks at known lengths along its face, is a
+mesh scene photographed from known poses (:func:`make_wall_scene`,
 :func:`write_wall_dataset`, :func:`wall_plan`).
 """
 from __future__ import annotations
@@ -33,6 +35,7 @@ class Scene:
     targets: dict[int, tuple[float, float, float]] = field(default_factory=dict)  # code -> world xyz
     cameras: list[dict] = field(default_factory=list)
     stakes: dict[str, tuple[float, float, float]] = field(default_factory=dict)  # name -> world xyz of the head
+    diameter: float | None = None  # metres: the diameter of the circle a ring is flown on (the weak ring)
 
     def height_at(self, x_local: np.ndarray, y_local: np.ndarray) -> np.ndarray:
         h, w = self.heights.shape
@@ -113,14 +116,17 @@ def _stamp_target(tex: np.ndarray, z: np.ndarray, texel: float, size_y: float, c
     return cx, cy, zc
 
 
-def make_ring_scene(seed: int = 0, texel: float = 0.04) -> Scene:
-    """A mound to fly a ring around: 80 m x 80 m of the ground of :func:`make_scene` (its noise texture and small
-    relief, its synthetic origin and CRS: no real place) without the trench, with a Gaussian mound 4 m high and 8 m
-    wide (sigma) at the centre, and 8 ArUco targets (codes 0-7) on flat plates, their centres on a circle of radius
-    16 m around the centre, one every 45 degrees from the +x direction. A target is 0.96 m across: 24 texels at the
+def make_ring_scene(seed: int = 0, texel: float = 0.04, size=(80.0, 80.0), target_radius: float = 16.0,
+                    n_targets: int = 8, mound: bool = True) -> Scene:
+    """A mound to fly a ring around: ``size`` metres (80 m x 80 m by default) of the ground of :func:`make_scene` (its
+    noise texture and small relief, its synthetic origin and CRS: no real place) without the trench, with a Gaussian
+    mound 4 m high and 8 m wide (sigma) at the centre unless ``mound`` is False, and ``n_targets`` ArUco targets
+    (codes 0 to ``n_targets`` - 1) on flat plates, their centres on a circle of radius ``target_radius`` around the
+    centre, one every ``360 / n_targets`` degrees from the +x direction. A target is 0.96 m across: 24 texels at the
     default ``texel`` of 0.04 m, 4 for each of the 6 cells of the pattern with its border (texture 2000 x 2000
-    texels, 12 MB; heights 16 MB)."""
-    size, origin, crs = (80.0, 80.0), (2480000.0, 4500000.0, 100.0), "EPSG:3004"  # the defaults of make_scene
+    texels, 12 MB; heights 16 MB). The defaults give the scene of the ring of :func:`write_ring_dataset`."""
+    origin, crs = (2480000.0, 4500000.0, 100.0), "EPSG:3004"  # the defaults of make_scene
+    size = (float(size[0]), float(size[1]))
     rng = np.random.default_rng(seed)
     w, h = int(round(size[0] / texel)), int(round(size[1] / texel))
     tex = _noise_texture(h, w, rng)
@@ -128,14 +134,15 @@ def make_ring_scene(seed: int = 0, texel: float = 0.04) -> Scene:
     x = (xx + 0.5) * texel
     y = size[1] - (yy + 0.5) * texel
     z = 0.08 * np.sin(x * 1.7) * np.cos(y * 2.1) + 0.04 * np.sin(x * 4.0 + 1.0)  # the small relief of make_scene
-    z = z + 4.0 * np.exp(-((x - size[0] / 2) ** 2 + (y - size[1] / 2) ** 2) / (2 * 8.0 ** 2))  # the mound
+    if mound:
+        z = z + 4.0 * np.exp(-((x - size[0] / 2) ** 2 + (y - size[1] / 2) ** 2) / (2 * 8.0 ** 2))  # the mound
     z = z.astype(np.float32)
     targets = {}
     tpx = int(round(0.96 / texel))
-    for code in range(8):
-        angle = np.radians(45.0 * code)
-        cx, cy, zc = _stamp_target(tex, z, texel, size[1], code, size[0] / 2 + 16.0 * np.cos(angle),
-                                   size[1] / 2 + 16.0 * np.sin(angle), tpx)
+    for code in range(n_targets):
+        angle = np.radians(360.0 / n_targets * code)
+        cx, cy, zc = _stamp_target(tex, z, texel, size[1], code, size[0] / 2 + target_radius * np.cos(angle),
+                                   size[1] / 2 + target_radius * np.sin(angle), tpx)
         targets[code] = (origin[0] + cx, origin[1] + cy, origin[2] + zc)
     return Scene(origin=origin, crs=crs, size=size, texel=texel, texture=tex, heights=z, targets=targets)
 
@@ -237,6 +244,23 @@ def ring_poses(n: int = 72, diameter: float = 60.0, height: float = 12.0) -> lis
     return poses
 
 
+def weak_ring_poses(n: int = 80, diameter: float = 60.0, height: float = 15.0) -> list[np.ndarray]:
+    """``n`` nadir cameras evenly spaced on a circle of ``diameter`` around (0, 0) at ``height``, the first on the +x
+    axis, in the order of the angle (one sense of travel): the optical axis straight down, the x axis of each camera
+    (the long side of its image) along the radius, outwards, across the track, and its y axis along the tangent,
+    against the sense of travel, so that the top of every image looks ahead to the next photo. world_from_cam poses as
+    :func:`ring_poses` gives them, drawn around the origin."""
+    poses = []
+    for a in np.linspace(0, 2 * np.pi, n, endpoint=False):
+        radial = np.array([np.cos(a), np.sin(a), 0.0])
+        down = np.array([0.0, 0.0, -1.0])
+        pose = np.eye(4)
+        pose[:3, 0], pose[:3, 1], pose[:3, 2] = radial, np.cross(down, radial), down
+        pose[:3, 3] = (diameter / 2 * np.cos(a), diameter / 2 * np.sin(a), height)
+        poses.append(pose)
+    return poses
+
+
 def render(scene: Scene, world_from_cam: np.ndarray, K: np.ndarray, size=(1200, 900), k1: float = -0.04) -> np.ndarray:
     """Ray-cast the textured height field (local frame). Applies radial distortion ``k1``."""
     import open3d as o3d
@@ -327,6 +351,55 @@ def write_ring_dataset(out_dir: str | Path, n: int = 72, diameter: float = 60.0,
         (out / "photos" / f"RING_{i:04d}.jpg").write_bytes(
             _jpeg_with_focal(img, 36.0 * focal / max(size), gps=(lat, lon, gz)))
         scene.cameras.append({"label": f"RING_{i:04d}", "world_from_cam": world_pose})
+    _write_gcp_csv(scene, out / "gcp.csv")
+    return scene
+
+
+# The gate of the native mapper on the weak ring (write_weak_ring_dataset with its defaults, the chain "optimize" of
+# ppg bench synthetic weak-ring). "shape": the largest residual of the triangulated targets after one similarity
+# fitted on all of them, before any optimization, over the diameter (bench.truth.ring_shape; spec 8.4: within 0.5 %).
+# "control_m" and "check_m": 1.25 times the better median, of COLMAP's incremental and global mappers (three runs
+# each), of the control and check errors after the optimization of the cameras, rounded up to the millimetre.
+# Measured on 2026-11-22 (ppg bench synthetic weak-ring --steps optimize, --mapper incremental and --mapper global):
+# the incremental mapper is the better one, medians 0.000950 m (control) and 0.010209 m (check); the global mapper
+# placed no photo in any run and fell back to the incremental one (medians 0.000972 m and 0.010848 m).
+WEAK_RING_GATE = {"shape": 0.005, "control_m": 0.002, "check_m": 0.013}
+
+
+def write_weak_ring_dataset(out_dir: str | Path, n: int = 80, diameter: float = 60.0, height: float = 15.0,
+                            size=(1200, 900), focal: float = 1000.0, k1: float = -0.04, gps_noise=(0.3, 0.5),
+                            seed: int = 0) -> Scene:
+    """A ring flown once: the ``n`` nadir photos of :func:`weak_ring_poses` (``diameter``, ``height``) along one
+    closed circular strip around the centre of a flat scene of 90 m x 90 m (:func:`make_ring_scene` with a texel of
+    0.02 m and no mound), each overlapping only its neighbours, with 12 targets on the circle under the strip (one
+    every 30 degrees from +x). Written to ``out_dir/photos`` (``WRING_0000.jpg``, ...) with ``out_dir/gcp.csv``
+    (code, X, Y, Z), as :func:`write_ring_dataset` writes its ring: the lens of the trench (``k1``), the focal
+    length and a GPS position in the EXIF of every photo (the true centre plus Gaussian noise of ``gps_noise``
+    metres in plan and in height, from a generator seeded with ``seed``), no accuracy of the position, so the program
+    reads its default. ``scene.cameras`` holds the true world poses, ``scene.diameter`` the diameter. At the defaults
+    a photo covers 18 m across the track and 13.5 m along it (1.5 cm per pixel), the forward overlap is about 82 %.
+    The origin and CRS are the synthetic ones of :func:`make_scene`: no real place."""
+    from pyproj import Transformer
+
+    out = Path(out_dir)
+    (out / "photos").mkdir(parents=True, exist_ok=True)
+    scene = make_ring_scene(seed, texel=0.02, size=(90.0, 90.0), target_radius=diameter / 2, n_targets=12,
+                            mound=False)
+    scene.diameter = float(diameter)
+    K = np.array([[focal, 0, size[0] / 2], [0, focal, size[1] / 2], [0, 0, 1]])
+    to_wgs84 = Transformer.from_crs(scene.crs, "EPSG:4326", always_xy=True)
+    noise = np.random.default_rng(seed)
+    sigma = np.array([gps_noise[0], gps_noise[0], gps_noise[1]], float)
+    for i, pose in enumerate(weak_ring_poses(n, diameter, height)):
+        pose[:2, 3] += np.asarray(scene.size) / 2  # drawn around (0, 0): stood around the centre of the scene
+        img = render(scene, pose, K, size, k1)
+        world_pose = pose.copy()
+        world_pose[:3, 3] += np.asarray(scene.origin)
+        gx, gy, gz = world_pose[:3, 3] + noise.normal(0.0, sigma)
+        lon, lat = to_wgs84.transform(gx, gy)
+        (out / "photos" / f"WRING_{i:04d}.jpg").write_bytes(
+            _jpeg_with_focal(img, 36.0 * focal / max(size), gps=(lat, lon, gz)))
+        scene.cameras.append({"label": f"WRING_{i:04d}", "world_from_cam": world_pose})
     _write_gcp_csv(scene, out / "gcp.csv")
     return scene
 
