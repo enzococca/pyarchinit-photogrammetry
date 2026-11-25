@@ -264,8 +264,8 @@ def elevation_cmd(ctx: typer.Context, project: Path,
                                                        "point and after the last"),
                   heights: Optional[str] = typer.Option(None, help="with --path: V0,V1, the heights of the "
                                                         "elevation (default: those of the wall on the model)"),
-                  snap: bool = typer.Option(True, "--snap/--no-snap", help="with --path: the line snapped onto the "
-                                            "face of the model, or kept as given"),
+                  snap: bool = typer.Option(False, "--snap/--no-snap", help="with --path: the line snapped onto the "
+                                            "face of the model (default: kept as given)"),
                   snap_band: Optional[float] = typer.Option(None, help="with --path: metres in front of the line "
                                                             "and behind it where the face is looked for (default "
                                                             "2.5)"),
@@ -623,6 +623,9 @@ def _wall_elevation(project, chunk, path, side, front, back, extend, heights, sn
     extend, heights, which = _pair(extend, "--extend"), _pair(heights, "--heights"), _side_value(side)
     if heights is not None and not heights[1] > heights[0]:
         raise typer.BadParameter("--heights: V0,V1 from the lower to the higher", param_hint="--heights")
+    if snap_band is not None and not snap:
+        raise typer.BadParameter("--snap-band goes with --snap (the line is kept as given without it)",
+                                 param_hint="--snap-band")
     doc, ch = _open(project, chunk)
     kw = {} if snap_band is None else {"band": float(snap_band)}
     try:

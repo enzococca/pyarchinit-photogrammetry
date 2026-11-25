@@ -202,6 +202,37 @@ def test_command_line_path_and_campaigns(two):
     assert r.exit_code == 2 and "--snap-band" in r.output
 
 
+def test_command_line_path_builds_on_the_line_given_unless_snap(two):
+    """The line given is the frame (the snap is a proposal of the window); ``--snap`` builds on the face."""
+    from typer.testing import CliRunner
+
+    from pyarchinit_photogrammetry.cli import app
+    from pyarchinit_photogrammetry.core.document import Document
+
+    from wall_helpers import distance_to
+
+    doc, (a, b), info, entry = two
+    project = str(doc.path)
+    face = np.asarray(info["face"], float)
+    clicks = face + np.array([[0.0, -0.3], [0.3, -0.3], [0.3, 0.0]])  # the face clicked 0.3 m in front of it
+    line = " ".join(f"{float(x)!r},{float(y)!r}" for x, y in clicks)
+    runner = CliRunner()
+    common = ["--side", "right", "--heights", "100,102", "--resolution", "0.05"]
+    r = runner.invoke(app, ["elevation", project, "--path", line, *common, "--name", "Cliccata"])
+    assert r.exit_code == 0, r.output
+    assert "snapped" not in r.output
+    r = runner.invoke(app, ["elevation", project, "--path", line, *common, "--snap", "--name", "Agganciata"])
+    assert r.exit_code == 0, r.output
+    assert "snapped, vertices moved" in r.output
+    frames = {e["name"]: e["frame"] for e in E.elevations(Document.open(project).chunks[0])}
+    assert np.allclose(frames["Cliccata"]["vertices"], clicks, rtol=0, atol=1e-6)  # the vertices are the clicks
+    snapped = np.asarray(frames["Agganciata"]["vertices"], float)
+    assert distance_to(face, snapped).max() < 0.05 and np.allclose(frames["Agganciata"]["clicked"], clicks, rtol=0, atol=1e-6)
+    assert np.abs(snapped - clicks).max() > 0.2
+    r = runner.invoke(app, ["elevation", project, "--path", line, *common, "--snap-band", "1"])
+    assert r.exit_code == 2 and "--snap-band" in r.output
+
+
 def test_a_chunk_without_a_model_is_refused_with_its_code(two):
     doc, (a, b), _info, entry = two
     (b.data_dir / "model.ply").unlink()

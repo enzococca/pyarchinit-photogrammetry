@@ -1,6 +1,7 @@
 """*Muro tracciato in pianta* as a pane that stays open: the elevation of a wall whose line is clicked on the plan
 (:mod:`..engine.wall_trace`, :class:`..engine.wall_path.WallPath`) in four steps, each with its state - the line
-traced on the orthophoto or the DEM, the line snapped onto the face of the model (or kept as clicked), the side the
+traced on the orthophoto or the DEM, the line snapped onto the face of the model offered as a proposal (the elevation
+is built on the line as clicked unless *Aggancia alla faccia* is ticked), the side the
 wall is seen from with the heights and the depths, the build, and the same elevation on the other campaigns of the
 wall (other chunks of the project, already placed together) as its group.
 
@@ -12,8 +13,8 @@ import contextlib
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QRadioButton, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from ..engine.wall_trace import SNAP_BAND
 from .i18n import number, tr
@@ -81,8 +82,8 @@ class WallPathPane(QWidget):
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
         intro = QLabel(tr("Il prospetto di un muro che segue una linea spezzata o curva: traccia la linea del muro "
-                          "sulla pianta (ortofoto o DEM), il programma la aggancia alla faccia del modello, scegli il "
-                          "lato e le quote, poi costruisci. La parete viene distesa lungo la linea."))
+                          "sulla pianta (ortofoto o DEM), il programma propone la linea agganciata alla faccia del "
+                          "modello, scegli il lato e le quote, poi costruisci. La parete viene distesa lungo la linea."))
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.titles: dict[str, tuple[QLabel, QLabel, str]] = {}
@@ -150,9 +151,10 @@ class WallPathPane(QWidget):
         sl = QVBoxLayout(body)
         sl.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
-        self.c_snap = QCheckBox(tr("Aggancia al muro"))
-        self.c_snap.setChecked(True)
-        self.c_snap.setToolTip(tr("La linea cliccata viene spostata sulla faccia del muro del modello"))
+        self.c_snap = QCheckBox(tr("Aggancia alla faccia"))
+        self.c_snap.setChecked(False)  # the line as clicked unless asked; kept while the program is open
+        self.c_snap.setToolTip(tr("Il prospetto si costruisce sulla linea agganciata alla faccia del muro del "
+                                  "modello, la proposta mostrata sulla pianta, invece che sulla linea cliccata"))
         row.addWidget(self.c_snap)
         row.addStretch(1)
         sl.addLayout(row)
@@ -169,16 +171,8 @@ class WallPathPane(QWidget):
         form.addRow(tr("Smussa la linea"), self.s_smooth)
         sl.addLayout(form)
         row = QHBoxLayout()
-        self.r_snapped = QRadioButton(tr("Linea agganciata"))
-        self.r_clicked = QRadioButton(tr("Linea cliccata"))
-        self.r_clicked.setChecked(True)
-        self.g_line = QButtonGroup(self)
-        self.g_line.addButton(self.r_snapped)
-        self.g_line.addButton(self.r_clicked)
         self.b_snap = QPushButton(tr("Aggancia di nuovo"))
         self.b_snap.setToolTip(tr("La linea cliccata agganciata di nuovo con la fascia, la smussatura e il lato scelti"))
-        sl.addWidget(self.r_snapped)
-        sl.addWidget(self.r_clicked)
         row.addWidget(self.b_snap)
         row.addStretch(1)
         sl.addLayout(row)
@@ -291,7 +285,6 @@ class WallPathPane(QWidget):
         self.b_recomposite.clicked.connect(lambda: self.window.wall_composite(ask=False))
         self.b_snap.clicked.connect(lambda: self.window.wall_snap())
         self.c_snap.toggled.connect(self._snap_toggled)
-        self.r_snapped.toggled.connect(lambda _on: self._line_changed())
         self.side.currentIndexChanged.connect(lambda _i: self._side_changed())
         with contextlib.suppress(AttributeError):
             window.runner.busy_changed.connect(self._busy_changed)
@@ -313,11 +306,8 @@ class WallPathPane(QWidget):
                 self.update_states()
 
     def _snap_toggled(self, on: bool) -> None:
-        if not on:
-            self.r_clicked.setChecked(True)
-        elif self.snapped is not None:
-            self.r_snapped.setChecked(True)
-        self.update_states()
+        """The line the elevation is built on changed: the plan shows it, the proposal made when there is none."""
+        self._line_changed()
         if on and self.clicked is not None and self.snapped is None and self.running is None:
             self.window.wall_snap()
 
@@ -327,8 +317,8 @@ class WallPathPane(QWidget):
         self.update_states()
 
     def _side_changed(self) -> None:
-        """Another side: the face looked for is another, the line is snapped again."""
-        if self.clicked is not None and self.c_snap.isChecked() and self.running is None:
+        """Another side: the face looked for is another, the snap proposed again."""
+        if self.clicked is not None and self.running is None:
             self.window.wall_snap()
 
     def set_trace(self, clicked, snapped=None, report=None, heights=None) -> None:
@@ -348,12 +338,6 @@ class WallPathPane(QWidget):
         if heights is not None:
             self.s_v0.setValue(float(heights[0]))
             self.s_v1.setValue(float(heights[1]))
-        usable = self.snapped is not None and bool((report or {}).get("snapped", True))
-        self.r_snapped.setEnabled(usable)
-        if usable and self.c_snap.isChecked():
-            self.r_snapped.setChecked(True)
-        else:
-            self.r_clicked.setChecked(True)
         self.update_states()
 
     def set_proposal(self, proposal: dict | None) -> None:
@@ -383,13 +367,20 @@ class WallPathPane(QWidget):
         self._check_sam()
         self.update_states()
 
+    def snap_usable(self) -> bool:
+        """A snapped line is there to be taken: the snap found the face (the proposal shown on the plan)."""
+        return self.snapped is not None and bool((self.report or {}).get("snapped", True))
+
+    def uses_snapped(self) -> bool:
+        """The elevation is built on the snapped line: *Aggancia alla faccia* ticked and the snap found the face."""
+        return self.c_snap.isChecked() and self.snap_usable()
+
     def points(self) -> np.ndarray | None:
-        """The line the elevation is built on: the snapped one or the clicked one, as chosen."""
+        """The line the elevation is built on: the clicked one, the snapped one when *Aggancia alla faccia* is
+        ticked (and the snap found the face)."""
         if self.clicked is None:
             return None
-        if self.r_snapped.isChecked() and self.snapped is not None:
-            return self.snapped
-        return self.clicked
+        return self.snapped if self.uses_snapped() else self.clicked
 
     def values(self) -> dict:
         res = self.s_resolution.value()
@@ -430,7 +421,7 @@ class WallPathPane(QWidget):
         if step == "snap":
             if self.clicked is None:
                 return "todo"
-            return "done" if (self.snapped is not None or not self.c_snap.isChecked()) else "todo"
+            return "done"  # the clicked line is used unless the snap is asked: nothing to wait for
         if step == "side":
             return "done" if self.clicked is not None and self.s_v1.value() > self.s_v0.value() else "todo"
         if step == "campaigns":
@@ -496,20 +487,20 @@ class WallPathPane(QWidget):
                 return tr("Ricerca della faccia del muro...")
             if self.clicked is None:
                 return ""
-            if not self.c_snap.isChecked():
-                return tr("La linea resta come è stata cliccata")
             r = self.report or {}
             if self.snapped is None:
-                return ""
+                return tr("La linea resta come è stata cliccata")
             if not r.get("snapped", True):
                 return tr("La faccia del muro non è stata trovata: si usa la linea cliccata. Clicca più vicino alla "
                           "faccia o cambia la fascia di ricerca.") + (
                     "\n" + str(r["refused"]) if r.get("refused") else "")
-            return tr("Vertici spostati in media di {0} cm, al massimo di {1} cm", number(100 * r.get("median_shift",
-                                                                                                0.0), 1),
-                      number(100 * r.get("max_shift", 0.0), 1)) + (
+            text = tr("Linea agganciata proposta: vertici spostati in media di {0} cm, al massimo di {1} cm",
+                      number(100 * r.get("median_shift", 0.0), 1), number(100 * r.get("max_shift", 0.0), 1)) + (
                 "\n" + tr("Tratti lasciati come cliccati: {0} (la faccia trovata lì è un'altra)", r["kept"])
                 if r.get("kept") else "")
+            return text + "\n" + (tr("Si usa la linea agganciata") if self.c_snap.isChecked() else
+                                   tr("Si usa la linea cliccata: spunta «Aggancia alla faccia» per usare la "
+                                      "proposta"))
         if step == "side":
             if self.clicked is None:
                 return ""
@@ -546,13 +537,13 @@ class WallPathPane(QWidget):
             title.setText(f"<b>{text}</b> — {names[st]}")
             self.states[key].setText(self.state_text(key))
         shift = (self.report or {}).get("shift")
-        if shift is not None and self.snapped is not None and self.c_snap.isChecked():
+        if shift is not None and self.snap_usable():
             self.shifts.setText(tr("Spostamento di ogni vertice: {0}", "; ".join(
                 f"{i + 1}: {number(100 * float(s), 1)} cm" for i, s in enumerate(shift))))
         else:
             self.shifts.setText("")
         has = self.clicked is not None and self.running is None
-        self.b_snap.setEnabled(has and self.c_snap.isChecked())
+        self.b_snap.setEnabled(has)
         self.b_build.setEnabled(has)
         self.b_campaigns.setEnabled(self.running is None and self.built_entry() is not None)
         self.b_finish.setEnabled(self.running is None and self.built_entry() is not None)

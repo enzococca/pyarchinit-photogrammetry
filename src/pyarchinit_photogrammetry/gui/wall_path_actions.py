@@ -138,8 +138,8 @@ def no_surface_text() -> str:
     from ..engine.elevation import FACE_ROWS
 
     return tr("Nessuna superficie del modello lungo la linea, nella fascia di profondità: una colonna è della faccia "
-              "del muro quando il modello c'è in almeno il {0} % delle sue quote. Aggancia la linea al muro, allarga "
-              "la profondità davanti e dietro o controlla le quote.", round(100 * FACE_ROWS))
+              "del muro quando il modello c'è in almeno il {0} % delle sue quote. Spunta «Aggancia alla faccia», "
+              "allarga la profondità davanti e dietro o controlla le quote.", round(100 * FACE_ROWS))
 
 
 def default_heights(chunk, points, side: str, front: float, back: float) -> tuple[float, float] | None:
@@ -179,7 +179,7 @@ class WallPathActions:
         self._act(menu, tr("Muro tracciato in pianta..."), lambda: self.show_wall_path_pane(start=True),
                   processing=True, icon_name="elevation",
                   tip=tr("Il prospetto di un muro che segue una linea tracciata sulla pianta (angoli, curve), "
-                         "agganciata alla faccia del modello"))
+                         "con la linea agganciata alla faccia del modello proposta"))
 
     def show_wall_path_pane(self, start: bool = False) -> None:
         """The pane *Muro tracciato in pianta* in front, read again from the active chunk; ``start``: the tracing of
@@ -286,8 +286,9 @@ class WallPathActions:
         return self.wall_snap()
 
     def wall_snap(self) -> bool:
-        """The line of the pane snapped onto the face (when *Aggancia al muro* is ticked) and its default heights, in
-        one task of the worker; the pane and the preview shown again with them."""
+        """The line of the pane snapped onto the face of the model - a proposal shown on the plan, used only when
+        *Aggancia alla faccia* is ticked - and the default heights of the line used, in one task of the worker; the
+        pane and the preview shown again with them."""
         from ..engine import wall_trace
         from ..engine.wall_path import TraceRefused, WallPath, corner_radii, ordered, smooth_trace
 
@@ -301,7 +302,8 @@ class WallPathActions:
         except TraceRefused as exc:
             self._warn(refusal_text(exc))
             return False
-        snap, band, smooth, front, back = v["snap"], v["band"], v["smooth"], v["front"], v["back"]
+        band, smooth, front, back, use = v["band"], v["smooth"], v["front"], v["back"], v["snap"]
+        snap = ch.product_path("model") is not None  # the proposal needs the model
 
         def work(p):
             line = smooth_trace(clicked, smooth) if smooth > 0 else clicked
@@ -315,7 +317,7 @@ class WallPathActions:
                         WallPath(kept, radii=corner_radii(kept, front, back))
                     except TraceRefused as exc:  # the line snapped is no trace: the clicked one is used
                         result = dict(result, snapped=False, refused=refusal_text(exc))
-            used = result["points"] if result is not None and result["snapped"] else line
+            used = result["points"] if use and result is not None and result["snapped"] else line
             p(0.9, "Heights of the wall")
             try:
                 heights = default_heights(ch, used, which, front, back)
@@ -386,7 +388,7 @@ class WallPathActions:
         v = pane.values()
         clicks = np.asarray(clicks, float).reshape(-1, 2)
         use_sam = pane.c_sam.isChecked() and pane.c_sam.isEnabled()
-        snap, band, front, back, asked = v["snap"], v["band"], v["front"], v["back"], v["side"]
+        use, band, front, back, asked = v["snap"], v["band"], v["front"], v["back"], v["side"]
 
         def work(p):
             mask = None
@@ -422,14 +424,15 @@ class WallPathActions:
                 return out
             out["which"] = which
             used = line
-            if snap and ch.product_path("model"):
+            if ch.product_path("model"):  # the snap proposed; the followed line used unless it is asked
                 p(0.6, "Snap of the line onto the face of the wall")
                 result = wall_trace.snap_trace(ch, line, which, band=band, progress=p.sub(0.6, 0.9))
                 if result["snapped"]:
                     try:
                         kept = ordered(result["points"], which)
                         WallPath(kept, radii=corner_radii(kept, front, back))
-                        used = result["points"]
+                        if use:
+                            used = result["points"]
                     except TraceRefused as exc:
                         result = dict(result, snapped=False, refused=refusal_text(exc))
                 out["snap"] = result
@@ -506,7 +509,7 @@ class WallPathActions:
             return False
         if which is None:
             return False
-        if (r is None and pane.c_snap.isChecked()) or which != p.get("which"):  # snapped now, on the side chosen
+        if r is None or which != p.get("which"):  # snapped now, on the side chosen
             if which != p.get("which") and pane.side.currentData() == "auto":
                 k = pane.side.findData(which)
                 pane.side.blockSignals(True)
@@ -967,7 +970,8 @@ class WallPathActions:
         return self.chunk is not None and view.tr is not None and self.drawings_frame is None and view.kind != "frame"
 
     def _draw_trace_preview(self) -> None:
-        """The line of the pane on the plan while it waits to be built: as clicked (dashed) and as snapped."""
+        """The line of the pane on the plan while it waits to be built: as clicked and as snapped (the proposal),
+        the one the elevation is built on drawn whole, the other dashed."""
         view = self.ortho_view
         view.remove_layer(TRACE_PREVIEW_LAYER)
         pane = getattr(self, "wall_pane", None)
@@ -986,12 +990,20 @@ class WallPathActions:
             return
         if self.chunk is not pane.chunk:
             return
+        snapped = pane.uses_snapped()
         with view.batch():
             view.add_line(pane.clicked, COLOUR_CLICKED, tr("cliccata"), layer=TRACE_PREVIEW_LAYER,
-                          attrs={"linea": "cliccata"}, width=2.0, dash=True)
-            if pane.snapped is not None and pane.r_snapped.isEnabled():  # its name at the other end
-                view.add_line(pane.snapped[::-1], COLOUR_SNAPPED, tr("agganciata"), layer=TRACE_PREVIEW_LAYER,
-                              attrs={"linea": "agganciata"}, width=2.0)
+                          attrs={"linea": "cliccata"}, width=2.0, dash=snapped)
+            if pane.snap_usable():  # the proposal, its name at the other end
+                from .i18n import number
+
+                r = pane.report or {}
+                attrs = {"linea": "agganciata", "spostamento_mediano_cm": number(100 * r.get("median_shift", 0.0), 1),
+                         "spostamento_massimo_cm": number(100 * r.get("max_shift", 0.0), 1),
+                         "tratti_lasciati": int(r.get("kept") or 0)}
+                view.add_line(pane.snapped[::-1], COLOUR_SNAPPED,
+                              tr("agganciata") if snapped else tr("agganciata (proposta)"),
+                              layer=TRACE_PREVIEW_LAYER, attrs=attrs, width=2.0, dash=not snapped)
 
     def _draw_traces(self) -> None:
         """The traces of the elevations of the active chunk on the plan (never on an elevation), and the line of the

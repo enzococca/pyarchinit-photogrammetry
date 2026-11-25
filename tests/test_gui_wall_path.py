@@ -103,7 +103,9 @@ def test_trace_snap_side_heights_and_build(make):
     _trace(w)
     assert w.requests == ["line"]
     assert pane.state("trace") == "done" and "3 vertici" in pane.state_text("trace")
-    assert pane.state("snap") == "done" and pane.r_snapped.isChecked()
+    assert pane.state("snap") == "done" and not pane.c_snap.isChecked()  # the snap a proposal, off by default
+    assert pane.snap_usable() and not pane.uses_snapped() and pane.points() is pane.clicked
+    assert "Si usa la linea cliccata" in pane.state_text("snap")
     assert pane.s_v0.value() == pytest.approx(100.0, abs=0.05) and pane.s_v1.value() == pytest.approx(102.0, abs=0.05)
     from pyarchinit_photogrammetry.engine import wall_trace
     from pyarchinit_photogrammetry.gui.i18n import number
@@ -118,7 +120,12 @@ def test_trace_snap_side_heights_and_build(make):
     a, b = (lab.pos() for lab in labels)  # the two names apart, not one over the other
     assert np.hypot(a.x() - b.x(), a.y() - b.y()) > 50
     assert len(w.ortho_view.features(TRACE_PREVIEW_LAYER)) == 2  # clicked and snapped
+    proposal = next(f for f in w.ortho_view.features(TRACE_PREVIEW_LAYER) if f["linea"] == "agganciata")
+    assert proposal["spostamento_massimo_cm"] == number(100 * real["max_shift"], 1)
 
+    pane.c_snap.setChecked(True)  # the proposal taken
+    assert pane.uses_snapped() and pane.points() is pane.snapped
+    assert "Si usa la linea agganciata" in pane.state_text("snap")
     assert w.wall_build()
     w.runner.wait()
     (entry,) = w.chs[0].meta["elevations"]
@@ -163,7 +170,6 @@ def test_the_choices_reach_the_engine(make, recorded, monkeypatch):
     pane = w.wall_pane
     pane.side.setCurrentIndex(pane.side.findData("left"))
     _trace(w)
-    pane.r_clicked.setChecked(True)
     pane.s_front.setValue(0.7)
     pane.s_back.setValue(0.3)
     pane.s_before.setValue(1.0)
@@ -175,19 +181,28 @@ def test_the_choices_reach_the_engine(make, recorded, monkeypatch):
     assert w.wall_build()
     w.runner.wait()
     (b,) = recorded["builds"]
-    assert np.allclose(b["frame"].vertices, _clicked(w)[::-1], atol=1e-9)  # seen from the left: the other way
+    assert np.allclose(b["frame"].vertices, _clicked(w)[::-1], rtol=0, atol=1e-6)  # the clicks; seen from the left: reversed
     assert b["extend"] == (1.0, 2.0) and b["heights"] == (100.5, 101.5)
     assert b["depth"] == (-0.3, 0.7) and b["resolution"] == 0.02 and b["name"] == "Muro nord"
     assert shown and shown[0]["id"] == "fake"
-    assert len(recorded["snaps"]) == 1
+    assert len(recorded["snaps"]) == 1  # the snap proposed, not used
 
-    # the snap unticked: no snap at all, the clicked line built
+    # "Aggancia alla faccia" ticked: the snapped line built; the tick kept for the next line
     w2 = make()
-    w2.wall_pane.c_snap.setChecked(False)
+    monkeypatch.setattr(w2, "show_elevation", lambda entry: None)
+    p2 = w2.wall_pane
+    p2.c_snap.setChecked(True)
     recorded["snaps"].clear()
     _trace(w2)
-    assert recorded["snaps"] == [] and w2.wall_pane.r_clicked.isChecked()
-    assert w2.wall_pane.state("snap") == "done"
+    assert len(recorded["snaps"]) == 1 and p2.uses_snapped() and p2.state("snap") == "done"
+    assert w2.wall_build()
+    w2.runner.wait()
+    frame = recorded["builds"][-1]["frame"]
+    assert np.allclose(frame.vertices, p2.snapped, rtol=0, atol=1e-6)
+    assert np.abs(p2.snapped - _clicked(w2)).max() > 0.2
+    assert distance_to(w2.info["face"], np.asarray(frame.vertices)).max() < 0.01
+    _trace(w2)
+    assert p2.c_snap.isChecked() and p2.uses_snapped()
 
 
 def test_the_dialog_offers_the_wall_and_opens_the_pane(make, monkeypatch):
@@ -985,7 +1000,7 @@ def test_follow_and_proposals_in_the_pane(make, monkeypatch):
     assert pane.state("trace") == "done" and pane.proposal is None
     assert np.array_equal(pane.clicked, proposed)  # the proposal's vertices are the line of the wall
     assert [f["linea"] for f in w.ortho_view.features(TRACE_PREVIEW_LAYER)] == ["cliccata", "agganciata"]
-    assert pane.state("snap") == "done" and pane.r_snapped.isChecked()
+    assert pane.state("snap") == "done" and pane.snap_usable() and not pane.uses_snapped()
     assert distance_to(w.info["face"], pane.snapped).max() < 0.05
     assert pane.s_v1.value() > pane.s_v0.value()
     assert not _texts(w)
