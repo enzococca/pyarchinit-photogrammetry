@@ -15,8 +15,10 @@ as the frame goes at that ``u`` (:meth:`FrameSurface.band`).
 """
 from __future__ import annotations
 
+import collections
 import json
 import logging
+import os
 import threading
 import uuid
 import warnings
@@ -1684,9 +1686,52 @@ PLACE_STEP = 0.02  # m: the least step a drawing of a wall path is densified to 
 PLACE_GAP = 0.25  # m: a hole in the relief up to this wide along u is bridged by the depths either side of it
 
 
+RELIEF_CACHE_SIZE = 8  # reliefs kept in memory (float32) for placing drawings: one per elevation shown in 3D
+_RELIEFS: "collections.OrderedDict" = collections.OrderedDict()  # path -> (stamp, band, transform)
+_RELIEFS_LOCK = threading.Lock()
+
+
+def _read_relief(path: Path):
+    """``(band float32 with NaN for no value, transform)`` of the relief file ``path``."""
+    import rasterio
+
+    with rasterio.open(path) as src:
+        band = src.read(1)
+        if band.dtype != np.float32:
+            band = band.astype(np.float32)
+        if src.nodata is not None and np.isfinite(src.nodata):
+            band[band == src.nodata] = np.nan
+        return band, src.transform
+
+
+def _relief_band(path: Path):
+    """The relief of the file ``path`` as :func:`_read_relief` gives it, kept between calls (the drawings of every
+    elevation are placed again after each edit while the 3D view shows them) and read again when the file changes
+    (its modification time or size); ``(None, None)`` for no file. At most :data:`RELIEF_CACHE_SIZE` are kept."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    key, stamp = str(Path(path).resolve()), (st.st_mtime_ns, st.st_size)
+    with _RELIEFS_LOCK:
+        held = _RELIEFS.get(key)
+        if held is not None and held[0] == stamp:
+            _RELIEFS.move_to_end(key)
+            return held[1], held[2]
+    band, transform = _read_relief(path)
+    band.setflags(write=False)  # shared by every caller
+    with _RELIEFS_LOCK:
+        _RELIEFS[key] = (stamp, band, transform)
+        _RELIEFS.move_to_end(key)
+        while len(_RELIEFS) > RELIEF_CACHE_SIZE:
+            _RELIEFS.popitem(last=False)
+    return band, transform
+
+
 def _relief_sampler(chunk: Chunk, entry: dict):
     """The function ``uv (N, 2) -> d (N,)`` that reads the relief of ``entry`` at each ``(u, v)`` (the cell that holds
-    it, as ``rasterio`` samples), the file read once, when first asked. Where a cell has no value, ``d`` is
+    it, as ``rasterio`` samples), the file read when first asked and kept while it does not change
+    (:func:`_relief_band`). Where a cell has no value, ``d`` is
     interpolated along ``u`` between the nearest cells of its row that have one, when there is one on both sides
     within :data:`PLACE_GAP` (a hole in the model, a corner the photos missed); else NaN (above the wall, past its
     ends, no relief)."""
@@ -1694,16 +1739,7 @@ def _relief_sampler(chunk: Chunk, entry: dict):
 
     def read():
         if "band" not in held:
-            import rasterio
-
-            relief = elevation_paths(chunk, entry)[1]
-            held["band"] = None
-            if relief.exists():
-                with rasterio.open(relief) as src:
-                    band = src.read(1).astype(np.float64)
-                    if src.nodata is not None and np.isfinite(src.nodata):
-                        band[band == src.nodata] = np.nan
-                    held["band"], held["t"] = band, src.transform
+            held["band"], held["t"] = _relief_band(elevation_paths(chunk, entry)[1])
         return held["band"], held.get("t")
 
     def sample(uv):

@@ -276,3 +276,36 @@ def test_a_wide_band_does_not_take_what_stands_off_the_wall(built):
     add_units(ch, "lontano", [unit_box(2.0, 100.6, 2.5, 101.0)])
     assert D.transfer(ch, "vicino", "largo")["units"] == 1
     assert D.transfer(ch, "lontano", "largo")["units"] == 0
+
+
+def test_the_relief_is_read_once_until_its_file_changes(built, tmp_path, monkeypatch):
+    """Drawings placed again (every edit with the 3D view on) do not read the relief of the elevation again: it is
+    kept per file and read again only when the file changes (its time or size)."""
+    import os
+    import shutil
+
+    ch, _info, entry = built
+    relief = tmp_path / "relief_copy.tif"
+    shutil.copyfile(E.elevation_paths(ch, entry)[1], relief)
+    other = _copy_entry(ch, entry, "copia", relief=str(relief))
+    reads = []
+    real = E._read_relief
+
+    def spy(path):
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(E, "_read_relief", spy)
+    data = {"units": [unit_box(2.0, 100.5, 2.4, 101.0).to_dict()], "quote": []}
+    first = E.world_tables(ch, other, data)["unita"][2][0][0]
+    second = E.world_tables(ch, other, data)["unita"][2][0][0]
+    assert len(reads) == 1 and first.equals(second)
+    import rasterio
+
+    with rasterio.open(relief, "r+") as dst:                                    # the elevation built again
+        band = dst.read(1)
+        dst.write(np.where(np.isfinite(band), band + 0.1, band).astype(band.dtype), 1)
+    st = os.stat(relief)
+    os.utime(relief, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    third = E.world_tables(ch, other, data)["unita"][2][0][0]
+    assert len(reads) == 2 and not first.equals(third)
