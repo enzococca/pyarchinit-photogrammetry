@@ -2283,7 +2283,11 @@ costruito in una trasformazione di un'altra scala (detto anche nel log). Riga di
 tre i canali a `BLOWN_LEVEL` (250) o oltre; `build_elevation(..., skip_backlit=True)` lascia fuori le foto oltre
 `BACKLIT_SHARE` (0,02), la voce dice `skip_backlit` e `backlit_skipped`, la correzione del colore è misurata sulle
 foto tenute solo per quella costruzione; `RuntimeError` quando tutte le foto sono in controluce. `build_like` costruisce
-come era stato costruito il prospetto di partenza. Riga di comando: `ppg elevation ... --skip-backlit`.
+come era stato costruito il prospetto di partenza. Riga di comando: `ppg elevation ... --skip-backlit`. Sono aperte ed esaminate solo le foto che
+vedono la parte costruita (`elevation.photos_seeing(chunk, surface)`: una griglia di punti del riferimento proiettata
+in ogni foto, solo pose e sensori), e le loro quote restano in `chunk.meta["blown_shares"]` (percorso della foto ->
+dimensione, ora, quota): una costruzione successiva, una ricostruzione o una campagna dello stesso chunk decodifica
+solo le foto il cui file è cambiato (`elevation.blown_shares`).
 
 ### Muri tracciati in pianta
 
