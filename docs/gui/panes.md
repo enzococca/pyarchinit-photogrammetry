@@ -320,8 +320,9 @@ corners or curves, in five steps, each with its mark (to do, running, done) and 
 
 1. *Line of the wall on the plan*: *Trace on the plan* (clicks on the 2D view), *Follow the wall between two clicks*,
    *Use SAM where the wall is low*, *Keep*, *Add via points*, *Propose the walls*;
-2. *Snap onto the face of the wall*: *Snap to the wall*, *Search band*, *Smooth the line*, *Snapped line* or *Clicked
-   line*, *Snap again*, and how far each vertex moved;
+2. *Snap onto the face of the wall*: the snapped line proposed on the plan with how far it moved the vertices, *Snap
+   to the face* (off by default: the elevation is built on the clicked line), *Search band*, *Smooth the line*, *Snap
+   again*;
 3. *Side, heights and depths*: *Side to look from*, *Lowest height*, *Highest height*, *Depth in front*, *Depth
    behind*, *Extend before*, *Extend after*;
 4. *Elevation*: *Resolution*, *Blending*, *Colour correction*, *Without the backlit photos*, *Name*, *Build the

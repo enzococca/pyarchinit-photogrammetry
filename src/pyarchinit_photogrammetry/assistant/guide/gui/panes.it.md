@@ -334,8 +334,9 @@ dice cosa ha trovato:
 
 1. *Linea del muro sulla pianta*: *Traccia sulla pianta* (clic nella vista 2D), *Segui il muro fra due clic*, *Usa SAM
    dove il muro è basso*, *Tieni*, *Aggiungi punti di passaggio*, *Proponi i muri*;
-2. *Aggancio alla faccia del muro*: *Aggancia al muro*, *Fascia di ricerca*, *Smussa la linea*, *Linea agganciata* o
-   *Linea cliccata*, *Aggancia di nuovo*, e di quanto si è spostato ogni vertice;
+2. *Aggancio alla faccia del muro*: la linea agganciata proposta sulla pianta con di quanto ha spostato i vertici,
+   *Aggancia alla faccia* (non spuntato all'inizio: il prospetto si costruisce sulla linea cliccata), *Fascia di
+   ricerca*, *Smussa la linea*, *Aggancia di nuovo*;
 3. *Lato, quote e profondità*: *Lato da cui guardare*, *Quota più bassa*, *Quota più alta*, *Profondità davanti*,
    *Profondità dietro*, *Prolunga prima*, *Prolunga dopo*;
 4. *Prospetto*: *Risoluzione*, *Fusione*, *Correzione colore*, *Senza le foto in controluce*, *Nome*, *Costruisci il

@@ -570,8 +570,11 @@ girando gli spigoli, senza i riquadri di più piani incollati insieme.
    stessa (una svolta di oltre 170 gradi: traccia le due facce come due muri) o una senza due punti diversi è
    rifiutata, e il pannello lo dice. Gli altri due modi di avere la linea - seguire il muro fra due clic e i muri
    proposti sulla pianta - sono in [Tracciamento automatico](#tracciamento-automatico) più sotto.
-2. **Aggancio alla faccia del muro.** Con *Aggancia al muro* spuntato (il predefinito) la linea cliccata viene
-   spostata sulla faccia del modello, un tratto dritto alla volta: una linea cliccata sulla cresta, in mezzo al muro o
+2. **Aggancio alla faccia del muro.** Il prospetto si costruisce sulla linea **come è stata cliccata**, a meno che
+   non spunti *Aggancia alla faccia* (non spuntato all'inizio; la spunta resta finché il programma è aperto).
+   L'aggancio è una proposta: tracciata la linea, il programma ne sposta una copia sulla faccia del modello e la
+   disegna sulla pianta (tratteggiata, "agganciata (proposta)") con di quanto si è spostata, e spunti la casella solo
+   se sta sulla faccia che intendevi. Lavora un tratto dritto alla volta: una linea cliccata sulla cresta, in mezzo al muro o
    sul piano davanti finisce sulla faccia. *Fascia di ricerca* (2,5 m) è quanto lontano, davanti e dietro la linea
    cliccata, si cerca la faccia. Ciò su cui sta il clic decide la direzione: sul muro o sul terreno accanto a una
    trincea la faccia è la prima superficie davanti, incontrata da dentro; sul piano davanti al muro o nell'aria di una
@@ -581,20 +584,20 @@ girando gli spigoli, senza i riquadri di più piani incollati insieme.
    trincea profonda dall'altro) viene presa la faccia bassa sopra il terreno, anche se alta 20 cm, mai quella alta
    della trincea; se dal tuo lato non c'è una faccia, resta la linea cliccata. *Smussa
    la linea* (0 m, nessuna) smussa su quella lunghezza un muro curvo cliccato con molti punti incerti, prima
-   dell'aggancio. La riga di stato dice di quanto si sono spostati i vertici (in media e al massimo, in cm) e lo
-   spostamento di ogni vertice è elencato. *Linea agganciata* o *Linea cliccata* sceglie su quale si costruisce il
-   prospetto (sono disegnate tutte e due sulla pianta, la cliccata tratteggiata); *Aggancia di nuovo* ripete
-   l'aggancio dopo un cambio di fascia o di smussatura.
-   **Tieni la linea cliccata** quando l'aggancio ha spostato un vertice dove non volevi (un cumulo di crollo, un
-   contrafforte, un muro davanti), quando la faccia è così rotta che nessun tratto dritto la segue, o quando la linea
-   era già stata disegnata con cura sulla faccia. Quando la faccia non viene trovata lungo la linea si usa la linea
-   cliccata e il pannello lo dice.
+   dell'aggancio. La riga di stato dice di quanto la proposta ha spostato i vertici (mediana e
+   massimo, in cm) e quanti tratti ha lasciato come cliccati, lo spostamento di ogni vertice è elencato e la linea
+   sulla pianta porta gli stessi valori. La linea su cui si costruisce il prospetto è disegnata piena, l'altra
+   tratteggiata; *Aggancia di nuovo* rifà la proposta dopo un cambio di fascia o di smussatura.
+   **Lascia la casella vuota** quando la proposta ha spostato un vertice dove non volevi (un cumulo di crollo, un
+   contrafforte, un muro davanti, la faccia lontana di una trincea), quando la faccia è così rotta che nessun tratto
+   dritto la segue, o quando la linea era già stata disegnata con cura sulla faccia. Quando la faccia non viene trovata
+   lungo la linea non c'è proposta e il pannello lo dice.
 3. **Lato, quote e profondità.** *Lato da cui guardare*: *Dove sono le foto* (il predefinito: il lato dove sta la
    maggior parte delle foto allineate, ognuna pesata per la distanza e per come guarda il muro, così un volo nadirale
    non vince sulle foto ravvicinate della faccia), *A sinistra della traccia* o *A destra della traccia* (percorrendola
    dal primo clic). Quando il lato più debole pesa il 60 % del più forte o più, la finestra chiede, con i due pesi;
-   sono mostrati anche nel pannello. Un cambio di lato aggancia di nuovo la linea (si cerca un'altra faccia). *Quota
-   più bassa* e *Quota più alta* sono lette sul modello lungo la linea agganciata - le quote del muro, non del terreno
+   sono mostrati anche nel pannello. Un cambio di lato rifà la proposta (si cerca un'altra faccia). *Quota
+   più bassa* e *Quota più alta* sono lette sul modello lungo la linea usata - le quote del muro, non del terreno
    intorno - arrotondate verso l'esterno a 5 cm; si cambiano liberamente. *Profondità davanti* e *Profondità dietro*
    (0,5 m ciascuna) tengono solo la superficie vicina alla faccia: un'impalcatura o un muro davanti vengono
    attraversati. *Prolunga prima* e *Prolunga dopo* allungano il prospetto oltre il primo e l'ultimo punto, nelle
@@ -712,14 +715,15 @@ Oltre ai clic, il passo *Linea del muro sulla pianta* ha due modi di trovare la 
   mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
   e il pannello lo dice: **Aggiungi punti di passaggio** (un clic dove passa il muro; la linea viene cercata di nuovo
   passando di lì), oppure spunta **Usa SAM dove il muro è basso** (SAM 2.1 ritaglia il muro sull'ortofoto a partire
-  dai clic, quando è installato). **Tieni** fa della proposta la linea del muro, agganciata e con le sue quote (il lato
-  viene chiesto quando le foto stanno da tutte e due le parti).
+  dai clic, quando è installato). **Tieni** fa della proposta la linea del muro, con il suo aggancio proposto e le sue
+  quote (il lato viene chiesto quando le foto stanno da tutte e due le parti).
 * **Proponi i muri**: le creste dei muri di tutta la pianta (un rilievo locale oltre 0,3 m, lunghe almeno 3 m), come
-  linee tratteggiate nel layer *Muri proposti*; un clic su una ne fa la linea del muro, controllata e agganciata come
-  se fosse stata cliccata.
+  linee tratteggiate nel layer *Muri proposti*; un clic su una ne fa la linea del muro, controllata e con l'aggancio
+  proposto come se fosse stata cliccata.
 
-La linea seguita corre sulla cima del muro e taglia uno spigolo interno attraverso la cima: l'aggancio rimette la
-linea sulla faccia e lo spigolo al suo posto. Controllala sulla pianta prima di costruire.
+La linea seguita corre sulla cima del muro e taglia uno spigolo interno attraverso la cima: l'aggancio proposto rimette
+la linea sulla faccia e lo spigolo al suo posto. Controllalo sulla pianta e spunta *Aggancia alla faccia* prima di
+costruire.
 
 #### Limiti
 
@@ -732,13 +736,13 @@ linea sulla faccia e lo spigolo al suo posto. Controllala sulla pianta prima di 
   tracciati, con i loro nomi: toglili e traccia di nuovo i muri dopo. Una rotazione intorno alla verticale, uno
   spostamento e una scala li muovono con il chunk.
 * Su un muro tracciato non si fa una sezione: si costruisce il prospetto (la finestra lo dice).
-* L'aggancio ha bisogno di un modello lungo la linea; la linea seguita e le proposte di un DEM.
+* L'aggancio (e la sua proposta) ha bisogno di un modello lungo la linea; la linea seguita e le proposte di un DEM.
 
 #### Dalla riga di comando
 
 ```bash
 ppg elevation scavo.ppg --path "X1,Y1 X2,Y2 X3,Y3" [--side auto|left|right|X,Y] [--extend 5,5]
-    [--heights V0,V1] [--snap|--no-snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
+    [--heights V0,V1] [--snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
     [--front 0.5] [--back 0.5] [--resolution R] [--skip-backlit] [--name NOME] [--chunk CHUNK]
 ppg elevation scavo.ppg --like ID --chunks "2019,2024" [--dates "2019=2019-06-10,2024=2024-07-02"] [--same-frame]
 ppg elevation scavo.ppg --like ID --compare confronto.png [--title T] [--overwrite]
@@ -750,8 +754,9 @@ ppg elevation scavo.ppg --like ID --finish prospetto.jpg [--no-fill] [--no-mask]
 * `--path`: la linea, due punti almeno, nel sistema di riferimento del chunk, separati da spazi. Stampa
   `NOME: W x H px at R m/px; v = height; L m along the wall; corners: N` e, se agganciata, di quanto si sono spostati
   i vertici. `--side` prende una parola o un punto dal lato di chi guarda (anche con `--trace`); `--extend A,B` metri
-  prima del primo punto e dopo l'ultimo; `--heights` le quote (predefinite: quelle del muro sul modello); `--no-snap`
-  tiene la linea come data; `--snap-band` e `--smooth` come nel pannello; `--scale wall` (predefinito) o `trace`.
+  prima del primo punto e dopo l'ultimo; `--heights` le quote (predefinite: quelle del muro sul modello); la linea
+  si usa come data; `--snap` (spento all'inizio) costruisce sulla linea agganciata alla faccia, `--snap-band` (con
+  `--snap`) e `--smooth` come nel pannello; `--scale wall` (predefinito) o `trace`.
   `--section` è rifiutato con `--path`, e le opzioni del percorso senza.
 * `--chunks` (con `--like`, non con `--chunk`): una riga per chunk - costruito, rifiutato con il motivo, o vuoto - e
   una per il gruppo; codice di uscita 1 quando non si è costruito nulla. `--dates` dà la data alle campagne.

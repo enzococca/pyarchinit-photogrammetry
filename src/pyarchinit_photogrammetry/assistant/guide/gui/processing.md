@@ -556,8 +556,11 @@ panels of several planes glued together.
    faces as two walls) or one without two different points is refused, said in the pane. The two other ways to get
    the line - following the wall between two clicks and the walls proposed on the plan - are in
    [Automatic tracing](#automatic-tracing) below.
-2. **Snap onto the face of the wall.** With *Snap to the wall* ticked (the default) the line clicked is moved onto the
-   face of the model, one straight stretch at a time: a line clicked on the crest, in the middle of the wall or on the
+2. **Snap onto the face of the wall.** The elevation is built on the line **as clicked** unless you tick *Snap to
+   the face* (off by default; the tick is kept while the program is open). The snap is a proposal: once the line is
+   traced the program moves a copy of it onto the face of the model and draws it on the plan (dashed, "snapped
+   (proposal)") with how far it moved, and you tick the box only when it lies on the face you meant. It works one
+   straight stretch at a time: a line clicked on the crest, in the middle of the wall or on the
    floor in front of it lands on the face. *Search band* (2.5 m) is how far in front of the clicked line and behind it
    the face is looked for. What the click stands on decides the direction: on the wall or on the ground beside a
    trench the face is the first surface in front, met from inside; on the floor in front of the wall or in the air of a
@@ -567,18 +570,19 @@ panels of several planes glued together.
    the ground is taken, even 20 cm high, never the tall face of the trench; when your side shows no face the clicked
    line is kept. *Smooth the line* (0 m, none)
    smooths a curved wall clicked with many shaky points over that length, before the snap. The state line says how
-   far the vertices moved (the mean and the most, in cm) and the shift of every vertex is listed. *Snapped line* or
-   *Clicked line* chooses which one the elevation is built on (both are drawn on the plan, the clicked one dashed);
-   *Snap again* repeats the snap after a change of band or smoothing.
-   **Keep the clicked line** when the snap moved a vertex where you did not mean it (a rubble heap, a buttress, a wall
-   in front), when the face is so broken that no straight stretch fits it, or when the line was already drawn on the
-   face with care. When the face is not found along the line the clicked line is used and the pane says so.
+   far the proposal moved the vertices (the median and the most, in cm) and how many stretches it kept as clicked, the
+   shift of every vertex is listed, and the line of the plan carries the same figures. The line the elevation is built
+   on is drawn whole, the other dashed; *Snap again* repeats the proposal after a change of band or smoothing.
+   **Leave the box unticked** when the proposal moved a vertex where you did not mean it (a rubble heap, a buttress, a
+   wall in front, the far face of a trench), when the face is so broken that no straight stretch fits it, or when the
+   line was already drawn on the face with care. When the face is not found along the line there is no proposal and
+   the pane says so.
 3. **Side, heights and depths.** *Side to look from*: *Where the photos are* (the default: the side most of the aligned
    photos stand on, each weighted by its distance and how it looks at the wall, so a nadir flight does not outvote the
    close-ups of the face), *To the left of the trace* or *To the right of the trace* (as walked from the first click).
    When the weaker side weighs 60 % of the stronger or more the window asks, with both weights; they are also shown
-   in the pane. A change of side snaps the line again (another face is looked for). *Lowest height* and *Highest
-   height* are read on the model along the snapped line - the heights of the wall, not of the ground around it -
+   in the pane. A change of side makes the proposal again (another face is looked for). *Lowest height* and *Highest
+   height* are read on the model along the line used - the heights of the wall, not of the ground around it -
    rounded outward to 5 cm; change them freely. *Depth in front* and *Depth behind* (0.5 m each) keep only the
    surface near the face: scaffolding or a wall in front is passed through. *Extend before* and *Extend after*
    prolong the elevation past the first and the last point along the line's end directions (the line stays as
@@ -693,14 +697,14 @@ Besides the clicks, the step *Line of the wall on the plan* has two ways to find
   the orthophoto) and is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
   crest it is weak, and the pane says so: **Add via points** (one click where the wall passes; the line is looked for
   again through it), or tick **Use SAM where the wall is low** (SAM 2.1 cuts the wall out of the orthophoto from the
-  clicks, when it is installed). **Keep** makes the proposal the line of the wall, snapped and with its heights (the
-  side is asked when the photos stand on both sides).
+  clicks, when it is installed). **Keep** makes the proposal the line of the wall, with its snap proposed and its heights
+  (the side is asked when the photos stand on both sides).
 * **Propose the walls**: the crests of the walls of the whole plan (a local relief over 0.3 m, at least 3 m long), as
-  dashed lines in the layer *Muri proposti*; a click on one makes it the line of the wall, checked and snapped as if
-  it were clicked.
+  dashed lines in the layer *Muri proposti*; a click on one makes it the line of the wall, checked and with its snap
+  proposed as if it were clicked.
 
-The followed line runs on the top of the wall and cuts an inner corner across its top: the snap puts the line on the
-face and the corner back in place. Check it on the plan before building.
+The followed line runs on the top of the wall and cuts an inner corner across its top: the snap proposed puts the line
+on the face and the corner back in place. Check it on the plan and tick *Snap to the face* before building.
 
 #### Limits
 
@@ -713,13 +717,13 @@ face and the corner back in place. Check it on the plan before building.
   with their names: remove them and trace the walls again after it. A turn about the vertical, a shift and a scale move
   them with the chunk.
 * A section is not made on a traced wall: the elevation is built (the window says it).
-* The snap needs a model along the line; the followed line and the proposals need a DEM.
+* The snap (and its proposal) needs a model along the line; the followed line and the proposals need a DEM.
 
 #### On the command line
 
 ```bash
 ppg elevation scavo.ppg --path "X1,Y1 X2,Y2 X3,Y3" [--side auto|left|right|X,Y] [--extend 5,5]
-    [--heights V0,V1] [--snap|--no-snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
+    [--heights V0,V1] [--snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
     [--front 0.5] [--back 0.5] [--resolution R] [--skip-backlit] [--name NAME] [--chunk CHUNK]
 ppg elevation scavo.ppg --like ID --chunks "2019,2024" [--dates "2019=2019-06-10,2024=2024-07-02"] [--same-frame]
 ppg elevation scavo.ppg --like ID --compare confronto.png [--title T] [--overwrite]
@@ -731,8 +735,9 @@ ppg elevation scavo.ppg --like ID --finish prospetto.jpg [--no-fill] [--no-mask]
 * `--path`: the line, two points at least, in the chunk's reference system, separated by spaces. It prints
   `NAME: W x H px at R m/px; v = height; L m along the wall; corners: N` and, when snapped, how far the vertices
   moved. `--side` takes a word or a point on the viewer's side (also with `--trace`); `--extend A,B` metres before the
-  first point and after the last; `--heights` the heights (default: those of the wall on the model); `--no-snap` keeps
-  the line as given; `--snap-band` and `--smooth` as in the pane; `--scale wall` (default) or `trace`. `--section`
+  first point and after the last; `--heights` the heights (default: those of the wall on the model); the line is used as given;
+  `--snap` (off by default) builds on the line snapped onto the face, `--snap-band` (with `--snap`) and `--smooth` as
+  in the pane; `--scale wall` (default) or `trace`. `--section`
   is refused with `--path`, and the path options without it.
 * `--chunks` (with `--like`, not with `--chunk`): one line per chunk - built, refused with its reason, or empty - and
   one for the group; exit code 1 when nothing was built. `--dates` dates the campaigns.

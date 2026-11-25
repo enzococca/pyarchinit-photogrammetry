@@ -2291,7 +2291,8 @@ a group in `chunk.meta["elevation_groups"]` (`KEY`) of the reference chunk: `id`
 | `strength_map(dem, resolution, ortho=None, mask=None, radius=2.0)`, `least_cost(strength, start, goal, resolution)`, `simplify_line(points, tolerance=0.1)` | the pieces |
 
 **Command line.** `ppg elevation P --path "X1,Y1 X2,Y2 ..." [--side auto|left|right|X,Y] [--extend A,B]
-[--heights V0,V1] [--snap/--no-snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace] [--skip-backlit]`;
+[--heights V0,V1] [--snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace] [--skip-backlit]` (the line as
+given unless `--snap`; `path_from_trace` itself snaps by default, the program's callers pass `snap` explicitly);
 `--like ID --chunks "A,B" [--dates "A=YYYY-MM-DD,..."] [--same-frame]`; `--like ID --compare OUT [--title T]
 [--overwrite]`; `--like ID --composite [--deeper 0.15]`; `--like ID --finish OUT [--no-fill] [--no-mask] [--no-level]
 [--no-targets] [--reduce N] [--max-hole 0.5]`. See [the guide](gui/processing.md#a-wall-traced-on-the-plan).
