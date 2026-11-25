@@ -783,7 +783,7 @@ mod tests {
         pb.gcps.clear();
         pb.mobs.clear();
         pb.markers.clear();
-        // as in round 1 of the mapper: the intrinsics held (free, k2 hardly held by this block)
+        // as in round 1 of the mapper: the intrinsics held
         pb.cameras[0].free.clear();
         for (j, g) in pb.gnss.iter_mut().enumerate() {
             g.2 = [0.5, 0.5, 1.0];
@@ -841,6 +841,26 @@ mod tests {
             }
         }
         assert!(gnss_hat_products(&start, &at, Loss::None, &[z[1..].to_vec()]).is_err());
+        // the conjugate gradients converge to the same products, and a system that is not positive
+        // definite (a photo left with neither a tie point nor a position) is refused
+        // by every solver with "not positive", never answered with finite wrong values
+        let pcg = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0).unwrap();
+        for (d, s) in linear[0].iter().zip(&pcg[0]) {
+            for a in 0..3 {
+                assert!((d[a] - s[a]).abs() < 1e-6, "{d:?} vs {s:?}");
+            }
+        }
+        let mut loose = start.clone();
+        loose.obs.retain(|o| o.image != 0);
+        loose.gnss.retain(|g| g.0 != 0);
+        let z: Vec<[f64; 3]> = z[1..].to_vec();
+        for (dense, pcg_above) in [(usize::MAX, u64::MAX), (0, u64::MAX), (0, 0)] {
+            let got = gnss_hat_products_with_limits(&loose, &at, Loss::None, &[z.clone()], dense, pcg_above);
+            match got {
+                Err(e) => assert!(e.contains("not positive") || e.contains("did not converge"), "{e}"),
+                Ok(v) => panic!("{dense} {pcg_above}: a singular system answered with {:?}", &v[0][..2]),
+            }
+        }
     }
 
     #[test]

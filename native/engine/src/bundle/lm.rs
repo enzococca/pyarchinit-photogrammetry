@@ -1039,8 +1039,11 @@ pub(crate) fn covariance_block_with_limits<M: Model>(
 /// right side `b` of `rhs` (one value per reduced column, none on the points: by the Schur
 /// complement the reduced system alone gives them). The solver is the one `Auto` takes for the
 /// steps within `dense_max_columns` and `pcg_above`: dense, the reduced system formed and
-/// factorised once for every right side; sparse or the conjugate gradients, once per right side.
-/// `Err` when the reduced system is not positive definite or a right side has another length.
+/// factorised once for every right side; sparse, once per right side; the conjugate gradients per
+/// right side to `COVARIANCE_FORCING` (as a column of `covariance_block`), refused when they meet a
+/// direction whose curvature is not positive or do not converge. `Err` when the reduced system is
+/// not positive definite (the message says "not positive"), when the conjugate gradients do not
+/// converge, or when a right side has another length.
 pub(crate) fn solve_normal_equations(
     shape: &Shape,
     lin: &Lin,
@@ -1075,7 +1078,15 @@ pub(crate) fn solve_normal_equations(
             for (gk, bk) in g.iter_mut().zip(b) {
                 *gk = -bk;
             }
-            let delta = stepper.step(shape, lin, &held, &g, &damping)?;
+            // the conjugate gradients as for a column of a covariance: to convergence, a direction of
+            // curvature that is not positive refused, never an iterate stopped short
+            let delta = match stepper {
+                Stepper::Pcg => {
+                    let red = Reduced { shape, lin, held: &held };
+                    pcg_step_converged(&red, &g, &damping, COVARIANCE_FORCING, COVARIANCE_PCG_ITERATIONS)?
+                }
+                _ => stepper.step(shape, lin, &held, &g, &damping)?,
+            };
             if !delta[..n].iter().all(|x| x.is_finite()) {
                 return Err("the reduced system is not positive definite".into());
             }
