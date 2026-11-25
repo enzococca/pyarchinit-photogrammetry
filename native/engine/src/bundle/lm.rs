@@ -968,7 +968,7 @@ pub fn solve_model<M: Model>(
 /// covariance), never returned short.
 pub(crate) const COVARIANCE_DENSE_MAX_COLUMNS: usize = 8000;
 pub(crate) const COVARIANCE_FORCING: f64 = 1e-12;
-pub(crate) const COVARIANCE_PCG_ITERATIONS: usize = 5000;
+pub const COVARIANCE_PCG_ITERATIONS: usize = 5000;
 
 /// The block of the reduced columns `cols` of the inverse of the normal matrix `J^T W J` (the
 /// curvature of the robust loss as the steps use it, undamped) at the parameters of `m`: by the
@@ -1040,7 +1040,8 @@ pub(crate) fn covariance_block_with_limits<M: Model>(
 /// complement the reduced system alone gives them). The solver is the one `Auto` takes for the
 /// steps within `dense_max_columns` and `pcg_above`: dense, the reduced system formed and
 /// factorised once for every right side; sparse, once per right side; the conjugate gradients per
-/// right side to `COVARIANCE_FORCING` (as a column of `covariance_block`), refused when they meet a
+/// right side to `COVARIANCE_FORCING` within `pcg_iterations` (as a column of `covariance_block`,
+/// `COVARIANCE_PCG_ITERATIONS` there), refused when they meet a
 /// direction whose curvature is not positive or do not converge. `Err` when the reduced system is
 /// not positive definite (the message says "not positive"), when the conjugate gradients do not
 /// converge, or when a right side has another length.
@@ -1050,6 +1051,7 @@ pub(crate) fn solve_normal_equations(
     rhs: &[Vec<f64>],
     dense_max_columns: usize,
     pcg_above: u64,
+    pcg_iterations: usize,
 ) -> Result<Vec<Vec<f64>>, String> {
     let n = shape.n;
     if let Some(b) = rhs.iter().find(|b| b.len() != n) {
@@ -1083,7 +1085,7 @@ pub(crate) fn solve_normal_equations(
             let delta = match stepper {
                 Stepper::Pcg => {
                     let red = Reduced { shape, lin, held: &held };
-                    pcg_step_converged(&red, &g, &damping, COVARIANCE_FORCING, COVARIANCE_PCG_ITERATIONS)?
+                    pcg_step_converged(&red, &g, &damping, COVARIANCE_FORCING, pcg_iterations)?
                 }
                 _ => stepper.step(shape, lin, &held, &g, &damping)?,
             };

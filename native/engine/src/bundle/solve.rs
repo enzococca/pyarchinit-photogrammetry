@@ -9,7 +9,7 @@
 
 use super::lm::{
     covariance_block, first_linearization, solve_model_with_limits, solve_normal_equations, BlockJacobian, Model,
-    Report,
+    Report, COVARIANCE_PCG_ITERATIONS,
 };
 use super::problem::{Layout, Parameters, Problem};
 use super::residuals::{
@@ -225,17 +225,20 @@ pub fn gnss_hat_products(
     loss: Loss,
     probes: &[Vec<[f64; 3]>],
 ) -> Result<Vec<Vec<[f64; 3]>>, String> {
-    gnss_hat_products_with_limits(pb, sol, loss, probes, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES)
+    gnss_hat_products_with_limits(pb, sol, loss, probes, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES, COVARIANCE_PCG_ITERATIONS)
 }
 
-/// `gnss_hat_products` with the limits of `Auto` as arguments (the tests lower them).
-pub(crate) fn gnss_hat_products_with_limits(
+/// `gnss_hat_products` with the limits of `Auto` and the iterations of the conjugate gradients as
+/// arguments (the tests lower them).
+#[doc(hidden)]
+pub fn gnss_hat_products_with_limits(
     pb: &Problem,
     sol: &Solution,
     loss: Loss,
     probes: &[Vec<[f64; 3]>],
     dense_max_columns: usize,
     pcg_above: u64,
+    pcg_iterations: usize,
 ) -> Result<Vec<Vec<[f64; 3]>>, String> {
     pb.check()?;
     let m = pb.gnss.len();
@@ -267,7 +270,7 @@ pub(crate) fn gnss_hat_products_with_limits(
             b
         })
         .collect();
-    let solved = solve_normal_equations(&shape, &lin, &rhs, dense_max_columns, pcg_above)?;
+    let solved = solve_normal_equations(&shape, &lin, &rhs, dense_max_columns, pcg_above, pcg_iterations)?;
     Ok(solved
         .iter()
         .map(|x| {
@@ -834,7 +837,8 @@ mod tests {
             }
         }
         assert!(largest > 0.05, "the probe moves the fit: {largest}");
-        let sparse = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, u64::MAX).unwrap();
+        let it = COVARIANCE_PCG_ITERATIONS;
+        let sparse = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, u64::MAX, it).unwrap();
         for (d, s) in linear[0].iter().zip(&sparse[0]) {
             for a in 0..3 {
                 assert!((d[a] - s[a]).abs() < 1e-9, "{d:?} vs {s:?}");
@@ -844,7 +848,10 @@ mod tests {
         // the conjugate gradients converge to the same products, and a system that is not positive
         // definite (a photo left with neither a tie point nor a position) is refused
         // by every solver with "not positive", never answered with finite wrong values
-        let pcg = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0).unwrap();
+        let pcg = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0, it).unwrap();
+        // stopped before they converge: refused, never returned short
+        let short = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0, 2);
+        assert!(short.as_ref().is_err_and(|e| e.contains("did not converge")), "{short:?}");
         for (d, s) in linear[0].iter().zip(&pcg[0]) {
             for a in 0..3 {
                 assert!((d[a] - s[a]).abs() < 1e-6, "{d:?} vs {s:?}");
@@ -855,7 +862,7 @@ mod tests {
         loose.gnss.retain(|g| g.0 != 0);
         let z: Vec<[f64; 3]> = z[1..].to_vec();
         for (dense, pcg_above) in [(usize::MAX, u64::MAX), (0, u64::MAX), (0, 0)] {
-            let got = gnss_hat_products_with_limits(&loose, &at, Loss::None, &[z.clone()], dense, pcg_above);
+            let got = gnss_hat_products_with_limits(&loose, &at, Loss::None, &[z.clone()], dense, pcg_above, it);
             match got {
                 Err(e) => assert!(e.contains("not positive") || e.contains("did not converge"), "{e}"),
                 Ok(v) => panic!("{dense} {pcg_above}: a singular system answered with {:?}", &v[0][..2]),

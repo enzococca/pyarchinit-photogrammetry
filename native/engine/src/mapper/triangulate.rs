@@ -165,7 +165,9 @@ pub const MIN_CORRECTION_OBSERVATIONS: usize = 20;
 /// observations (those within the normalised threshold, the points and the poses held, nothing
 /// written back) by iteratively reweighted least squares under Huber's loss at 1.345 times the
 /// robust scale of the errors, and its threshold is the larger of `o.final_max_reprojection_px`
-/// and four times the robust scale (`1.4826 MAD`) of the corrected errors.
+/// and four times the robust scale (`1.4826 MAD`) of the corrected errors. A model without radial
+/// terms (SIMPLE_PINHOLE, PINHOLE) is never adjusted in them, so its cameras always have the
+/// correction fitted: it then stands for the distortion the model cannot hold at all.
 pub fn pixel_tests(
     t: &Tracks,
     points: &[Option<[f64; 3]>],

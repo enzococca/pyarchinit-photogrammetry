@@ -153,10 +153,15 @@ pub const FOCAL_SD_HOLD: f64 = 0.005;
 pub const FOCAL_MOVE_HOLD: f64 = 0.2;
 /// Ruling R-B1 (R20's guard): the radial terms of a camera whose focal length is held are freed only
 /// when the sd of the displacement they cause at the corner of the photo is at most this many
-/// pixels (`bundle.GROUP_SD_HOLD_PX` of the optimisation); a freed round that changes its k1 by
-/// more than `RADIAL_MOVE_HOLD` is run again with them held.
+/// pixels (`bundle.GROUP_SD_HOLD_PX` of the optimisation); a freed round whose change of the radial
+/// terms (from their values after round 1) moves a corner of the photo by more than
+/// `RADIAL_MOVE_HOLD_SHARE` of the half diagonal of the photo, in pixels at the corner, is run
+/// again with them held, on any camera (the same meaning whatever the model; R20's 0.5 in k1 is
+/// about a whole half diagonal at the corner of a frame camera). Not a fixed 20 px: a camera that
+/// starts at k1 = 0 recovers its lens in round 2, and a lens of k1 = -0.04 moves the corner of a
+/// 2000 x 1500 photo at f = 1000 px by 78 px (the flat block of the mapper's tests).
 pub const GROUP_SD_HOLD_PX: f64 = 0.5;
-pub const RADIAL_MOVE_HOLD: f64 = 0.5;
+pub const RADIAL_MOVE_HOLD_SHARE: f64 = 0.25;
 /// Without positions, the sd of the focal lengths is taken with the scale of the block held by a
 /// position of one photo whose sigma is this many times the extent of the block: a gauge that
 /// adds no information the block has (the sd is the same to four digits from a tenth of the
@@ -223,7 +228,8 @@ pub struct State {
     /// cause at the corner of the photo, judged with the focal length held (ruling R-B1, as
     /// R20/R21 judge it in the optimisation), and whether its radial terms stay held: above
     /// `GROUP_SD_HOLD_PX`, without a covariance, or by the guard of `FOCAL_MOVE_HOLD` /
-    /// `RADIAL_MOVE_HOLD`. A camera whose focal length is free has its radial terms free.
+    /// `RADIAL_MOVE_HOLD_SHARE`. `intrinsics` honours it on every camera, the focal length free or
+    /// held.
     pub radial_sd: Vec<Option<f64>>,
     pub radial_held: Vec<bool>,
 }
@@ -587,10 +593,12 @@ fn fitted(pb: &Problem, sol: &Solution) -> Vec<[f64; 3]> {
         .collect()
 }
 
-/// Whether the error of a solve of the bundle module says its reduced system is not positive
-/// definite (a pivot of its factor or a curvature of the conjugate gradients that is not positive).
-fn not_positive_definite(why: &str) -> bool {
-    why.contains("not positive")
+/// Whether the error of a linear solve of the bundle module says it could not be made: a reduced
+/// system that is not positive definite (a pivot of its factor, a block of its diagonal or a
+/// curvature of the conjugate gradients that is not positive), or conjugate gradients that did not
+/// converge.
+fn linear_solve_failed(why: &str) -> bool {
+    why.contains("not positive") || why.contains("did not converge")
 }
 
 /// `bundle::gnss_hat_products` by adjustments: for each probe the targets of the positions moved
@@ -656,6 +664,19 @@ fn helmert_step(
     loss: Loss,
     observe: &mut dyn FnMut() -> bool,
 ) -> Result<Option<[f64; 5]>, String> {
+    let limits = (bundle::DENSE_MAX_COLUMNS, bundle::PCG_ABOVE_BYTES, crate::bundle::lm::COVARIANCE_PCG_ITERATIONS);
+    helmert_step_with(pb, sol, loss, observe, limits)
+}
+
+/// `helmert_step` with the limits of the linear solve (`bundle::gnss_hat_products_with_limits`:
+/// the dense limit, the bytes above which the conjugate gradients are taken, their iterations).
+fn helmert_step_with(
+    pb: &Problem,
+    sol: &Solution,
+    loss: Loss,
+    observe: &mut dyn FnMut() -> bool,
+    (dense, pcg_above, iterations): (usize, u64, usize),
+) -> Result<Option<[f64; 5]>, String> {
     let m = pb.gnss.len();
     if m < MIN_POSITIONS {
         return Ok(None);
@@ -673,11 +694,12 @@ fn helmert_step(
     if !observe() {
         return Err("cancelled".into());
     }
-    let moves = match bundle::gnss_hat_products(pb, sol, loss, &probes) {
+    let moves = match bundle::gnss_hat_products_with_limits(pb, sol, loss, &probes, dense, pcg_above, iterations) {
         Ok(moves) => moves,
-        // a reduced system that is not positive definite: the probes adjusted one by one (the
-        // damped steps go on where the linear solve cannot); any other error is one
-        Err(why) if not_positive_definite(&why) => probes_by_adjustment(pb, sol, loss, &probes, observe)?,
+        // a reduced system that is not positive definite, or conjugate gradients that do not
+        // converge on an ill-conditioned one: the probes adjusted one by one (the damped steps go
+        // on where the linear solve cannot); any other error is one
+        Err(why) if linear_solve_failed(&why) => probes_by_adjustment(pb, sol, loss, &probes, observe)?,
         Err(why) => return Err(why),
     };
     let (mut trace_h, mut trace_v) = (0.0, 0.0);
@@ -792,8 +814,12 @@ fn intrinsics(state: &State, round: usize, rounds: usize, positions: bool) -> (V
             let principal = round >= rounds && positions && state.frame == Frame::Gnss && state.opencv_sensor[c];
             let groups = groups(cam.model);
             let take = if principal { 4 } else { 2 };
+            let radial_held = state.radial_held.get(c).copied().unwrap_or(false);
             let mut free = Vec::new();
             for (g, idx) in groups.iter().enumerate().take(take) {
+                if g == 1 && radial_held {
+                    continue;
+                }
                 named[g] |= !idx.is_empty();
                 free.extend_from_slice(idx);
             }
@@ -1155,10 +1181,30 @@ fn radial_corner_sds(
     Ok(out)
 }
 
+/// How far, in pixels, the change of the radial terms of `cam` from those of `was` (its state after
+/// round 1, the terms taken in the order of their group: a camera widened since keeps its values)
+/// moves the corners of the photo: the largest over the four corners of `cam`, the rest of `cam`
+/// as it is.
+pub fn radial_move_px(cam: &CameraState, was: &CameraState) -> f64 {
+    let (now, before) = (groups(cam.model)[1], groups(was.model)[1]);
+    let mut back = cam.clone();
+    for (j, &k) in now.iter().enumerate() {
+        back.params[k] = before.get(j).map_or(0.0, |&k0| was.params[k0]);
+    }
+    let (a, b) = (cam.camera(), back.camera());
+    corner_rays(cam)
+        .iter()
+        .map(|&(u, v)| {
+            let (p, q) = (a.pixel(u, v), b.pixel(u, v));
+            (p.0 - q.0).hypot(p.1 - q.1)
+        })
+        .fold(0.0, f64::max)
+}
+
 /// Ruling R16 (and R-B1), after a freed adjustment: the cameras whose focal length moved by more
-/// than `FOCAL_MOVE_HOLD` from `after_round_1`, or whose k1 (the radial terms free, the focal length
-/// held) changed by more than `RADIAL_MOVE_HOLD`, with the note of each: `(camera, focal moved,
-/// note)`.
+/// than `FOCAL_MOVE_HOLD` from `after_round_1`, or whose radial terms (free) moved a corner of the
+/// photo by more than `RADIAL_MOVE_HOLD_SHARE` of its half diagonal (`radial_move_px`), with the
+/// note of each: `(camera, focal moved, note)`.
 fn moved_too_far(state: &State, free: &[Vec<usize>], after_round_1: &[CameraState]) -> Vec<(usize, bool, String)> {
     let mut out = Vec::new();
     for (c, cam) in state.cameras.iter().enumerate() {
@@ -1173,14 +1219,11 @@ fn moved_too_far(state: &State, free: &[Vec<usize>], after_round_1: &[CameraStat
                 continue;
             }
         }
-        let (now, before) = (groups(cam.model)[1], groups(was.model)[1]);
-        if let (Some(&k), Some(&k0)) = (now.first(), before.first()) {
-            if free[c].contains(&k) {
-                let change = (cam.params[k] - was.params[k0]).abs();
-                if change > RADIAL_MOVE_HOLD || !change.is_finite() {
-                    out.push((c, false, format!("radial held: k1 changed by {change:.3}")));
-                }
-            }
+        let moved = radial_move_px(cam, was);
+        let limit = RADIAL_MOVE_HOLD_SHARE * 0.5 * cam.width.hypot(cam.height);
+        if groups(cam.model)[1].iter().any(|k| free[c].contains(k)) && (moved > limit || !moved.is_finite())
+        {
+            out.push((c, false, format!("radial held: moved {moved:.1} px at the image corner")));
         }
     }
     out
@@ -1452,9 +1495,10 @@ mod tests {
     /// position has a reduced system that is not positive definite, so the linear products are
     /// refused and the probes are adjusted one by one (the damped steps leave that photo where it
     /// is): the step still gives its sums and redundancies, those of `probes_by_adjustment`
-    /// itself; other errors are not taken for that one.
+    /// itself; so do conjugate gradients that do not converge; other errors are not taken for
+    /// those.
     #[test]
-    fn a_reduced_system_that_is_not_positive_definite_takes_the_probes_by_adjustment() {
+    fn a_linear_solve_that_cannot_be_made_takes_the_probes_by_adjustment() {
         let (mut pb, _) = crate::bundle::synthetic::grid_block(16, 150, 5);
         pb.gcps.clear();
         pb.mobs.clear();
@@ -1468,7 +1512,7 @@ mod tests {
         let mut go = || true;
         let sol = adjust_with(&pb, Loss::None, &mut go).unwrap();
         let refused = bundle::gnss_hat_products(&pb, &sol, Loss::None, &[vec![[1.0; 3]; pb.gnss.len()]]);
-        assert!(refused.as_ref().is_err_and(|e| not_positive_definite(e)), "{refused:?}");
+        assert!(refused.as_ref().is_err_and(|e| linear_solve_failed(e)), "{refused:?}");
         let [sum_h, sum_v, r_h, r_v, _] = helmert_step(&pb, &sol, Loss::None, &mut go).unwrap().expect("a step");
         let mut random = Lcg(SIGMA_PROBE_SEED);
         let m = pb.gnss.len();
@@ -1479,8 +1523,85 @@ mod tests {
             probes.iter().zip(&moves).flat_map(|(z, h)| z.iter().zip(h)).map(|(z, h)| z[0] * h[0] + z[1] * h[1]).sum();
         assert!((r_h - (2.0 * m as f64 - trace_h / SIGMA_PROBES as f64)).abs() < 1e-9, "{r_h}");
         assert!(sum_h > 0.0 && sum_v > 0.0 && r_v > 0.0 && r_v < m as f64);
-        assert!(!not_positive_definite("a probe of 3 positions for 4"));
-        assert!(not_positive_definite("pivot 7 of the reduced system is not positive"));
+        assert!(!linear_solve_failed("a probe of 3 positions for 4"));
+        assert!(linear_solve_failed("pivot 7 of the reduced system is not positive"));
+        // a positive definite block whose conjugate gradients stop before they converge (two
+        // iterations here) takes the probes by adjustment as well, not an error of the rounds
+        let (mut good, _) = crate::bundle::synthetic::grid_block(16, 150, 5);
+        good.gcps.clear();
+        good.mobs.clear();
+        good.markers.clear();
+        good.cameras[0].free.clear();
+        let at = adjust_with(&good, Loss::None, &mut go).unwrap();
+        let m = good.gnss.len();
+        let short = bundle::gnss_hat_products_with_limits(&good, &at, Loss::None, &[vec![[1.0; 3]; m]], 0, 0, 2);
+        assert!(short.as_ref().is_err_and(|e| e.contains("did not converge") && linear_solve_failed(e)), "{short:?}");
+        let fallback = helmert_step_with(&good, &at, Loss::None, &mut go, (0, 0, 2)).unwrap().expect("a step");
+        let mut random = Lcg(SIGMA_PROBE_SEED);
+        let probes: Vec<Vec<[f64; 3]>> =
+            (0..SIGMA_PROBES).map(|_| (0..m).map(|_| std::array::from_fn(|_| random.sign())).collect()).collect();
+        let moves = probes_by_adjustment(&good, &at, Loss::None, &probes, &mut go).unwrap();
+        let trace_h: f64 =
+            probes.iter().zip(&moves).flat_map(|(z, h)| z.iter().zip(h)).map(|(z, h)| z[0] * h[0] + z[1] * h[1]).sum();
+        assert!((fallback[2] - (2.0 * m as f64 - trace_h / SIGMA_PROBES as f64)).abs() < 1e-9, "{fallback:?}");
+    }
+
+    /// The guard of the radial terms in pixels (R-B1), on a camera whose focal length is free: the
+    /// ring with a SIMPLE_RADIAL camera after round 1, then round 2 run with its k1 after round 1
+    /// said to be 0.3 (hundreds of pixels at the corner): the round runs again with the radial
+    /// terms held and the focal length still free - `intrinsics` honours `radial_held` on a camera
+    /// whose focal length is free, so the rerun is not the same round - with a note in pixels.
+    /// `radial_move_px` is the move of the corner: f r (k1 r^2) for a change of k1 alone.
+    #[test]
+    fn a_radial_change_too_far_at_the_corner_holds_the_radial_terms_of_a_free_focal_length() {
+        use crate::mapper::{synthetic, Mapper};
+
+        let mut ring = synthetic::ring(24, 200, 5).expect("a ring");
+        ring.input.cameras[0].model = "SIMPLE_RADIAL".into();
+        ring.input.cameras[0].params.push(0.0);
+        let o = Options::default();
+        let mut m = Mapper::new(ring.input.clone(), o.clone()).expect("a mapper");
+        let mut go = || true;
+        m.view_graph(&mut go).unwrap();
+        m.rotations(&mut go).unwrap();
+        m.tracks(500, &mut go).unwrap();
+        m.position(Some(&ring.gnss), &mut go).unwrap();
+        let input = ring.input.clone();
+        let mut state = m.state().expect("a positioned state").clone();
+        state.opencv_sensor = vec![false];
+        state.intrinsics_held = vec![false];
+        state.radial_held = vec![false];
+        let positions = !positions_used(&state).is_empty();
+        filter(&mut state, &input, &o, POSITIONED_FILTER_SCALE).unwrap();
+        guarded_adjustment(&mut state, &input, &o, 1, o.rounds, positions, false, false, &[], &mut go).unwrap();
+        let (free, names) = intrinsics(&state, 2, o.rounds, positions);
+        assert_eq!((free[0].clone(), names), (vec![0, 3], vec!["focal".to_string(), "radial".to_string()]));
+        let mut claimed = state.cameras.clone();
+        claimed[0].params[3] = 0.3;
+        let cam = &state.cameras[0];
+        let (u, v) = corner_rays(cam)[3];
+        let r2 = u * u + v * v;
+        let expected = cam.params[0] * r2.sqrt() * (0.3 - cam.params[3]).abs() * r2;
+        assert!((radial_move_px(cam, &claimed[0]) - expected).abs() < 1e-6 * expected);
+        let notes = state.notes.len();
+        let (free, names, _) =
+            guarded_adjustment(&mut state, &input, &o, 2, o.rounds, positions, false, false, &claimed, &mut go)
+                .unwrap();
+        assert_eq!((state.intrinsics_held.clone(), state.radial_held.clone()), (vec![false], vec![true]));
+        assert_eq!((free[0].clone(), names), (vec![0], vec!["focal".to_string()]), "the rerun is another round");
+        assert_eq!(state.notes.len(), notes + 1);
+        assert!(state.notes[notes].starts_with("camera 0: radial held: moved ") && state.notes[notes].contains(" px "),
+                "{:?}", state.notes);
+        // honest values after round 1: nothing held
+        let mut honest = m.state().unwrap().clone();
+        honest.opencv_sensor = vec![false];
+        honest.intrinsics_held = vec![false];
+        honest.radial_held = vec![false];
+        filter(&mut honest, &input, &o, POSITIONED_FILTER_SCALE).unwrap();
+        guarded_adjustment(&mut honest, &input, &o, 1, o.rounds, positions, false, false, &[], &mut go).unwrap();
+        let after = honest.cameras.clone();
+        guarded_adjustment(&mut honest, &input, &o, 2, o.rounds, positions, false, false, &after, &mut go).unwrap();
+        assert_eq!(honest.radial_held, vec![false]);
     }
 
     /// Ruling R18: the guard of ruling R16 on a forced move. The positioned state of a synthetic

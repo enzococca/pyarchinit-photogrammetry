@@ -1933,11 +1933,13 @@ def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_pa
     assert radial_free, mapper["notes"]  # the reference rendering: the mapper frees the radial terms (0.26 px)
     assert mapper["intrinsics_held"] == [cam for cam, _ in mapper["focal_sd"]]  # the focal length held (R16)
     sensor = check["focal_sd"][0][0]
-    assert check["checked"] is True and check["held"]["focal"] == [sensor] and check["held"]["radial"] == []
+    assert check["checked"] is True and check["held"]["focal"] == [sensor]
     assert check["held"]["principal_point"] == [] and check["principal_point_sd"] == []
     assert check["focal_sd"][0][1] > 0.05  # 10 % (COLMAP's formulation) and 14 % (ours) measured
-    # 0.50 px measured from the radial terms the mapper left (0.12 px from a lens at zero, before R-B1)
-    assert 0 < check["radial_sd"][0][1] < bundle.GROUP_SD_HOLD_PX
+    # the rule's own decision, not a figure: freed iff the sd at the corner is within the line (0.50 px measured
+    # from the radial terms the mapper left, 0.12 px from a lens at zero before R-B1)
+    assert 0 < check["radial_sd"][0][1] and (check["radial_sd"][0][1] <= bundle.GROUP_SD_HOLD_PX) == (
+        check["held"]["radial"] == [])
     assert check["notes"][0] == f"sensor {sensor}: focal held: undetermined, sd {100 * check['focal_sd'][0][1]:.2f} %"
     if engine == "ppg":
         # held, undetermined on its own or given up for the radial terms (R25: 2.35 px with them free measured)
