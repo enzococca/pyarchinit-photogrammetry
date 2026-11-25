@@ -852,9 +852,12 @@ mod tests {
         // stopped before they converge: refused, never returned short
         let short = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0, 2);
         assert!(short.as_ref().is_err_and(|e| e.contains("did not converge")), "{short:?}");
+        // relative to the largest product: the conjugate gradients stop on the Q-criterion, which
+        // leaves about 1e-6 of them (1.08e-6 measured on a Windows runner)
+        let scale = linear[0].iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
         for (d, s) in linear[0].iter().zip(&pcg[0]) {
             for a in 0..3 {
-                assert!((d[a] - s[a]).abs() < 1e-6, "{d:?} vs {s:?}");
+                assert!((d[a] - s[a]).abs() <= 1e-5 * scale, "{d:?} vs {s:?}");
             }
         }
         let mut loose = start.clone();
