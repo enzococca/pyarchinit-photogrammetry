@@ -11,7 +11,8 @@
 //! of `IterativeBundleAdjustment`); the last adjustment with every track is filtered at the plain
 //! threshold before and after (as `IterativeRetriangulateAndRefine`), and in pixels as COLMAP's
 //! retriangulation filters (`triangulate::filter_in_pixels`: `Options::final_max_reprojection_px`
-//! and `final_min_triangulation_deg`, 4 px and 1.5 deg). The filters of the rounds are
+//! and `final_min_triangulation_deg`, 4 px and 1.5 deg; not in pixels on a camera whose intrinsics
+//! the rounds held, whose errors hold what its lens model lacks). The filters of the rounds are
 //! `triangulate::filter`, which also drops the points whose rays meet at less than
 //! `Options::min_triangulation_deg`.
 //!
@@ -461,10 +462,12 @@ fn filter(state: &mut State, input: &Input, o: &Options, scale: f64) -> Result<(
 }
 
 /// The filter of the last adjustment with every track (`triangulate::filter_in_pixels`: the
-/// normalised threshold, `Options::final_max_reprojection_px` and `final_min_triangulation_deg`),
-/// written into the state as `filter` writes it.
+/// normalised threshold, `Options::final_max_reprojection_px` but on the cameras whose intrinsics
+/// are held, and `final_min_triangulation_deg`), written into the state as `filter` writes it.
 fn filter_final(state: &mut State, input: &Input, o: &Options) -> Result<(), String> {
-    let f = triangulate::filter_in_pixels(&state.tracks, &state.points, input, &state.cams(), &state.poses(), o)?;
+    let (cams, poses) = (state.cams(), state.poses());
+    let held = &state.intrinsics_held;
+    let f = triangulate::filter_in_pixels(&state.tracks, &state.points, input, &cams, &poses, o, held)?;
     keep_filtered(state, f);
     Ok(())
 }

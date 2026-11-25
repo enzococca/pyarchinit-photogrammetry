@@ -108,7 +108,13 @@ pub fn filter(
 /// `filter` as COLMAP's retriangulation filters (`IncrementalMapper::FilterPoints`, the filter of
 /// the last adjustment of its global mapper): an observation goes also when its reprojection error
 /// in pixels exceeds `o.final_max_reprojection_px`, and the observations of a point go when no two
-/// of their rays meet at `o.final_min_triangulation_deg` or more. `Err` as `filter`.
+/// of their rays meet at `o.final_min_triangulation_deg` or more. The observations of a camera of
+/// `held` (one flag per camera of `input`; missing: not held) are not measured in pixels: its
+/// intrinsics were not adjusted (a block that does not determine them, ruling R16), so its errors
+/// hold what its lens model lacks, the observations near the corners most, and dropping them would
+/// take from a later calibration the observations that tell the lens. COLMAP's filter of 4 px
+/// follows an adjustment that refines the lens. `Err` as `filter`.
+#[allow(clippy::too_many_arguments)]
 pub fn filter_in_pixels(
     t: &Tracks,
     points: &[Option<[f64; 3]>],
@@ -116,13 +122,17 @@ pub fn filter_in_pixels(
     cams: &[Camera],
     poses: &[Option<Pose>],
     o: &Options,
+    held: &[bool],
 ) -> Result<Filtered, String> {
-    filter_by(t, points, input, cams, poses, o.max_normalized_reprojection, Some(o.final_max_reprojection_px),
+    let max_px: Vec<f64> = (0..cams.len())
+        .map(|c| if held.get(c).copied().unwrap_or(false) { f64::INFINITY } else { o.final_max_reprojection_px })
+        .collect();
+    filter_by(t, points, input, cams, poses, o.max_normalized_reprojection, Some(&max_px),
               o.final_min_triangulation_deg)
 }
 
-/// `filter` with its thresholds: the normalised error, the error in pixels (`None`: not
-/// measured) and the angle in degrees.
+/// `filter` with its thresholds: the normalised error, the error in pixels per camera (`None`:
+/// not measured) and the angle in degrees.
 #[allow(clippy::too_many_arguments)]
 fn filter_by(
     t: &Tracks,
@@ -131,7 +141,7 @@ fn filter_by(
     cams: &[Camera],
     poses: &[Option<Pose>],
     max_normalized: f64,
-    max_px: Option<f64>,
+    max_px: Option<&[f64]>,
     min_deg: f64,
 ) -> Result<Filtered, String> {
     t.check(input)?;
@@ -164,12 +174,13 @@ fn filter_by(
                 continue;
             }
             let px = input.keypoint(image, k);
-            let cam = &cams[input.images[image].camera];
+            let c = input.images[image].camera;
+            let cam = &cams[c];
             let (u, v) = cam.normalised(px[0], px[1]);
             let error = (x / z - u).hypot(y / z - v);
             let in_pixels = max_px.is_none_or(|max| {
                 let (pu, pv) = cam.pixel(x / z, y / z);
-                (pu - px[0]).hypot(pv - px[1]) <= max
+                max[c] == f64::INFINITY || (pu - px[0]).hypot(pv - px[1]) <= max[c]
             });
             if error <= max_normalized && in_pixels {
                 left.push(i);
