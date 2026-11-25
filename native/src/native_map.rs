@@ -241,8 +241,9 @@ fn options_dict<'py>(py: Python<'py>, o: &Options) -> PyResult<Bound<'py, PyDict
 /// The options of the native mapper with their defaults (the fields of the engine's `Options`):
 /// ``max_normalized_reprojection`` and ``min_triangulation_deg`` are pycolmap's
 /// ``GlobalPipelineOptions().mapper.max_normalized_reproj_error`` and ``.mapper.min_tri_angle_deg``;
-/// ``final_max_reprojection_px`` and ``final_min_triangulation_deg`` are pycolmap's
-/// ``IncrementalPipelineOptions().mapper.filter_max_reproj_error`` and ``.mapper.filter_min_tri_angle``.
+/// ``final_max_reprojection_px`` and ``final_min_triangulation_deg`` are the C++ defaults of COLMAP's
+/// ``IncrementalMapper::Options`` that the retriangulation of its global mapper filters with, shown by pycolmap
+/// as ``IncrementalPipelineOptions().mapper.filter_max_reproj_error`` and ``.mapper.filter_min_tri_angle``.
 #[pyfunction]
 pub(crate) fn native_mapper_defaults(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     options_dict(py, &Options::default())

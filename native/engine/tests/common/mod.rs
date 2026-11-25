@@ -117,6 +117,9 @@ pub struct InputOptions {
     /// uniformly.
     pub displaced_share: f64,
     pub displaced_px: [f64; 2],
+    /// The radial distortion of the lens the key points are seen through (`k1` of SIMPLE_RADIAL on
+    /// the normalised coordinates); not zero, the camera is SIMPLE_RADIAL starting at `k1 = 0`.
+    pub true_k1: f64,
     /// The focal length the camera starts from.
     pub start_focal: f64,
     pub prior_focal: bool,
@@ -134,6 +137,7 @@ impl Default for InputOptions {
             outlier_share: 0.0,
             displaced_share: 0.0,
             displaced_px: [0.0, 0.0],
+            true_k1: 0.0,
             start_focal: FOCAL,
             prior_focal: true,
             with_f: false,
@@ -443,6 +447,12 @@ impl Scene {
         for (i, view) in self.views.iter().enumerate() {
             let start = keypoints.len();
             for &(_, px) in view {
+                let mut px = px;
+                if o.true_k1 != 0.0 {
+                    let (u, v) = ((px[0] - self.cx) / self.focal, (px[1] - self.cy) / self.focal);
+                    let g = 1.0 + o.true_k1 * (u * u + v * v);
+                    px = [self.cx + self.focal * u * g, self.cy + self.focal * v * g];
+                }
                 let mut x = px[0] + o.noise_px * random.normal();
                 let mut y = px[1] + o.noise_px * random.normal();
                 if o.displaced_share > 0.0 && random.unit() < o.displaced_share {
@@ -456,10 +466,15 @@ impl Scene {
             let keypoints = start..keypoints.len();
             images.push(ImageIn { name: Self::name(i), image_id: i as u32 + 1, camera: 0, keypoints });
         }
+        let (model, params) = if o.true_k1 != 0.0 {
+            ("SIMPLE_RADIAL", vec![o.start_focal, self.cx, self.cy, 0.0])
+        } else {
+            ("SIMPLE_PINHOLE", vec![o.start_focal, self.cx, self.cy])
+        };
         let cameras = vec![CameraIn {
             camera_id: 1,
-            model: "SIMPLE_PINHOLE".to_string(),
-            params: vec![o.start_focal, self.cx, self.cy],
+            model: model.to_string(),
+            params,
             width: WIDTH,
             height: HEIGHT,
             prior_focal: o.prior_focal,

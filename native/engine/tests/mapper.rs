@@ -251,6 +251,110 @@ fn the_last_filter_keeps_no_observation_beyond_four_pixels() {
     assert!(mean < 0.7, "mean reprojection error {mean} px");
 }
 
+/// Ruling R-B1 on a weak block: a flat nadir survey 100 m high (no mound, a metre of relief, GNSS
+/// of 3 / 6 m) whose lens has k1 = -0.04 (78 px at the corner), the camera starting at k1 = 0, 5 %
+/// of the key points displaced by 5 to 9 px. The focal length is undetermined and held (0.57 %
+/// measured); the radial terms, judged with it held, are determined (0.45 px at the corner), freed
+/// from round 2 and recovered; after the last filter no observation is beyond 4 px.
+#[test]
+fn a_flat_block_holds_its_focal_length_and_frees_its_radial_terms() {
+    let s = corridor(4, 30, 30.0, 60.0, 100.0, 0.0, 0.02, 141);
+    let input = s.input(&InputOptions {
+        noise_px: 0.5,
+        displaced_share: 0.05,
+        displaced_px: [5.0, 9.0],
+        true_k1: -0.04,
+        seed: 142,
+        ..InputOptions::default()
+    });
+    let gnss = gnss_with(&s, 3.0, 6.0, [5.0, 5.0, 10.0], 143, &[]);
+    let mut m = Mapper::new(input.clone(), Options::default()).expect("a mapper");
+    let report = run(&mut m, Some(&gnss), None);
+    let state = m.state().expect("refined");
+    let errors = state.reprojection_px(&input);
+    let worst = errors.iter().copied().fold(0.0, f64::max);
+    let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+    let k1 = state.cameras[0].params[3];
+    eprintln!("flat block: focal sd {:?}, radial sd {:?}, k1 {k1:.4}, focal {:.2}, {} observations, mean {mean:.3} \
+               px, worst {worst:.2} px, notes {:?}", report.focal_sd, state.radial_sd, state.cameras[0].params[0],
+              errors.len(), report.notes);
+    assert_eq!(report.placed, s.poses.len());
+    assert_eq!(report.intrinsics_held, vec![true], "the focal length of a flat block is held");
+    assert_eq!(state.radial_held, vec![false], "{:?}", report.notes);
+    assert!(state.radial_sd[0].is_some_and(|sd| sd <= ppg_engine::mapper::rounds::GROUP_SD_HOLD_PX));
+    assert_eq!(state.cameras[0].params[0], common::FOCAL, "the focal length held at its start");
+    assert!(report.rounds[1].intrinsics == vec!["radial".to_string()], "{:?}", report.rounds);
+    assert!((k1 + 0.04).abs() <= 0.005, "k1 {k1}");
+    assert!(worst <= 4.0, "an observation {worst} px off is kept");
+    assert!(mean < 0.7, "mean reprojection error {mean} px");
+}
+
+/// Ruling R-B1, a camera whose radial terms stay held is never spared by the last filter: the true
+/// poses and points of a survey seen through a lens of k1 = -0.006 (12 px at the corner, within the
+/// normalised threshold of 10 px over most of the photo) by a camera held at k1 = 0, 5 % of the key
+/// points displaced by 5 to 9 px. `pixel_tests` fits the lens (k1 within 0.0005) and the
+/// filter after that correction keeps the observations the lens moved (a filter without it drops
+/// those of the corners) and drops the displaced ones.
+#[test]
+fn a_held_lens_is_corrected_before_the_filter_in_pixels() {
+    use ppg_engine::mapper::{tracks, triangulate};
+    let s = corridor(2, 12, 12.0, 24.0, 40.0, 0.0, 0.06, 151);
+    let o = InputOptions {
+        noise_px: 0.5,
+        displaced_share: 0.05,
+        displaced_px: [5.0, 9.0],
+        true_k1: -0.006,
+        seed: 152,
+        ..InputOptions::default()
+    };
+    let input = s.input(&o);
+    let clean = s.input(&InputOptions { displaced_share: 0.0, ..o.clone() });
+    let t = tracks::build(&input, &vec![true; input.images.len()]);
+    let points: Vec<Option<[f64; 3]>> = (0..t.len())
+        .map(|k| {
+            let (image, kp) = t.track(k)[0];
+            let x = s.points[s.views[image as usize][kp as usize].0];
+            Some([x.x, x.y, x.z])
+        })
+        .collect();
+    let poses: Vec<Option<ppg_engine::camera::Pose>> = s
+        .poses
+        .iter()
+        .map(|p| {
+            let tr = -(p.rotation * p.centre);
+            Some(std::array::from_fn(|a| [p.rotation[(a, 0)], p.rotation[(a, 1)], p.rotation[(a, 2)], tr[a]]))
+        })
+        .collect();
+    let c = &input.cameras[0];
+    let cams = vec![Camera::new(&c.model, &c.params, c.width, c.height).unwrap()];
+    let opts = Options::default();
+    let tests = triangulate::pixel_tests(&t, &points, &input, &cams, &poses, &opts, &[false]);
+    eprintln!("held lens: {tests:?}");
+    assert!((tests[0].radial[0] + 0.006).abs() < 0.0005, "{tests:?}");
+    assert!(tests[0].max_px >= 4.0 && tests[0].max_px < 5.0, "{tests:?}");
+    let kept = triangulate::filter_in_pixels(&t, &points, &input, &cams, &poses, &opts, &tests).unwrap();
+    let plain = [triangulate::PixelTest { max_px: 4.0, radial: [0.0; 2] }];
+    let uncorrected = triangulate::filter_in_pixels(&t, &points, &input, &cams, &poses, &opts, &plain).unwrap();
+    // an observation is displaced when its key point differs from that of the clean input
+    let (mut right, mut right_kept, mut wrong, mut wrong_kept, mut right_plain) = (0, 0, 0, 0, 0);
+    for (i, &(image, kp)) in t.observations.iter().enumerate() {
+        let (a, b) = (input.keypoint(image as usize, kp), clean.keypoint(image as usize, kp));
+        if (a[0] - b[0]).hypot(a[1] - b[1]) > 4.5 {
+            wrong += 1;
+            wrong_kept += kept.keep[i] as usize;
+        } else {
+            right += 1;
+            right_kept += kept.keep[i] as usize;
+            right_plain += uncorrected.keep[i] as usize;
+        }
+    }
+    eprintln!("right {right_kept} / {right} kept ({right_plain} without the correction), wrong {wrong_kept} / {wrong}");
+    assert!(wrong > 50);
+    assert!(right_kept as f64 > 0.97 * right as f64, "{right_kept} of {right}");
+    assert!((right_plain as f64) < 0.9 * right as f64, "the lens moves the corners: {right_plain} of {right}");
+    assert!((wrong_kept as f64) < 0.1 * wrong as f64, "{wrong_kept} of {wrong}");
+}
+
 /// The world turned by 30 degrees about (1, 2, 3) (the poses, the points and the positions; the
 /// pixels the same): the averaged rotations are turned onto the positions by a rotation that is
 /// neither the identity nor symmetric, and the centres land on the turned truth itself (no

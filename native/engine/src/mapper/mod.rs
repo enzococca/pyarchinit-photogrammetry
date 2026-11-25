@@ -76,14 +76,17 @@ pub struct Options {
     /// (COLMAP's retriangulation in its global mapper); false only for the trials of the plan
     /// (`PPG_NATIVE_FINAL_ALL_TRACKS=0`).
     pub final_all_tracks: bool,
-    /// The filter of the last adjustment with every track, before and after it, as COLMAP's
-    /// retriangulation filters the global mapper's block: an observation whose reprojection error
-    /// exceeds this many pixels goes (beside the normalised threshold), and a point goes whose rays
-    /// meet at less than `final_min_triangulation_deg` (pycolmap's
-    /// `IncrementalPipelineOptions().mapper.filter_max_reproj_error` and `.filter_min_tri_angle`,
-    /// 4.0 and 1.5 in pycolmap 4.2.1, the options of the retriangulation of its global mapper).
-    /// The normalised threshold alone keeps errors up to `max_normalized_reprojection` times the
-    /// focal length (36 px on a 20-megapixel drone camera): the wrong observations of long tracks.
+    /// The filter of the last adjustment with every track, before and after it: an observation
+    /// whose reprojection error exceeds this many pixels goes (beside the normalised threshold),
+    /// and a point goes whose rays meet at less than `final_min_triangulation_deg`. These are the
+    /// C++ defaults of COLMAP's `IncrementalMapper::Options` (`filter_max_reproj_error` 4.0,
+    /// `filter_min_tri_angle` 1.5), which the retriangulation of COLMAP's global mapper filters
+    /// with; pycolmap shows them as `IncrementalPipelineOptions().mapper.filter_max_reproj_error`
+    /// and `.filter_min_tri_angle` (they are not fields of the global mapper's options, whose
+    /// `retriangulation` holds the triangulator's 15 px and 1 deg). COLMAP filters before the
+    /// adjustment of its retriangulation; the filter after the last adjustment goes beyond it. The
+    /// normalised threshold alone keeps errors up to `max_normalized_reprojection` times the focal
+    /// length (36 px on a 20-megapixel drone camera): the wrong observations of long tracks.
     pub final_max_reprojection_px: f64,
     pub final_min_triangulation_deg: f64,
     /// One flag per camera of the input: its sensor is OPENCV (the camera of the mapper being

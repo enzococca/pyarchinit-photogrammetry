@@ -349,6 +349,8 @@ impl Mapper {
             notes: p.notes.clone(),
             focal_sd: Vec::new(),
             intrinsics_held: Vec::new(),
+            radial_sd: Vec::new(),
+            radial_held: Vec::new(),
         };
         self.report.frame = Some(p.frame);
         self.report.frame_rotation = Some(p.frame_rotation);
