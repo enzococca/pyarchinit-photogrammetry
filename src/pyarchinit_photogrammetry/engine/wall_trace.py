@@ -37,7 +37,6 @@ NEIGHBOURS = 2  # segments on either side of one whose lines say where its neigh
 
 _OVERLAP = 0.01  # m: a look starts this far on the other side of the clicked line: a face on the line itself is met
 _PAST = 0.001  # m past a surface, where a look goes on from
-AWAY = 0.3  # a face whose normal points away from the viewer by more than this (its horizontal part) is not taken
 
 
 # ---------------------------------------------------------------- the side
@@ -274,31 +273,6 @@ def _under(chunk: Chunk, raycaster, lock, at: np.ndarray, top: float) -> np.ndar
     return at[:, 2] + _cast(chunk, raycaster, lock, at, np.array([0.0, 0.0, 1.0])) <= top + OVER_TOP
 
 
-def _facing(chunk: Chunk, raycaster, lock, plane, u: np.ndarray, v: np.ndarray, depth: np.ndarray) -> np.ndarray:
-    """``depth`` (of samples ``(u, v)`` of the plane of a clicked segment) without the surfaces that face away from
-    the viewer: NaN where the surface found, looked at from just in front of it, has an outward normal that turns
-    away from the viewer by more than :data:`AWAY` (horizontally) - the back of the wall met from inside it, the
-    face of the trench on its other side however tall. A surface that is not met again so (a floor, met lying) is
-    kept."""
-    found = np.nonzero(np.isfinite(depth))[0]
-    if not len(found):
-        return depth
-    inverse = np.linalg.inv(chunk.transform)
-    rotation = inverse[:3, :3] / np.cbrt(np.linalg.det(inverse[:3, :3]))  # world -> model, without the scale
-    start = plane.point(u[found], v[found], depth[found] + _OVERLAP) @ inverse[:3, :3].T + inverse[:3, 3]
-    along = np.tile(rotation @ -plane.normal, (len(found), 1))
-    with lock:
-        t, normal = raycaster.hit_normal(start, along)
-    t = t * chunk.scale
-    normal = normal @ rotation  # model -> world (the inverse of a rotation is its transpose)
-    flat = plane.normal[:2] / max(float(np.hypot(*plane.normal[:2])), 1e-12)
-    across = normal[:, :2] @ flat  # the horizontal of the normal towards the viewer
-    away = (t <= 2.0 * _OVERLAP) & (across < -AWAY)
-    depth = depth.copy()
-    depth[found[away]] = np.nan
-    return depth
-
-
 def _columns(d: np.ndarray, open_rows: np.ndarray | None = None) -> np.ndarray:
     """The depth of the face in each column of a clicked segment, of the depths ``d`` (columns, heights) its
     samples see: their median - NaN for a column with surface at fewer than :data:`~.elevation.FACE_ROWS` of
@@ -475,13 +449,11 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     first surface met, as far as the band behind it (a model that is the face alone, clicked behind it) - or from
     where another part of the line is as near as itself, when that is nearer than the band (:func:`_reach`).
 
-    The face is the one seen from the viewer's side. A surface whose outward normal (by the winding of the model,
-    as photos build it) points away from the viewer is never taken, from any look (:func:`_facing`): the face of
-    the trench on the other side of a wall, however tall, met from inside the wall through a hole of its crest. Nor
-    is what a look from the band meets when it starts under the model - under the high ground a wall stands
-    against. A segment that finds only that keeps its click. Where the viewer's side is high ground, the heights of
-    a column that count are those over it (in the open where the band starts): a low face, 20 cm over the ground,
-    is a face.
+    The face is the one seen from the viewer's side. A look from the band that starts under the model - under the
+    high ground a wall stands against - meets the surfaces from inside what they bound, facing away from the
+    viewer: the face of the trench on the other side of the wall, however tall, is never taken; a segment that
+    finds only that keeps its click. Where the viewer's side is high ground, the heights of a column that count are
+    those over it (in the open where the band starts): a low face, 20 cm over the ground, is a face.
 
     In columns ``step`` wide along the segment the depth of the face is the median of the surface over
     ``samples`` heights between the two of ``heights`` (default: those of the model along the line,
@@ -491,10 +463,10 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     :data:`FIT_NEAR` - not when it sees the wall for a short stretch, or rubble and bushes at any depth.
 
     A line found is not taken - the segment keeps the line clicked - where it faces away from the viewer (above),
-    where it goes further than ``band`` from the clicked segment anywhere along it, and where it lies off its click
-    further than those of its neighbours do (:func:`_apart`): the face of a tower beside the wall, of another wall
-    behind it. No vertex goes further than ``band`` from where it was clicked, but a corner, where two lines meet
-    within the band of each (:func:`_moved`: 1.41 times the band at most at a right angle).
+    where it goes further than ``band`` from the clicked segment anywhere along it, and where it lies off its click further than those of its neighbours do
+    (:func:`_apart`): the face of a tower beside the wall, of another wall behind it. No vertex goes further than
+    ``band`` from where it was clicked, but a corner, where two lines meet within the band of each (:func:`_moved`:
+    1.41 times the band at most at a right angle).
 
     A vertex between two segments goes where their lines meet (between the two where they are one wall going on,
     or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its segment
@@ -559,32 +531,26 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
             u = plane.coords(np.column_stack([line[i] + x[:, None] * t[i], np.zeros(n)]))[:, 0]
             uu, hh = np.repeat(u, samples), np.tile(rows, n)
 
-            away_rows = np.full(n * samples, np.nan)  # what faces away from the viewer: found, never taken
-
-            def facing(depth: np.ndarray, rows=None) -> np.ndarray:
-                kept = _facing(chunk, raycaster, lock, plane, uu, hh, depth)
-                turned = np.isfinite(depth) & np.isnan(kept) & (True if rows is None else rows)
-                away_rows[turned] = depth[turned]
-                return kept
-
             def from_line() -> np.ndarray:
-                return facing(_from_line(chunk, raycaster, lock, plane, uu, hh, heights[1], band))
+                return _from_line(chunk, raycaster, lock, plane, uu, hh, heights[1], band)
 
             reach = _reach(v, i, x, towards[i], band)
             # the samples in the open on the viewer's side, where the band starts: not under the high ground. A look
-            # from the band that starts under it goes through what the model bounds: what it meets is not taken
+            # from the band that starts under it goes through what the model bounds, and the first surface it meets
+            # faces away from the viewer - the back of the wall, however tall: it is not taken
             open_rows = ~_under(chunk, raycaster, lock, plane.point(uu, hh, np.repeat(reach, samples)), heights[1])
+
+            met = {}
 
             def from_band() -> np.ndarray:  # the first surface met from the band in front of the line
                 surface = FrameSurface(chunk, raycaster, _Sight(plane, u, reach), step, lock, (-band, band),
                                        (0.0, heights[0], float(length[i]), heights[1]))
                 depth = surface.depth_at(uu, hh)
-                under = np.isfinite(depth) & ~open_rows
-                away_rows[under] = depth[under]
-                return np.where(open_rows, facing(depth, open_rows), np.nan)
+                met["away"] = np.where(open_rows, np.nan, depth)
+                return np.where(open_rows, depth, np.nan)
 
-            def from_under() -> np.ndarray:  # what faces away from the viewer, or was met from under the model
-                return away_rows
+            def from_under() -> np.ndarray:  # what the band met from under the model: said, never taken
+                return met["away"]
 
             for look in (from_line, from_band, from_under):  # each only when those before it found no line
                 d = _columns(look().reshape(n, samples), None if look is from_under else open_rows.reshape(n, samples))
