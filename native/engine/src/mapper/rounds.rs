@@ -556,15 +556,62 @@ fn fitted(pb: &Problem, sol: &Solution) -> Vec<[f64; 3]> {
         .collect()
 }
 
+/// `bundle::gnss_hat_products` by adjustments: for each probe the targets of the positions moved
+/// by one sigma times its signs and the problem solved again from `sol` (the solved biases folded
+/// into the targets), the move of the fitted positions in sigmas. The way of the products when the
+/// linear solve cannot be made (a reduced system that is not positive definite).
+fn probes_by_adjustment(
+    pb: &Problem,
+    sol: &Solution,
+    loss: Loss,
+    probes: &[Vec<[f64; 3]>],
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    let mut start = pb.clone();
+    start.rotations.clone_from(&sol.rotations);
+    start.centres.clone_from(&sol.centres);
+    start.points.clone_from(&sol.points);
+    for (cam, params) in start.cameras.iter_mut().zip(&sol.camera_params) {
+        cam.params.clone_from(params);
+    }
+    for g in &mut start.gnss {
+        let bias = sol.bias.iter().find(|(f, _)| *f == g.3).map_or([0.0; 3], |(_, b)| *b);
+        for a in 0..3 {
+            g.1[a] -= bias[a];
+        }
+    }
+    let mut out = Vec::with_capacity(probes.len());
+    for z in probes {
+        let mut probe = start.clone();
+        for (g, zj) in probe.gnss.iter_mut().zip(z) {
+            for a in 0..3 {
+                g.1[a] += g.2[a] * zj[a];
+            }
+        }
+        let moved = adjust_with(&probe, loss, observe)?;
+        let moved_fit = fitted(&probe, &moved);
+        // the base fit in the frame of the probe: the centre alone (the biases folded)
+        let hz = pb.gnss.iter().enumerate().map(|(j, &(at, _, sigma, _))| {
+            std::array::from_fn(|a| (moved_fit[j][a] - sol.centres[at][a]) / sigma[a])
+        });
+        out.push(hz.collect());
+    }
+    Ok(out)
+}
+
 /// One step of the variance-component estimation (Helmert's, after Foerstner) at the solution
 /// `sol` of `pb`: the sums `v^T P v` of the horizontal and the vertical residuals of the positions
 /// (in units of their sigmas in `pb`), their redundancies `r = n - tr(H)` (`H = J_g N^-1 J_g^T`
 /// the part of the hat matrix of the positions), and the cost of the tie points (in units of
-/// `pixel_sigma`). The trace is Hutchinson's stochastic one through the solver: the targets moved
-/// by one sigma times a random sign each (`SIGMA_PROBES` draws from `SIGMA_PROBE_SEED`), the
-/// problem solved again from `sol`, `H z` the move of the fitted positions in sigmas, `z^T H z` an
-/// unbiased estimate of the trace (summed over the rows of each group). The residuals of a fit are
-/// smaller than the noise by the share the block absorbs; the redundancy takes that share out.
+/// `pixel_sigma`). The trace is Hutchinson's stochastic one: random signs `z`, one per row of the
+/// positions (`SIGMA_PROBES` draws from `SIGMA_PROBE_SEED`), `H z` the move of the fitted positions
+/// in sigmas when their targets move by `z` sigmas (`bundle::gnss_hat_products`: one linear solve
+/// at `sol`, the normal matrix factorised once for every probe on a block solved dense;
+/// `probes_by_adjustment` when that solve cannot be made), `z^T H z` an unbiased estimate of the
+/// trace (summed over the rows of each group). An adjustment per probe, as before, took 8 to 11
+/// iterations each and was stopped after one now and then by the function tolerance (the move of a
+/// sigma is small beside the cost of the tie points), which left that probe's `H z` at zero. The
+/// residuals of a fit are smaller than the noise by the share the block absorbs; the redundancy takes that share out.
 /// `None` with fewer than `MIN_POSITIONS` positions or a redundancy that is not positive.
 fn helmert_step(
     pb: &Problem,
@@ -583,39 +630,22 @@ fn helmert_step(
         sum_h += v[0] * v[0] + v[1] * v[1];
         sum_v += v[2] * v[2];
     }
-    // the problem at the solution, the solved biases folded into the targets
-    let mut start = pb.clone();
-    start.rotations.clone_from(&sol.rotations);
-    start.centres.clone_from(&sol.centres);
-    start.points.clone_from(&sol.points);
-    for (cam, params) in start.cameras.iter_mut().zip(&sol.camera_params) {
-        cam.params.clone_from(params);
-    }
-    for g in &mut start.gnss {
-        let bias = sol.bias.iter().find(|(f, _)| *f == g.3).map_or([0.0; 3], |(_, b)| *b);
-        for a in 0..3 {
-            g.1[a] -= bias[a];
-        }
-    }
     let mut random = Lcg(SIGMA_PROBE_SEED);
+    let probes: Vec<Vec<[f64; 3]>> =
+        (0..SIGMA_PROBES).map(|_| (0..m).map(|_| std::array::from_fn(|_| random.sign())).collect()).collect();
+    if !observe() {
+        return Err("cancelled".into());
+    }
+    let moves = match bundle::gnss_hat_products(pb, sol, loss, &probes) {
+        Ok(moves) => moves,
+        // a reduced system that is not positive definite: the probes adjusted one by one
+        Err(_) => probes_by_adjustment(pb, sol, loss, &probes, observe)?,
+    };
     let (mut trace_h, mut trace_v) = (0.0, 0.0);
-    for _ in 0..SIGMA_PROBES {
-        let mut probe = start.clone();
-        let mut z = vec![[0.0; 3]; m];
-        for (j, g) in probe.gnss.iter_mut().enumerate() {
-            for a in 0..3 {
-                z[j][a] = random.sign();
-                g.1[a] += g.2[a] * z[j][a];
-            }
-        }
-        let moved = adjust_with(&probe, loss, observe)?;
-        let moved_fit = fitted(&probe, &moved);
-        for j in 0..m {
-            let sigma = pb.gnss[j].2;
-            // the base fit in the frame of the probe: the centre alone (the biases folded)
-            let hz: [f64; 3] = std::array::from_fn(|a| (moved_fit[j][a] - sol.centres[pb.gnss[j].0][a]) / sigma[a]);
-            trace_h += z[j][0] * hz[0] + z[j][1] * hz[1];
-            trace_v += z[j][2] * hz[2];
+    for (z, hz) in probes.iter().zip(&moves) {
+        for (zj, hj) in z.iter().zip(hz) {
+            trace_h += zj[0] * hj[0] + zj[1] * hj[1];
+            trace_v += zj[2] * hj[2];
         }
     }
     let k = SIGMA_PROBES as f64;
