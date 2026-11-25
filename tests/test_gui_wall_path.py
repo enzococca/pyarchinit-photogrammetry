@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import sys
+
 import pytest
 
 from wall_helpers import distance_to, wall_doc
@@ -523,6 +525,7 @@ def test_the_pane_fits_the_right_dock(make, qapp):
     assert pane.minimumSizeHint().width() <= 260
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the wider font stands in for the Windows metrics, which the test above meets on Windows itself")
 def test_the_pane_fits_the_right_dock_with_a_wider_font(qapp):
     """Segoe UI on Windows is wider than the fonts of macOS and Linux: the pane, built with a font 1.4 times
     larger, still fits the right dock (its buttons and ticks may be narrower than their text)."""
