@@ -32,6 +32,8 @@ FIT_NEAR = 0.1  # m: a column within this of the line of its segment lies on it
 OVER_TOP = 1.0  # m over the highest height looked at: what stands higher above a click is a cover, not a crest
 SAME_WALL_DEG = 5.0  # two fitted lines that turn less are one wall going on: no corner to put where they meet
 STRAIGHT = 0.01  # m: a vertex this near the line between its neighbours is a click on a straight wall, not a turn
+APART = 0.5  # m: a line this much further off its click than those of the neighbours of its segment is another face
+NEIGHBOURS = 2  # segments on either side of one whose lines say where its neighbours found the face
 
 _OVERLAP = 0.01  # m: a look starts this far on the other side of the clicked line: a face on the line itself is met
 _PAST = 0.001  # m past a surface, where a look goes on from
@@ -314,8 +316,33 @@ def _fit(x: np.ndarray, d: np.ndarray, width: float) -> tuple[float, float]:
     return a, b
 
 
+def _apart(fits: np.ndarray, length: np.ndarray, found: np.ndarray, closed: bool = False) -> np.ndarray:
+    """The segments of a clicked line whose fitted lines (``fits``, of those ``found``) are another face than that
+    of their neighbours: at one end of its segment at least, the depth of a line off the clicked line is further
+    than :data:`APART` from the median of the depths at both ends of the :data:`NEIGHBOURS` segments on either side
+    of it that have a line - two at least. One goes at a time, the furthest first, and is no neighbour of the
+    others after that: on a wall clicked as short segments, one that took the face of a tower beside it, or of a
+    wall behind, does not make a zig-zag of the line, nor turn its neighbours out with it. On a ``closed`` line the
+    neighbours go round."""
+    ends = np.column_stack([fits[:, 0], fits[:, 0] + fits[:, 1] * length])  # the depth of each line at its ends
+    n = len(ends)
+    kept, out = found.copy(), np.zeros(n, bool)
+    while True:
+        far = np.zeros(n)
+        for i in np.nonzero(kept)[0]:
+            near = [i + k for k in range(-NEIGHBOURS, NEIGHBOURS + 1) if k]
+            near = sorted({j % n for j in near} - {i}) if closed else [j for j in near if 0 <= j < n]
+            near = [j for j in near if kept[j]]
+            if len(near) >= 2:
+                far[i] = np.abs(ends[i] - np.median(ends[near])).max()
+        worst = int(np.argmax(far))
+        if not far[worst] > APART:
+            return out
+        kept[worst], out[worst] = False, True
+
+
 def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray, fits: np.ndarray,
-           found: np.ndarray, closed: bool = False) -> np.ndarray | None:
+           found: np.ndarray, closed: bool = False, band: float = np.inf) -> np.ndarray | None:
     """Where the vertices ``v`` of a clicked line go, given the line fitted to each segment that has one
     (``found``; ``fits`` its depth at the start of the segment and its slope, along ``towards``, the normal of
     the segment towards the viewer).
@@ -332,6 +359,11 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
     The vertices keep the order clicked. Where a segment would be turned back - two lines that meet past the
     next vertex or before the one before, as do those of the short chords of a smoothed corner, each at another
     depth - its vertices are put between their two lines, as above, and not where they meet.
+
+    Two lines that each pass within ``band`` of a vertex meet within ``band`` over the cosine of half the angle
+    between them: the band itself for two lines that turn a little, 1.41 times it at a right angle. Where they meet
+    further - lines that turn a little, found at different depths, meet far along the wall - the vertex goes
+    between them, as above.
 
     None when no segment has a line, and when the order cannot be kept even so."""
     start = v[:-1] + fits[:, :1] * towards  # each fitted line at the two ends of its segment
@@ -361,6 +393,8 @@ def _moved(v: np.ndarray, length: np.ndarray, t: np.ndarray, towards: np.ndarray
             if abs(cross) >= np.sin(np.radians(SAME_WALL_DEG)):
                 gap = start[b] - end[a]
                 meet[j] = end[a] + heading[a] * (gap[0] * heading[b, 1] - gap[1] * heading[b, 0]) / cross
+                if np.hypot(*(meet[j] - v[j])) > band / np.sqrt(max((1.0 + cos) / 2.0, 1e-12)):
+                    meet[j] = np.nan  # further than two lines within the band of the vertex can meet: not there
         elif found[a]:
             between[j] = end[a]
         elif found[b]:
@@ -409,6 +443,12 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     :data:`MIN_FIT`), and the segment has that line when :data:`MIN_SNAP_SHARE` of its columns lie on it, within
     :data:`FIT_NEAR` - not when it sees the wall for a short stretch, or rubble and bushes at any depth.
 
+    A line found is not taken - the segment keeps the line clicked - where it goes further than ``band`` from the
+    clicked segment anywhere along it, and where it lies off its click further than those of its neighbours do
+    (:func:`_apart`): the face of a tower beside the wall, of another wall behind it. No vertex goes further than
+    ``band`` from where it was clicked, but a corner, where two lines meet within the band of each (:func:`_moved`:
+    1.41 times the band at most at a right angle).
+
     A vertex between two segments goes where their lines meet (between the two where they are one wall going on,
     or would meet out of the order of the vertices: :func:`_moved`), an end vertex onto the line of its segment
     along its normal; the two ends of a line that ends on its first point, a room traced all round, are one
@@ -419,8 +459,10 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
     ``shift`` (N: how far each vertex went, metres), ``median_shift``, ``max_shift`` and ``segments``: for each
     clicked segment ``offset`` (the depth of its line at its first point, towards the viewer), ``slope`` (per
     metre along the direction clicked) and ``share`` (of its columns, those that lie on that line); ``offset``
-    and ``slope`` are 0 for a segment without a line. ``snapped`` is False and the points are those clicked when
-    no segment has a line, and when the lines found cannot keep the vertices in the order clicked.
+    and ``slope`` are 0 for a segment without a line - and ``kept``, whether the line it found was not taken (its
+    ``offset`` and ``slope`` are those of that line); ``kept`` says of how many segments. ``snapped`` is False and
+    the points are those clicked when no segment has a line, and when the lines found cannot keep the vertices in
+    the order clicked.
 
     :class:`~.wall_path.TraceRefused` as :func:`side_of`; ``RuntimeError`` without a model."""
     from .visibility import raycaster_for_chunk
@@ -489,14 +531,18 @@ def snap_trace(chunk: Chunk, points, side="auto", band: float = SNAP_BAND, heigh
                         break
             progress((i + 1) / len(length))
     progress(1.0)
-    moved = _moved(v, length, t, towards, fits, share >= MIN_SNAP_SHARE, closed)
+    found = share >= MIN_SNAP_SHARE
+    beyond = found & ((np.abs(fits[:, 0]) > band) | (np.abs(fits[:, 0] + fits[:, 1] * length) > band))
+    apart = _apart(fits, length, found & ~beyond, closed)
+    kept = beyond | apart  # a line was found, but it is not taken: the segment keeps the line clicked
+    moved = _moved(v, length, t, towards, fits, found & ~kept, closed, band)
     out = clicked if moved is None else (line[0] + moved)[place]
     shift = np.hypot(*(out - clicked).T)
-    segments = [{"offset": 0.0, "slope": 0.0, "share": 0.0} if place[i] == place[i + 1] else
+    segments = [{"offset": 0.0, "slope": 0.0, "share": 0.0, "kept": False} if place[i] == place[i + 1] else
                 {"offset": float(fits[place[i], 0]), "slope": float(fits[place[i], 1]),
-                 "share": float(share[place[i]])} for i in range(len(clicked) - 1)]
+                 "share": float(share[place[i]]), "kept": bool(kept[place[i]])} for i in range(len(clicked) - 1)]
     return {"points": out, "snapped": moved is not None, "shift": shift, "median_shift": float(np.median(shift)),
-            "max_shift": float(shift.max()), "segments": segments}
+            "max_shift": float(shift.max()), "segments": segments, "kept": int(kept.sum())}
 
 
 # ---------------------------------------------------------------- the frame
@@ -547,8 +593,9 @@ def path_from_trace(chunk: Chunk, points, side="auto", front: float = DEFAULT_FR
     and gives it snapped, with ``snap`` off.
 
     The report: ``side`` (``"left"`` or ``"right"`` of the line as clicked), ``snapped`` (whether the snap moved
-    it), ``median_shift`` and ``max_shift`` of its vertices (metres, 0 without a snap), ``length`` of the line of
-    the frame and ``corners``, how many it has.
+    it), ``median_shift`` and ``max_shift`` of its vertices (metres, 0 without a snap; ``band`` at most, but at a
+    corner), ``kept`` (of how many clicked segments the snap did not take the line it found, :func:`snap_trace`),
+    ``length`` of the line of the frame and ``corners``, how many it has.
 
     :class:`~.wall_path.TraceRefused` as :func:`side_of` and :class:`~.wall_path.WallPath`; for a line the snap
     made that the frame refuses, the refusal says so."""
@@ -560,11 +607,11 @@ def path_from_trace(chunk: Chunk, points, side="auto", front: float = DEFAULT_FR
     if not (np.isfinite(smooth) and smooth >= 0.0):
         raise ValueError("smooth: the length the clicked line is smoothed over, in metres, zero for none")
     line = smooth_trace(asked, smooth)
-    report = {"side": which, "snapped": False, "median_shift": 0.0, "max_shift": 0.0}
+    report = {"side": which, "snapped": False, "median_shift": 0.0, "max_shift": 0.0, "kept": 0}
     if snap:
         result = snap_trace(chunk, line, which, band=band, heights=heights)
         line = result["points"]
-        report.update({key: result[key] for key in ("snapped", "median_shift", "max_shift")})
+        report.update({key: result[key] for key in ("snapped", "median_shift", "max_shift", "kept")})
     vertices = _without_straight(ordered(line, which), front, back)
     if clicked is not None:
         clicked = _xy(clicked)

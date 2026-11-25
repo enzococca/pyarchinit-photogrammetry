@@ -160,12 +160,12 @@ def test_what_a_snap_gives_back(model_outside):
     face = np.asarray(info["face"])
     clicked = face + OFF
     r = T.snap_trace(ch, clicked.tolist(), side="right")
-    assert set(r) == {"points", "snapped", "shift", "median_shift", "max_shift", "segments"}
+    assert set(r) == {"points", "snapped", "shift", "median_shift", "max_shift", "segments", "kept"}
     assert r["snapped"] is True and r["points"].shape == (3, 2) and r["shift"].shape == (3,)
     assert np.allclose(r["shift"], np.hypot(*(r["points"] - clicked).T)) and np.allclose(r["shift"], [0.40, 0.32, 0.30],
                                                                                         atol=0.005)
     assert r["median_shift"] == pytest.approx(0.32, abs=0.005) and r["max_shift"] == pytest.approx(r["shift"].max())
-    assert [set(s) for s in r["segments"]] == [{"offset", "slope", "share"}] * 2
+    assert [set(s) for s in r["segments"]] == [{"offset", "slope", "share", "kept"}] * 2 and r["kept"] == 0
     # an end goes along the normal of its segment: the first click falls where its segment's normal meets the face
     step = clicked[1] - clicked[0]
     normal = np.array([step[1], -step[0]]) / np.hypot(*step)
@@ -206,6 +206,81 @@ def test_a_curve_of_short_segments_is_shifted_segment_by_segment(tmp_path):
     _doc, ch, info = model_doc(tmp_path / "dentro", make_wall_scene(trace=ARC, viewer="left"))
     r = T.snap_trace(ch, centre + (face - centre) * (2.8 / 3.0), side="left")
     assert r["snapped"] and distance_to(face, r["points"]).max() < 0.02 and np.abs(r["shift"] - 0.2).max() < 0.005
+
+
+def test_a_gentle_curve_clicked_as_long_chords_does_not_drift(tmp_path):
+    """A curved wall (radius 20 m) clicked as 8 chords of about 2.4 m that turn by 6 to 8 degrees, each click
+    somewhere between 15 cm on the crest and 45 cm in front: lines that turn so little meet far from the vertex
+    when they are found at slightly different depths. Every vertex stays on the face."""
+    steps = np.radians([6.0, 7.0, 8.0, 7.0, 6.0, 8.0, 7.0, 7.0])
+    at = -np.pi / 2.0 - steps.sum() / 2.0 + np.concatenate([[0.0], np.cumsum(steps)])
+    arc = np.linspace(at[0] - 0.08, at[-1] + 0.08, 160)                  # the face goes on past the clicks
+    centre = np.array([0.0, 14.0])
+    _doc, ch, info = model_doc(tmp_path, make_wall_scene(trace=centre + 20.0 * np.column_stack(
+        [np.cos(arc), np.sin(arc)]), marks=()))
+    face = np.asarray(info["face"])
+    o = face[0] - (centre + 20.0 * np.array([np.cos(arc[0]), np.sin(arc[0])]))
+    for by in ([0.3, 0.1, 0.45, -0.15, 0.25, 0.4, -0.1, 0.2, 0.35], [0.4, 0.05, 0.3, 0.45, -0.1, 0.0, 0.35, 0.1, 0.25]):
+        r = 20.0 + np.asarray(by)                                          # the viewer outside the curve
+        clicked = o + centre + r[:, None] * np.column_stack([np.cos(at), np.sin(at)])
+        out = T.snap_trace(ch, clicked, side="right")
+        assert out["snapped"] and out["kept"] == 0
+        assert distance_to(face, out["points"]).max() < 0.15 and out["max_shift"] < 0.6
+
+
+def _wall_tower_and_wall_behind():
+    """A straight wall 24 m long (its face on y = 0 from x = -12 to 12, seen from the south, 60 cm thick), a second
+    wall 2 m behind it, and a round tower of 4 m radius in front of the first that sinks 50 cm into it at x = 0."""
+    scene = make_wall_scene(trace=[(-12.0, 0.0), (12.0, 0.0)], thickness=0.6, marks=())
+    behind = make_wall_scene(trace=[(-12.0, 2.6), (12.0, 2.6)], marks=())
+    a = np.radians(np.linspace(0.0, 360.0, 73))
+    tower = make_wall_scene(trace=np.column_stack([4.0 * np.cos(a), -3.5 + 4.0 * np.sin(a)]), thickness=0.8,
+                            marks=())
+    for other in (behind, tower):
+        _added(scene, other.vertices, other.faces)
+    return scene
+
+
+@pytest.mark.parametrize("by", [[0.3, 0.27, -0.1, 0.24, 0.08, -0.05, 0.29, 0.39, 0.2],
+                                [-0.2, -0.3, 0.25, 0.4, 0.1, 0.2, -0.1, 0.3, 0.15],
+                                [0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3],
+                                [0.1, 0.2, 0.15, 0.7, 0.6, 0.65, 0.2, 0.1, 0.2]])
+def test_a_tower_beside_the_wall_and_a_wall_behind_do_not_take_its_line(by, tmp_path):
+    """Clicked every 3 m in front of the wall or on its crest, the segments by the tower see its curved face in
+    front of the wall. Their lines are not taken: no vertex goes onto the tower (... not one of them goes off its
+    click towards it), none slides along the wall where two lines that turn a little meet, and none goes further
+    than the band."""
+    _doc, ch, info = model_doc(tmp_path, _wall_tower_and_wall_behind())
+    face = np.asarray(info["face"])
+    o = face[0] - [-12.0, 0.0]
+    clicked = o + np.column_stack([np.linspace(-11.0, 11.0, 9), -np.asarray(by)])
+    r = T.snap_trace(ch, clicked, side="right")
+    assert r["snapped"] and r["max_shift"] <= T.SNAP_BAND
+    off = distance_to(face, r["points"])
+    assert (off < 0.05).sum() >= 6                                        # on the wall, but where it kept the click
+    assert np.all((off < 0.05) | (r["shift"] < 0.25))                     # the others stay near their clicks ...
+    assert r["kept"] == sum(s["kept"] for s in r["segments"]) >= 1           # ... of the segments by the tower
+    assert r["max_shift"] <= np.abs(by).max() / np.cos(np.radians(20.0)) + 0.05   # nothing slid along the wall
+
+
+def test_no_vertex_goes_further_than_the_band():
+    """Two lines found that turn by 6 degrees and lie 40 cm apart meet 3.8 m from the vertex: it goes between
+    them. A segment whose line lies further off its click than its neighbours' is set apart."""
+    v = np.array([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]])
+    legs = dict(length=np.array([10.0, 10.0]), t=np.array([[1.0, 0.0], [1.0, 0.0]]),
+                towards=np.array([[0.0, -1.0], [0.0, -1.0]]), found=np.array([True, True]))
+    fits = np.array([[0.1, 0.0], [0.5, 0.105]])                   # the second turns by 6 degrees, 40 cm further
+    free = T._moved(v, fits=fits, **legs)
+    assert np.hypot(*(free[1] - v[1])) == pytest.approx(3.8, abs=0.05)    # where they meet
+    held = T._moved(v, fits=fits, band=2.5, **legs)
+    assert np.hypot(*(held - v).T).max() <= 2.5 and abs(held[1, 0] - 10.0) < 0.05
+    # the neighbours: the segment whose line lies 1 m further off its click than its neighbours' is set apart
+    five = np.full(5, 3.0)
+    flat = np.column_stack([[0.2, 0.25, 1.3, 0.2, 0.3], np.zeros(5)])
+    assert T._apart(flat, five, np.ones(5, bool)).tolist() == [False, False, True, False, False]
+    assert not T._apart(flat, five, np.array([False, False, True, True, False])).any()  # a neighbour alone
+    two = np.column_stack([[0.2, 0.2, 1.3, 1.25, 0.2, 0.3], np.zeros(6)])            # two on the tower in a row
+    assert T._apart(two, np.full(6, 3.0), np.ones(6, bool)).tolist() == [False, False, True, True, False, False]
 
 
 @pytest.mark.parametrize("trace, viewer, by", [
@@ -452,7 +527,7 @@ def test_a_segment_without_a_face_goes_with_those_that_have_one(tmp_path):
     clicked = o + [[0.0, -0.3], [5.0, -0.3], [12.0, -0.3]]
     r = T.snap_trace(ch, clicked, side="right")
     assert r["snapped"] and np.abs(r["points"] - (o + [[0.0, 0.0], [5.0, 0.0], [12.0, 0.0]])).max() < 0.005
-    assert r["segments"][1] == {"offset": 0.0, "slope": 0.0, "share": pytest.approx(1.0 / 7.0, abs=0.02)}
+    assert r["segments"][1] == {"offset": 0.0, "slope": 0.0, "share": pytest.approx(1.0 / 7.0, abs=0.02), "kept": False}
     assert r["segments"][1]["share"] < T.MIN_SNAP_SHARE < r["segments"][0]["share"]
     # ... or turning where the wall ends: the leg without a wall moves along itself with the corner
     clicked = o + [[0.0, -0.3], [6.3, -0.3], [6.3, 4.0]]
@@ -630,7 +705,8 @@ def test_what_the_snap_refuses_and_a_point_clicked_twice(model_outside):
     r = T.snap_trace(ch, clicked[[0, 1, 1, 2]], side="right")
     assert r["points"].shape == (4, 2) and np.array_equal(r["points"][1], r["points"][2])
     assert np.linalg.norm(r["points"][1] - face[1]) < 0.02 and len(r["segments"]) == 3
-    assert r["segments"][1] == {"offset": 0.0, "slope": 0.0, "share": 0.0} and r["shift"][1] == r["shift"][2]
+    assert r["segments"][1] == {"offset": 0.0, "slope": 0.0, "share": 0.0, "kept": False}
+    assert r["shift"][1] == r["shift"][2]
     r = T.snap_trace(ch, clicked[[0, 0, 1, 2]], side="right")
     assert np.array_equal(r["points"][0], r["points"][1]) and r["segments"][0]["share"] == 0.0
     assert [round(q["offset"], 2) for q in r["segments"]] == [0.0, -0.4, -0.25]
@@ -975,7 +1051,7 @@ def test_the_frame_of_a_trace(model_outside):
     assert distance_to(face, path.vertices).max() < 0.01 and np.array_equal(path.clicked, clicked)
     assert path.radii == corner_radii(path.vertices) and path.radii == pytest.approx([0.52])
     assert report["side"] == "right" and report["snapped"] is True and 0.38 < report["max_shift"] < 0.42
-    assert set(report) == {"side", "snapped", "median_shift", "max_shift", "length", "corners"}
+    assert set(report) == {"side", "snapped", "median_shift", "max_shift", "kept", "length", "corners"}
     assert report["median_shift"] == pytest.approx(0.32, abs=0.005)
     assert report["length"] == path.length and report["corners"] == 1 == len(path.corners())
     two, report = T.path_from_trace(ch, clicked[:2], side="right")              # two clicks: a wall without a corner
