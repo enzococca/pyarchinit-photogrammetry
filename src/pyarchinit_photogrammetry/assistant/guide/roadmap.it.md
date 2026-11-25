@@ -304,6 +304,11 @@ dataset pubblici WorldView-3.
   1.10; il motore classico (pycolmap, Open3D) resta dietro per tutta la 2.x. Con lei: la scheda di una US aperta
   dal sito pubblicato, i proxy del plugin blender-em nel sito, nessun nome di persona in un sito pubblicato, i
   binari dichiarati GPL-3.0-or-later.
+* **Muri tracciati in pianta** (fatto, in attesa di una verifica su un muro vero): il prospetto di un muro che gira
+  gli spigoli o curva, la sua linea cliccata o seguita sulla pianta e agganciata alla faccia, disteso girando gli
+  spigoli; lo stesso muro in più campagne su una griglia sola, la scheda di confronto, il composito delle campagne, la
+  finitura per una pubblicazione, le foto in controluce lasciate fuori
+  ([un muro tracciato in pianta](gui/processing.md#un-muro-tracciato-in-pianta)).
 * **Verifiche su dati veri** (senza versione per ora): l'import da WebODM, una scena satellitare propria, `ppg
   remote` su una macchina remota, i nodi di rete su due computer veri, un volo MicaSense intero fino all'ortofoto
   di riflettanza.

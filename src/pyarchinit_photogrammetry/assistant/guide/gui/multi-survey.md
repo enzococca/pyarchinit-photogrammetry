@@ -215,6 +215,16 @@ DEM), `sources.tif` (the chunk of each cell: 0 none, 1 the first of the list...)
 `chunk` and `priority`) and `mosaic.json`. The paths of the sources are kept relative to the project: a project moved
 or renamed stays as it was.
 
+## The same wall in several campaigns
+
+A standing wall surveyed in several years - each year a chunk of the project, the chunks already placed together -
+is compared on its elevation: the elevation of the wall (a plane, a cylinder or
+[a wall traced on the plan](processing.md#a-wall-traced-on-the-plan)) is built again on the other chunks on **the same
+grid** (*Same elevation on other chunks...*, right click on the elevation), the campaigns are kept as a group with
+their dates, the **comparison sheet** stacks them on one axis with the heights and the corners, and the **composite**
+gives the wall as it was when most exposed (an older campaign where it is more than 0.15 m deeper). All of it is in
+[The same wall in several campaigns](processing.md#the-same-wall-in-several-campaigns) and the sections after it.
+
 ## Command line
 
 ```bash
@@ -240,3 +250,7 @@ ppg mosaic remove scavo.ppg m1a2b3c4d
 `--areas` takes a GeoPackage of polygons with the attribute `chunk` (label or key) and, optionally, `priority`.
 `ppg mosaic remove` deletes the files at once (the window puts them aside for *Undo*). All the options are in the
 [Python API](../api.md#several-surveys-masks-water-merged-products).
+
+The campaigns of a wall on the command line: `ppg elevation scavo.ppg --like ID --chunks "2019,2024"`, then
+`--like ID --compare confronto.png` and `--like ID --composite [--deeper 0.15]`
+([on the command line](processing.md#on-the-command-line)).

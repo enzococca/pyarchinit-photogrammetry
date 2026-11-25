@@ -66,6 +66,14 @@ le forme ceramiche simili, la calibrazione di un sensore. Le esportazioni che sc
 
 I plugin aggiungono a questo menu i loro formati.
 
+I **prospetti** si esportano dal loro clic destro nell'area di lavoro: *Esporta...* scrive ortofoto, rilievo, piano,
+profilo e disegni ([disegni sui prospetti](processing.md#disegni-sui-prospetti-e-sulle-sezioni)); *Esporta per la
+pubblicazione...* scrive una copia rifinita - buchi riempiti, aperture lasciate aperte, fuori dal muro bianco o
+trasparente, colore uniformato, mire coperte - come JPEG o GeoTIFF, mentre il prospetto resta come misurato
+([finitura per una pubblicazione](processing.md#finitura-per-una-pubblicazione)). I disegni di un
+[muro tracciato in pianta](processing.md#un-muro-tracciato-in-pianta) vanno a QGIS in 3D sulla superficie del muro,
+girando gli spigoli, e le tracce di tutti i prospetti come il layer *Tracce dei prospetti*.
+
 **OBJ a gruppi**: esportando il modello in OBJ si scelgono i **gruppi** - nessuno, uno per chunk di partenza di un
 modello unito (o per oggetto di un OBJ importato), oppure uno per parte connessa (`part_001` la più grande) - e il
 **lato massimo delle pagine di texture** nelle copie accanto al file. Ogni gruppo è scritto come `o`/`g` con un

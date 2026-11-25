@@ -2083,7 +2083,7 @@ una sezione lasciata davanti al muro - viene attraversato).
 | `with_heights(plane)`, `heights_measured(frame)` | v diventa la quota mondo quando l'asse v è verticale entro un grado; se lo è |
 | `cylinder_from_circle(chunk, points, inside=True, axis="vertical", axis_points=None, depth=None)` | il cilindro per un cerchio adattato a punti in pianta; il suo asse da `cylinder_axis`, tenuto in `Cylinder.tilt` |
 | `cylinder_axis(chunk, circle, method="vertical", points=None, tolerance=0.3, depth=None)` | l'asse di un cilindro e `info` (`method`, `tilt_deg`, `azimuth_deg`, `residual_m`, `centre_z`) |
-| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, max_angle=80, bounds=None, kind="elevation", scale="cylinder", u_map=None)` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo |
+| `build_elevation(chunk, frame, resolution=None, name=None, depth=None, blending="mosaic", colour_correction=None, ghosting=False, fill_holes=True, progress=None, workers=None, max_angle=80, bounds=None, kind="elevation", scale=None, u_map=None, texture=None, extend=None, heights=None, skip_backlit=False)` | ortofoto e rilievo (`d`, float32) del sistema come GeoTIFF in metri del sistema, elencati in `chunk.meta["elevations"]`; `kind="section"` tiene solo quello che sta dietro al piano e salva il profilo; `scale` per difetto `cylinder` su un cilindro, `wall` su un muro tracciato; `extend` e `heights` per un muro tracciato; `skip_backlit` lascia fuori le foto in controluce |
 | `build_like(chunk, entry, name=None, progress=None, workers=None, source=None, same_frame=False)` | un prospetto di `chunk` sul sistema e sulla griglia di `entry` (di questo chunk o di `source`, nello stesso sistema di riferimento): gli stessi pixel, per confrontare le campagne |
 | `same_crs(a, b)` | due sistemi di riferimento di chunk confrontati per significato, non per testo |
 | `wall_map(surface)`, `wall_length(entry)` | la `u_map` che fa di u la lunghezza lungo il muro; la lunghezza del muro tutto intorno |
@@ -2139,6 +2139,95 @@ potrebbe venire vuota o fuori posto senza dirlo. Senza `name` il nuovo prende il
 costruito in una trasformazione di un'altra scala (detto anche nel log). Riga di comando: `ppg elevation --like ID
 [--like-chunk CHUNK] [--same-frame]`.
 
+**Foto in controluce.** `elevation.blown_share(cam)` è la quota dei pixel di una foto (letta ridotta di 4) con tutti e
+tre i canali a `BLOWN_LEVEL` (250) o oltre; `build_elevation(..., skip_backlit=True)` lascia fuori le foto oltre
+`BACKLIT_SHARE` (0,02), la voce dice `skip_backlit` e `backlit_skipped`, la correzione del colore è misurata sulle
+foto tenute solo per quella costruzione; `RuntimeError` quando tutte le foto sono in controluce. `build_like` costruisce
+come era stato costruito il prospetto di partenza. Riga di comando: `ppg elevation ... --skip-backlit`.
+
+### Muri tracciati in pianta
+
+Un muro tracciato in pianta è il sistema `engine.wall_path.WallPath` (anche `elevation.WallPath`, `kind` "path"): una
+linea della pianta (x, y nel sistema del chunk) con un arco a ogni vertice, così la sua normale gira senza salti -
+davanti a uno spigolo convesso la striscia si apre a ventaglio, in uno spigolo rientrante non si ripiega. `u` è la
+lunghezza lungo la linea (attraverso `u_map`, coppie `[s, u]`: la lunghezza sulla faccia), da sinistra a destra per chi
+guarda stando a destra del verso di percorrenza; `v` è la quota (Z del mondo); `d` lo scostamento lungo la normale,
+verso chi guarda. Dove due parti della linea sono ugualmente vicine (il centro di un arco, metà di una stanza) il
+sistema finisce `CLEARANCE` (0,02 m) prima di quel posto: nessun punto del mondo si vede due volte. `frame_from_dict`
+legge `"path"`, `"cylinder"`, `"plane"` (o nessun tipo); un altro tipo è un `ValueError`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `WallPath(vertices, radius=DEFAULT_RADIUS, radii=None, u_map=None, clicked=None)` | il sistema; `point(u, v, d)`, `view(u, v)`, `coords(p)` (NaN fuori dai suoi limiti), `max_depth_at(u)`, `min_depth_at(u)`, `length()`, `min_radius()`, `corners()` (`s`, `u`, `angle_deg` - positivo se convesso -, `radius`, `xy` di ogni spigolo), `u_of(s)`, `s_of(u)`, `trace_line(u0=None, u1=None)` (la linea in pianta con gli spigoli vivi), `to_dict()` |
+| `wall_path.TraceRefused(reason, message="")` | un `ValueError`; `reason` in `REASONS`: `points` (meno di due punti diversi), `crosses` (la linea si incrocia o si tocca), `turns_back` (una svolta oltre `MAX_TURN_DEG`, 170), `side` |
+| `wall_path.corner_radii(vertices, front=0.5, back=0.5)` | l'arco di ogni vertice: `front + CLEARANCE`, meno a una svolta stretta, così uno spigolo rientrante tiene la profondità davanti |
+| `wall_path.ordered(points, side)`, `smooth_trace(points, sigma)` | la linea nell'ordine di chi guarda; una linea cliccata con molti punti smussata su `sigma` m |
+| `engine.wall_trace.side_votes(chunk, points)` | `{"left": peso, "right": peso}`: le foto allineate dai due lati, ognuna pesata per come vede la faccia (una foto nadirale non pesa) |
+| `wall_trace.side_of(chunk, points, side="auto")` | `"left"` o `"right"`: una parola com'è, un punto in pianta `(x, y)` dal lato di chi guarda, o `auto` (le foto) |
+| `wall_trace.snap_trace(chunk, points, side="auto", band=2.5, heights=None, step=0.05, samples=40, progress=None)` | la linea cliccata spostata sulla faccia del modello, un tratto dritto alla volta: `points`, `snapped`, `shift` (per vertice), `median_shift`, `max_shift`, `segments` |
+| `wall_trace.path_from_trace(chunk, points, side="auto", front=0.5, back=0.5, snap=True, band=2.5, heights=None, smooth=0.0, clicked=None)` | `(WallPath, rapporto)`; il rapporto dice `side`, `snapped`, `median_shift`, `max_shift`, `length`, `corners` |
+| `elevation.face_map(surface, samples=200)` | la `u_map` che fa di `u` la lunghezza sulla faccia (colonne di `FACE_COLUMN`, 0,01 m; una colonna è della faccia dove il modello è incontrato a `FACE_ROWS`, il 10 %, delle sue quote; `NoSurface` quando nessuna lo è) |
+| `elevation.height_range(chunk, frame, depth, span=None)` | le quote `(v0, v1)` del muro lungo la linea (percentili 0,5 e 99,5 del modello nella fascia), arrotondate verso l'esterno a `HEIGHT_STEP` (0,05 m) |
+| `elevation.NoSurface` | un `ValueError`: nessuna faccia lungo la linea |
+| `elevation.traces(chunk)`, `trace_layer(chunk)`, `TRACES_LAYER` | le tracce dei prospetti di un chunk (non le sezioni): `id`, `name`, `kind`, `geometry` (LineString GeoJSON), `length_m`; come layer di linee "Tracce dei prospetti" (`etichetta`, `prospetto`, `prospetto_id`, `tipo`, `lunghezza_m`) |
+
+**`build_elevation` su un muro tracciato.** `depth` è per difetto 0,5 m davanti alla linea e 0,5 m dietro, limitata
+per ogni `u` dal sistema; senza `bounds` la parte costruita è la traccia da un capo all'altro, prolungata di
+`extend=(prima, dopo)` metri lungo le tangenti ai capi, fra `heights=(v0, v1)` (per difetto `height_range`).
+`scale="wall"` (il predefinito) misura `face_map` e la tiene nel sistema (`entry["scale"]` "wall"); `scale="trace"`:
+`u` lungo la linea; `scale="keep"`: il sistema com'è; `u_map`: quella mappa. `bounds` sono in metri di quella `u` e si
+danno al posto di `extend` e `heights`. Non vi si fa una sezione. Il nome predefinito è "Prospetto del muro".
+`wall_length(entry)` è la lunghezza del muro da un capo all'altro della sua traccia sulla faccia. Un orientamento che
+inclina un chunk con prospetti di muri tracciati viene rifiutato (`orient.OrientRefused`, `"path_elevations"`, con i
+loro nomi) prima di cambiare qualsiasi cosa; una rotazione intorno a Z, uno spostamento e una scala muovono vertici,
+archi e `u_map` con il chunk.
+
+**Disegni.** Il collocamento in 3D dei disegni di un prospetto su muro tracciato (`world_tables`, il GeoPackage del
+mondo, il DXF 3D, `elevation_drawings.drawings(world=True)`) infittisce ogni geometria a `max(2 x risoluzione,
+PLACE_STEP)` (0,02 m) e mette ogni vertice in `frame.point(u, v, d)`, con `d` letta sul rilievo; un vuoto del rilievo
+fino a `PLACE_GAP` (0,25 m) lungo `u` è scavalcato. `elevation_drawings.transfer` su un prospetto di muro tracciato
+sposta un record solo quando ogni vertice cade sul sistema, dentro la sua fascia di profondità ed entro
+`max(3 x risoluzione, 0,05)` m dal suo rilievo.
+
+**Campagne: `engine.elevation_groups`.** I prospetti di un muro in più chunk, costruiti su una griglia sola, restano
+come un gruppo in `chunk.meta["elevation_groups"]` (`KEY`) del chunk di riferimento: `id` (`g` + 8 esadecimali),
+`name`, `reference`, `members` (`chunk`, `id`, `date`), `composite`.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `build_on_chunks(doc, chunk, entry, chunks, same_frame=False, dates=None, progress=None, workers=None)` | `entry` costruito di nuovo su ciascuno di `chunks` (`build_like`), ognuno un membro del suo gruppo: `{"group", "built": [(chunk, entry)], "refused": [{"chunk", "code", "reason"}], "empty": [nomi]}`; `code` in `CODES`: `already`, `no_model`, `crs` (con `theirs` e `mine`), `local`; un errore tiene quello che è stato costruito (`exc.campaigns`) |
+| `campaign_date(chunk)`, `parse_date(text)` | la data di una campagna: `chunk.meta["date"]`, se no la data EXIF mediana delle sue foto; `AAAA-MM-GG` |
+| `groups(chunk)`, `group_of(doc, chunk, eid)` | i gruppi tenuti in un chunk; `(chunk di riferimento, gruppo)` di un prospetto, o None |
+| `new_group(chunk, entry)`, `add_member(group, chunk, entry, date=None)`, `set_date(group, chunk_key, eid, date)` | un gruppo e i suoi membri, a mano |
+| `members(doc, chunk, group)` | i membri risolti: `chunk`, `entry`, `date`, `label`, `record`, per data (quelli senza data per ultimi) |
+| `engine.elevation_sheet.comparison_sheet(doc, chunk, group, out_path, title=None, max_width=6000, dpi=200, progress=None, overwrite=True)` | la scheda di confronto (PNG o JPEG, un PDF accanto): fasce su un asse `u` solo, quote ogni `HEIGHT_TICK` (0,5 m), spigoli tratteggiati; restituisce `image`, `pdf`, `factor`, `px_per_m`, `bands`, `v_ticks`, `u_ticks`, `corners`, `skipped`, `reasons`, `codes` (`gone`, `grid`, `shift`); `FileExistsError` con `overwrite=False` quando un file c'è già |
+| `engine.elevation_composite.composite(doc, chunk, group, threshold=0.15, name=None, match=True, progress=None)` | il composito nel chunk di riferimento: per ogni cella la campagna più recente, una più vecchia più profonda di oltre `threshold` (`DEEPER`) o dove la cella è vuota; `match` i colori (guadagno tenuto entro `GAIN_LIMITS`, 0,5-2; solo la media sotto `MATCH_MIN_CELLS` celle in comune); rifatto al suo posto; `sources.tif` per cella; `Undated` (un `ValueError`) finché una campagna non ha data |
+| `elevation_composite.is_stale(doc, chunk, entry)`, `composites(chunk)`, `undated(doc, chunk, group)`, `match_colours(rgb, reference, where, info=None)` | se un composito è da rifare (una fonte ricostruita, corretta, sparita, o le campagne o le loro date cambiate); i compositi di un chunk; le campagne senza data |
+| `elevation.entry_from_rasters(chunk, like, rgba, relief, name=None, kind="composite", extra=None, replace=None)` | un prospetto fatto da raster sulla griglia di `like`; `source` "rasters"; le patch vi sono rifiutate (`patches.CompositePatched`) |
+| `elevation.source_stamp(entry)`, `grid_of(entry)`, `new_build()` | il timbro di una costruzione e delle sue patch; `(origine, forma)` della griglia; il segno di una costruzione |
+
+**Finitura: `engine.elevation_finish`.** Un'esportazione: il prospetto non cambia.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `finish(chunk, entry, out_path, fill=True, mask=True, level=True, targets=True, reduce=1, quality=92, max_hole=0.5, progress=None)` | il prospetto rifinito e scritto come JPEG o GeoTIFF RGBA (con la trasformazione e i tag del prospetto, `ppg_finish`): le mire (`TARGET_HALF_SIDE`, 0,18 m) fatte buchi, i buchi riempiti (`fillable`: fino a `max_hole` sempre, più grandi dove il rilievo ha superficie, se no un'apertura contata in `openings`), il colore uniformato (Lab, `LEVEL_SIGMA_PX` 250), fuori dall'estensione mascherato; rifiutato dentro i dati del progetto, oltre `MAX_PIXELS` (nomina il `reduce` che ci sta) |
+| `span(valid)`, `fillable(holes, measured, cell, max_hole=0.5)`, `fill_holes(rgb, valid, holes)`, `level_colours(rgb, valid, sigma=250.0)`, `inside_folder(path, folder)` | i passi, uno per uno |
+
+**Tracciamento automatico: `engine.wall_auto`.** Sul DEM del chunk.
+
+| Chiamata | Descrizione |
+| --- | --- |
+| `follow(chunk, points, mask=None, radius=2.0, progress=None)` | la linea fra i capi cliccati (e i punti di passaggio, in ordine) lungo la cresta: `{"points", "on_ridge", "cell"}`; `on_ridge` sotto 0,5 è debole; `FollowRefused` (`points`, `outside`, `no_path`); `RuntimeError` senza DEM |
+| `proposals(chunk, min_height=0.3, min_length=3.0, radius=2.0, progress=None)` | i muri della pianta come linee candidate, le più lunghe prima |
+| `sam_mask(chunk, segmenter, points, margin=10.0, max_side=1536)` | `(maschera, trasformazione)` del muro sull'ortofoto ritagliato da SAM 2.1 (un processo a parte) a partire dai clic, per `follow(mask=...)` |
+| `strength_map(dem, resolution, ortho=None, mask=None, radius=2.0)`, `least_cost(strength, start, goal, resolution)`, `simplify_line(points, tolerance=0.1)` | i pezzi |
+
+**Riga di comando.** `ppg elevation P --path "X1,Y1 X2,Y2 ..." [--side auto|left|right|X,Y] [--extend A,B]
+[--heights V0,V1] [--snap/--no-snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace] [--skip-backlit]`;
+`--like ID --chunks "A,B" [--dates "A=AAAA-MM-GG,..."] [--same-frame]`; `--like ID --compare OUT [--title T]
+[--overwrite]`; `--like ID --composite [--deeper 0.15]`; `--like ID --finish OUT [--no-fill] [--no-mask] [--no-level]
+[--no-targets] [--reduce N] [--max-hole 0.5]`. Vedi [la guida](gui/processing.md#un-muro-tracciato-in-pianta).
+
 ### Disegni sui prospetti e sulle sezioni
 
 La finestra tiene ciò che si disegna su un prospetto o una sezione nel suo sistema:
@@ -2153,7 +2242,7 @@ prospetto tiene `u`, `v` e ha `x`, `y`, `quota_q` = il suo punto nel mondo sulla
 | `relief_at(chunk, entry, u, v)` | la profondità della superficie in `(u, v)` |
 | `frame_drawings(chunk, id)` | i disegni tenuti con il prospetto `id` |
 | `export_drawings(chunk, entry, folder, scale=None, stem=None, raster=False, dxf_3d=True)` | `{"dxf", "svg", "png", "gpkg", "gpkg_world"}` (+ `"dxf_3d"`, `<stem>_disegni_3d.dxf` nelle coordinate del rilievo, con `dxf_3d`; + `"ortho"` con `raster`): DXF in `(u, v)` (layer US, USM, QUOTE, PIETRE, PUNTI, PROFILO), SVG in scala 1:`scale` sopra l'ortofoto, PNG, il GeoPackage sviluppato (tabella `frame` con il piano; `unita`, `quote`, `punti`, `pietre` in `(u, v)`, senza CRS, con una colonna `geom_world` in WKT) e il GeoPackage in 3D sul rilievo |
-| `world_tables(chunk, entry, data=None)`, `write_world_tables(con, tables, srs_id, prefix="")` | i disegni collocati sul rilievo in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` di una sezione), nel CRS del prospetto (`entry["crs"]`); scritti con la Z in un GeoPackage aperto |
+| `world_tables(chunk, entry, data=None, trace=False)`, `write_world_tables(con, tables, srs_id, prefix="")` | i disegni collocati sul rilievo in 3D (`unita`, `quote`, `punti`, `pietre`, `profilo` di una sezione; con `trace`, `traccia`: la traccia in pianta a metà altezza con `nome`, `prospetto`, `prospetto_id`, `tipo`), nel CRS del prospetto (`entry["crs"]`); su un muro tracciato ogni vertice va sulla superficie del muro; scritti con la Z in un GeoPackage aperto |
 | `io.qgis_link.LiveLink.write_elevations({id: (crs, tabelle)})`, `elevation_tables()` | quelle tabelle nel GeoPackage dal vivo come `prospetto_<id>_<nome>` (in un solo senso), lette anche dal collegamento con RustGIS (`RustGisLink.refresh_elevations()`) |
 | `io.qgis_link.PLAN_TABLES`, `two_way_tables()`, `plan_identities(layers)` | le tabelle degli altri disegni della pianta (`poligoni`, `curve`, `linee`, `punti`), rilette da `LiveLink.read_changes()` come quelle nei due sensi; tutte le tabelle rilette; `{ppg_id: (tabella, layer, attributi)}` degli elementi dei layer della vista 2D come `LiveLink.write` identifica le loro righe. Un layer dato a `LiveLink.write` con `"sent": False` (nascosto nel pannello *Layer*) è trattenuto: identificato con gli altri, le sue righe escono dal file e dal suo registro (niente riletto come eliminato) finché non viene inviato di nuovo; lo stesso per i disegni liberi di un layer non visibile (`free_drawings.set_layer(..., visible=False)`); `RasterView.layer_shown(nome, mostrato)` è emesso quando un layer viene mostrato o nascosto. La finestra tiene le modifiche dei layer che non disegna lei in `chunk.meta["plan_edits"]` (`{layer: {"rev", "changed", "deleted", "added"}}`) |
 | `io.qgis_link.live_vectors(path)`, `layer_subset(layer)`, `project_layers(qgs)`, `layers_not_in_project(have, vectors)`, `feature_kind(attrs, default)`, `legacy_identities(layers)` | i layer che `build_project` dà a QGIS per i disegni della pianta: uno per ogni layer con righe nel GeoPackage dal vivo, filtrato sulla colonna `layer` (`"subset"`) con il suo nome come valore predefinito di quella colonna (`LiveLink.free_vectors()` fa lo stesso per i disegni liberi, `elevation_tables(filled=True)` lascia fuori le tabelle vuote); i `(tabella, layer)` che un `.qgs` scritto mostra e i layer che non mostra ancora; il tipo di un elemento dalla sua geometria (la sua tabella); `{identità fino alla 1.7.8: identità di adesso}` degli elementi di un layer di linee e poligoni |

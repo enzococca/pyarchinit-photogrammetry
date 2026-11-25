@@ -152,6 +152,7 @@ products. The step-by-step guide is the [tutorial](../tutorials/tell.md); the de
 | **Build DEM...** · **Build orthophoto...** | the rasters in plan |
 | **Reconstruction region** | [see below](#workflow-reconstruction-region) |
 | **Elevation or cylindrical development...** | orthophoto and relief of a wall, or a section, on a plane (a section trace, markers with the axes chosen), or of a well or a tower on a cylinder ([elevations](processing.md#elevations)) |
+| **Wall traced on the plan...** | the pane of a wall traced on the plan: its line clicked or followed on the plan, snapped onto the face, the elevation unrolled round its corners; other campaigns, comparison sheet, composite ([a wall traced on the plan](processing.md#a-wall-traced-on-the-plan)) |
 | **Process everything...** ++ctrl+r++ | every step in a row with the default choices |
 
 !!! info "Photos that cannot be read"

@@ -6,7 +6,7 @@ start they are in three groups:
 | Where | Panes |
 | --- | --- |
 | left | [Workspace](#workspace), [Reference](#reference), [Layer](#layer) - always there |
-| right | [PyArchInit](#pyarchinit), [US proxies](#us-proxies), [Multispectral and Thermal](multispectral.md), the panes of the plugins |
+| right | [PyArchInit](#pyarchinit), [US proxies](#us-proxies), [Multispectral and Thermal](multispectral.md), [Wall traced on the plan](#wall-traced-on-the-plan), the panes of the plugins |
 | bottom | [Photos](#photos), [Sections](#sections), [Python console](#python-console), [Assistant](#assistant), [Log](#log) |
 
 The tabs of a group are on top, each with the icon of its pane; the title bar under them names the pane in
@@ -86,6 +86,7 @@ buttons that do not fit):
 | the project | *Add chunk*, *Append projects...* |
 | *Merged products* | *Merged orthophoto and DEM...* |
 | a merged product | *Show*, *Open the folder*, *Remove* ([merged products](multi-survey.md#merged-orthophoto-and-dem)) |
+| an elevation | *Show*, *Export...*, *Export for publication...*, *Drawings from another elevation...*, *Same elevation on other chunks...*; in a group of campaigns also *Comparison sheet...* and *Composite of the campaigns...*; on a composite *Make the composite again*; *Remove* ([a wall traced on the plan](processing.md#a-wall-traced-on-the-plan)) |
 
 The commands work on chunks that are not the active one too: removing, renaming, enabling and disabling act
 on the chunk of the item and leave the active chunk as it is, while showing an item and the commands of its
@@ -311,3 +312,22 @@ How the solids are made and how they follow their units is in
 [Tools for archaeology](archaeology.md#us-proxies).
 
 <div style="clear: both"></div>
+
+## Wall traced on the plan
+
+*Workflow > Wall traced on the plan...* opens it, in front, and starts the tracing. The elevation of a wall that turns
+corners or curves, in five steps, each with its mark (to do, running, done) and a line that says what it found:
+
+1. *Line of the wall on the plan*: *Trace on the plan* (clicks on the 2D view), *Follow the wall between two clicks*,
+   *Use SAM where the wall is low*, *Keep*, *Add via points*, *Propose the walls*;
+2. *Snap onto the face of the wall*: *Snap to the wall*, *Search band*, *Smooth the line*, *Snapped line* or *Clicked
+   line*, *Snap again*, and how far each vertex moved;
+3. *Side, heights and depths*: *Side to look from*, *Lowest height*, *Highest height*, *Depth in front*, *Depth
+   behind*, *Extend before*, *Extend after*;
+4. *Elevation*: *Resolution*, *Blending*, *Colour correction*, *Without the backlit photos*, *Name*, *Build the
+   elevation*, *Export for publication...*;
+5. *Other campaigns*: *Same elevation on other chunks...*, *Comparison sheet...*, *Composite of the campaigns...*,
+   *Make the composite again*.
+
+The line belongs to the active chunk: another chunk or another project empties the pane. Each step is described in
+[A wall traced on the plan](processing.md#a-wall-traced-on-the-plan).

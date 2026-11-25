@@ -398,7 +398,10 @@ of the 3D view. The orthophoto and the relief of the model are built on a plane,
   of sight, the top of the screen up, the right to the right; what the view shows, or the whole model;
 * **three points clicked** in the 3D view (*Elevation > Plane through three points*): the horizontal axis from
   the first to the second;
-* the **cylinder of a selected polygon**: the development of a well or a tower, seen from inside or from outside.
+* the **cylinder of a selected polygon**: the development of a well or a tower, seen from inside or from outside;
+* a **wall traced on the plan**: a line clicked on the orthophoto or the DEM, bent or curved, along which the face of
+  the wall is unrolled round its corners (*Workflow > Wall traced on the plan...*, see
+  [A wall traced on the plan](#a-wall-traced-on-the-plan)).
 
 **The axis of a cylindrical development.** The dialog of a cylinder asks for its *Axis*:
 
@@ -484,6 +487,218 @@ Another campaign on the same wall, in another chunk of the same reference system
 the two compare cell by cell. Two chunks in a LOCAL frame have worlds of their own: `--same-frame` says they are
 in the same frame (aligned, merged, oriented on the same markers), without it the command refuses. Without
 `--name` the new elevation takes the source's name made distinct ("Torre (2)").
+
+**Backlit photos.** Every elevation dialog has *Leave out the backlit photos (over 2 % of the pixels blown)*: a
+photo taken against the light, the sky burnt white behind the wall, does not paint the elevation. A photo is backlit
+when more than 2 % of its pixels have all three channels at 250 or over. The entry says how many were left out (its
+tooltip in the workspace); the colour correction of that build is measured on the photos kept, and the chunk's own
+correction is not changed. When every photo is backlit the build stops with an error. On the command line:
+`--skip-backlit`.
+
+### A wall traced on the plan
+
+A wall that turns corners, bends or curves - an enclosure, the rooms of a building, a terrace wall that follows the
+slope of a hill - does not lie on one plane. *Workflow > Wall traced on the plan...* (or *Wall traced on the plan* as
+the surface in the elevation dialog) opens the pane **Wall traced on the plan** on the right: the line of the wall is
+traced on the plan, and its face is unrolled along that line into one elevation, round its corners, without the
+panels of several planes glued together.
+
+**The steps of the pane.** Each step has a mark (to do, running, done) and a line that says what it found.
+
+1. **Line of the wall on the plan.** *Trace on the plan*: click the vertices of the wall's line in the 2D view (the
+   orthophoto or the DEM; the plan is shown first if an elevation is open), **Backspace** removes the last one,
+   **Enter** or a double click ends, **Esc** gives up. A curved wall is clicked with many points: the line through
+   them is one smooth line, not facets. Clicks closer than 1 mm are one point; a last click within 5 cm of the first,
+   on a line of four points or more, closes the line on it (a room traced all round). The line is checked at once: a
+   line that **crosses or touches itself**, one that **turns back** on itself (a turn over 170 degrees: trace the two
+   faces as two walls) or one without two different points is refused, said in the pane. The two other ways to get
+   the line - following the wall between two clicks and the walls proposed on the plan - are in
+   [Automatic tracing](#automatic-tracing) below.
+2. **Snap onto the face of the wall.** With *Snap to the wall* ticked (the default) the line clicked is moved onto the
+   face of the model, one straight stretch at a time: a line clicked on the crest, in the middle of the wall or on the
+   floor in front of it lands on the face. *Search band* (2.5 m) is how far in front of the clicked line and behind it
+   the face is looked for. What the click stands on decides the direction: on the wall or on the ground beside a
+   trench the face is the first surface in front, met from inside; on the floor in front of the wall or in the air of a
+   trench it is the first surface behind. The other side of a narrow room or of a trench is not taken for it; in a
+   trench or a corridor narrower than the band, make the band smaller than their width. *Smooth the line* (0 m, none)
+   smooths a curved wall clicked with many shaky points over that length, before the snap. The state line says how
+   far the vertices moved (the mean and the most, in cm) and the shift of every vertex is listed. *Snapped line* or
+   *Clicked line* chooses which one the elevation is built on (both are drawn on the plan, the clicked one dashed);
+   *Snap again* repeats the snap after a change of band or smoothing.
+   **Keep the clicked line** when the snap moved a vertex where you did not mean it (a rubble heap, a buttress, a wall
+   in front), when the face is so broken that no straight stretch fits it, or when the line was already drawn on the
+   face with care. When the face is not found along the line the clicked line is used and the pane says so.
+3. **Side, heights and depths.** *Side to look from*: *Where the photos are* (the default: the side most of the aligned
+   photos stand on, each weighted by its distance and how it looks at the wall, so a nadir flight does not outvote the
+   close-ups of the face), *To the left of the trace* or *To the right of the trace* (as walked from the first click).
+   When the weaker side weighs 60 % of the stronger or more the window asks, with both weights; they are also shown
+   in the pane. A change of side snaps the line again (another face is looked for). *Lowest height* and *Highest
+   height* are read on the model along the snapped line - the heights of the wall, not of the ground around it -
+   rounded outward to 5 cm; change them freely. *Depth in front* and *Depth behind* (0.5 m each) keep only the
+   surface near the face: scaffolding or a wall in front is passed through. *Extend before* and *Extend after*
+   prolong the elevation past the first and the last point along the line's end directions (the line stays as
+   traced): a stretch of the wall that the plan does not show clearly, or the ground at its ends.
+4. **Elevation.** *Resolution* (automatic: the GSD), *Blending*, *Colour correction*, *Without the backlit photos*,
+   *Name* (default "Prospetto del muro"), then **Build the elevation**. It is listed in the workspace like any other
+   elevation and shown in the raster view; *Export for publication...* is described
+   [below](#finishing-for-a-publication).
+5. **Other campaigns.** The same wall in the other chunks: see [below](#the-same-wall-in-several-campaigns).
+
+The line is kept with its chunk and its project: another chunk made active, or another project, empties the pane.
+
+**`u` runs along the face.** On an elevation of a traced wall `u` is the **length measured on the face of the wall**,
+from the first point (or from the start of the extension) left to right as the viewer sees it, and `v` is the
+**height**. A wall that bows, or whose line was clicked a little off, is as long on the elevation as on the ground:
+the face is measured in columns of 1 cm, a column counts as face where the model is met at 10 % of its heights at
+least, and a roughness under 5 cm adds no length. With `--scale trace` (command line) `u` is the length along the line
+instead. The tooltip of the elevation in the workspace says which. A wall where no column of face is found along the
+line is refused with that rule, in the pane, and nothing is built.
+
+**What a corner looks like.** At each vertex the line turns along a small arc, so the direction of view turns
+without a jump. At a **convex corner** (the outside of a building) the view fans round the corner: the stones of the
+corner are seen in a continuous band, without a gap. At a **re-entrant corner** (the inside of a room) nothing folds:
+no stone is shown twice. The arc is as large as the depth in front plus 2 cm, so a re-entrant corner keeps the whole
+depth in front; at a sharp turn it is smaller. The depth band ends where two parts of the line are equally near - the
+middle of a narrow room, the centre of an arc - 2 cm short of that place: what lies beyond belongs to the other part
+of the wall and is not taken twice. The corners are counted in the result ("corners: 2") and marked on the comparison
+sheet.
+
+**Drawings across a corner.** Units, spot heights and the other drawings are drawn on the elevation as on any other,
+in its metres (u, v), and may run across a corner. When they are exported in 3D (the `_disegni_mondo.gpkg`, the 3D DXF,
+the live link with QGIS or RustGIS) every vertex is put on the surface of the wall at its place, the outline
+densified every 2 cm (or twice the resolution): a unit across a corner bends round it, and in plan it falls on the
+wall where it was drawn. A hole of the relief up to 0.25 m along the wall is bridged by the depths on either side.
+*Drawings from another elevation...* onto a traced wall moves a drawing only where it lands within 5 cm (or three
+pixels, when that is more) of that wall's surface; the others stay where they are, said in the log.
+
+**The layer *Tracce dei prospetti*.** The plan shows the trace of every elevation of the chunk - traced walls, planes
+and cylinders; sections have their own layer - as a line with the elevation's name, on the plan only, never on an
+elevation. A double click on a trace opens its elevation. The layer goes to QGIS through the live link, one way,
+with the fields `etichetta`, `prospetto` (the name), `prospetto_id`, `tipo` (`plane`, `cylinder`, `path`) and
+`lunghezza_m`; the trace keeps the sharp corners of the line, not its arcs. The 3D GeoPackage of an elevation also
+holds its trace as the table `traccia`, at the middle height.
+
+#### The same wall in several campaigns
+
+A wall surveyed in several years, each year a chunk of the same project already placed together (ties between
+chunks, the same markers, the same reference system), is built on **one grid**: *Same elevation on other chunks...*
+(right click on the elevation in the workspace, or *Other campaigns* in the pane) lists the other chunks with a model,
+those in the same reference system ticked, with a **date** for each (*YYYY-MM-DD*: the date of the chunk, else the
+middle date of its photos; the dates of the campaigns already in the group can be changed there too). Each chunk
+ticked gets the elevation on the same frame, grid, bounds, resolution, depth and mosaic settings (as `--like`), so the
+orthophotos lie on the same pixels. The elevations made are kept together as the **group** of that wall; the tooltip
+of each says the group, how many campaigns it holds and its date.
+
+A chunk is refused, with its reason, when it is already in the group, has no model, or is in another reference
+system (both are named). Two chunks in a **LOCAL** system have worlds of their own: the window asks whether they are in
+the same frame (aligned, merged, oriented on the same markers); no, and nothing is built. A chunk where the wall is
+not found is said as empty. What was built before an error is kept.
+
+#### The comparison sheet
+
+*Comparison sheet...* (on an elevation in a group, or in the pane) writes one image (PNG, or JPEG) and a PDF beside
+it: the campaigns **stacked on one u axis**, the oldest on top, each with its label and date; the heights every
+0.5 m on the left of every band, the distances along the wall, the **corners** of the trace as red dashed
+lines through all the bands with a triangle on top; the title is the group's name or the one given. The grid is the
+group's reference elevation; a campaign on another grid (rebuilt at another resolution, or shifted by part of a pixel)
+is left out with its reason. A wide wall is reduced by a whole factor to 6,000 pixels at most. An existing image or
+PDF is replaced only after a question (on the command line, `--overwrite`).
+
+#### The composite of the campaigns
+
+*Composite of the campaigns...* makes one elevation of the wall **as it was when it was most exposed**: for each cell
+the most recent campaign, replaced by an older one where that one is **deeper by more than 0.15 m** (the threshold
+can be changed) or where the recent one has nothing - a stretch since covered by sand, collapse or a backfill. The
+colours of the older campaigns are matched to the most recent one on the cells they share near where they take over
+(*Match the colours...*, on by default; the change is held to a gain between 0.5 and 2). The composite is an
+elevation of the chunk the wall was traced on (kind `composite`, named "<wall> <first year>-<last year>"): it can be
+drawn on, exported, finished and compared; a raster `sources.tif` says for each cell which campaign it came from, and
+the elevation records its threshold and its sources. Every campaign needs a date (the window asks for the missing
+one first).
+
+It is **stale** when a campaign is built again, patched, or its date changes the order: the tooltip and the status
+bar say "Composite to make again"; *Make the composite again* (right click on the composite, or in the pane) makes it
+again in place with the same threshold and colours. A composite has no photos: patches and the texture painting are
+refused on it.
+
+#### Finishing for a publication
+
+*Export for publication...* (right click on any elevation, or in the pane) writes a copy for a book or a poster -
+**the elevation itself stays as measured**: the orthophoto and the relief in the project are not touched. In order:
+
+* **Fill the holes**: a hole up to *Largest hole to fill* (0.5 m) across is filled with colour and texture from its
+  edges; a larger one only where the relief has surface in it (colour missing on a measured wall); a larger one
+  without surface is an **opening** - a door, a window - and stays open. The message says how many openings were
+  left open.
+* **Outside the wall white**: what lies outside the span of the wall (the sky over the crest, specks of ground)
+  white in a JPEG, transparent in a TIFF.
+* **Level the colour**: the slow changes of light along the wall are taken away (Lab, over about 250 pixels). It also
+  evens out the real shading between parts of the wall that face the light differently: untick it when that matters.
+* **Paint over the targets**: the markers lying on the elevation, 18 cm around each.
+
+*One pixel in* N reduces the image. The file is a JPEG (`.jpg`, white outside) or a GeoTIFF (`.tif`, transparent
+outside, in the elevation's metres) and must be written outside the project's data folder.
+
+#### Automatic tracing
+
+Besides the clicks, the step *Line of the wall on the plan* has two ways to find the line on the **DEM**:
+
+* **Follow the wall between two clicks**: click the two ends of the wall (and, if needed, points it passes through, in
+  order), double click to end. The line follows the crest of the wall on the local relief of the DEM (and the edges of
+  the orthophoto) and is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
+  crest it is weak, and the pane says so: **Add via points** (one click where the wall passes; the line is looked for
+  again through it), or tick **Use SAM where the wall is low** (SAM 2.1 cuts the wall out of the orthophoto from the
+  clicks, when it is installed). **Keep** makes the proposal the line of the wall, snapped and with its heights (the
+  side is asked when the photos stand on both sides).
+* **Propose the walls**: the crests of the walls of the whole plan (a local relief over 0.3 m, at least 3 m long), as
+  dashed lines in the layer *Muri proposti*; a click on one makes it the line of the wall, checked and snapped as if
+  it were clicked.
+
+The followed line runs on the top of the wall and cuts an inner corner across its top: the snap puts the line on the
+face and the corner back in place. Check it on the plan before building.
+
+#### Limits
+
+* The line is a line **on the plan**: no traces in 3D, no inclined traces. `v` is always the height; a battered wall is
+  a change of depth, a sloping crest is fine.
+* A **closed line** (a room traced all round) is unrolled as a strip from the first point round to it again: the two
+  ends meet at a sharp corner, without an arc, and the strip is not joined into a ring. A round tower or a well is a
+  cylinder.
+* An orientation of the chunk that **tilts** it (a new vertical) is refused while it has elevations of traced walls,
+  with their names: remove them and trace the walls again after it. A turn about the vertical, a shift and a scale move
+  them with the chunk.
+* A section is not made on a traced wall: the elevation is built (the window says it).
+* The snap needs a model along the line; the followed line and the proposals need a DEM.
+
+#### On the command line
+
+```bash
+ppg elevation scavo.ppg --path "X1,Y1 X2,Y2 X3,Y3" [--side auto|left|right|X,Y] [--extend 5,5]
+    [--heights V0,V1] [--snap|--no-snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
+    [--front 0.5] [--back 0.5] [--resolution R] [--skip-backlit] [--name NAME] [--chunk CHUNK]
+ppg elevation scavo.ppg --like ID --chunks "2019,2024" [--dates "2019=2019-06-10,2024=2024-07-02"] [--same-frame]
+ppg elevation scavo.ppg --like ID --compare confronto.png [--title T] [--overwrite]
+ppg elevation scavo.ppg --like ID --composite [--deeper 0.15]
+ppg elevation scavo.ppg --like ID --finish prospetto.jpg [--no-fill] [--no-mask] [--no-level] [--no-targets]
+    [--reduce N] [--max-hole 0.5]
+```
+
+* `--path`: the line, two points at least, in the chunk's reference system, separated by spaces. It prints
+  `NAME: W x H px at R m/px; v = height; L m along the wall; corners: N` and, when snapped, how far the vertices
+  moved. `--side` takes a word or a point on the viewer's side (also with `--trace`); `--extend A,B` metres before the
+  first point and after the last; `--heights` the heights (default: those of the wall on the model); `--no-snap` keeps
+  the line as given; `--snap-band` and `--smooth` as in the pane; `--scale wall` (default) or `trace`. `--section`
+  is refused with `--path`, and the path options without it.
+* `--chunks` (with `--like`, not with `--chunk`): one line per chunk - built, refused with its reason, or empty - and
+  one for the group; exit code 1 when nothing was built. `--dates` dates the campaigns.
+* `--compare` builds nothing and prints the image and the PDF, and the campaigns left out; `--title` the title;
+  without `--overwrite` existing files are kept and the command fails.
+* `--composite` makes (or makes again) the composite of the group of `--like`; `--deeper` the threshold in metres.
+* `--finish` exports the elevation `--like` finished: `--no-fill`, `--no-mask`, `--no-level`, `--no-targets` leave
+  out a step, `--reduce N` one pixel in N, `--max-hole` the largest hole filled everywhere.
+* `--skip-backlit` goes with a build, not with `--like` (that elevation's own setting is used).
+* An elevation that is in no group gives an error with `--compare` and `--composite`. These options take `--like`;
+  `--chunks`, `--compare`, `--composite` and `--finish` do not go together.
 
 ### Drawings on elevations and sections
 

@@ -67,6 +67,14 @@ workbook too.
 
 The plugins add their own formats to this menu.
 
+**Elevations** are exported from their right click in the workspace: *Export...* writes orthophoto, relief, plane,
+profile and drawings ([drawings on elevations](processing.md#drawings-on-elevations-and-sections)); *Export for
+publication...* writes a finished copy - holes filled, openings left open, outside the wall white or transparent,
+colour levelled, targets painted over - as a JPEG or a GeoTIFF, the elevation itself staying as measured
+([finishing for a publication](processing.md#finishing-for-a-publication)). The drawings of a
+[wall traced on the plan](processing.md#a-wall-traced-on-the-plan) go to QGIS in 3D on the surface of the wall, round
+its corners, and the traces of all elevations as the layer *Tracce dei prospetti*.
+
 **OBJ with groups**: exporting the model as OBJ asks for the **groups** - none, one per source chunk of a merged model
 (or per object of an imported OBJ), or one per connected piece (`part_001` the largest) - and for the **largest side
 of the texture pages** in the copies beside the file. Every group is written as `o`/`g` with a `usemtl` for each page

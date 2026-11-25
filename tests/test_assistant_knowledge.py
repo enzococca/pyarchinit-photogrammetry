@@ -106,6 +106,16 @@ def test_scripting_page_is_indexed():
     assert not (set(K.Index.pages(DOCS, "it")) & set(K.Index.pages(DOCS, "en")))
 
 
+def test_the_wall_traced_on_the_plan_is_in_the_guide():
+    it = K.default_index("it").search("come faccio il prospetto di un muro tracciato in pianta con gli angoli")
+    assert any(p.page == "gui/processing.it.md" for p in it[:3]), [p.page for p in it]
+    en = K.default_index("en").search("how do I compare the same wall in several campaigns")
+    assert any(p.page == "gui/processing.md" for p in en[:3]), [p.page for p in en]
+    for page in ("gui/processing.md", "gui/processing.it.md", "api.md", "api.it.md"):
+        text = (DOCS / page).read_text(encoding="utf-8")
+        assert all(word in text for word in ("--path", "--chunks", "--compare", "--composite", "--finish"))
+
+
 def test_guide_folder_of_a_checkout_is_docs_and_the_package_has_its_copy():
     assert K.guide_folder() == DOCS
     assert (K.PACKAGE / "guide" / "scripting.md").is_file()
