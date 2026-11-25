@@ -50,6 +50,25 @@ class Raycaster:
             out[idx_ray] = np.linalg.norm(locs - origins[idx_ray], axis=1)
         return out
 
+    def hit_normal(self, origins: np.ndarray, directions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Distance to the first hit along unit ``directions`` (inf if none) and the unit normal of the triangle
+        hit (by its winding: outward on a mesh whose triangles turn counter-clockwise seen from outside; NaN if
+        none), in the frame of the mesh."""
+        normal = np.full((len(origins), 3), np.nan)
+        if self._o3d is not None:
+            o3d, scene = self._o3d
+            ans = scene.cast_rays(o3d.core.Tensor(np.hstack([origins, directions]).astype(np.float32)))
+            t = ans["t_hit"].numpy().astype(np.float64)
+            hit = np.isfinite(t)
+            normal[hit] = ans["primitive_normals"].numpy().astype(np.float64)[hit]
+            return t, normal
+        locs, idx_ray, idx_tri = self._mesh.ray.intersects_location(origins, directions, multiple_hits=False)
+        t = np.full(len(origins), np.inf)
+        if len(idx_ray):
+            t[idx_ray] = np.linalg.norm(locs - origins[idx_ray], axis=1)
+            normal[idx_ray] = self._mesh.face_normals[idx_tri]
+        return t, normal
+
     def visible_from(self, center: np.ndarray, points: np.ndarray, rel_tol: float = 2e-3,
                      abs_tol: float = 0.0) -> np.ndarray:
         """True where ``points`` are not hidden by the mesh as seen from ``center``.

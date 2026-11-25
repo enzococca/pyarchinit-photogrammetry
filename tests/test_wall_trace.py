@@ -16,7 +16,7 @@ from pyarchinit_photogrammetry.engine import elevation as E
 from pyarchinit_photogrammetry.engine import wall_trace as T
 from pyarchinit_photogrammetry.engine.visibility import raycaster_for_chunk
 from pyarchinit_photogrammetry.engine.wall_path import TraceRefused, WallPath, corner_radii, smooth_trace
-from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene
+from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene, orient_outward
 
 from wall_helpers import distance_to, model_doc, wall_doc
 
@@ -498,6 +498,38 @@ def test_a_wall_against_high_ground_keeps_the_face_seen_from_its_viewer(low, dee
     for by in (0.0, 0.2, -0.2):                                    # seen from the trench: its edge, the air, the crest
         r = T.snap_trace(ch, back + along + [0.0, by], side="left")
         assert r["snapped"] and np.abs(r["points"][:, 1] - back[:, 1]).max() < 0.1, (by, r["points"])
+
+
+@pytest.mark.parametrize("low, deep", [(0.3, 2.0), (0.2, 2.5)])
+@pytest.mark.parametrize("crest", [True, False])
+def test_a_click_on_the_crest_of_a_wall_against_high_ground(low, deep, crest, tmp_path):
+    """The same wall clicked on its crest, 10 to 30 cm in from the edge on the viewer's side: the face is the low one
+    in front of the click. Without the crest in the model (a hole along the top of the wall) the click is in the
+    open, and the first surface behind it is the face of the trench met from inside the wall - its outward normal
+    points away from the viewer, and it is not taken: the low face in front is."""
+    scene = _wall_against_high_ground(low, deep)
+    if not crest:
+        scene.faces = np.delete(orient_outward(scene.vertices, scene.faces), [8, 9], axis=0)
+    _doc, ch, info = model_doc(tmp_path, scene)
+    face = np.asarray(info["face"])
+    for by in (0.1, 0.2, 0.3):
+        clicked = face + [[1.0, by], [-1.0, by]]
+        for side, line in (("right", clicked), ("left", clicked[::-1])):
+            r = T.snap_trace(ch, line, side=side)
+            assert r["snapped"] and np.abs(r["points"][:, 1] - face[:, 1]).max() < 0.1, (by, side, r["points"])
+
+
+def test_a_face_turned_away_from_the_viewer_is_not_taken(tmp_path):
+    """A face whose outward normal points away from the viewer is never taken, from any look: a wall of the default
+    scene clicked 30 cm in front of it with the viewer said on the other side meets the face from behind - its
+    normal towards the viewer said is away from him - and keeps its click."""
+    _doc, ch, info = model_doc(tmp_path, _face_alone(make_wall_scene(trace=[(0.0, 0.0), (6.0, 0.0)])))
+    face = np.asarray(info["face"])
+    clicked = face + [[0.5, 0.3], [-0.5, 0.3]]           # behind the face, the viewer said behind too
+    r = T.snap_trace(ch, clicked, side="left")
+    assert not r["snapped"] and np.array_equal(r["points"], clicked) and r["kept"] == 1
+    r = T.snap_trace(ch, face + [[0.5, -0.3], [-0.5, -0.3]], side="right")    # from its own side: taken
+    assert r["snapped"] and np.abs(r["points"][:, 1] - face[:, 1]).max() < 0.005
 
 
 @pytest.mark.parametrize("by", [0.0, 0.5])
