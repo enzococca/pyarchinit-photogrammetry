@@ -112,6 +112,11 @@ pub struct InputOptions {
     /// The share of the matches of every pair replaced by a wrong one (a key point of the second
     /// photo at least 100 pixels from the right one).
     pub outlier_share: f64,
+    /// The share of the key points displaced (a wrong feature taken for the right one in every pair
+    /// of its photo), each by a distance drawn uniformly in `displaced_px` in a direction drawn
+    /// uniformly.
+    pub displaced_share: f64,
+    pub displaced_px: [f64; 2],
     /// The focal length the camera starts from.
     pub start_focal: f64,
     pub prior_focal: bool,
@@ -127,6 +132,8 @@ impl Default for InputOptions {
         InputOptions {
             noise_px: 0.0,
             outlier_share: 0.0,
+            displaced_share: 0.0,
+            displaced_px: [0.0, 0.0],
             start_focal: FOCAL,
             prior_focal: true,
             with_f: false,
@@ -436,8 +443,14 @@ impl Scene {
         for (i, view) in self.views.iter().enumerate() {
             let start = keypoints.len();
             for &(_, px) in view {
-                let x = px[0] + o.noise_px * random.normal();
-                let y = px[1] + o.noise_px * random.normal();
+                let mut x = px[0] + o.noise_px * random.normal();
+                let mut y = px[1] + o.noise_px * random.normal();
+                if o.displaced_share > 0.0 && random.unit() < o.displaced_share {
+                    let d = random.uniform_in(o.displaced_px[0], o.displaced_px[1]);
+                    let a = random.uniform_in(0.0, std::f64::consts::TAU);
+                    x += d * a.cos();
+                    y += d * a.sin();
+                }
                 keypoints.push([x as f32, y as f32]);
             }
             let keypoints = start..keypoints.len();
