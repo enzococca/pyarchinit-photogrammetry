@@ -523,6 +523,23 @@ def test_the_pane_fits_the_right_dock(make, qapp):
     assert pane.minimumSizeHint().width() <= 260
 
 
+def test_the_pane_fits_the_right_dock_with_a_wider_font(qapp):
+    """Segoe UI on Windows is wider than the fonts of macOS and Linux: the pane, built with a font 1.4 times
+    larger, still fits the right dock (its buttons and ticks may be narrower than their text)."""
+    from pyarchinit_photogrammetry.gui.wall_path_pane import WallPathPane
+
+    font = qapp.font()
+    big = qapp.font()
+    big.setPointSizeF(font.pointSizeF() * 1.4)
+    qapp.setFont(big)
+    try:
+        pane = WallPathPane(None)
+        assert pane.minimumSizeHint().width() <= 260
+        pane.deleteLater()
+    finally:
+        qapp.setFont(font)
+
+
 def _menu_entry(w, monkeypatch, open_menu, text):
     """Trigger the entry ``text`` of the context menu ``open_menu()`` opens (the window's QMenu stood in by one whose
     exec triggers that entry)."""

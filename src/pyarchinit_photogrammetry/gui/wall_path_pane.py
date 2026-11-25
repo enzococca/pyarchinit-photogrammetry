@@ -50,6 +50,14 @@ def _narrow(widget, width: int = 80) -> None:
     widget.setSizePolicy(QSizePolicy.Policy.Ignored, widget.sizePolicy().verticalPolicy())
 
 
+def _shrinkable(widget, width: int = 120) -> None:
+    """A button or a tick whose text cannot wrap may be narrower than its text, down to ``width`` pixels: the
+    pane fits the right dock with any font (Segoe UI on Windows is wider); the full text stays in the tooltip."""
+    widget.setMinimumWidth(min(width, widget.minimumSizeHint().width()))
+    if not widget.toolTip():
+        widget.setToolTip(widget.text())
+
+
 def weak_text() -> str:
     return tr("La linea proposta corre per meno di metà sulla cresta di un muro: è debole. Aggiungi punti di "
               "passaggio, clicca più vicino al muro o tracciala a mano.")
@@ -273,6 +281,8 @@ class WallPathPane(QWidget):
         form.addWidget(self.b_recomposite)
         step(4, "campaigns", tr("Altre campagne"), body)
         lay.addStretch(1)
+        for widget in self.findChildren(QPushButton) + self.findChildren(QCheckBox):
+            _shrinkable(widget)
 
         self.b_trace.clicked.connect(lambda: self.window.wall_trace_start())
         self.b_follow.clicked.connect(lambda: self.window.wall_follow())
