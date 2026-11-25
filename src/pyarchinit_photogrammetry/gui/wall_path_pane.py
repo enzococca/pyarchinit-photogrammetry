@@ -75,6 +75,8 @@ class WallPathPane(QWidget):
         self.running: str | None = None  # the step being worked on
         self.built: str | None = None  # the id of the elevation built from the line shown
         self.proposal: dict | None = None  # the line followed between the clicks, waiting for "Tieni"
+        self.line_heights: dict = {}  # the default heights of each line: "clicked", "snapped" -> (v0, v1) or None
+        self.shown_heights: tuple | None = None  # the default heights last put in the boxes
         self.candidates: list = []  # the walls proposed on the plan of ``self.candidates_chunk``
         self.candidates_chunk = None
         self.sam_ready = False  # SAM 2.1 can run (the tick is enabled)
@@ -306,7 +308,9 @@ class WallPathPane(QWidget):
                 self.update_states()
 
     def _snap_toggled(self, on: bool) -> None:
-        """The line the elevation is built on changed: the plan shows it, the proposal made when there is none."""
+        """The line the elevation is built on changed: the plan shows it, its default heights in the boxes (unless
+        typed by hand), the proposal made when there is none."""
+        self._show_line_heights()
         self._line_changed()
         if on and self.clicked is not None and self.snapped is None and self.running is None:
             self.window.wall_snap()
@@ -335,10 +339,29 @@ class WallPathPane(QWidget):
             self.votes = None
         else:
             self.chunk = getattr(self.window, "chunk", None)
-        if heights is not None:
-            self.s_v0.setValue(float(heights[0]))
-            self.s_v1.setValue(float(heights[1]))
+        if isinstance(heights, dict):  # the defaults of both lines: those of the line used shown
+            self.line_heights = dict(heights)
+            self._show_line_heights(force=True)
+        else:
+            self.line_heights = {}
+            if heights is not None:
+                self._set_heights(heights)
         self.update_states()
+
+    def _set_heights(self, heights) -> None:
+        self.s_v0.setValue(float(heights[0]))
+        self.s_v1.setValue(float(heights[1]))
+        self.shown_heights = (self.s_v0.value(), self.s_v1.value())
+
+    def _show_line_heights(self, force: bool = False) -> None:
+        """The default heights of the line the elevation is built on put in the boxes - unless they hold heights
+        typed by hand (other than the defaults last shown), ``force`` aside."""
+        h = self.line_heights.get("snapped" if self.uses_snapped() else "clicked")
+        if h is None:
+            return
+        if not force and self.shown_heights != (self.s_v0.value(), self.s_v1.value()):
+            return
+        self._set_heights(h)
 
     def set_proposal(self, proposal: dict | None) -> None:
         """The line followed between the clicks (``{"points", "on_ridge", "clicks", "snap", "heights", ...}``, see

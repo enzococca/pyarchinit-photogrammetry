@@ -168,6 +168,22 @@ def default_heights(chunk, points, side: str, front: float, back: float) -> tupl
     return (round(float(np.floor(lo / step + 1e-6)) * step, 6), round(float(np.ceil(hi / step - 1e-6)) * step, 6))
 
 
+def _line_heights(chunk, clicked, snapped, side: str, front: float, back: float) -> dict:
+    """The default heights (:func:`default_heights`) of the clicked line and of the snapped one (None: no snap):
+    ``{"clicked": (v0, v1) | None, "snapped": (v0, v1) | None}`` - the pane shows those of the line used, and
+    those of the other when *Aggancia alla faccia* changes."""
+    out = {}
+    for name, line in (("clicked", clicked), ("snapped", snapped)):
+        out[name] = None
+        if line is None:
+            continue
+        try:
+            out[name] = default_heights(chunk, line, side, front, back)
+        except Exception as exc:  # noqa: BLE001 - the heights are typed by hand then
+            log.warning("No default heights for the wall: %s", exc)
+    return out
+
+
 class WallPathActions:
     """Methods of the main window (it provides ``chunk``, ``wall_pane``, ``ortho_view``, ``drawings_frame``,
     ``request_geometry``, ``run_task``, ``show_elevation``, ``_show_raster``, ``_need_chunk``, ``_warn``, ``_act``,
@@ -287,7 +303,8 @@ class WallPathActions:
 
     def wall_snap(self) -> bool:
         """The line of the pane snapped onto the face of the model - a proposal shown on the plan, used only when
-        *Aggancia alla faccia* is ticked - and the default heights of the line used, in one task of the worker; the
+        *Aggancia alla faccia* is ticked - and the default heights of both lines (the clicked one and the snapped
+        one), in one task of the worker: those of the line used are shown, the others when the tick changes; the
         pane and the preview shown again with them."""
         from ..engine import wall_trace
         from ..engine.wall_path import TraceRefused, WallPath, corner_radii, ordered, smooth_trace
@@ -302,7 +319,7 @@ class WallPathActions:
         except TraceRefused as exc:
             self._warn(refusal_text(exc))
             return False
-        band, smooth, front, back, use = v["band"], v["smooth"], v["front"], v["back"], v["snap"]
+        band, smooth, front, back = v["band"], v["smooth"], v["front"], v["back"]
         snap = ch.product_path("model") is not None  # the proposal needs the model
 
         def work(p):
@@ -317,14 +334,9 @@ class WallPathActions:
                         WallPath(kept, radii=corner_radii(kept, front, back))
                     except TraceRefused as exc:  # the line snapped is no trace: the clicked one is used
                         result = dict(result, snapped=False, refused=refusal_text(exc))
-            used = result["points"] if use and result is not None and result["snapped"] else line
             p(0.9, "Heights of the wall")
-            try:
-                heights = default_heights(ch, used, which, front, back)
-            except Exception as exc:  # noqa: BLE001 - the heights are typed by hand then
-                log.warning("No default heights for the wall: %s", exc)
-                heights = None
-            return {"result": result, "heights": heights}
+            snapped = result["points"] if result is not None and result["snapped"] else None
+            return {"result": result, "heights": _line_heights(ch, line, snapped, which, front, back)}
 
         def done(out):
             if pane.clicked is not clicked:  # traced again meanwhile, or the pane emptied
@@ -388,7 +400,7 @@ class WallPathActions:
         v = pane.values()
         clicks = np.asarray(clicks, float).reshape(-1, 2)
         use_sam = pane.c_sam.isChecked() and pane.c_sam.isEnabled()
-        use, band, front, back, asked = v["snap"], v["band"], v["front"], v["back"], v["side"]
+        band, front, back, asked = v["band"], v["front"], v["back"], v["side"]
 
         def work(p):
             mask = None
@@ -423,7 +435,7 @@ class WallPathActions:
                 out["refused"] = refusal_text(exc)
                 return out
             out["which"] = which
-            used = line
+            snapped = None
             if ch.product_path("model"):  # the snap proposed; the followed line used unless it is asked
                 p(0.6, "Snap of the line onto the face of the wall")
                 result = wall_trace.snap_trace(ch, line, which, band=band, progress=p.sub(0.6, 0.9))
@@ -431,15 +443,11 @@ class WallPathActions:
                     try:
                         kept = ordered(result["points"], which)
                         WallPath(kept, radii=corner_radii(kept, front, back))
-                        if use:
-                            used = result["points"]
+                        snapped = result["points"]
                     except TraceRefused as exc:
                         result = dict(result, snapped=False, refused=refusal_text(exc))
                 out["snap"] = result
-            try:
-                out["heights"] = default_heights(ch, used, which, front, back)
-            except Exception as exc:  # noqa: BLE001 - the heights are typed by hand then
-                log.warning("No default heights for the wall: %s", exc)
+            out["heights"] = _line_heights(ch, line, snapped, which, front, back)
             return out
 
         def done(out):

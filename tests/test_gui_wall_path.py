@@ -138,6 +138,38 @@ def test_trace_snap_side_heights_and_build(make):
     assert not _texts(w)
 
 
+def test_the_heights_shown_are_those_of_the_line_used(make, monkeypatch):
+    """The default heights of the clicked line and of the snapped one are both found with the proposal: ticking
+    *Aggancia alla faccia* later shows those of the snapped line, unticking those of the clicked one; heights typed
+    by hand stay."""
+    from pyarchinit_photogrammetry.gui import wall_path_actions as A
+
+    w = make()
+    pane = w.wall_pane
+    clicked = _clicked(w)
+    asked = []
+
+    def heights(chunk, points, side, front, back):
+        on_click = np.allclose(np.asarray(points, float)[:len(clicked)], clicked, rtol=0, atol=1e-6)
+        asked.append("clicked" if on_click else "snapped")
+        return (90.0, 91.0) if on_click else (100.0, 102.0)
+
+    monkeypatch.setattr(A, "default_heights", heights)
+    _trace(w)
+    assert sorted(asked) == ["clicked", "snapped"]                 # both found when the proposal is made
+    assert not pane.uses_snapped()
+    assert (pane.s_v0.value(), pane.s_v1.value()) == (90.0, 91.0)
+    pane.c_snap.setChecked(True)                                   # no new task: the snapped line's heights
+    assert pane.uses_snapped() and (pane.s_v0.value(), pane.s_v1.value()) == (100.0, 102.0)
+    assert (pane.values()["v0"], pane.values()["v1"]) == (100.0, 102.0)   # what the build is given
+    pane.c_snap.setChecked(False)
+    assert (pane.s_v0.value(), pane.s_v1.value()) == (90.0, 91.0)
+    pane.s_v0.setValue(95.5)                                       # typed by hand: kept through the tick
+    pane.c_snap.setChecked(True)
+    assert (pane.s_v0.value(), pane.s_v1.value()) == (95.5, 91.0)
+    assert len(asked) == 2 and not _texts(w)
+
+
 @pytest.fixture
 def recorded(monkeypatch):
     """The engine's build_elevation and snap_trace recorded (the snap done for real, the build not)."""
