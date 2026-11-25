@@ -327,8 +327,115 @@ def test_backlit_photos_are_left_out_and_counted(processed, tmp_path, monkeypatc
     assert cams[9].key in seen[-1]
     assert json.dumps(ch.meta.get("colour"), sort_keys=True) == stored
     _backlit_photos(monkeypatch, ch, {c.key: 0.05 for c in ch.cameras})
+    _touch(ch.cameras)  # the shares are kept per file: the photos changed
     with pytest.raises(RuntimeError):
         E.build_elevation(ch, _trench_frame(ch), skip_backlit=True, **kw)
+
+
+def _touch(cams, seconds: float = 10.0) -> None:
+    """The time of the photos of ``cams`` moved on by ``seconds`` (a photo edited: its kept share is stale)."""
+    import os
+
+    for cam in cams:
+        st = os.stat(cam.path)
+        os.utime(cam.path, ns=(st.st_atime_ns, st.st_mtime_ns + int(seconds * 1e9)))
+
+
+def _counting(monkeypatch, ch, shares: dict) -> dict:
+    """:func:`_backlit_photos`, and what the build does with each photo counted: ``decoded`` (read reduced, the
+    backlit test), ``read`` (read whole, the painting), ``opened`` (its header read): camera labels in order."""
+    import PIL.Image
+
+    from pyarchinit_photogrammetry.engine import ortho, visibility
+
+    _backlit_photos(monkeypatch, ch, shares)
+    fake = visibility.read_photo
+    labels = {c.path: c.label for c in ch.cameras}
+    seen = {"decoded": [], "read": [], "opened": []}
+
+    def photo(cam, flags=cv2.IMREAD_COLOR):
+        seen["decoded" if flags == cv2.IMREAD_REDUCED_COLOR_4 else "read"].append(cam.label)
+        return fake(cam, flags)
+
+    real_open = PIL.Image.open
+
+    def opened(fp, *a, **kw):
+        if str(fp) in labels:
+            seen["opened"].append(labels[str(fp)])
+        return real_open(fp, *a, **kw)
+
+    monkeypatch.setattr(ortho, "read_photo", photo)
+    monkeypatch.setattr(visibility, "read_photo", photo)
+    monkeypatch.setattr(PIL.Image, "open", opened)
+    return seen
+
+
+def test_a_build_reads_only_the_photos_that_see_its_part(processed, tmp_path, monkeypatch):
+    """The photos of a part seen by few of them: only those are opened (once each) and looked at for the light;
+    their shares are kept in the chunk, so a second build decodes none, and a photo that changed is decoded again;
+    the count of the backlit ones left out stays the same."""
+    import threading
+
+    from pyarchinit_photogrammetry.engine.visibility import raycaster_for_chunk
+
+    _doc, ch = _copy(processed, tmp_path)
+    frame = _trench_frame(ch)
+    kw = dict(resolution=0.02, depth=(-0.08, 0.08), max_angle=89.0)
+    full = E.FrameSurface(ch, raycaster_for_chunk(ch), frame, 0.02, threading.Lock(), kw["depth"], None)
+    u0, v0 = full.bounds[:2]
+    bounds = (u0, v0, u0 + 0.2, v0 + 0.2)
+    part = E.FrameSurface(ch, raycaster_for_chunk(ch), frame, 0.02, threading.Lock(), kw["depth"], bounds)
+    seeing = sorted(c.label for c in E.photos_seeing(ch, part))
+    others = sorted({c.label for c in ch.aligned_cameras} - set(seeing))
+    assert 0 < len(seeing) < len(ch.aligned_cameras) / 2 and others
+    by_label = {c.label: c for c in ch.cameras}
+    shares = {by_label[seeing[0]].key: 0.05, by_label[others[0]].key: 0.05}  # one backlit in it, one out of it
+    seen = _counting(monkeypatch, ch, shares)
+    entry = E.build_elevation(ch, frame, bounds=bounds, skip_backlit=True, **kw)
+    assert sorted(seen["decoded"]) == seeing                      # each photo that sees it decoded once, no other
+    assert sorted(seen["opened"]) == seeing                       # each header read once
+    assert set(seen["read"]) <= set(seeing)
+    assert entry["backlit_skipped"] == 1
+    stored = ch.meta["blown_shares"]
+    assert sorted(by_label_of(ch, stored)) == seeing and stored[by_label[seeing[0]].path][2] == pytest.approx(0.05)
+    for k in seen:
+        seen[k].clear()
+    again = E.build_like(ch, entry)                               # the shares kept: nothing decoded
+    assert seen["decoded"] == [] and again["backlit_skipped"] == 1
+    assert sorted(seen["opened"]) == seeing
+    seen["decoded"].clear()
+    _touch([by_label[seeing[1]]])                                 # a photo changed: that one decoded again
+    third = E.build_elevation(ch, frame, bounds=bounds, skip_backlit=True, **kw)
+    assert seen["decoded"] == [seeing[1]] and third["backlit_skipped"] == 1
+
+
+def by_label_of(ch, stored: dict) -> list[str]:
+    labels = {c.path: c.label for c in ch.cameras}
+    return [labels[p] for p in stored]
+
+
+def test_the_photos_that_see_a_part_paint_it_as_all_the_photos(processed, tmp_path, monkeypatch):
+    """Building from the photos that see the part only (:func:`elevation.photos_seeing`) paints the same elevation
+    as from every photo of the chunk."""
+    _doc, ch = _copy(processed, tmp_path)
+    kw = dict(resolution=0.02, depth=(-0.08, 0.08), max_angle=89.0)
+    real = E.photos_seeing
+    counts = []
+
+    def seeing(chunk, surf, cams=None):
+        out = real(chunk, surf, cams)
+        counts.append(len(out))
+        return out
+
+    monkeypatch.setattr(E, "photos_seeing", seeing)
+    narrow = E.build_elevation(ch, _trench_frame(ch), **kw)
+    assert counts[-1] < len(ch.aligned_cameras)
+    monkeypatch.setattr(E, "photos_seeing", lambda chunk, surf, cams=None: list(chunk.aligned_cameras))
+    wide = E.build_elevation(ch, _trench_frame(ch), **kw)
+    with rasterio.open(ch.data_dir / narrow["orthophoto"]) as a, rasterio.open(ch.data_dir / wide["orthophoto"]) as b:
+        x, y = a.read(), b.read()
+    assert x.shape == y.shape and (x[3] > 0).sum() > 1000
+    assert np.array_equal(x, y)
 
 
 def test_command_line_finish_and_skip_backlit(strip, processed, tmp_path, monkeypatch):

@@ -1105,7 +1105,9 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
 
     ``skip_backlit``: the photos taken against the light left out - those whose share of blown pixels
     (:func:`blown_share`) is over :data:`BACKLIT_SHARE`; the entry says ``skip_backlit`` and how many were left out
-    (``backlit_skipped``). ``RuntimeError`` when every photo is."""
+    (``backlit_skipped``). ``RuntimeError`` when every photo is. Only the photos that see the part built
+    (:func:`photos_seeing`) are opened, painted from and looked at for the light; their shares are kept in the chunk
+    (:func:`blown_shares`)."""
     wall_path = frame.kind == "path"
     if scale is None:
         scale = "wall" if wall_path else "cylinder"
@@ -1167,28 +1169,7 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
             raise
         from_texture = False  # no photos and no texture: the relief alone, the orthophoto stays empty (as before)
     textured = texture_ortho.TexturedModel(chunk) if from_texture else None
-    progress(0.0, "Checking the photos")
-    cams, _bad = ([], []) if from_texture else readable_cameras(chunk, True)
-    backlit = 0
-    if skip_backlit and cams:
-        progress(0.0, "Looking for backlit photos")
-        cams, left = _without_backlit(cams)
-        backlit = len(left)
-        if left:
-            log.info("Elevation: %d backlit photos left out (over %.0f %% of the pixels blown): %s", backlit,
-                     100 * BACKLIT_SHARE, ", ".join(c.label for c in left))
     resolution = float(resolution or (textured.texel() if from_texture else estimate_gsd(chunk)))
-    if from_texture:
-        correction = None
-    elif backlit and colour_correction is not False and (colour_correction or chunk.meta.get("colour")):
-        # the gains measured again without the backlit photos, for this build only (the chunk's own stay)
-        from .colour import Correction
-        from .colour import estimate as estimate_colour
-
-        info = estimate_colour(chunk, cams=cams, store=False, progress=progress.sub(0.0, 0.02))
-        correction = Correction(chunk, info) or None
-    else:
-        correction = correction_for(chunk, colour_correction, progress.sub(0.0, 0.02))
     raycaster = raycaster_for_chunk(chunk)
     lock = threading.Lock()
     if scale == "cylinder" and getattr(frame, "u_map", None) is not None:  # on the cylinder, as asked
@@ -1206,6 +1187,29 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
         frame = Cylinder(frame.centre, frame.axis, frame.radius, frame.inside, frame.start, tilt=frame.tilt,
                          u_map=umap)
     surf = FrameSurface(chunk, raycaster, frame, resolution, lock, depth, bounds)
+    backlit = 0
+    if from_texture:
+        cams, correction = [], None
+    else:
+        # only the photos that see the part built: their headers read once, the backlit ones looked for among them
+        progress(0.02, "Checking the photos")
+        cams, _bad = readable_cameras(chunk, True, cameras=photos_seeing(chunk, surf))
+        if skip_backlit and cams:
+            progress(0.02, "Looking for backlit photos")
+            cams, left = _without_backlit(chunk, cams)
+            backlit = len(left)
+            if left:
+                log.info("Elevation: %d backlit photos left out (over %.0f %% of the pixels blown): %s", backlit,
+                         100 * BACKLIT_SHARE, ", ".join(c.label for c in left))
+        if backlit and colour_correction is not False and (colour_correction or chunk.meta.get("colour")):
+            # the gains measured again without the backlit photos, for this build only (the chunk's own stay)
+            from .colour import Correction
+            from .colour import estimate as estimate_colour
+
+            info = estimate_colour(chunk, cams=cams, store=False, progress=progress.sub(0.02, 0.01))
+            correction = Correction(chunk, info) or None
+        else:
+            correction = correction_for(chunk, colour_correction, progress.sub(0.02, 0.01))
     tile = frame_tile(frame, resolution)
     if from_texture:
         ctx = None
@@ -1308,14 +1312,96 @@ def blown_share(cam) -> float:
     return float((img >= BLOWN_LEVEL).all(axis=-1).mean())
 
 
-def _without_backlit(cams: list) -> tuple[list, list]:
-    """``(kept, left out)``: the cameras whose share of blown pixels is over :data:`BACKLIT_SHARE` left out;
-    ``RuntimeError`` when that is every one."""
+SEEING_STEP = 0.1  # metres between the points of a frame looked for in the photos (:func:`photos_seeing`)
+SEEING_POINTS = 256  # at most this many along each side of the frame
+
+
+def photos_seeing(chunk: Chunk, surf: "FrameSurface", cams=None) -> list:
+    """The cameras (the aligned ones by default) that see the part of a frame ``surf`` covers: a grid of points
+    over its bounds (every :data:`SEEING_STEP` metres, at most :data:`SEEING_POINTS` a side) at the front, the
+    middle and the back of its depth band, one at least falling in the photo (with a margin of a tenth of it),
+    in front of the camera and not from well behind the frame. Only the sensors and the poses are read, no photo:
+    the photos of a large chunk that look elsewhere are neither opened nor decoded by the build."""
+    from .visibility import project_valid
+
+    cams = list(chunk.aligned_cameras if cams is None else cams)
+    if not cams:
+        return []
+    u0, v0, u1, v1 = surf.bounds
+    nu = int(np.clip(np.ceil((u1 - u0) / SEEING_STEP), 1, SEEING_POINTS - 1)) + 1
+    nv = int(np.clip(np.ceil((v1 - v0) / SEEING_STEP), 1, SEEING_POINTS - 1)) + 1
+    uu, vv = np.meshgrid(np.linspace(u0, u1, nu), np.linspace(v0, v1, nv))
+    u, v = uu.ravel(), vv.ravel()
+    lo, hi = surf.band(u)
+    hi = np.where(hi > lo, hi, lo)
+    u3 = np.concatenate([u, u, u])
+    v3 = np.concatenate([v, v, v])
+    d3 = np.concatenate([hi, (lo + hi) / 2, lo])
+    world = surf.frame.point(u3, v3, d3)
+    view = surf.frame.view(u3, v3)
+    good = np.isfinite(world).all(axis=1) & np.isfinite(view).all(axis=1)
+    world, view = world[good], view[good]
+    if not len(world):
+        return []
+    view = view / np.maximum(np.linalg.norm(view, axis=1, keepdims=True), 1e-12)
+    inv = np.linalg.inv(chunk.transform)
+    pts = world @ inv[:3, :3].T + inv[:3, 3]
+    seeing = []
+    for cam in cams:
+        s = chunk.sensor(cam)
+        _px, _depth, ok = project_valid(chunk, cam, pts, margin=-0.1 * max(s.width, s.height))
+        if not ok.any():
+            continue
+        ray = chunk.to_world(cam.center[None])[0] - world[ok]
+        ray /= np.maximum(np.linalg.norm(ray, axis=1, keepdims=True), 1e-12)
+        if ((ray * view[ok]).sum(axis=1) > -0.5).any():  # not from well behind (the tiles test the angle)
+            seeing.append(cam)
+    return seeing
+
+
+def _photo_stamp(cam) -> list | None:
+    """``[size, mtime in ns]`` of the photo of ``cam``, None when it cannot be looked at."""
+    import os
+
+    try:
+        st = os.stat(cam.path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return [int(st.st_size), int(st.st_mtime_ns)]
+
+
+def blown_shares(chunk: Chunk, cams: list) -> list[float]:
+    """:func:`blown_share` of each camera, kept in ``chunk.meta["blown_shares"]`` (photo path -> ``[size, mtime
+    in ns, share]``): a photo whose file has the same size and time is not decoded again, by a later build, a
+    rebuild or a campaign of the same chunk; one that changed is."""
     import os
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
-        shares = list(pool.map(blown_share, cams))
+    kept = chunk.meta.get("blown_shares")
+    kept = kept if isinstance(kept, dict) else {}
+    stamps = [_photo_stamp(c) for c in cams]
+    shares: list = [None] * len(cams)
+    todo = []
+    for i, (cam, stamp) in enumerate(zip(cams, stamps)):
+        hit = kept.get(str(cam.path))
+        if stamp is not None and isinstance(hit, list) and len(hit) == 3 and hit[:2] == stamp:
+            shares[i] = float(hit[2])
+        else:
+            todo.append(i)
+    if todo:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+            for i, share in zip(todo, pool.map(blown_share, [cams[i] for i in todo])):
+                shares[i] = float(share)
+                if stamps[i] is not None:
+                    kept[str(cams[i].path)] = [*stamps[i], shares[i]]
+        chunk.meta["blown_shares"] = kept
+    return shares
+
+
+def _without_backlit(chunk: Chunk, cams: list) -> tuple[list, list]:
+    """``(kept, left out)``: the cameras whose share of blown pixels is over :data:`BACKLIT_SHARE` left out (the
+    shares kept in the chunk, :func:`blown_shares`); ``RuntimeError`` when that is every one."""
+    shares = blown_shares(chunk, cams)
     kept = [c for c, s in zip(cams, shares) if s <= BACKLIT_SHARE]
     left = [c for c, s in zip(cams, shares) if s > BACKLIT_SHARE]
     if not kept:
