@@ -1017,12 +1017,45 @@ def make_wall_scene(trace=WALL_TRACE, viewer: str = "right", height: float = 2.0
             out[on] = _sample(tex, along[on] / texel - 0.5, (height - p[on, 2]) / texel - 0.5)
         return out
 
+    faces = orient_outward(np.array(vertices, np.float64), np.array(faces, np.int64))
     scene = MeshScene(np.array(vertices, np.float64), np.array(faces, np.uint32), 2, WALL_MAT, WALL_MAT_TEXEL, mat,
                       surface_color, targets={i: m[2] for i, m in enumerate(placed)})
     scene.face, scene.back, scene.viewer = face, back, viewer
     scene.height, scene.thickness, scene.marks = float(height), float(thickness), placed
     scene.face_columns = np.array(columns, np.float64)
     return scene
+
+
+def orient_outward(vertices: np.ndarray, faces: np.ndarray, gap: float = 0.002, seed: int = 0) -> np.ndarray:
+    """``faces`` (M, 3) turned so that each triangle's normal (by its winding, counter-clockwise seen from outside)
+    points to the air, as the normals of a model built from photos do. A point is inside what the scene bounds when
+    a ray straight up from it crosses the surfaces an odd number of times: the ground, a block, the body of a wall
+    under its crest. Of each triangle, the points ``gap`` on either side of five points of it are looked at, and the
+    most of them decide (a ray up along an edge of another triangle counts it twice); where both sides are inside
+    or both outside (a face alone, without a crest), its winding is kept."""
+    import open3d as o3d
+
+    v, f = np.asarray(vertices, np.float64), np.asarray(faces, np.int64).copy()
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.core.Tensor(v.astype(np.float32)), o3d.core.Tensor(f.astype(np.uint32)))
+    a, b, c = (v[f[:, k]] for k in range(3))
+    normal = np.cross(b - a, c - a)
+    normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+    rng = np.random.default_rng(seed)
+
+    def inside(p: np.ndarray) -> np.ndarray:
+        rays = np.hstack([p, np.tile([0.0, 0.0, 1.0], (len(p), 1))]).astype(np.float32)
+        return scene.count_intersections(o3d.core.Tensor(rays)).numpy() % 2 == 1
+
+    votes = np.zeros(len(f), np.intp)
+    for _ in range(5):
+        w = rng.uniform(0.1, 0.45, (len(f), 2))
+        at = a + w[:, :1] * (b - a) + w[:, 1:] * (c - a)
+        votes += (inside(at + gap * normal) & ~inside(at - gap * normal)).astype(np.intp)
+        votes -= (inside(at - gap * normal) & ~inside(at + gap * normal)).astype(np.intp)
+    flip = votes > 0
+    f[flip] = f[flip][:, ::-1]
+    return f
 
 
 def wall_poses(scene: MeshScene, distance: float = 2.5, spacing: float = 0.6, heights=(0.5, 1.5)) -> list[np.ndarray]:

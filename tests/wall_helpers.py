@@ -107,7 +107,9 @@ def model_doc(folder, scene, crs: str = CRS, shift=SHIFT, drop=None):
     doc = ppg.Document()
     ch = _chunk(doc, "Muro", crs, shift)
     doc.save(folder / "model.ppg")
-    faces = np.asarray(scene.faces, np.int64)
+    from pyarchinit_photogrammetry.testing.synthetic import orient_outward
+
+    faces = orient_outward(scene.vertices, scene.faces)  # the normals of a model built from photos point to the air
     if drop is not None:
         column = scene.face_columns
         faces = faces[~((column >= drop[0]) & (column < drop[1]))]
