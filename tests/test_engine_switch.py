@@ -1,7 +1,8 @@
 """The engine of the matching, the alignment and the depth maps: ``auto``, ``classic`` or ``native``.
 
 The native engine does the matching and the alignment (``NATIVE_STEPS``) and not the depth maps yet: ``auto`` is the
-classic engine until a step is put in ``AUTO_NATIVE_STEPS`` (after the gate of the step: the matching), and ``native``
+classic engine until a step is put in ``AUTO_NATIVE_STEPS`` (after the gate of the step: the matching and the
+alignment), and ``native``
 on a step the native engine does not do falls back to the classic one and says so - a line in the log, what was asked and
 what was used in ``chunk.meta["engine"]``, a row in the report. The word comes from the ``engine`` argument of the
 three methods of the chunk, else from ``PPG_ENGINE``; the command line takes it with a hidden ``--engine`` and refuses
@@ -46,6 +47,8 @@ def idle_engine(monkeypatch):
     monkeypatch.setattr(native_match, "core_unavailable", lambda: None)  # the reasons of a request, not of the core
     monkeypatch.setattr(native_map, "cannot_run", lambda chunk, mapper, reset: ran.align_reason)
     monkeypatch.setattr(native_map, "core_unavailable", lambda: None)
+    # the mapper auto picks is the global one, as on a block of drone photos: auto aligns natively
+    monkeypatch.setattr(native_map, "auto_takes", lambda chunk, mapper: True)
 
     def align_cameras(chunk, **kwargs):
         ran.append("align_cameras")
@@ -62,9 +65,12 @@ def idle_engine(monkeypatch):
 
 
 # ---------------------------------------------------------------------------------------- the word and the engine
-def test_the_default_is_auto_and_auto_is_classic_today(monkeypatch):
+def test_the_default_is_auto_and_auto_is_native_for_the_matching_and_the_alignment(monkeypatch):
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    c = switch.resolve("align_cameras")
+    for step in ("match_photos", "align_cameras"):
+        c = switch.resolve(step)
+        assert (c.requested, c.used, c.fallback) == ("auto", "native", None)
+    c = switch.resolve("build_depth_maps")
     assert (c.requested, c.used, c.fallback) == ("auto", "classic", None)
 
 
@@ -85,14 +91,14 @@ def test_native_falls_back_to_classic_and_says_so(monkeypatch, caplog):
 
 def test_the_alignment_is_the_native_engines_when_asked_for(monkeypatch, caplog):
     """``align_cameras`` is a step the native engine does (its global mapper, :mod:`engine.native_map`): ``native``
-    gives it to the native engine, with no fallback and no line in the log; ``auto`` stays classic until the step has
-    passed its gate (it is not in ``AUTO_NATIVE_STEPS``)."""
+    gives it to the native engine, with no fallback and no line in the log, and so does ``auto`` since the alignment
+    passed its gate (it is in ``AUTO_NATIVE_STEPS``); ``classic`` keeps the classic one."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert "align_cameras" in switch.NATIVE_STEPS and "align_cameras" not in switch.AUTO_NATIVE_STEPS
+    assert "align_cameras" in switch.NATIVE_STEPS and "align_cameras" in switch.AUTO_NATIVE_STEPS
     with caplog.at_level("INFO"):
         assert switch.resolve("align_cameras", "native") == switch.Choice("native", "native", None)
         for word in (None, "auto"):
-            assert switch.resolve("align_cameras", word) == switch.Choice("auto", "classic", None)
+            assert switch.resolve("align_cameras", word) == switch.Choice("auto", "native", None)
         assert switch.resolve("align_cameras", "classic") == switch.Choice("classic", "classic", None)
     assert not caplog.records
 
@@ -116,10 +122,14 @@ def test_the_matching_is_the_native_engines_when_asked_for(monkeypatch, caplog):
 
 def test_auto_takes_a_step_only_once_it_is_in_auto_native_steps(monkeypatch, caplog):
     """``AUTO_NATIVE_STEPS`` names the steps ``auto`` gives to the native engine: none until a step has passed its
-    gate (the session owner adds it then, one line): the matching, since its gate; ``auto`` is native for the
-    matching, with no line in the log, and ``classic`` is still the classic engine."""
+    gate (the session owner adds it then, one line): the matching and the alignment, since their gates; ``auto`` is
+    native for them, with no line in the log, and ``classic`` is still the classic engine."""
     monkeypatch.delenv("PPG_ENGINE", raising=False)
-    assert switch.AUTO_NATIVE_STEPS == frozenset({"match_photos"})
+    assert switch.AUTO_NATIVE_STEPS == frozenset({"match_photos", "align_cameras"})
+    for step in ("match_photos", "align_cameras"):
+        assert switch.resolve(step, "auto") == switch.Choice("auto", "native", None)
+        assert switch.resolve(step, "classic") == switch.Choice("classic", "classic", None)
+    assert switch.resolve("build_depth_maps", "auto") == switch.Choice("auto", "classic", None)
     monkeypatch.setattr(switch, "AUTO_NATIVE_STEPS", frozenset())
     for word in (None, "auto"):
         assert switch.resolve("match_photos", word) == switch.Choice("auto", "classic", None)
@@ -271,7 +281,7 @@ def test_a_chunk_records_the_engine_it_used(monkeypatch, idle_engine):
     assert (record["requested"], record["used"]) == ("native", "classic")
     assert isinstance(record["fallback"], str) and record["fallback"]
     assert chunk.align_cameras() == 0
-    assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "classic", "fallback": None}
+    assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "native", "fallback": None}
     assert chunk.meta["engine"]["match_photos"] == record  # each step has its own record
     chunk.build_depth_maps(engine=" Classic ")
     assert chunk.meta["engine"]["build_depth_maps"] == {"requested": "classic", "used": "classic", "fallback": None}
@@ -334,7 +344,7 @@ def test_a_step_bears_whatever_is_under_the_key(name, held, monkeypatch, caplog,
     with caplog.at_level("INFO"):
         result = getattr(chunk, name)()
     assert result == (0 if name == "align_cameras" else None) and idle_engine == [name]
-    used = "native" if name in switch.AUTO_NATIVE_STEPS else "classic"  # the matching: native since its gate
+    used = "native" if name in switch.AUTO_NATIVE_STEPS else "classic"  # the matching and the alignment: since gates
     assert chunk.meta["engine"] == {name: {"requested": "auto", "used": used, "fallback": None}}
     warned = [line for line in caplog.records if line.name == switch.__name__]
     if held is None:
@@ -524,9 +534,10 @@ def test_the_alignment_runs_the_native_mapper_or_falls_back(monkeypatch, caplog)
     assert chunk.meta["engine"]["align_cameras"] == {"requested": "native", "used": "classic",
                                                      "fallback": "placed 3 of 48 photos"}
     state["gave_up"] = None
-    # auto: classic while the step is not in AUTO_NATIVE_STEPS, and while auto_takes says no once it is
+    # auto: classic while the step is not in AUTO_NATIVE_STEPS, and while auto_takes says no when it is
     caplog.clear()
     with caplog.at_level("INFO"):
+        monkeypatch.setattr(switch, "AUTO_NATIVE_STEPS", frozenset({"match_photos"}))
         chunk.align_cameras()
         assert asked[-1] == "classic"
         monkeypatch.setattr(switch, "AUTO_NATIVE_STEPS", frozenset({"match_photos", "align_cameras"}))
@@ -540,6 +551,53 @@ def test_the_alignment_runs_the_native_mapper_or_falls_back(monkeypatch, caplog)
     assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "native", "fallback": None}
     chunk.align_cameras(engine="classic")
     assert asked[-1] == "classic" and len(asked) == 7
+
+
+def test_auto_aligns_natively_and_falls_back_to_the_classic_chain(monkeypatch, caplog):
+    """Under ``auto`` (the default, since the gate of the alignment) the matching and the alignment resolve to the
+    native engine, and the chunk asks the classic step for the native mapper when the mapper ``auto`` picks is the
+    global one. A block the native mapper refuses is aligned by the classic chain: the step is recorded as classic,
+    with the reason of the mapper as its fallback and one WARNING line; a request the native mapper does not take
+    (:func:`native_map.cannot_run`) is the program's choice of the classic alignment, with no fallback."""
+    from pyarchinit_photogrammetry.engine import native_map, sfm
+
+    monkeypatch.delenv("PPG_ENGINE", raising=False)
+    for step in ("match_photos", "align_cameras"):
+        assert switch.resolve(step) == switch.Choice("auto", "native", None)
+    asked: list[str] = []
+    state = {"reason": None, "gave_up": "built a block whose cameras miss the GPS of the photos by 99 m"}
+
+    def align(chunk, **kwargs):
+        asked.append(kwargs["engine"])
+        info = chunk.meta.setdefault("sfm", {})
+        info.pop("native_fallback", None)
+        if kwargs["engine"] == "native" and state["gave_up"]:
+            info["native_fallback"] = state["gave_up"]
+        return 0
+
+    monkeypatch.setattr(sfm, "align_cameras", align)
+    monkeypatch.setattr(native_map, "cannot_run", lambda chunk, mapper, reset: state["reason"])
+    monkeypatch.setattr(native_map, "auto_takes", lambda chunk, mapper: True)
+    chunk = Chunk(key=0, label="x")
+    with caplog.at_level("INFO"):
+        chunk.align_cameras()
+    assert asked == ["native"]
+    assert chunk.meta["sfm"]["native_fallback"] == state["gave_up"]
+    assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "classic",
+                                                     "fallback": state["gave_up"]}
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == switch.__name__] == [
+        ("WARNING", f"engine 'auto' asked, classic used ({state['gave_up']})")]
+    state["gave_up"] = None  # the native mapper keeps its block
+    chunk.align_cameras()
+    assert asked[-1] == "native"
+    assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "native", "fallback": None}
+    state["reason"] = "rigs"  # a request it does not take: classic by the program's choice
+    chunk.align_cameras()
+    assert asked[-1] == "classic"
+    assert chunk.meta["engine"]["align_cameras"] == {"requested": "auto", "used": "classic", "fallback": None}
+    chunk.align_cameras(engine="classic")  # the classic alignment stays selectable
+    assert asked[-1] == "classic"
+    assert chunk.meta["engine"]["align_cameras"] == {"requested": "classic", "used": "classic", "fallback": None}
 
 
 def test_the_engine_is_the_last_argument_and_by_keyword_only():
@@ -596,7 +654,8 @@ def test_the_commands_ask_the_steps_for_the_engine(tmp_path, monkeypatch, idle_e
         result = run(app, [command, str(project)])
         assert result.exit_code == 0, result.output
     assert kept() == {**dict.fromkeys(switch.STEPS, ("auto", "classic", False)),
-                      "match_photos": ("auto", "native", False)}  # the matching: native since its gate
+                      "match_photos": ("auto", "native", False),  # the matching and the alignment: native
+                      "align_cameras": ("auto", "native", False)}  # since their gates
     for command in ("align", "dense"):
         result = run(app, [command, str(project), "--engine", "Native"])
         assert result.exit_code == 0, result.output

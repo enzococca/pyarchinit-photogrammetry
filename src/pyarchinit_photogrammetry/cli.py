@@ -69,7 +69,8 @@ def _open(project: Path, chunk: Optional[str] = None):
 def _engine(engine: Optional[str]) -> str:
     """The word of ``--engine`` (None: of ``PPG_ENGINE``, else ``auto``; :mod:`.engine.switch`), checked before a
     command opens its project: an unknown one is a usage error that names the accepted ones. The option is hidden:
-    the native engine does none of the steps yet, and every word runs the classic one."""
+    ``auto`` gives the matching and the alignment to the native engine (the classic one behind it), ``classic``
+    keeps the classic chain, and the depth maps are classic under every word."""
     from .engine import switch
 
     try:

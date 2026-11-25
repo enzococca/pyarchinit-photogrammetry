@@ -19,8 +19,8 @@ rules, and the reason is kept (``chunk.meta["sfm"]["native_fallback"]``, then th
 
 What the native mapper does not do stays classic (:func:`cannot_run`): the incremental and hierarchical mappers,
 photos added to an alignment, rigs, calibrations held fixed, camera models it does not know; and without the native
-core of API 16 or with ``PPG_NATIVE=0`` nothing changes. ``auto`` gives it the alignment only once the step is in
-:data:`.switch.AUTO_NATIVE_STEPS` and when the global mapper is the one ``auto`` picks (:func:`auto_takes`).
+core of API 16 or with ``PPG_NATIVE=0`` nothing changes. ``auto`` gives it the alignment (the step is in
+:data:`.switch.AUTO_NATIVE_STEPS` since its gate) when the global mapper is the one ``auto`` picks (:func:`auto_takes`).
 
 Two variables tune the mapper for the trials of the plan: ``PPG_NATIVE_TRACKS_PER_PHOTO`` (the tracks kept per photo
 for the positioning and the first rounds; by default a quarter of the tie point limit of the matching, 500 at least,

@@ -516,8 +516,9 @@ class Chunk:
         otherwise the classic alignment runs and the reason is kept. A block the native mapper refuses
         (photos left out, cameras off the GPS of the photos, a large reprojection error) or a failure of
         it hands the alignment to the classic chain, which aligns with its own rules, and the reason is
-        kept too; a cancel and a full disk stop the step. ``auto`` is the classic alignment until the
-        native one has passed its gate. What was asked and what was used are kept in
+        kept too; a cancel and a full disk stop the step. ``auto`` is the native alignment (since its
+        gate) when the mapper it picks is the global one, with the same fallbacks; else the classic one.
+        ``classic`` keeps the classic alignment. What was asked and what was used are kept in
         ``meta["engine"]``.
 
         A new alignment lives in a new arbitrary frame: the chunk transform is reset and,
