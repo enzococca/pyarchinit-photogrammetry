@@ -403,3 +403,49 @@ def test_command_line_refuses_a_campaign_without_a_date(campaigns):
     doc.save()
     r = CliRunner().invoke(app, ["elevation", str(doc.path), "--like", a["id"], "--composite"])
     assert r.exit_code == 1 and f"give a date to {other.label}" in r.output
+
+
+def test_a_project_appended_keeps_its_groups_and_composite_on_its_own_chunks(campaigns, tmp_path):
+    """Source chunks with keys 0 and 1, a group and its composite; a target with chunks X (0) and Y (1): after the
+    append the group and the composite name the appended chunks (2 and 3), never X or Y, and the composite is not
+    stale; the reference chunk appended alone drops the group (said) and names no chunk of the target."""
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.core.append import append_projects
+
+    doc, (ref, other), group, (a, b), _boxes = campaigns
+    comp = C.composite(doc, ref, group, match=False)
+    doc.save()
+    assert (ref.key, other.key) == (0, 1)
+    target = ppg.Document()
+    target.add_chunk("X")
+    target.add_chunk("Y")
+    target.save(tmp_path / "dst" / "target.ppg")
+    (res,) = append_projects(target, [doc.path])
+    assert res.error is None, res.error
+    new_ref, new_other = res.chunks
+    assert (new_ref.key, new_other.key) == (2, 3)
+    found = G.group_of(target, new_other, b["id"])
+    assert found is not None and found[0] is new_ref
+    g = found[1]
+    assert sorted(m["chunk"] for m in g["members"]) == [2, 3]
+    record = g["composite"]
+    assert [s["chunk"] for s in record["sources"]] == [2, 3]
+    assert all(s["chunk"] in (2, 3) for s in record["left_out"])
+    assert [o[0] for o in record["order"]] == [2, 3]
+    (entry,) = C.composites(new_ref)
+    assert entry["id"] == comp["id"] and [s["chunk"] for s in entry["sources"]] == [2, 3]
+    assert not C.is_stale(target, new_ref, entry)
+    assert G.group_of(target, target.chunks[0], a["id"]) is None
+    assert G.group_of(target, target.chunks[1], b["id"]) is None
+    # the reference chunk alone: its group names a chunk not appended - dropped and said, no key of X or Y left
+    alone = ppg.Document()
+    alone.add_chunk("X")
+    alone.add_chunk("Y")
+    alone.save(tmp_path / "alone" / "target.ppg")
+    (res2,) = append_projects(alone, [doc.path], chunks=[0])
+    (only,) = res2.chunks
+    assert G.groups(only) == []
+    (entry2,) = C.composites(only)
+    assert all(s["chunk"] in (None, only.key) for s in entry2["sources"])
+    assert C.is_stale(alone, only, entry2)
+    assert any("gruppo" in w for w in res2.warnings)
