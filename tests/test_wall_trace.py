@@ -447,6 +447,73 @@ def test_a_shelter_over_the_wall_is_no_crest(by, tmp_path):
     assert r["snapped"] and np.abs(r["points"] - face).max() < 0.005
 
 
+def _wall_against_high_ground(low: float, deep: float, thickness: float = 1.5, length: float = 8.0):
+    """A wall ``thickness`` thick from x = 0 to ``length``, its crest at height ``deep``: on its south the high
+    ground (sand) ``low`` under its crest, so that its south face stands ``low`` high; on its north a trench
+    ``deep`` deep from its crest (its floor at 0, its far side 3 m off), the high ground again past it. ``face``:
+    the south face, on y = 0 from west to east (the viewer on the right, on the sand); ``back``: the north face,
+    seen from the trench, on y = ``thickness``."""
+    x0, x1, sand, far = -4.0, length + 4.0, deep - low, thickness + 3.0
+    v, f = [], []
+
+    def quad(*corners):
+        k = len(v)
+        v.extend(corners)
+        f.extend([[k, k + 1, k + 2], [k, k + 2, k + 3]])
+
+    for (a, b), (c, d) in (((x0, -6.0), (x1, 0.0)), ((x0, far), (x1, far + 6.0)), ((x0, 0.0), (0.0, thickness)),
+                           ((length, 0.0), (x1, thickness))):                       # the high ground
+        quad((a, b, sand), (c, b, sand), (c, d, sand), (a, d, sand))
+    quad((0.0, 0.0, deep), (length, 0.0, deep), (length, thickness, deep), (0.0, thickness, deep))  # the crest
+    for (a, b), (c, d), z in (((0.0, 0.0), (length, 0.0), sand), ((0.0, 0.0), (0.0, thickness), sand),
+                              ((length, 0.0), (length, thickness), sand), ((0.0, thickness), (length, thickness), 0.0)):
+        quad((a, b, z), (c, d, z), (c, d, deep), (a, b, deep))                       # its faces and ends
+    quad((x0, thickness, 0.0), (x1, thickness, 0.0), (x1, far, 0.0), (x0, far, 0.0))  # the floor of the trench
+    for (a, b), (c, d) in (((x0, thickness), (0.0, thickness)), ((length, thickness), (x1, thickness)),
+                           ((x0, far), (x1, far))):                                 # its sides past the wall
+        quad((a, b, 0.0), (c, d, 0.0), (c, d, sand), (a, b, sand))
+    face, back = np.array([[0.0, 0.0], [length, 0.0]]), np.array([[0.0, thickness], [length, thickness]])
+    return SimpleNamespace(vertices=np.array(v, np.float64), faces=np.array(f), face=face, back=back, viewer="right",
+                           height=low, thickness=thickness, marks=[], face_columns=None)
+
+
+@pytest.mark.parametrize("low, deep", [(0.3, 2.0), (0.3, 2.3), (0.2, 2.5), (0.2, 3.0)])
+def test_a_wall_against_high_ground_keeps_the_face_seen_from_its_viewer(low, deep, tmp_path):
+    """A wall 1.5 m thick, the high ground 20-30 cm under its crest on the viewer's side, a trench 2-2.5 m deep on
+    the other: clicked on the edge of the high ground or half a metre out on it, the face is the low one the viewer
+    sees, not the tall one of the trench - which faces away from the viewer however tall it is. Seen from the
+    trench, the tall one."""
+    scene = _wall_against_high_ground(low, deep)
+    _doc, ch, info = model_doc(tmp_path, scene)
+    face, shift = np.asarray(info["face"]), np.asarray(info["face"]) - scene.face
+    along = np.array([[1.0, 0.0], [-1.0, 0.0]])                    # within the length of the wall
+    for by in (0.0, 0.05, 0.5):                                    # on the edge, out on the sand
+        clicked = face + along + [0.0, -by]
+        for side, line in (("right", clicked), ("left", clicked[::-1])):   # its viewer by a word, either way clicked
+            r = T.snap_trace(ch, line, side=side)
+            assert r["snapped"] and np.abs(r["points"][:, 1] - face[:, 1]).max() < 0.1, (by, side, r["points"])
+            path, _report = T.path_from_trace(ch, line, side=side)
+            assert distance_to(face, path.vertices).max() < 0.1
+    back = scene.back + shift
+    for by in (0.0, 0.2, -0.2):                                    # seen from the trench: its edge, the air, the crest
+        r = T.snap_trace(ch, back + along + [0.0, by], side="left")
+        assert r["snapped"] and np.abs(r["points"][:, 1] - back[:, 1]).max() < 0.1, (by, r["points"])
+
+
+@pytest.mark.parametrize("by", [0.0, 0.5])
+def test_a_wall_buried_on_the_side_of_its_viewer_keeps_its_click(by, tmp_path):
+    """The high ground up to the crest of the wall on the viewer's side: the viewer sees no face. The look from the
+    band in front starts under the ground and meets the face of the trench from behind - it faces away from the
+    viewer, and is not taken however tall: the line keeps its click, and the report says so."""
+    _doc, ch, info = model_doc(tmp_path, _wall_against_high_ground(0.0, 2.5))
+    clicked = np.asarray(info["face"]) + [[1.0, -by], [-1.0, -by]]
+    r = T.snap_trace(ch, clicked, side="right")
+    assert not r["snapped"] and np.array_equal(r["points"], clicked) and r["max_shift"] == 0.0
+    assert r["kept"] == 1 and r["segments"][0]["kept"] and r["segments"][0]["offset"] == pytest.approx(-1.5 - by)
+    _path, report = T.path_from_trace(ch, clicked, side="right")
+    assert report["kept"] == 1 and not report["snapped"]
+
+
 def test_the_line_fitted_to_what_a_segment_sees(model_outside, tmp_path):
     ch, info = model_outside
     face = np.asarray(info["face"])
@@ -833,32 +900,36 @@ def test_the_samples_a_segment_looks_from(model_outside, monkeypatch, tmp_path):
     monkeypatch.setattr(T, "_cast", spy)
     monkeypatch.setattr(T.FrameSurface, "depth_at", spy_band)
     T.snap_trace(ch, clicked, side="right", band=1.5, heights=(100.4, 101.6), step=0.5, samples=6)
-    up = [c for c in cast if c.direction[2] == 1.0]            # first, straight up from each sample
-    assert len(up) == 2 and len(up[0].start) == 13 * 6 and len(up[1].start) == 9 * 6     # 6.15, 4.05 m by 0.5 m
+    # per segment, straight up twice: from the band in front of each sample (whether it is in the open on the
+    # viewer's side), then from the sample itself
+    up = [c for c in cast if c.direction[2] == 1.0]
+    assert len(up) == 4 and [len(c.start) for c in up] == [13 * 6] * 2 + [9 * 6] * 2    # 6.15, 4.05 m by 0.5 m
+    step = (clicked[1] - clicked[0]) / np.hypot(*(clicked[1] - clicked[0]))
+    viewer = np.array([step[1], -step[0], 0.0])
+    assert np.allclose(up[0].start, up[1].start + 1.5 * viewer)                          # the band in front
+    up = [up[1], up[3]]                                                                  # from the samples
     along = np.unique(np.round(np.hypot(*(up[0].start[:, :2] - clicked[0]).T), 9))       # on the clicked line ...
     assert np.allclose(along, (np.arange(13) + 0.5) * np.hypot(6.15, 0.2) / 13)          # at most, at their middles
     assert np.allclose(np.unique(up[0].start[:, 2]), 100.5 + 0.2 * np.arange(6))         # the middles of six parts
     # the samples are in the open: each looks behind the line from a centimetre in front of it, and in front of it
-    step = (clicked[1] - clicked[0]) / np.hypot(*(clicked[1] - clicked[0]))
-    viewer = np.array([step[1], -step[0], 0.0])
-    behind, into = cast[1], cast[2]
+    behind, into = cast[2], cast[3]
     assert np.allclose(behind.direction, -viewer) and np.allclose(into.direction, viewer)
     assert np.allclose(behind.start, up[0].start + 0.01 * viewer) and np.allclose(into.start, up[0].start)
     assert not band                                             # a line from the clicked line: no other look
     del cast[:]
     T.snap_trace(ch, clicked, side="right")                    # 5 cm, forty heights
-    up = [c for c in cast if c.direction[2] == 1.0]
+    up = [c for c in cast if c.direction[2] == 1.0][1:]
     assert len(up[0].start) == 124 * 40 and np.allclose(np.unique(up[0].start[:, 2]), 100.025 + 0.05 * np.arange(40))
     del cast[:]
     T.snap_trace(ch, clicked[::-1], side="left", step=0.5, samples=6)                    # clicked the other way:
     assert len(cast[0].start) == 9 * 6                                                   # the second leg first,
-    assert np.allclose(cast[1].direction, [-1.0, 0.05 / 4.05, 0.0], atol=1e-3)           # behind it is the west
+    assert np.allclose(cast[2].direction, [-1.0, 0.05 / 4.05, 0.0], atol=1e-3)           # behind it is the west
     # under the crest: one look, in front of the line from a centimetre behind it
     del cast[:]
     crest = np.asarray(info["face"]) + [[0.0, 0.15], [-0.15, 0.15], [-0.15, 0.0]]
     r = T.snap_trace(ch, crest, side="right", step=0.5, samples=6)
-    assert r["snapped"] and len(cast) == 4 and not band
-    assert np.allclose(cast[1].direction, [0.0, -1.0, 0.0]) and np.allclose(cast[1].start, cast[0].start + [0, 0.01, 0])
+    assert r["snapped"] and len(cast) == 6 and not band     # with the look up from the band
+    assert np.allclose(cast[2].direction, [0.0, -1.0, 0.0]) and np.allclose(cast[2].start, cast[1].start + [0, 0.01, 0])
     # a room of 4 m by 3 seen from inside, its walls without a crest and without a back, clicked 15 cm behind
     # them: in the open, with nothing behind the line and no way out in front. With no line from the clicked
     # line a segment looks from the band in front of it - 2.5 m, or where another part of the line is as near
