@@ -562,7 +562,10 @@ panels of several planes glued together.
    the face is looked for. What the click stands on decides the direction: on the wall or on the ground beside a
    trench the face is the first surface in front, met from inside; on the floor in front of the wall or in the air of a
    trench it is the first surface behind. The other side of a narrow room or of a trench is not taken for it; in a
-   trench or a corridor narrower than the band, make the band smaller than their width. *Smooth the line* (0 m, none)
+   trench or a corridor narrower than the band, make the band smaller than their width. The face is always the one
+   seen from your side: on a wall against high ground (sand on your side, a deep trench on the other) the low face over
+   the ground is taken, even 20 cm high, never the tall face of the trench; when your side shows no face the clicked
+   line is kept. *Smooth the line* (0 m, none)
    smooths a curved wall clicked with many shaky points over that length, before the snap. The state line says how
    far the vertices moved (the mean and the most, in cm) and the shift of every vertex is listed. *Snapped line* or
    *Clicked line* chooses which one the elevation is built on (both are drawn on the plan, the clicked one dashed);

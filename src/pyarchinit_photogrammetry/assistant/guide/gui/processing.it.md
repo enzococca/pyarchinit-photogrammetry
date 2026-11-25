@@ -576,7 +576,10 @@ girando gli spigoli, senza i riquadri di più piani incollati insieme.
    cliccata, si cerca la faccia. Ciò su cui sta il clic decide la direzione: sul muro o sul terreno accanto a una
    trincea la faccia è la prima superficie davanti, incontrata da dentro; sul piano davanti al muro o nell'aria di una
    trincea è la prima superficie dietro. L'altro lato di una stanza stretta o di una trincea non viene preso per lei;
-   in una trincea o in un corridoio più stretti della fascia, usa una fascia più piccola della loro larghezza. *Smussa
+   in una trincea o in un corridoio più stretti della fascia, usa una fascia più piccola della loro larghezza. La
+   faccia è sempre quella vista dal tuo lato: su un muro addossato a un terreno più alto (sabbia dal tuo lato, una
+   trincea profonda dall'altro) viene presa la faccia bassa sopra il terreno, anche se alta 20 cm, mai quella alta
+   della trincea; se dal tuo lato non c'è una faccia, resta la linea cliccata. *Smussa
    la linea* (0 m, nessuna) smussa su quella lunghezza un muro curvo cliccato con molti punti incerti, prima
    dell'aggancio. La riga di stato dice di quanto si sono spostati i vertici (in media e al massimo, in cm) e lo
    spostamento di ogni vertice è elencato. *Linea agganciata* o *Linea cliccata* sceglie su quale si costruisce il
