@@ -5,57 +5,78 @@
 //! The residual of an observation is GLOMAP's (`estimators/global_positioning.cc`, the
 //! `BATAPairwiseDirectionError` of `estimators/cost_function.h`, after Zhuang et al. 2018): `s (X -
 //! C) - v`, `v` the unit ray of the observation in the world, `X` the point, `C` the centre of the
-//! photo and `s` a scale of that observation with a floor (`SCALE_FLOOR`), part of the point's
-//! block; under the Huber loss of `Options::positioning_huber`, the observations of a camera
-//! without a prior focal length weighed by a half (GLOMAP's `ScaledLoss`); tracks seen by fewer than
-//! `MIN_VIEWS` photos left out.
+//! photo and `s` a scale of that observation with a floor (`SCALE_FLOOR`): in the solve from the
+//! random start a coordinate of the point's block (GLOMAP's), in the joint solve with the positions
+//! eliminated in closed form, so that a point block is its three coordinates (`Scales`); under the
+//! Huber loss of `Options::positioning_huber`, the observations of a camera without a prior focal
+//! length weighed by a half (GLOMAP's `ScaledLoss`); tracks seen by fewer than `MIN_VIEWS` photos
+//! left out.
 //!
-//! 1. **With GNSS** (at least 3 placed photos with a position): first the rays alone, as without
-//!    GNSS (step 5), put on the positions by one robust similarity (Umeyama's, iteratively
-//!    reweighted with Huber 1 on the residual in sigmas) with, for two flights or more, a
-//!    translation per flight (the first held at zero). No position is left out here: the rays
-//!    alone drift, and a position far from this block is often a good one where the drift is
-//!    largest (only the `Similarity` result of step 2 names the positions farther than
-//!    `OUTLIER_SIGMAS` from it as outliers). The directions of the positions of step 2 are taken
-//!    with those translations taken out.
-//! 2. The averaged rotations live in a frame of their own, turned onto the frame of the positions
-//!    by the rotation `Q` that best takes the directions between the photos of the verified pairs
-//!    with parallax (the translation of the pair, put in the averaged frame) onto the directions
-//!    between their positions: Horn's closed form in iteratively reweighted least squares with the
-//!    Huber weights of `FRAME_HUBER_DEG` on the angle (ruling R11). When the positions spread
-//!    little across the block (twice the square root of the second eigenvalue of the covariance of
-//!    their horizontal coordinates below `POSITION_SPREAD_SIGMAS` times the median of their
-//!    recorded horizontal accuracy), with fewer than `MIN_FRAME_PAIRS` pairs, directions that span
-//!    little more than a line (`MIN_SPREAD`), or a median angle left above
-//!    `MAX_FRAME_RESIDUAL_DEG` (baselines whose directions are the noise of the positions), the
-//!    positions cannot orient the block: the result is the block of step 1 on the positions
-//!    (`Frame::Similarity`). No baseline is measured on the block of the rays alone: on a ring
-//!    that drifts it shrinks.
-//! 3. The centres start where the similarity of step 1 put them (a photo it did not place, on its
-//!    position), the selected tracks are triangulated from them with the rotations `Q R` and go
-//!    through `triangulate::filter` (the reprojection left out: the start is only as good as the
-//!    positions; the depth and the angle of the rays kept).
-//! 4. Centres, points and scales are solved together (`bundle::lm`) with every position as a
-//!    residual `(C + b - g) / sigma` per axis under Huber 1 (in sigmas), `sigma` the
-//!    recorded accuracy (estimated again from the residuals only in the rounds of adjustment that
-//!    follow, where the redundancy of each position is known: the residuals of a fit are smaller
-//!    than the noise), `b` the bias of the position's flight: one per flight when there are two
-//!    flights or more, the first held at zero. The positions hold the gauge. The rays keep GLOMAP's
-//!    scale: at this level the heights of nadir photos are weakly held (the depth along each ray is
-//!    free) and follow their positions; the reprojection of the rounds holds them. The biases
-//!    start at the translations of step 1. The Huber loss bounds the pull of a gross fix; the
-//!    positions then farther than `OUTLIER_SIGMAS` of their recorded accuracy from the solved
-//!    centres and biases (the horizontal axes together, or the vertical) are the outliers
-//!    (`gnss_outliers`), and the block is solved once more without them.
+//! 1. **With GNSS** (at least 3 placed photos with a position) the block starts at the positions
+//!    (`from_positions`). The averaged rotations live in a frame of their own, turned onto the
+//!    frame of the positions by the rotation `Q` that best takes the directions between the photos
+//!    of the verified pairs with parallax (the translation of the pair, put in the averaged frame)
+//!    onto the directions between their positions: Horn's closed form in iteratively reweighted
+//!    least squares with the Huber weights of `FRAME_HUBER_DEG` on the angle (ruling R11). When
+//!    the positions spread little across the block (twice the square root of the second
+//!    eigenvalue of the covariance of their horizontal coordinates below `POSITION_SPREAD_SIGMAS`
+//!    times the median of their recorded horizontal accuracy), with fewer than `MIN_FRAME_PAIRS`
+//!    pairs, directions that span little more than a line (`MIN_SPREAD`), or a median angle left
+//!    above `MAX_FRAME_RESIDUAL_DEG` (baselines whose directions are the noise of the positions),
+//!    the positions cannot orient the block: the start of step 4 is taken.
+//! 2. In that first frame, a position that disagrees with the positions of most of its
+//!    neighbours of the same flight across the direction of their pair (the rays give the
+//!    direction between two photos, not their distance) is left out of the start
+//!    (`local_by_directions`, the local pre-check of ruling R9); the offset of each flight (the
+//!    first at zero) is solved from the pairs across two flights, whose centres differ along the
+//!    direction of the pair (`flight_offsets`), and the frame is turned again on the positions
+//!    less those offsets, the two in turn until the offsets settle (a flight of a single strip
+//!    cannot hold the roll about its axis: a height offset per strip is a roll).
+//! 3. Each centre starts at its position less its flight's offset; a placed photo without one
+//!    (or whose position was left out) from its rays (`resect`: the centre nearest the lines from
+//!    the points triangulated by the others, back along its rays), else at the mean of its
+//!    neighbours. The selected tracks are triangulated from the starts with the rotations `Q R`
+//!    and go through `triangulate::filter` (the reprojection left out: the start is only as good
+//!    as the positions; the depth and the angle of the rays kept). Centres, points and biases are
+//!    solved together (`bundle::lm`, the scales of the rays eliminated) with every position used
+//!    as a residual `(C + b - g) / sigma` per axis under Huber 1 (in sigmas), `sigma` the recorded
+//!    accuracy (estimated again from the residuals only in the rounds of adjustment that follow,
+//!    where the redundancy of each position is known: the residuals of a fit are smaller than the
+//!    noise), `b` the bias of the position's flight: one per flight when there are two flights or
+//!    more, the first held at zero, starting at the offsets of step 2. The positions hold the
+//!    gauge. The rays keep GLOMAP's scale: at this level the heights of nadir photos are weakly
+//!    held (the depth along each ray is free) and follow their positions; the reprojection of the
+//!    rounds holds them. The Huber loss bounds the pull of a gross fix; the positions then farther
+//!    than `OUTLIER_SIGMAS` of their recorded accuracy from the solved centres and biases (the
+//!    horizontal axes together, or the vertical) are the outliers (`gnss_outliers`), a position
+//!    left out in step 2 that the solved block agrees with is taken back, and the block is solved
+//!    once more when anything changed. The start then passes its check (`start_check`): at most
+//!    `START_OUTLIER_SHARE` of the positions outliers, and no flight of `MIN_CHECKED_FLIGHT`
+//!    positions or more with more than half of them.
+//! 4. **The fallback** (the positions cannot orient the block, or the start failed its check):
+//!    the rays alone, as without GNSS (step 5), put on the positions by one robust similarity
+//!    (Umeyama's, iteratively reweighted with Huber 1 on the residual in sigmas) with, for two
+//!    flights or more, a translation per flight (the first held at zero). No position is left out
+//!    against that block (ruling R9: the rays alone drift, and a position far from it is often a
+//!    good one where the drift is largest) but those that disagree with most of their neighbours
+//!    on it (`local_outliers`); the frame is turned as in step 1 on the positions less those
+//!    translations (the block on the positions, `Frame::Similarity`, when they cannot orient it,
+//!    the positions farther than `OUTLIER_SIGMAS` from it its outliers), the centres start where
+//!    the similarity put them (on its position a photo it did not place or placed farther than
+//!    `OUTLIER_SIGMAS` from it) and are solved as in step 3. After a failed check the start at the
+//!    positions is kept unless the rays alone give the frame of the positions with less than
+//!    `RAYS_BETTER` times its mean cost of a ray (`prefer_rays`); the notes say which
+//!    (`Positioned::notes`).
 //! 5. **Without GNSS**: centres and points start at random (GLOMAP's start: uniform in a cube of
 //!    `RANDOM_EXTENT`, the scales at 1, from the generator of this file seeded with `SEED`), one
 //!    centre and the first scale held (GLOMAP holds the first scale), the scales above their
-//!    floors; `Frame::Free`.
+//!    floors (here coordinates of the point blocks: eliminated, they stop short from a random
+//!    start); `Frame::Free`.
 //!
 //! Everything runs in a fixed order and the solver sums in a fixed order: two runs give the same
 //! bits.
 
-use nalgebra::{Matrix2, Matrix3, Vector2, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix2, Matrix3, Vector2, Vector3};
 
 use super::graph::{check_cameras, ViewGraph};
 use super::input::Input;
@@ -105,6 +126,22 @@ const FREE_MAX_ITERATIONS: usize = 300;
 /// translations of the flights (solved in turn, so given more).
 const IRLS_ITERATIONS: usize = 100;
 const PLACE_ITERATIONS: usize = 500;
+/// The start at the positions fails its check when more than this share of the positions are
+/// outliers after its joint solve, or more than half of the positions of a flight of at least
+/// `MIN_CHECKED_FLIGHT` positions.
+const START_OUTLIER_SHARE: f64 = 0.1;
+const MIN_CHECKED_FLIGHT: usize = 3;
+/// After a failed check, the block from the rays alone is kept only with a mean cost of a ray
+/// below this share of the block from the positions'.
+const RAYS_BETTER: f64 = 0.5;
+/// The passes of the resection of the photos without a position, and the lines it keeps: within
+/// this many times the median distance of the lines to the first centre.
+const RESECT_PASSES: usize = 4;
+const RESECT_SPREAD: f64 = 3.0;
+/// The passes of the frame and the offsets of the flights in turn, and the largest change of an
+/// offset, in metres, that ends them.
+const FRAME_PASSES: usize = 10;
+const FRAME_SETTLED: f64 = 1e-3;
 
 /// The positions of photos: the index of the photo in `Input::images`, its position (metric axes,
 /// less an offset), the recorded accuracy of each axis (one sigma, metres) and the flight it
@@ -137,7 +174,8 @@ pub enum Frame {
 /// free frame); the bias of each flight, sorted by flight, the first zero (empty with one flight
 /// or in a free frame; in the `Similarity` frame the translations of the flights); the photos
 /// whose position is an outlier, ascending; the scales on their floor and the cost of the last
-/// solve.
+/// solve, the mean cost of a ray observation in it (what decides between the two starts, see
+/// `prefer_rays`); notes on the start (the fallback to the rays alone, see `position`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Positioned {
     pub centres: Vec<Option<[f64; 3]>>,
@@ -151,6 +189,8 @@ pub struct Positioned {
     pub gnss_outliers: Vec<usize>,
     pub scales_on_floor: usize,
     pub cost: f64,
+    pub ray_cost: f64,
+    pub notes: Vec<String>,
 }
 
 /// Knuth's MMIX linear congruential generator.
@@ -211,9 +251,40 @@ struct RayIn {
 }
 
 enum Scale {
-    /// The coordinate of the point blocks that holds it.
+    /// The coordinate of the point blocks that holds it (`Scales::Explicit`).
     Free(usize),
     Held(f64),
+    /// Eliminated in closed form from its residual (`Scales::Eliminated`).
+    Eliminated,
+}
+
+/// How the free scales of the observations enter the solve: eliminated in closed form from each
+/// residual, so that a point block is its three coordinates (`Eliminated`, what `position` uses),
+/// or as coordinates of the point blocks (`Explicit`, GLOMAP's formulation: a point seen `k` times
+/// is a dense block of `3 + k`), kept as the reference the elimination is proved against. The
+/// scale of an observation appears in its residual alone; the closed form is the least-squares
+/// scale, `max(floor, v . (X - C) / |X - C|^2)`, which minimises the norm of the residual. The
+/// solver applies the Huber loss row by row, so the two have the same minima while the rows of an
+/// observation are inside the Huber scale (the inliers); for an observation with a row beyond it
+/// (a wrong match) the closed form is not the minimiser of its robust cost, and the two solutions
+/// differ by a little (the tests: centres within 10 cm, cost within 2 %, with a tenth of wrong
+/// matches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scales {
+    Eliminated,
+    Explicit,
+}
+
+/// The scale that minimises `|s d - v|` with `s` at least `SCALE_FLOOR`, and whether it is above
+/// the floor (the minimum of the unbounded problem).
+fn best_scale(d: &[f64; 3], v: &[f64; 3]) -> (f64, bool) {
+    let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    let projection = (d[0] * v[0] + d[1] * v[1] + d[2] * v[2]) / dd;
+    if dd > 0.0 && projection > SCALE_FLOOR {
+        (projection, true)
+    } else {
+        (SCALE_FLOOR, false)
+    }
 }
 
 struct Ray {
@@ -268,6 +339,7 @@ impl PositionModel {
         fixes: Vec<Fix>,
         flights: usize,
         huber: f64,
+        scales: Scales,
     ) -> PositionModel {
         let n = centres.len();
         let mut in_solve = vec![false; n];
@@ -289,7 +361,7 @@ impl PositionModel {
         let cam_sizes = vec![3; photo_of_block.len() + n_bias];
         let mut point_sizes = vec![3; points.len()];
         for r in &rays {
-            if !r.held {
+            if !r.held && scales == Scales::Explicit {
                 point_sizes[r.point] += 1;
             }
         }
@@ -307,6 +379,8 @@ impl PositionModel {
             .map(|r| {
                 let scale = if r.held {
                     Scale::Held(r.scale)
+                } else if scales == Scales::Eliminated {
+                    Scale::Eliminated
                 } else {
                     let c = next[r.point];
                     next[r.point] += 1;
@@ -338,10 +412,16 @@ impl PositionModel {
         [self.params[c], self.params[c + 1], self.params[c + 2]]
     }
 
-    fn scale(&self, s: &Scale) -> f64 {
-        match *s {
-            Scale::Free(c) => self.params[c],
-            Scale::Held(v) => v,
+    /// The scale of a ray, and whether it is free above its floor (`None` for one held).
+    fn scale(&self, r: &Ray) -> (f64, Option<bool>) {
+        match r.scale {
+            Scale::Free(c) => (self.params[c], Some(self.params[c] > SCALE_FLOOR)),
+            Scale::Held(v) => (v, None),
+            Scale::Eliminated => {
+                let (x, c) = (self.point(r.point), self.centres[r.photo]);
+                let (s, above) = best_scale(&std::array::from_fn(|a| x[a] - c[a]), &r.ray);
+                (s, Some(above))
+            }
         }
     }
 
@@ -360,8 +440,24 @@ impl PositionModel {
         std::array::from_fn(|a| c[a] + b[a] - f.xyz[a])
     }
 
+    /// The mean cost of a ray observation (its rows under their loss, half the sum as the solver
+    /// counts it); zero without rays.
+    fn ray_cost(&self) -> f64 {
+        if self.rays.is_empty() {
+            return 0.0;
+        }
+        let mut out = BlockJacobian::default();
+        let mut total = 0.0;
+        for k in 0..self.rays.len() {
+            out.clear();
+            self.residuals(k, &mut out);
+            total += 0.5 * out.residuals.iter().map(|r| out.loss.rho(r * r)).sum::<f64>();
+        }
+        total / self.rays.len() as f64
+    }
+
     fn scales_on_floor(&self) -> usize {
-        self.bounds.iter().filter(|&&(c, floor)| self.params[c] <= floor).count()
+        self.rays.iter().filter(|r| self.scale(r).1 == Some(false)).count()
     }
 }
 
@@ -381,7 +477,17 @@ impl Model for PositionModel {
     fn linearize(&self, k: usize, out: &mut BlockJacobian) {
         if k < self.rays.len() {
             let r = &self.rays[k];
-            let (x, c, s, w) = (self.point(r.point), self.centres[r.photo], self.scale(&r.scale), r.weight);
+            let (x, c, w) = (self.point(r.point), self.centres[r.photo], r.weight);
+            let d: [f64; 3] = std::array::from_fn(|a| x[a] - c[a]);
+            let (s, above) = self.scale(r);
+            // the derivative of the residual `s d - v` by `d`: `s I`, and for a scale eliminated
+            // above its floor (`s = v . d / |d|^2`) also `d (v - 2 s d)^T / |d|^2`
+            let eliminated = matches!(r.scale, Scale::Eliminated) && above == Some(true);
+            let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            let m = |a: usize, q: usize| {
+                let diagonal = if q == a { s } else { 0.0 };
+                if eliminated { diagonal + d[a] * (r.ray[q] - 2.0 * s * d[q]) / dd } else { diagonal }
+            };
             let block = self.block_of_photo[r.photo];
             if let Some(b) = block {
                 out.cameras.push(b);
@@ -390,21 +496,20 @@ impl Model for PositionModel {
             let size = self.point_sizes[r.point];
             let scale_col = match r.scale {
                 Scale::Free(col) => Some(col - self.point_col[r.point]),
-                Scale::Held(_) => None,
+                Scale::Held(_) | Scale::Eliminated => None,
             };
             for a in 0..3 {
-                let d = x[a] - c[a];
-                out.residuals.push(w * (s * d - r.ray[a]));
+                out.residuals.push(w * (s * d[a] - r.ray[a]));
                 if block.is_some() {
                     for q in 0..3 {
-                        out.jacobian.push(if q == a { -w * s } else { 0.0 });
+                        out.jacobian.push(-w * m(a, q));
                     }
                 }
                 for q in 0..size {
                     let value = if q < 3 {
-                        if q == a { w * s } else { 0.0 }
+                        w * m(a, q)
                     } else if Some(q) == scale_col {
-                        w * d
+                        w * d[a]
                     } else {
                         0.0
                     };
@@ -704,8 +809,8 @@ fn similarity(from: &[Vector3<f64>], to: &[Vector3<f64>], w: &[f64]) -> Option<(
 /// it with that one only. Ascending.
 fn local_outliers(graph: &ViewGraph, fix_of: &[Option<usize>], g: &Gnss, block: &Positioned) -> Vec<usize> {
     let n = fix_of.len();
-    // per edge of one flight between two photos with a fix: its photos and its disagreement in the
-    // accuracies of the two fixes combined, horizontal and vertical
+    // per edge of one flight between two photos with a fix: its photos, the disagreement of the
+    // two fixes with the block and their combined accuracy
     let mut edges = Vec::new();
     for e in &graph.edges {
         let (a, b) = (e.a, e.b);
@@ -721,11 +826,23 @@ fn local_outliers(graph: &ViewGraph, fix_of: &[Option<usize>], g: &Gnss, block: 
             continue;
         }
         let d: [f64; 3] = std::array::from_fn(|x| g.xyz[ka][x] - g.xyz[kb][x] - (ca[x] - cb[x]));
-        let s: [f64; 3] = std::array::from_fn(|x| g.sigma[ka][x].hypot(g.sigma[kb][x]));
-        edges.push((a, b, (d[0] / s[0]).hypot(d[1] / s[1]), (d[2] / s[2]).abs()));
+        edges.push((a, b, d, combined(g, ka, kb)));
     }
-    // the rays-only block is only locally right: its error over an edge sets the scale of a
-    // disagreement when it is larger than the accuracy of the fixes (the robust scales of the
+    vouched(n, &edges)
+}
+
+/// The photos (of `n`) that disagree with most of their neighbours, from the edges `(a, b,
+/// disagreement, accuracy)` (metres per axis): a disagreement is beyond `OUTLIER_SIGMAS` of the
+/// accuracy (the horizontal axes together, or the vertical), or of the robust scale of all the
+/// disagreements where that is the larger; a neighbour counts against a photo only when it agrees
+/// with most of its other neighbours; a photo needs two neighbours at least. Ascending.
+fn vouched(n: usize, edges: &[(usize, usize, [f64; 3], [f64; 3])]) -> Vec<usize> {
+    let edges: Vec<(usize, usize, f64, f64)> = edges
+        .iter()
+        .map(|&(a, b, d, s)| (a, b, (d[0] / s[0]).hypot(d[1] / s[1]), (d[2] / s[2]).abs()))
+        .collect();
+    // the block (or the directions) is only locally right: its error over an edge sets the scale
+    // of a disagreement when it is larger than the accuracy of the fixes (the robust scales of the
     // horizontal norms, a Rayleigh median, and of the vertical values)
     let mut h: Vec<f64> = edges.iter().map(|e| e.2).collect();
     let mut v: Vec<f64> = edges.iter().map(|e| e.3).collect();
@@ -788,10 +905,30 @@ pub fn position(
     o: &Options,
     observe: &mut dyn FnMut() -> bool,
 ) -> Result<Positioned, String> {
+    position_with(input, cams, graph, rotations, tracks, selected, gnss, o, Scales::Eliminated, observe)
+}
+
+/// `position` with the scales of the observations solved as `scales` says (`Scales::Explicit` is
+/// the reference formulation the tests compare with).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn position_with(
+    input: &Input,
+    cams: &[Camera],
+    graph: &ViewGraph,
+    rotations: &Rotations,
+    tracks: &Tracks,
+    selected: &[usize],
+    gnss: Option<&Gnss>,
+    o: &Options,
+    scales: Scales,
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Positioned, String> {
     check(input, cams, graph, rotations, tracks, selected, gnss, o)?;
     if !observe() {
         return Err("cancelled".into());
     }
+    let ctx = Context { input, cams, graph, rotations, tracks, selected, o, scales };
     let n = input.images.len();
     // the position of each placed photo, by its index in `gnss`
     let mut fix_of: Vec<Option<usize>> = vec![None; n];
@@ -804,15 +941,178 @@ pub fn position(
     }
     let with_positions = gnss.filter(|_| fix_of.iter().filter(|f| f.is_some()).count() >= 3);
     let Some(g) = with_positions else {
-        return free(input, cams, rotations, tracks, selected, o, observe);
+        return free(&ctx, observe);
     };
-    // the robust start: the rays alone, put on the positions by one robust similarity, which also
-    // finds the positions that disagree with the rays
-    let block = free(input, cams, rotations, tracks, selected, o, observe)?;
+    let Some(mut from_fixes) = from_positions(&ctx, g, &fix_of, observe)? else {
+        // the positions alone cannot orient the block: the rays alone put on them (step 1)
+        let mut p = from_rays(&ctx, g, &fix_of, observe)?;
+        if p.frame == Frame::Gnss {
+            p.notes.push("positioning: the pairs of one flight could not turn the frame; started from the rays \
+                          alone".into());
+        }
+        return Ok(p);
+    };
+    let Err(why) = start_check(&from_fixes, g, &fix_of) else {
+        return Ok(from_fixes);
+    };
     if !observe() {
         return Err("cancelled".into());
     }
-    let on_positions = put_on_positions(block, &fix_of, g)?;
+    // the fallback: the rays alone from the random start, put on the positions (step 1); kept only
+    // when clearly better on the rays (`prefer_rays`)
+    let mut from_block = from_rays(&ctx, g, &fix_of, observe)?;
+    if prefer_rays(&from_fixes, &from_block) {
+        from_block.notes.push(format!("positioning: the start at the positions failed its check ({why}); started \
+                                       from the rays alone (cost of a ray {:.3e} against {:.3e})",
+                                      from_block.ray_cost, from_fixes.ray_cost));
+        Ok(from_block)
+    } else {
+        from_fixes.notes.push(format!("positioning: the start at the positions failed its check ({why}); kept the \
+                                       start at the positions (the rays alone: frame {:?}, cost of a ray {:.3e} \
+                                       against {:.3e})", from_block.frame, from_block.ray_cost,
+                                      from_fixes.ray_cost));
+        Ok(from_fixes)
+    }
+}
+
+/// Whether the block from the rays alone replaces the block from the positions after a failed
+/// check: only in the frame of the positions (the fallback never weakens a frame the positions
+/// turned, ruling R11, to a similarity) and with a mean cost of its ray observations below
+/// `RAYS_BETTER` times the other's. The count of outliers does not decide: a bent block from the
+/// rays alone can take wrong positions into the translations of the flights and name fewer of
+/// them; the rays say which block fits the photos.
+fn prefer_rays(from_fixes: &Positioned, from_rays: &Positioned) -> bool {
+    from_rays.frame == Frame::Gnss && from_rays.ray_cost < RAYS_BETTER * from_fixes.ray_cost
+}
+
+/// What every stage of the positioning reads.
+struct Context<'a> {
+    input: &'a Input,
+    cams: &'a [Camera],
+    graph: &'a ViewGraph,
+    rotations: &'a Rotations,
+    tracks: &'a Tracks,
+    selected: &'a [usize],
+    o: &'a Options,
+    scales: Scales,
+}
+
+/// The robust check of the start at the positions, after its joint solve: `Err` naming the
+/// failure when more than `START_OUTLIER_SHARE` of the positions are outliers, or when more than
+/// half of the positions of a flight of `MIN_CHECKED_FLIGHT` positions or more are (a block that
+/// the solve left in a wrong basin, a flight that its bias did not take).
+fn start_check(p: &Positioned, g: &Gnss, fix_of: &[Option<usize>]) -> Result<(), String> {
+    let total = fix_of.iter().flatten().count();
+    let outliers = p.gnss_outliers.len();
+    if outliers as f64 > START_OUTLIER_SHARE * total as f64 {
+        return Err(format!("{outliers} of {total} positions are outliers"));
+    }
+    let mut flights: Vec<(i64, usize, usize)> = Vec::new();
+    for (i, k) in fix_of.iter().enumerate() {
+        let Some(k) = *k else { continue };
+        let out = usize::from(p.gnss_outliers.binary_search(&i).is_ok());
+        match flights.iter_mut().find(|(id, _, _)| *id == g.flight[k]) {
+            Some(f) => {
+                f.1 += 1;
+                f.2 += out;
+            }
+            None => flights.push((g.flight[k], 1, out)),
+        }
+    }
+    flights.sort_unstable();
+    for (id, count, out) in flights {
+        if count >= MIN_CHECKED_FLIGHT && 2 * out > count {
+            return Err(format!("{out} of the {count} positions of flight {id} are outliers"));
+        }
+    }
+    Ok(())
+}
+
+/// Steps 1 to 4 from the positions: the frame turned onto them, the positions that disagree with
+/// their neighbours left out (`local_by_directions`), the offsets of the flights from the pairs
+/// across flights (`flight_offsets`) and the frame turned again on the positions less them, every
+/// centre starting at its position less its flight's offset (a photo without one placed from its
+/// rays, `resect`), and the joint solve. `None` when the positions cannot orient the block.
+fn from_positions(
+    ctx: &Context,
+    g: &Gnss,
+    fix_of: &[Option<usize>],
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Option<Positioned>, String> {
+    // a first frame from the positions as they are (the pairs across two flights carry the
+    // difference of their offsets: the Huber weights of the frame bound them), the positions that
+    // disagree with their neighbours and the offsets of the flights in it; then the frame again
+    // from the positions less those offsets, and the offsets in that frame
+    let Some((q, _)) = turn_onto_positions(ctx.graph, ctx.rotations, fix_of, g) else {
+        return Ok(None);
+    };
+    let dirs = directions(ctx.graph, ctx.rotations, &q);
+    let local = local_by_directions(&dirs, fix_of, g);
+    let mut used = fix_of.to_vec();
+    for &i in &local {
+        used[i] = None;
+    }
+    let mut offsets = flight_offsets(&dirs, &used, g);
+    let mut frame = None;
+    for _ in 0..FRAME_PASSES {
+        let Some((q, residual_deg)) = turn_onto_positions(ctx.graph, ctx.rotations, &used, &less(g, &offsets))
+        else {
+            return Ok(None);
+        };
+        let next = flight_offsets(&directions(ctx.graph, ctx.rotations, &q), &used, g);
+        let moved = next
+            .iter()
+            .zip(&offsets)
+            .map(|(a, b)| (Vector3::from(a.1) - Vector3::from(b.1)).norm())
+            .fold(0.0, f64::max);
+        offsets = next;
+        frame = Some((q, residual_deg));
+        if moved < FRAME_SETTLED {
+            break;
+        }
+    }
+    let (q, residual_deg) = frame.expect("one pass at least");
+    if !observe() {
+        return Err("cancelled".into());
+    }
+    let bias_of = |id: i64| offsets.iter().find(|(f, _)| *f == id).map_or([0.0; 3], |(_, b)| *b);
+    let world_from_cam: Vec<Option<Matrix3<f64>>> =
+        ctx.rotations.world_from_cam.iter().map(|w| w.as_ref().map(|w| q * matrix(w))).collect();
+    let mut start: Vec<Option<Vector3<f64>>> = used
+        .iter()
+        .map(|k| {
+            k.map(|k| {
+                let b = bias_of(g.flight[k]);
+                Vector3::new(g.xyz[k][0] - b[0], g.xyz[k][1] - b[1], g.xyz[k][2] - b[2])
+            })
+        })
+        .collect();
+    let mut local = local;
+    local.extend(rays_against_positions(ctx, &world_from_cam, &mut start, &mut used, g));
+    local.sort_unstable();
+    local.dedup();
+    resect(ctx, &world_from_cam, &mut start);
+    let js = JointStart { q, residual_deg, world_from_cam, start, used, local, bias_of: &bias_of };
+    joint(ctx, g, fix_of, js, observe).map(Some)
+}
+
+/// Steps 1 to 4 from the rays alone (the fallback): the rays alone from GLOMAP's random start put
+/// on the positions by the robust similarity with the translations of the flights, the positions
+/// that disagree with their neighbours on it left out (`local_outliers`), the frame turned onto the
+/// positions less those translations, the centres starting where the similarity put them, and the
+/// joint solve; the block on the positions (`Frame::Similarity`) when they cannot orient it.
+fn from_rays(
+    ctx: &Context,
+    g: &Gnss,
+    fix_of: &[Option<usize>],
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Positioned, String> {
+    let n = fix_of.len();
+    let block = free(ctx, observe)?;
+    if !observe() {
+        return Err("cancelled".into());
+    }
+    let on_positions = put_on_positions(block, fix_of, g)?;
     if on_positions.frame != Frame::Similarity {
         return Ok(on_positions);
     }
@@ -820,30 +1120,22 @@ pub fn position(
     // position is far from it wherever the drift is largest, which is where the positions are
     // needed; only a fix that disagrees with the fixes of most of its neighbours in the view graph
     // is left out of the joint solve (`local_outliers`), and the joint solve finds the others
-    let local = local_outliers(graph, &fix_of, g, &on_positions);
-    let all_fixes = fix_of.clone();
-    let mut fix_of = fix_of;
+    let local = local_outliers(ctx.graph, fix_of, g, &on_positions);
+    let mut used = fix_of.to_vec();
     for &i in &local {
-        fix_of[i] = None;
+        used[i] = None;
     }
     // the directions between the positions with the translations of their flights taken out
     let bias_of = |id: i64| on_positions.bias.iter().find(|(f, _)| *f == id).map_or([0.0; 3], |(_, b)| *b);
-    let mut corrected = g.clone();
-    for (xyz, &id) in corrected.xyz.iter_mut().zip(&g.flight) {
-        let b = bias_of(id);
-        for a in 0..3 {
-            xyz[a] -= b[a];
-        }
-    }
-    let Some((q, residual_deg)) = turn_onto_positions(graph, rotations, &fix_of, &corrected)
-    else {
+    let corrected = less(g, &on_positions.bias);
+    let Some((q, residual_deg)) = turn_onto_positions(ctx.graph, ctx.rotations, &used, &corrected) else {
         return Ok(on_positions);
     };
     if !observe() {
         return Err("cancelled".into());
     }
     let world_from_cam: Vec<Option<Matrix3<f64>>> =
-        rotations.world_from_cam.iter().map(|w| w.as_ref().map(|w| q * matrix(w))).collect();
+        ctx.rotations.world_from_cam.iter().map(|w| w.as_ref().map(|w| q * matrix(w))).collect();
     // the centres start where the similarity put the rays-only block; a photo it did not place,
     // or placed farther than `OUTLIER_SIGMAS` from its position (the flight's translation taken
     // out), on its position: the rays alone drift and can be broken in places, and from there the
@@ -851,7 +1143,7 @@ pub fn position(
     // positions so used have passed `local_outliers`)
     let start: Vec<Option<Vector3<f64>>> = (0..n)
         .map(|i| {
-            let fix = fix_of[i].map(|k| {
+            let fix = used[i].map(|k| {
                 let b = bias_of(g.flight[k]);
                 (Vector3::new(g.xyz[k][0] - b[0], g.xyz[k][1] - b[1], g.xyz[k][2] - b[2]), g.sigma[k])
             });
@@ -862,7 +1154,37 @@ pub fn position(
             }
         })
         .collect();
+    let js = JointStart { q, residual_deg, world_from_cam, start, used, local, bias_of: &bias_of };
+    joint(ctx, g, fix_of, js, observe)
+}
 
+/// Where the joint solve starts: the frame and its median angle, the turned rotations, the centres,
+/// the positions used and those left out before the solve, and the bias of each flight (by its
+/// id, measured from any flight: the first flight of the positions used is taken as zero).
+struct JointStart<'a> {
+    q: Matrix3<f64>,
+    residual_deg: f64,
+    world_from_cam: Vec<Option<Matrix3<f64>>>,
+    start: Vec<Option<Vector3<f64>>>,
+    used: Vec<Option<usize>>,
+    local: Vec<usize>,
+    bias_of: &'a dyn Fn(i64) -> [f64; 3],
+}
+
+/// Steps 3 and 4 from `js`: the tracks triangulated from the starts, the joint solve of centres,
+/// points and biases with every position used, the outliers after it (and the positions left out
+/// before it that the solved block agrees with taken back), and one more solve when anything
+/// changed. `all_fixes` is the position of each placed photo.
+fn joint(
+    ctx: &Context,
+    g: &Gnss,
+    all_fixes: &[Option<usize>],
+    js: JointStart,
+    observe: &mut dyn FnMut() -> bool,
+) -> Result<Positioned, String> {
+    let (input, cams, tracks, selected, o) = (ctx.input, ctx.cams, ctx.tracks, ctx.selected, ctx.o);
+    let JointStart { q, residual_deg, world_from_cam, start, used: mut fix_of, local, bias_of } = js;
+    let n = fix_of.len();
     // the tracks triangulated from the starts, through the filter (the reprojection left out)
     let mut triangulated: Vec<Option<[f64; 3]>> = vec![None; tracks.len()];
     for &t in selected {
@@ -925,9 +1247,10 @@ pub fn position(
     // the flights share the rays of one component of the rotations (the photos placed are one
     // connected part of the view graph): a flight without rays to the others would let its bias
     // and its centres trade off
-    let mut m = PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber);
-    // the translations of step 1 are measured from the first flight of all the positions; when its
-    // positions were all left out, the first flight here is another one, held at zero
+    let mut m = PositionModel::new(rays_in, &points, centres, None, fixes, flights.len(), o.positioning_huber,
+                                   ctx.scales);
+    // the biases are measured from the first flight of all the positions; when its positions were
+    // all left out, the first flight here is another one, held at zero
     let reference = flights.first().map_or([0.0; 3], |&id| bias_of(id));
     for (f, &id) in flights.iter().enumerate().skip(1) {
         let b = bias_of(id);
@@ -935,7 +1258,7 @@ pub fn position(
     }
     let mut cost = solve(&mut m, MAX_ITERATIONS, observe)?;
     // the positions farther than `OUTLIER_SIGMAS` from the solved centres and biases are the
-    // outliers; a fix left out by `local_outliers` that the solved block agrees with comes back (a
+    // outliers; a fix left out before the solve that the solved block agrees with comes back (a
     // photo the rays alone placed wrong looks like a wrong fix to its neighbours); the block is
     // solved once more when anything changed
     let mut far: Vec<usize> =
@@ -988,19 +1311,312 @@ pub fn position(
         gnss_outliers,
         scales_on_floor: m.scales_on_floor(),
         cost,
+        ray_cost: m.ray_cost(),
+        notes: Vec::new(),
     })
 }
 
+/// Per edge of `graph` with parallax whose two photos have a rotation (the edges the rotation
+/// averaging kept): its photos and the unit direction from the centre of the first to the centre
+/// of the second in the frame turned by `q`.
+fn directions(graph: &ViewGraph, rotations: &Rotations, q: &Matrix3<f64>) -> Vec<(usize, usize, Vector3<f64>)> {
+    let n = rotations.world_from_cam.len();
+    let mut out = Vec::new();
+    for (k, e) in graph.edges.iter().enumerate() {
+        if !e.parallax || e.a >= n || e.b >= n || rotations.dropped.binary_search(&k).is_ok() {
+            continue;
+        }
+        let (Some(_), Some(wb)) = (rotations.world_from_cam[e.a], rotations.world_from_cam[e.b]) else {
+            continue;
+        };
+        // X_b = R X_a + t with t = R_b (C_a - C_b): C_b - C_a along -R_b^T t
+        let d = q * -(matrix(&wb) * Vector3::from(e.translation));
+        if d.norm() > 0.0 && d.iter().all(|v| v.is_finite()) {
+            out.push((e.a, e.b, d.normalize()));
+        }
+    }
+    out
+}
+
+/// The photos whose fix disagrees with the fixes of most of its neighbours of the same flight (as
+/// `local_outliers`), the disagreement over an edge being the part of the difference of the two
+/// fixes across the direction of the edge (`directions`): the rays give the direction between two
+/// photos, not their distance. A fix wrong along every edge of its photo is not seen here; the
+/// joint solve, whose positions pull with a bounded force, and the test after it find it.
+fn local_by_directions(dirs: &[(usize, usize, Vector3<f64>)], fix_of: &[Option<usize>], g: &Gnss) -> Vec<usize> {
+    let mut edges = Vec::new();
+    for &(a, b, u) in dirs {
+        let (Some(ka), Some(kb)) = (fix_of[a], fix_of[b]) else { continue };
+        if g.flight[ka] != g.flight[kb] {
+            continue;
+        }
+        let diff = Vector3::from(g.xyz[kb]) - Vector3::from(g.xyz[ka]);
+        let d = diff - u * u.dot(&diff);
+        edges.push((a, b, [d.x, d.y, d.z], combined(g, ka, kb)));
+    }
+    vouched(fix_of.len(), &edges)
+}
+
+/// The positions `g` less the offset of their flight (`offsets` by flight id; zero for a flight
+/// not in it).
+fn less(g: &Gnss, offsets: &[(i64, [f64; 3])]) -> Gnss {
+    let mut out = g.clone();
+    for (xyz, &id) in out.xyz.iter_mut().zip(&g.flight) {
+        let b = offsets.iter().find(|(f, _)| *f == id).map_or([0.0; 3], |(_, b)| *b);
+        for a in 0..3 {
+            xyz[a] -= b[a];
+        }
+    }
+    out
+}
+
+/// The accuracy of the difference of the positions `ka` and `kb`, per axis.
+fn combined(g: &Gnss, ka: usize, kb: usize) -> [f64; 3] {
+    std::array::from_fn(|x| g.sigma[ka][x].hypot(g.sigma[kb][x]))
+}
+
+/// The offset of each flight of the positions used (by its id, sorted; the first at zero) from the
+/// edges between two flights: the centres of an edge are the positions less the offsets of their
+/// flights, and their difference lies along the direction of the edge (`directions`); in
+/// iteratively reweighted least squares (Huber 1 on the part of that difference across the
+/// direction, in the accuracy of the two positions). A flight without such edges, or a component
+/// the directions do not hold, stays at zero (a small ridge).
+fn flight_offsets(dirs: &[(usize, usize, Vector3<f64>)], fix_of: &[Option<usize>], g: &Gnss) -> Vec<(i64, [f64; 3])> {
+    let mut ids: Vec<i64> = fix_of.iter().flatten().map(|&k| g.flight[k]).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut offsets = vec![Vector3::zeros(); ids.len()];
+    let unknowns = 3 * ids.len().saturating_sub(1);
+    // per edge across two flights: the flights, the projector across its direction, the
+    // difference of the positions and the weight of the accuracy of the two
+    let mut edges: Vec<(usize, usize, Matrix3<f64>, Vector3<f64>, f64)> = Vec::new();
+    for &(a, b, u) in dirs {
+        let (Some(ka), Some(kb)) = (fix_of[a], fix_of[b]) else { continue };
+        if g.flight[ka] == g.flight[kb] {
+            continue;
+        }
+        let fa = ids.binary_search(&g.flight[ka]).expect("a known flight");
+        let fb = ids.binary_search(&g.flight[kb]).expect("a known flight");
+        let s = combined(g, ka, kb);
+        let base = 3.0 / (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+        edges.push((fa, fb, Matrix3::identity() - u * u.transpose(),
+                    Vector3::from(g.xyz[kb]) - Vector3::from(g.xyz[ka]), base));
+    }
+    if unknowns > 0 && !edges.is_empty() {
+        let mut weights: Vec<f64> = edges.iter().map(|e| e.4).collect();
+        for _ in 0..IRLS_ITERATIONS {
+            let mut a = DMatrix::<f64>::zeros(unknowns, unknowns);
+            let mut rhs = DVector::<f64>::zeros(unknowns);
+            for (&(fa, fb, p, y, _), w) in edges.iter().zip(&weights) {
+                // the residual P (y - o_b + o_a), the first flight's offset held at zero
+                let terms = [(fb, -1.0), (fa, 1.0)];
+                for &(f, sf) in &terms {
+                    if f == 0 {
+                        continue;
+                    }
+                    let rf = 3 * (f - 1);
+                    for &(h, sh) in &terms {
+                        if h == 0 {
+                            continue;
+                        }
+                        let rh = 3 * (h - 1);
+                        let block = *w * sf * sh * p;
+                        let mut view = a.view_mut((rf, rh), (3, 3));
+                        view += block;
+                    }
+                    let mut view = rhs.rows_mut(rf, 3);
+                    view -= *w * sf * (p * y);
+                }
+            }
+            let ridge = 1e-9 * a.diagonal().max().max(f64::MIN_POSITIVE);
+            for d in 0..unknowns {
+                a[(d, d)] += ridge;
+            }
+            let Some(x) = a.cholesky().map(|c| c.solve(&rhs)) else { break };
+            let next: Vec<Vector3<f64>> = (0..ids.len())
+                .map(|f| match f {
+                    0 => Vector3::zeros(),
+                    _ => Vector3::new(x[3 * f - 3], x[3 * f - 2], x[3 * f - 1]),
+                })
+                .collect();
+            let moved = next.iter().zip(&offsets).map(|(a, b)| (a - b).norm()).fold(0.0, f64::max);
+            offsets = next;
+            weights = edges
+                .iter()
+                .map(|&(fa, fb, p, y, base)| {
+                    let norm = (p * (y - offsets[fb] + offsets[fa])).norm() * base.sqrt();
+                    base * if norm <= GNSS_HUBER { 1.0 } else { GNSS_HUBER / norm }
+                })
+                .collect();
+            if moved < 1e-9 {
+                break;
+            }
+        }
+    }
+    ids.iter().zip(&offsets).map(|(&id, o)| (id, [o.x, o.y, o.z])).collect()
+}
+
+/// The centre of each photo of `targets` from its rays: the centre nearest the lines from the
+/// points of its tracks, each triangulated from the other photos with a start (the photo itself
+/// left out; with `flight_of`, only the photos of its flight), back along its rays; solved again
+/// without the lines farther than `RESECT_SPREAD` times the median distance (wrong matches).
+/// `None` for a photo with fewer than two such lines.
+fn resection(
+    ctx: &Context,
+    world_from_cam: &[Option<Matrix3<f64>>],
+    start: &[Option<Vector3<f64>>],
+    targets: &[bool],
+    flight_of: Option<&[Option<i64>]>,
+) -> Vec<Option<Vector3<f64>>> {
+    let (input, cams, tracks) = (ctx.input, ctx.cams, ctx.tracks);
+    let n = start.len();
+    let mut lines: Vec<Vec<([f64; 3], [f64; 3])>> = vec![Vec::new(); n];
+    for &t in ctx.selected {
+        let track = tracks.track(t);
+        if !track.iter().any(|&(image, _)| targets[image as usize] && world_from_cam[image as usize].is_some()) {
+            continue;
+        }
+        let rays: Vec<(usize, [f64; 3], [f64; 3])> = track
+            .iter()
+            .filter_map(|&(image, k)| {
+                let image = image as usize;
+                let (w, c) = (world_from_cam[image].as_ref()?, start[image]?);
+                let v = ray(input, cams, w, image, k);
+                Some((image, [c.x, c.y, c.z], [v.x, v.y, v.z]))
+            })
+            .collect();
+        for &(image, k) in track {
+            let image = image as usize;
+            let Some(w) = world_from_cam[image].as_ref().filter(|_| targets[image]) else { continue };
+            let same = |j: usize| flight_of.is_none_or(|f| f[j].is_some() && f[j] == f[image]);
+            let others: Vec<([f64; 3], [f64; 3])> =
+                rays.iter().filter(|r| r.0 != image && same(r.0)).map(|r| (r.1, r.2)).collect();
+            let Some(x) = triangulate::point(&others) else { continue };
+            let v = ray(input, cams, w, image, k);
+            lines[image].push((x, [-v.x, -v.y, -v.z]));
+        }
+    }
+    lines
+        .iter()
+        .map(|lines| {
+            let c = triangulate::point(lines)?;
+            let distance = |l: &([f64; 3], [f64; 3])| {
+                let (x, v) = (Vector3::from(l.0), Vector3::from(l.1));
+                let d = Vector3::from(c) - x;
+                (d - v * v.dot(&d)).norm()
+            };
+            let mut spread: Vec<f64> = lines.iter().map(distance).collect();
+            let limit = RESECT_SPREAD * median(&mut spread);
+            let near: Vec<([f64; 3], [f64; 3])> = lines.iter().filter(|l| distance(l) <= limit).copied().collect();
+            Some(Vector3::from(triangulate::point(&near).unwrap_or(c)))
+        })
+        .collect()
+}
+
+/// The photos started at their position whose position disagrees with their rays: each such
+/// photo resected from the points of the others of its flight (`resection`), its disagreement with
+/// its start
+/// in the accuracy of its position; beyond `OUTLIER_SIGMAS` of the accuracy (the horizontal axes
+/// together, or the vertical), or of the robust scale of all the disagreements where that is the
+/// larger, the photo starts at its resection instead and its position is left out of the start
+/// (it comes back after the joint solve when the block agrees with it); in `RESECT_PASSES` passes,
+/// as the starts so moved give better points. The photos so moved, ascending.
+fn rays_against_positions(
+    ctx: &Context,
+    world_from_cam: &[Option<Matrix3<f64>>],
+    start: &mut [Option<Vector3<f64>>],
+    used: &mut [Option<usize>],
+    g: &Gnss,
+) -> Vec<usize> {
+    let mut moved = Vec::new();
+    for _ in 0..RESECT_PASSES {
+        let targets: Vec<bool> = used.iter().map(|k| k.is_some()).collect();
+        // the offsets between two flights are not known well enough yet to compare across them
+        let flight_of: Vec<Option<i64>> = used.iter().map(|k| k.map(|k| g.flight[k])).collect();
+        let at = resection(ctx, world_from_cam, start, &targets, Some(&flight_of));
+        // per photo: its disagreement, horizontal and vertical, in the accuracy of its position
+        let mut checked: Vec<(usize, Vector3<f64>, f64, f64)> = Vec::new();
+        for i in 0..used.len() {
+            let (Some(k), Some(r), Some(c)) = (used[i], at[i], start[i]) else { continue };
+            let s = g.sigma[k];
+            let e = r - c;
+            checked.push((i, r, (e.x / s[0]).hypot(e.y / s[1]), (e.z / s[2]).abs()));
+        }
+        let mut h: Vec<f64> = checked.iter().map(|e| e.2).collect();
+        let mut v: Vec<f64> = checked.iter().map(|e| e.3).collect();
+        let (sh, sv) = (median(&mut h) / RAYLEIGH_MEDIAN, MAD_SCALE * median(&mut v));
+        let (lh, lv) = (OUTLIER_SIGMAS * sh.max(1.0), OUTLIER_SIGMAS * sv.max(1.0));
+        let far: Vec<(usize, Vector3<f64>)> =
+            checked.iter().filter(|e| e.2 > lh || e.3 > lv).map(|e| (e.0, e.1)).collect();
+        if far.is_empty() {
+            break;
+        }
+        for (i, r) in far {
+            start[i] = Some(r);
+            used[i] = None;
+            moved.push(i);
+        }
+    }
+    moved.sort_unstable();
+    moved
+}
+
+/// The placed photos without a start (no position used) started from their rays (`resection`),
+/// in passes, as photos started this way start the points of others. A photo still without a
+/// start that has observations starts at the mean of the starts of its neighbours in the view
+/// graph.
+fn resect(ctx: &Context, world_from_cam: &[Option<Matrix3<f64>>], start: &mut [Option<Vector3<f64>>]) {
+    let n = start.len();
+    let wanted = |start: &[Option<Vector3<f64>>], i: usize| world_from_cam[i].is_some() && start[i].is_none();
+    for _ in 0..RESECT_PASSES {
+        let targets: Vec<bool> = (0..n).map(|i| wanted(start, i)).collect();
+        if !targets.iter().any(|&t| t) {
+            return;
+        }
+        let at = resection(ctx, world_from_cam, start, &targets, None);
+        let mut moved = false;
+        for i in 0..n {
+            if let (true, Some(c)) = (targets[i], at[i]) {
+                start[i] = Some(c);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    let mut seen = vec![false; n];
+    for &t in ctx.selected {
+        for &(image, _) in ctx.tracks.track(t) {
+            seen[image as usize] = true;
+        }
+    }
+    let fallback: Vec<Option<Vector3<f64>>> = (0..n)
+        .map(|i| {
+            if !(wanted(start, i) && seen[i]) {
+                return None;
+            }
+            let near: Vec<Vector3<f64>> = ctx
+                .graph
+                .edges
+                .iter()
+                .filter_map(|e| if e.a == i { Some(e.b) } else if e.b == i { Some(e.a) } else { None })
+                .filter_map(|j| start.get(j).copied().flatten())
+                .collect();
+            (!near.is_empty()).then(|| near.iter().sum::<Vector3<f64>>() / near.len() as f64)
+        })
+        .collect();
+    for (s, f) in start.iter_mut().zip(fallback) {
+        if f.is_some() {
+            *s = f;
+        }
+    }
+}
+
 /// Step 5: the positioning without positions, from GLOMAP's random start.
-fn free(
-    input: &Input,
-    cams: &[Camera],
-    rotations: &Rotations,
-    tracks: &Tracks,
-    selected: &[usize],
-    o: &Options,
-    observe: &mut dyn FnMut() -> bool,
-) -> Result<Positioned, String> {
+fn free(ctx: &Context, observe: &mut dyn FnMut() -> bool) -> Result<Positioned, String> {
+    let (input, cams, rotations, tracks, selected, o) =
+        (ctx.input, ctx.cams, ctx.rotations, ctx.tracks, ctx.selected, ctx.o);
     let n = input.images.len();
     let mut rays_in = Vec::new();
     let mut point_of: Vec<Option<usize>> = vec![None; selected.len()];
@@ -1035,7 +1651,10 @@ fn free(
         (0..n).map(|i| if seen_photo[i] { random.vector(RANDOM_EXTENT) } else { [0.0; 3] }).collect();
     let points: Vec<[f64; 3]> = (0..count).map(|_| random.vector(RANDOM_EXTENT)).collect();
     let held = seen_photo.iter().position(|&s| s);
-    let mut m = PositionModel::new(rays_in, &points, centres, held, Vec::new(), 0, o.positioning_huber);
+    // GLOMAP's formulation (`Scales::Explicit`): from the random start the scales eliminated stop
+    // short (a point behind its camera, its scale on the floor, hardly moves)
+    let mut m =
+        PositionModel::new(rays_in, &points, centres, held, Vec::new(), 0, o.positioning_huber, Scales::Explicit);
     let cost = if m.rays.is_empty() { 0.0 } else { solve(&mut m, FREE_MAX_ITERATIONS, observe)? };
     Ok(Positioned {
         centres: (0..n).map(|i| seen_photo[i].then(|| m.centres[i])).collect(),
@@ -1049,6 +1668,8 @@ fn free(
         gnss_outliers: Vec::new(),
         scales_on_floor: m.scales_on_floor(),
         cost,
+        ray_cost: m.ray_cost(),
+        notes: Vec::new(),
     })
 }
 
@@ -1162,6 +1783,8 @@ fn put_on_positions(block: Positioned, fix_of: &[Option<usize>], g: &Gnss) -> Re
         gnss_outliers,
         scales_on_floor: block.scales_on_floor,
         cost: block.cost,
+        ray_cost: block.ray_cost,
+        notes: block.notes,
     })
 }
 
@@ -1180,5 +1803,65 @@ mod tests {
         let want = w.transpose() * (x - c);
         let (a, b, d) = transform(&pose_of(&w, &c), x.x, x.y, x.z);
         assert!((Vector3::new(a, b, d) - want).norm() < 1e-12, "{:?} vs {want:?}", (a, b, d));
+    }
+
+    /// A block of `n` photos, those of `outliers` named outliers, with the frame and ray cost given.
+    fn block(n: usize, outliers: &[usize], frame: Frame, ray_cost: f64) -> Positioned {
+        Positioned {
+            centres: vec![Some([0.0; 3]); n],
+            points: Vec::new(),
+            frame,
+            frame_rotation: rows(&Matrix3::identity()),
+            frame_residual_deg: None,
+            sigma_h: None,
+            sigma_v: None,
+            bias: Vec::new(),
+            gnss_outliers: outliers.to_vec(),
+            scales_on_floor: 0,
+            cost: 0.0,
+            ray_cost,
+            notes: Vec::new(),
+        }
+    }
+
+    /// Positions of `n` photos, photo `i` in flight `flight(i)`.
+    fn fixes(n: usize, flight: impl Fn(usize) -> i64) -> (Gnss, Vec<Option<usize>>) {
+        let g = Gnss {
+            image: (0..n).collect(),
+            xyz: vec![[0.0; 3]; n],
+            sigma: vec![[1.0; 3]; n],
+            flight: (0..n).map(flight).collect(),
+        };
+        (g, (0..n).map(Some).collect())
+    }
+
+    /// The check of the start: at most a tenth of the positions outliers, and no flight of three
+    /// positions or more with more than half of them.
+    #[test]
+    fn the_start_check() {
+        let (g, fix_of) = fixes(40, |i| 1 + (i >= 20) as i64);
+        assert_eq!(start_check(&block(40, &[], Frame::Gnss, 0.0), &g, &fix_of), Ok(()));
+        assert_eq!(start_check(&block(40, &[1, 5, 9, 30], Frame::Gnss, 0.0), &g, &fix_of), Ok(()));
+        let share = start_check(&block(40, &[1, 5, 9, 30, 33], Frame::Gnss, 0.0), &g, &fix_of);
+        assert!(share.unwrap_err().contains("5 of 40 positions"));
+        // a flight of 4 positions with 3 outliers: 3 of 40 overall, but more than half of the flight
+        let (g, fix_of) = fixes(40, |i| 1 + (i >= 36) as i64);
+        let flight = start_check(&block(40, &[36, 37, 38], Frame::Gnss, 0.0), &g, &fix_of);
+        assert!(flight.unwrap_err().contains("flight 2"));
+        assert_eq!(start_check(&block(40, &[36, 37], Frame::Gnss, 0.0), &g, &fix_of), Ok(()));
+        // a flight of 2 positions is not judged on its own
+        let (g, fix_of) = fixes(40, |i| 1 + (i >= 38) as i64);
+        assert_eq!(start_check(&block(40, &[38, 39], Frame::Gnss, 0.0), &g, &fix_of), Ok(()));
+    }
+
+    /// After a failed check the rays alone win only in the frame of the positions and with less
+    /// than half the cost of the rays per observation; fewer outliers alone do not make them win.
+    #[test]
+    fn the_rays_alone_win_only_on_their_cost() {
+        let from_fixes = block(40, &[1, 2, 3, 4, 5], Frame::Gnss, 1e-3);
+        assert!(prefer_rays(&from_fixes, &block(40, &[], Frame::Gnss, 0.4e-3)));
+        assert!(!prefer_rays(&from_fixes, &block(40, &[], Frame::Gnss, 0.6e-3)), "fewer outliers alone");
+        assert!(!prefer_rays(&from_fixes, &block(40, &[], Frame::Similarity, 0.1e-3)), "the frame weakened");
+        assert!(!prefer_rays(&from_fixes, &block(40, &[], Frame::Gnss, f64::NAN)));
     }
 }

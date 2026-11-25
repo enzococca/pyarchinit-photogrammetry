@@ -82,18 +82,21 @@ struct DiagonalBlock {
     start: usize,
     len: usize,
     factor: Vec<f64>,
+    /// The block is not positive definite (its Cholesky factor failed): then neither is the system.
+    singular: bool,
 }
 
 impl DiagonalBlock {
     fn new(start: usize, len: usize, mut block: Vec<f64>) -> DiagonalBlock {
         let diagonal: Vec<f64> = (0..len).map(|k| block[k * len + k]).collect();
-        if !cholesky(&mut block, len) {
+        let singular = !cholesky(&mut block, len);
+        if singular {
             block.fill(0.0);
             for (k, d) in diagonal.into_iter().enumerate() {
                 block[k * len + k] = if d > 0.0 { d.sqrt() } else { 1.0 };
             }
         }
-        DiagonalBlock { start, len, factor: block }
+        DiagonalBlock { start, len, factor: block, singular }
     }
 
     /// `z = M^-1 r` on the rows of the block.
@@ -357,7 +360,10 @@ pub(crate) fn pcg_step_with(
 
 /// `pcg_step_with` that refuses an iterate `max_iterations` stopped before the Q-criterion
 /// (`forcing`) was met: the solve of a column of an inverse (`lm::covariance_block`), where a
-/// truncated iterate is short exactly in the poorly determined directions.
+/// truncated iterate is short exactly in the poorly determined directions. It also refuses a system
+/// whose diagonal blocks are not all positive definite (a principal block of a positive definite
+/// matrix is): the iterations stay in the span of the right side and would otherwise answer with
+/// finite values on a singular system.
 pub(crate) fn pcg_step_converged(
     red: &Reduced,
     g: &[f64],
@@ -365,7 +371,7 @@ pub(crate) fn pcg_step_converged(
     forcing: f64,
     max_iterations: usize,
 ) -> Result<Vec<f64>, String> {
-    match pcg_solve(red, g, damping, forcing, max_iterations)? {
+    match pcg_solve_strict(red, g, damping, forcing, max_iterations, true)? {
         (delta, true) => Ok(delta),
         (_, false) => Err(format!("the conjugate gradients did not converge in {max_iterations} iterations")),
     }
@@ -378,6 +384,19 @@ fn pcg_solve(
     forcing: f64,
     max_iterations: usize,
 ) -> Result<(Vec<f64>, bool), String> {
+    pcg_solve_strict(red, g, damping, forcing, max_iterations, false)
+}
+
+/// `pcg_solve`; with `strict`, `Err` when a diagonal block of the reduced system is not positive
+/// definite.
+fn pcg_solve_strict(
+    red: &Reduced,
+    g: &[f64],
+    damping: &[f64],
+    forcing: f64,
+    max_iterations: usize,
+    strict: bool,
+) -> Result<(Vec<f64>, bool), String> {
     let points = point_inverses(red, g, damping);
     let cx = Context { shape: red.shape, lin: red.lin, g, damping, points: &points };
     let n = red.shape.n;
@@ -385,6 +404,9 @@ fn pcg_solve(
     let mut converged = true;
     if n > 0 {
         let (blocks, b) = preconditioner(&cx);
+        if strict && blocks.iter().any(|block| block.singular) {
+            return Err("the reduced system is not positive definite (a block of its diagonal is not)".into());
+        }
         let mut scratch = Scratch::new(red);
         let apply = |p: &[f64], q: &mut [f64]| product(&cx, &mut scratch, p, q);
         let (x, done) = conjugate_gradients(apply, &blocks, &b, forcing, max_iterations)?;

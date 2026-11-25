@@ -6,7 +6,8 @@ the choice of the program. The native engine does the matching (:data:`NATIVE_ST
 the alignment (its global mapper, :mod:`.native_map`), not the depth maps yet: on those ``native`` falls back to the classic engine, says so in the log and leaves the
 reason in the record of the step (:func:`record`, ``chunk.meta["engine"]``), which the report prints. ``auto`` is
 the classic engine for a step until that step is put in :data:`AUTO_NATIVE_STEPS`, once it has passed its gate: the
-matching is. A method whose engine cannot do the step after all (a failure half way) falls back the same way
+matching and the alignment are (the alignment when the mapper ``auto`` picks is the global one,
+:func:`.native_map.auto_takes`; a block the native mapper refuses is aligned by the classic chain, the reason kept). A method whose engine cannot do the step after all (a failure half way) falls back the same way
 (:func:`fall_back`); a request the native engine does not take (the native core missing, a learned matcher...) is a
 fallback under ``native`` and, under ``auto``, the program's choice of the classic engine (:func:`decline`).
 
@@ -28,8 +29,9 @@ STEPS = ("match_photos", "align_cameras", "build_depth_maps")
 NATIVE_STEPS: frozenset[str] = frozenset({"match_photos", "align_cameras"})
 # those of them ``auto`` gives to the native engine: a step goes in once it has passed its gate (the session owner
 # adds it, one line, one commit): the matching, since its gate on the large block (2026-11-22: 2.6 times faster than
-# the classic one, the same precision)
-AUTO_NATIVE_STEPS: frozenset[str] = frozenset({"match_photos"})
+# the classic one, the same precision); the alignment, since its gate on nine real blocks (2026-11-25: every photo
+# placed or more, the same reprojection error, 2 to 10 times faster; the classic chain stays the fallback)
+AUTO_NATIVE_STEPS: frozenset[str] = frozenset({"match_photos", "align_cameras"})
 _ACCEPTED = f"{', '.join(ENGINES[:-1])} or {ENGINES[-1]}"
 
 
@@ -60,7 +62,8 @@ def resolve(step: str, engine: str | None = None) -> Choice:
     """The engine that does ``step`` (one of :data:`STEPS`, the name of its method of
     :class:`..core.chunk.Chunk`) when ``engine`` is asked for (:func:`check`). ``classic`` is the classic engine.
     ``auto`` takes the native engine for a step only once that step has passed its gate and is in
-    :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): the matching; the other steps are classic. ``native``
+    :data:`AUTO_NATIVE_STEPS` (and in :data:`NATIVE_STEPS`): the matching and the alignment; the depth maps are
+    classic. ``native``
     is the native engine for a step it does (:data:`NATIVE_STEPS`: the matching, the alignment) and, on a step it
     does not do, falls back to the classic one, with the reason in ``fallback`` and one line in the log: never an
     error. A name that is not a step raises a ValueError that names it, before anything is done under it."""

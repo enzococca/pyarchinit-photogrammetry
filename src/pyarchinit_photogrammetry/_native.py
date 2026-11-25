@@ -47,7 +47,7 @@ FEATURES = {
     "convbin": "raw_to_rinex",  # raw receiver logs converted to RINEX by RTKLIB's convbin (API 11)
     "bundle": "bundle_adjust",  # the bundle adjustment of the native engine (API 12)
     "native_match": "native_match_pairs",  # the matching step of the native engine: features, pairs, stores (API 15)
-    "native_mapper": "NativeMapper",  # the global mapper of the native engine, one method per stage (API 16)
+    "native_mapper": "NativeMapper",  # the global mapper of the native engine, one method per stage (API 19)
     # the covariance of the free intrinsics of a bundle problem, from the reduced system (API 18)
     "intrinsics_covariance": "bundle_intrinsics_covariance",
 }
@@ -57,7 +57,10 @@ BUNDLE_API = 12  # bundle_adjust, bundle_evaluate
 NATIVE_MATCH_API = 15  # native_features, native_preselect, native_match_pairs, the stores, read_grey, rescale_as_colmap;
 # 14: the options of the second stage (guided, guided_max_ratio, guided_band); 15: the check of the second stage
 # (guided_check, on: a core of API 14 matches without it and is not taken)
-MAPPER_API = 16  # NativeMapper, native_mapper_defaults
+# NativeMapper, native_mapper_defaults; 19: the mapper of the alignment's gate (the last filter in pixels, the focal
+# length held alone with the radial terms judged): a core of API 16-18 carries the mapper that failed that gate and
+# is not taken, under auto or on request
+MAPPER_API = 19
 INTRINSICS_API = 18  # bundle_intrinsics_covariance (17 gave its diagonal alone, bundle_intrinsics_variances)
 
 # the bindings of the native matching, by the name they have in native_match_kernels() (``native_`` in front of
@@ -73,7 +76,7 @@ def supports(model: str) -> bool:
     API 8; ``"crinex"``: Hatanaka-compressed RINEX decoded, API 9; ``"tin"``: the TIN kernels, API 10;
     ``"convbin"``: raw receiver logs converted to RINEX, API 11; ``"bundle"``: the bundle adjustment
     of the native engine, API 12; ``"native_match"``: the matching step of the native engine, API 15;
-    ``"native_mapper"``: the global mapper of the native engine, API 16; ``"intrinsics_covariance"``: the
+    ``"native_mapper"``: the global mapper of the native engine, API 19; ``"intrinsics_covariance"``: the
     covariance of the free intrinsics of a bundle problem, API 18)."""
     core = _core() if enabled() else None
     if core is None:
@@ -123,9 +126,10 @@ def native_match_kernels() -> SimpleNamespace | None:
 
 
 def native_mapper() -> type | None:
-    """The class ``NativeMapper`` of the native engine (API 16): the global mapper on the arrays of COLMAP's
+    """The class ``NativeMapper`` of the native engine (API 19): the global mapper on the arrays of COLMAP's
     database, one method per stage (``view_graph``, ``rotations``, ``tracks``, ``position``, ``refine``, then
-    ``write_model`` and ``report``). ``None`` without a core of API 16, with ``PPG_NATIVE=0``, or with a core
+    ``write_model`` and ``report``). ``None`` without a core of API 19 (an older core carries the mapper that failed the gate of the alignment, which
+    is never taken), with ``PPG_NATIVE=0``, or with a core
     that does not carry it."""
     core = _core() if enabled() else None
     if core is None or (api() or 0) < MAPPER_API or not has("native_mapper"):

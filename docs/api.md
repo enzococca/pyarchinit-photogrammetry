@@ -143,8 +143,8 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 ### The native matching
 
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
-`auto`, the default, is the native engine for this step since it passed its gate - the classic one for the
-alignment and the depth maps) does the step with the native engine of the core (`engine.native_match`,
+`auto`, the default, is the native engine for this step since it passed its gate, as for the alignment - the classic
+one for the depth maps) does the step with the native engine of the core (`engine.native_match`,
 `ppg_core` API 15): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
@@ -625,25 +625,38 @@ pipeline: clusters of photos aligned on the cores, then merged.
 ### The native alignment
 
 `align_cameras(engine="native")` (or `PPG_ENGINE=native`) aligns the photos with the global mapper of the
-native engine (`engine.native_map`, `ppg_core` API 16) in place of COLMAP's: it reads the cameras, the key
+native engine (`engine.native_map`, `ppg_core` API 19) in place of COLMAP's: it reads the cameras, the key
 points and the verified pairs of `database.db` (whichever engine matched them), builds the view graph,
 averages the rotations, establishes the tracks (`tiepoint_limit / 4` per photo, 500 at least, as the classic
 global mapper), positions the cameras - on the GPS of the photos when three of them or more have one, on the
-same metric axes less a round offset as the pose priors of the classic engine; frame `gnss` when the positions
-orient the block, `similarity` when they spread too little for their accuracy and only place it, `free` without
-them - and adjusts the block in rounds (focal length and radial distortion freed from the second, only where the
-block determines them: a camera whose focal length has a marginal posterior sd (every term the last round frees free with it: fx and fy, the
-principal point and the decentring terms too where that round widens the camera to OPENCV) above
-0.5 % after the first round - a flat
-nadir block, which cannot tell its focal length from its height - keeps its calibration held, as does one whose
-focal length a freed round moves by more than 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` and the
-notes say so). The model is
-written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, stays the
-classic alignment until the native one has passed its gate.
+same metric axes less a round offset as the pose priors of the classic engine, the positioning starting from
+those positions (the rays alone only as the fallback of a start that fails its check); frame `gnss` when the
+positions orient the block, `similarity` when they spread too little for their accuracy and only place it,
+`free` without them - and adjusts the block in rounds (focal length and radial distortion freed from the second,
+only where the block determines them: a camera whose focal length has a marginal posterior sd (every term the
+last round frees free with it: fx and fy, the principal point and the decentring terms too where that round
+widens the camera to OPENCV) above 0.5 % after the first round - a flat nadir block, which cannot tell its focal
+length from its height - keeps its focal length held, with its principal point and decentring terms, and its
+radial terms are judged with the focal length held: free where the sd of the displacement they cause at the
+corner of the photo is 0.5 px at most, held above; a freed round that moves the focal length by more than 20 %,
+or the corner by more than a quarter of the half diagonal through the radial terms, is run again with them
+held; `report["focal_sd"]`, `report["intrinsics_held"]` (the focal length held), `report["radial_sd"]`,
+`report["radial_held"]` and the notes say so). After the rounds every track of three photos or more is
+triangulated again and the block adjusted once more with all of them, filtered before and after in pixels as
+COLMAP's retriangulation filters (an observation more than 4 px off, a point whose rays meet at less than
+1.5 degrees: the options `final_max_reprojection_px` and `final_min_triangulation_deg` of the mapper, the C++
+defaults of COLMAP's incremental mapper); a camera whose radial terms stayed held is tested after a radial
+correction fitted to its errors (nothing written back), at 4 px or four robust sigmas of the corrected errors,
+whichever is larger. The model is
+written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, is the
+native alignment since it passed its gate (nine real blocks, 2026-11-25) when the mapper `auto` picks for the
+chunk is the global one, with the classic chain behind it as below; `engine="classic"` keeps the classic
+alignment.
 
 What the native mapper does not do stays classic, with the reason in the log and in
-`meta["engine"]["align_cameras"]["fallback"]`: the native core missing or older than API 16
-(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, the `incremental` or
+`meta["engine"]["align_cameras"]["fallback"]` (under `auto` the classic alignment is then the program's choice,
+with no fallback recorded): the native core missing or older than API 19 (an older core carries the mapper that
+failed the gate of the alignment) (`the native core with the mapper (API 19) is not installed`), `PPG_NATIVE=0`, the `incremental` or
 `hierarchical` mapper asked, photos added to an alignment (`reset=False`), 360-degree rigs, calibrations held
 fixed, a camera model it does not know (a fisheye one).
 

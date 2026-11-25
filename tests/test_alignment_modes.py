@@ -194,9 +194,10 @@ def test_a_global_block_that_misses_its_gps_stops_before_its_adjustment(tmp_path
 
 def test_a_global_block_that_fits_goes_on_to_its_adjustment(tmp_path):
     """The same ring, nothing patched: the positioned block sits on the GPS of the photos within their noise, the
-    global alignment goes on to its adjustment and places every photo; the check is recorded with its residual."""
+    global alignment goes on to its adjustment and places every photo; the check is recorded with its residual. The
+    classic global mapper, asked by name (``auto`` aligns with the native one since its gate)."""
     _scene, _doc, ch = _matched_ring(tmp_path, accuracy=JUDGEABLE_ACCURACY)
-    n = ch.align_cameras(mapper="global")
+    n = ch.align_cameras(mapper="global", engine="classic")
     info = ch.meta["sfm"]
     assert info["mapper"] == "global", info.get("global_fallback")
     assert "global_fallback" not in info

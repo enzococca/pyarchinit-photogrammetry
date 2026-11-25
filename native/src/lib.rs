@@ -34,8 +34,10 @@ use ppg_engine::{bundle, camera, depth, gpu, gpu_fuse, gpu_patchmatch, gpu_sift,
 /// a match of the second stage also tested against the rivals the first stage saw, `guided_check`,
 /// 16: the native mapper - NativeMapper, native_mapper_defaults, 17: the variances of the free intrinsics of a
 /// bundle problem - bundle_intrinsics_variances, 18: their covariance in its place, whose diagonal they are -
-/// bundle_intrinsics_covariance).
-const API: u32 = 18;
+/// bundle_intrinsics_covariance, 19: the mapper of the alignment's gate - the last filter in pixels, the focal
+/// length held alone with the radial terms judged, the options final_max_reprojection_px and
+/// final_min_triangulation_deg, radial_held and radial_sd in the report).
+const API: u32 = 19;
 
 // one matcher per GPU, each behind its own lock: several GPUs work at the same time
 fn matchers() -> &'static Mutex<HashMap<i64, Arc<Mutex<gpu::Matcher>>>> {

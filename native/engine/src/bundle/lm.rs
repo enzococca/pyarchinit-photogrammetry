@@ -968,7 +968,7 @@ pub fn solve_model<M: Model>(
 /// covariance), never returned short.
 pub(crate) const COVARIANCE_DENSE_MAX_COLUMNS: usize = 8000;
 pub(crate) const COVARIANCE_FORCING: f64 = 1e-12;
-pub(crate) const COVARIANCE_PCG_ITERATIONS: usize = 5000;
+pub const COVARIANCE_PCG_ITERATIONS: usize = 5000;
 
 /// The block of the reduced columns `cols` of the inverse of the normal matrix `J^T W J` (the
 /// curvature of the robust loss as the steps use it, undamped) at the parameters of `m`: by the
@@ -1032,6 +1032,69 @@ pub(crate) fn covariance_block_with_limits<M: Model>(
         }
     }
     Ok(out)
+}
+
+/// The reduced columns of the solutions `x` of the undamped normal equations `J^T W J x = b` of
+/// the linearisation `lin` (the curvature of the robust loss as the steps use it), one for each
+/// right side `b` of `rhs` (one value per reduced column, none on the points: by the Schur
+/// complement the reduced system alone gives them). The solver is the one `Auto` takes for the
+/// steps within `dense_max_columns` and `pcg_above`: dense, the reduced system formed and
+/// factorised once for every right side; sparse, once per right side; the conjugate gradients per
+/// right side to `COVARIANCE_FORCING` within `pcg_iterations` (as a column of `covariance_block`,
+/// `COVARIANCE_PCG_ITERATIONS` there), refused when they meet a
+/// direction whose curvature is not positive or do not converge. `Err` when the reduced system is
+/// not positive definite (the message says "not positive"), when the conjugate gradients do not
+/// converge, or when a right side has another length.
+pub(crate) fn solve_normal_equations(
+    shape: &Shape,
+    lin: &Lin,
+    rhs: &[Vec<f64>],
+    dense_max_columns: usize,
+    pcg_above: u64,
+    pcg_iterations: usize,
+) -> Result<Vec<Vec<f64>>, String> {
+    let n = shape.n;
+    if let Some(b) = rhs.iter().find(|b| b.len() != n) {
+        return Err(format!("a right side of {} values for {n} reduced columns", b.len()));
+    }
+    if n == 0 || rhs.is_empty() {
+        return Ok(rhs.to_vec());
+    }
+    let held = vec![false; shape.n_point_cols];
+    let damping = vec![0.0; n + shape.n_point_cols];
+    if choose_linear_solver(n, 0, dense_max_columns, pcg_above) == LinearSolver::Dense {
+        let zero = vec![0.0; n + shape.n_point_cols];
+        let red = Reduced { shape, lin, held: &held };
+        let points = point_inverses(&red, &zero, &damping);
+        let cx = Context { shape, lin, g: &zero, damping: &damping, points: &points };
+        let (mut system, _) = dense_system(&cx);
+        let mut columns = rhs.concat();
+        cholesky_solve_columns(&mut system, &mut columns, rhs.len())?;
+        return Ok(columns.chunks(n).map(<[f64]>::to_vec).collect());
+    }
+    let mut stepper = Stepper::choose(shape, LinearSolver::Auto, dense_max_columns, pcg_above)?;
+    rhs.iter()
+        .map(|b| {
+            // a step solves (J^T W J) delta = -g: the right side as minus a gradient
+            let mut g = vec![0.0; n + shape.n_point_cols];
+            for (gk, bk) in g.iter_mut().zip(b) {
+                *gk = -bk;
+            }
+            // the conjugate gradients as for a column of a covariance: to convergence, a direction of
+            // curvature that is not positive refused, never an iterate stopped short
+            let delta = match stepper {
+                Stepper::Pcg => {
+                    let red = Reduced { shape, lin, held: &held };
+                    pcg_step_converged(&red, &g, &damping, COVARIANCE_FORCING, pcg_iterations)?
+                }
+                _ => stepper.step(shape, lin, &held, &g, &damping)?,
+            };
+            if !delta[..n].iter().all(|x| x.is_finite()) {
+                return Err("the reduced system is not positive definite".into());
+            }
+            Ok(delta[..n].to_vec())
+        })
+        .collect()
 }
 
 /// `solve_model` with the limits of `Auto` as arguments (the tests lower them to small blocks).

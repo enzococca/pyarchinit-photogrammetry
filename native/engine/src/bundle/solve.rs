@@ -7,7 +7,10 @@
 //! are updated on their manifold by `exp(delta) R`; the points their inliers do not hold are
 //! re-solved on their own after every accepted step (`residuals::refine_unheld_points`).
 
-use super::lm::{covariance_block, solve_model_with_limits, BlockJacobian, Model, Report};
+use super::lm::{
+    covariance_block, first_linearization, solve_model_with_limits, solve_normal_equations, BlockJacobian, Model,
+    Report, COVARIANCE_PCG_ITERATIONS,
+};
 use super::problem::{Layout, Parameters, Problem};
 use super::residuals::{
     bar, control, gnss, observation_linearized, observation_values, refine_unheld_points, rs_prior, variables, Loss,
@@ -203,6 +206,89 @@ pub fn bias_covariance(pb: &Problem, sol: &Solution, loss: Loss) -> Result<Vec<(
         })
         .collect();
     Ok(out)
+}
+
+/// The part of the hat matrix of the positions of the photos (`Problem::gnss`) times each probe of
+/// `probes` at the solution `sol` of `pb`: `H z` with `H = J_g N^-1 J_g^T W_g`, `J_g` the rows of the
+/// positions (in units of their sigmas: the fitted position, the centre of the photo plus the bias
+/// of its flight, minus the target, over the sigma), `N` the normal matrix of every row at the
+/// solution (`loss` on the tie points, its curvature as the steps use it, undamped) and `z` one
+/// value per row of the positions (per position, per axis). `H z` is how far the fitted positions
+/// move, in sigmas, when their targets move by `z` sigmas, to first order: one Gauss-Newton step
+/// from the solution, the linear solve of `lm::solve_normal_equations` (one factorisation for every
+/// probe on a block solved dense), in place of an adjustment per probe. `Err` when the reduced
+/// system is not positive definite, a probe has another length than the positions, or `sol` does
+/// not fit `pb`.
+pub fn gnss_hat_products(
+    pb: &Problem,
+    sol: &Solution,
+    loss: Loss,
+    probes: &[Vec<[f64; 3]>],
+) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    gnss_hat_products_with_limits(pb, sol, loss, probes, DENSE_MAX_COLUMNS, PCG_ABOVE_BYTES, COVARIANCE_PCG_ITERATIONS)
+}
+
+/// `gnss_hat_products` with the limits of `Auto` and the iterations of the conjugate gradients as
+/// arguments (the tests lower them).
+#[doc(hidden)]
+pub fn gnss_hat_products_with_limits(
+    pb: &Problem,
+    sol: &Solution,
+    loss: Loss,
+    probes: &[Vec<[f64; 3]>],
+    dense_max_columns: usize,
+    pcg_above: u64,
+    pcg_iterations: usize,
+) -> Result<Vec<Vec<[f64; 3]>>, String> {
+    pb.check()?;
+    let m = pb.gnss.len();
+    if let Some(z) = probes.iter().find(|z| z.len() != m) {
+        return Err(format!("a probe of {} positions for {m}", z.len()));
+    }
+    let mut model = BundleModel::new(pb, loss);
+    let params = sol.parameters();
+    params.fits(pb, &model.lay)?;
+    model.params = params;
+    let (shape, lin) = first_linearization(&model)?;
+    // b = J_g^T W_g z, on the reduced columns (the positions touch the photos and the biases only)
+    let rhs: Vec<Vec<f64>> = probes
+        .iter()
+        .map(|z| {
+            let mut b = vec![0.0; shape.n];
+            for (j, zj) in z.iter().enumerate() {
+                let k = model.gnss_block + j;
+                for (a, (row, jr)) in shape.jac_rows(&lin, k).enumerate() {
+                    let wz = lin.weights[row] * zj[a];
+                    for (c, pos) in shape.cameras_of(k) {
+                        let col = shape.cam_col[c];
+                        for t in 0..shape.cam_size[c] {
+                            b[col + t] += jr[pos + t] * wz;
+                        }
+                    }
+                }
+            }
+            b
+        })
+        .collect();
+    let solved = solve_normal_equations(&shape, &lin, &rhs, dense_max_columns, pcg_above, pcg_iterations)?;
+    Ok(solved
+        .iter()
+        .map(|x| {
+            (0..m)
+                .map(|j| {
+                    let k = model.gnss_block + j;
+                    let mut hz = [0.0; 3];
+                    for (a, (_, jr)) in shape.jac_rows(&lin, k).enumerate() {
+                        for (c, pos) in shape.cameras_of(k) {
+                            let col = shape.cam_col[c];
+                            hz[a] += (0..shape.cam_size[c]).map(|t| jr[pos + t] * x[col + t]).sum::<f64>();
+                        }
+                    }
+                    hz
+                })
+                .collect()
+        })
+        .collect())
 }
 
 /// The covariance of the free intrinsics of the cameras of `pb` at its own parameters: the block
@@ -687,6 +773,104 @@ mod tests {
         // a few iterations do not reach the inverse: refused, not returned short
         let short = covariance_block_with_limits(&model, &cols, 0, 3);
         assert!(short.is_err(), "{short:?}");
+    }
+
+    /// The hat products of the positions are, to first order, how far an adjustment moves the
+    /// fitted positions when their targets move: a grid of 16 photos in two flights (a bias each,
+    /// the first the reference, the intrinsics held) solved tightly, its targets moved by a tenth of their sigma times
+    /// random signs and the block solved again from the solution, against the linear products; the
+    /// sparse solver gives what the dense one gives; a probe of another length is refused.
+    #[test]
+    fn the_hat_products_of_the_positions_are_the_move_of_a_new_adjustment() {
+        let (mut pb, _) = crate::bundle::synthetic::grid_block(16, 150, 5);
+        pb.gcps.clear();
+        pb.mobs.clear();
+        pb.markers.clear();
+        // as in round 1 of the mapper: the intrinsics held
+        pb.cameras[0].free.clear();
+        for (j, g) in pb.gnss.iter_mut().enumerate() {
+            g.2 = [0.5, 0.5, 1.0];
+            g.3 = if j < 8 { 1 } else { 2 };
+            g.1[0] += if j < 8 { 0.0 } else { 0.7 };
+        }
+        pb.gnss_bias = true;
+        pb.reference_flight = Some(1);
+        pb.check().unwrap();
+        let tight = Options {
+            max_iterations: 200,
+            function_tolerance: 1e-15,
+            gradient_tolerance: 1e-14,
+            parameter_tolerance: 1e-15,
+            ..Options::default()
+        };
+        let sol = solve(&pb, &tight, &mut |_, _| true).unwrap();
+        // the solution as the start, the solved biases folded into the targets
+        let mut start = pb.clone();
+        start.rotations.clone_from(&sol.rotations);
+        start.centres.clone_from(&sol.centres);
+        start.points.clone_from(&sol.points);
+        for g in &mut start.gnss {
+            let b = sol.bias.iter().find(|(f, _)| *f == g.3).map_or([0.0; 3], |(_, b)| *b);
+            (0..3).for_each(|a| g.1[a] -= b[a]);
+        }
+        let at = solve(&start, &tight, &mut |_, _| true).unwrap();
+        let mut seed = 11u64;
+        let mut sign = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            if seed >> 63 == 1 { 1.0 } else { -1.0 }
+        };
+        let z: Vec<[f64; 3]> = (0..pb.gnss.len()).map(|_| [sign(), sign(), sign()]).collect();
+        let linear = gnss_hat_products(&start, &at, Loss::None, std::slice::from_ref(&z)).unwrap();
+        let step = 0.1;
+        let mut probe = start.clone();
+        for (g, zj) in probe.gnss.iter_mut().zip(&z) {
+            (0..3).for_each(|a| g.1[a] += step * g.2[a] * zj[a]);
+        }
+        let moved = solve(&probe, &tight, &mut |_, _| true).unwrap();
+        let mut largest = 0.0f64;
+        for (j, &(i, _, sigma, flight)) in start.gnss.iter().enumerate() {
+            let b = moved.bias.iter().find(|(f, _)| *f == flight).map_or([0.0; 3], |(_, b)| *b);
+            for a in 0..3 {
+                let hz = (moved.centres[i][a] + b[a] - at.centres[i][a]) / sigma[a] / step;
+                assert!((hz - linear[0][j][a]).abs() < 1e-3, "position {j} axis {a}: {hz} vs {}", linear[0][j][a]);
+                largest = largest.max(hz.abs());
+            }
+        }
+        assert!(largest > 0.05, "the probe moves the fit: {largest}");
+        let it = COVARIANCE_PCG_ITERATIONS;
+        let sparse = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, u64::MAX, it).unwrap();
+        for (d, s) in linear[0].iter().zip(&sparse[0]) {
+            for a in 0..3 {
+                assert!((d[a] - s[a]).abs() < 1e-9, "{d:?} vs {s:?}");
+            }
+        }
+        assert!(gnss_hat_products(&start, &at, Loss::None, &[z[1..].to_vec()]).is_err());
+        // the conjugate gradients converge to the same products, and a system that is not positive
+        // definite (a photo left with neither a tie point nor a position) is refused
+        // by every solver with "not positive", never answered with finite wrong values
+        let pcg = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0, it).unwrap();
+        // stopped before they converge: refused, never returned short
+        let short = gnss_hat_products_with_limits(&start, &at, Loss::None, &[z.clone()], 0, 0, 2);
+        assert!(short.as_ref().is_err_and(|e| e.contains("did not converge")), "{short:?}");
+        // relative to the largest product: the conjugate gradients stop on the Q-criterion, which
+        // leaves about 1e-6 of them (1.08e-6 measured on a Windows runner)
+        let scale = linear[0].iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+        for (d, s) in linear[0].iter().zip(&pcg[0]) {
+            for a in 0..3 {
+                assert!((d[a] - s[a]).abs() <= 1e-5 * scale, "{d:?} vs {s:?}");
+            }
+        }
+        let mut loose = start.clone();
+        loose.obs.retain(|o| o.image != 0);
+        loose.gnss.retain(|g| g.0 != 0);
+        let z: Vec<[f64; 3]> = z[1..].to_vec();
+        for (dense, pcg_above) in [(usize::MAX, u64::MAX), (0, u64::MAX), (0, 0)] {
+            let got = gnss_hat_products_with_limits(&loose, &at, Loss::None, &[z.clone()], dense, pcg_above, it);
+            match got {
+                Err(e) => assert!(e.contains("not positive") || e.contains("did not converge"), "{e}"),
+                Ok(v) => panic!("{dense} {pcg_above}: a singular system answered with {:?}", &v[0][..2]),
+            }
+        }
     }
 
     #[test]
