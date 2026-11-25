@@ -328,6 +328,38 @@ fn the_filter_drops_far_and_flat_observations() {
     assert!(triangulate::filter(&wrong, &[Some(x)], &input, &cams, &poses, &o).is_err());
 }
 
+/// The filter of the last adjustment (COLMAP's retriangulation): 4 pixels and 1.5 degrees beside
+/// the normalised threshold. An observation 5 pixels off, which the normalised threshold keeps at a
+/// focal length of 1000 pixels, goes; 3 pixels off stays; rays meeting at 1.2 degrees go.
+#[test]
+fn the_last_filter_drops_what_is_beyond_four_pixels_or_under_one_and_a_half_degrees() {
+    let o = Options::default();
+    let x = [1.0, 2.0, 0.5];
+    let (mut input, t, poses, cams) = seen_from(&[[0.0, 0.0, 20.0], [5.0, 0.0, 20.0], [10.0, 0.5, 20.0]], x);
+    let k1 = input.images[1].keypoints.start;
+    input.keypoints[k1][0] += 5.0;
+    let k2 = input.images[2].keypoints.start;
+    input.keypoints[k2][1] -= 3.0;
+    let kept = triangulate::filter(&t, &[Some(x)], &input, &cams, &poses, &o).unwrap();
+    assert_eq!(kept.keep, vec![true; 3]);
+    let kept = triangulate::filter_in_pixels(&t, &[Some(x)], &input, &cams, &poses, &o).unwrap();
+    assert_eq!(kept.keep, vec![true, false, true]);
+    assert_eq!((kept.by_reprojection, kept.by_angle), (1, 0));
+    // the threshold is the option's
+    let loose = Options { final_max_reprojection_px: 6.0, ..o.clone() };
+    let kept = triangulate::filter_in_pixels(&t, &[Some(x)], &input, &cams, &poses, &loose).unwrap();
+    assert_eq!(kept.keep, vec![true; 3]);
+
+    let baseline = |deg: f64| 2.0 * 19.5 * (deg.to_radians() / 2.0).tan();
+    let b = baseline(1.2);
+    let at = [0.5 + b / 2.0, 2.0, 0.5];
+    let (input, t, poses, cams) = seen_from(&[[0.5, 2.0, 20.0], [0.5 + b, 2.0, 20.0]], at);
+    let kept = triangulate::filter(&t, &[Some(at)], &input, &cams, &poses, &o).unwrap();
+    assert_eq!(kept.keep, vec![true; 2]);
+    let kept = triangulate::filter_in_pixels(&t, &[Some(at)], &input, &cams, &poses, &o).unwrap();
+    assert_eq!((kept.keep, kept.by_angle), (vec![false; 2], 2));
+}
+
 #[test]
 fn the_filter_keeps_the_points_of_a_scene() {
     let s = scene(5, Kind::Strip, 5);

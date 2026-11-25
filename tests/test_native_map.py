@@ -229,6 +229,10 @@ def test_the_filter_thresholds_are_colmaps():
     mapper = pycolmap.GlobalPipelineOptions().mapper
     assert defaults["max_normalized_reprojection"] == mapper.max_normalized_reproj_error
     assert defaults["min_triangulation_deg"] == mapper.min_tri_angle_deg
+    # the filter of the last adjustment is that of COLMAP's retriangulation (its incremental mapper's)
+    retriangulation = pycolmap.IncrementalPipelineOptions().mapper
+    assert defaults["final_max_reprojection_px"] == retriangulation.filter_max_reproj_error
+    assert defaults["final_min_triangulation_deg"] == retriangulation.filter_min_tri_angle
 
 
 def test_the_options_are_checked():

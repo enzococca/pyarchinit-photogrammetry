@@ -9,7 +9,9 @@
 //! (`POSITIONED_FILTER_SCALE`, applied once at the start of `refine`); after the adjustment of round
 //! `r` (from 1) it is `max(4 - r, 1)` times it (`filter_scale`: 3, 2, 1, COLMAP's `max(3 - ite, 1)`
 //! of `IterativeBundleAdjustment`); the last adjustment with every track is filtered at the plain
-//! threshold before and after (as `IterativeRetriangulateAndRefine`). Every filter is
+//! threshold before and after (as `IterativeRetriangulateAndRefine`), and in pixels as COLMAP's
+//! retriangulation filters (`triangulate::filter_in_pixels`: `Options::final_max_reprojection_px`
+//! and `final_min_triangulation_deg`, 4 px and 1.5 deg). The filters of the rounds are
 //! `triangulate::filter`, which also drops the points whose rays meet at less than
 //! `Options::min_triangulation_deg`.
 //!
@@ -37,8 +39,12 @@
 //!   held from then on. The notes say so per camera (`camera c: focal held: ...`).
 //!
 //! Then, unless `Options::final_all_tracks` is false, every track of three placed photos or more
-//! without a point is triangulated with the poses held, filtered, and one last adjustment runs
-//! with all of them (reported as round `rounds + 1`).
+//! without a point is triangulated with the poses held, filtered (in pixels as well), and one last
+//! adjustment runs with all of them (reported as round `rounds + 1`), filtered again in pixels.
+//! Without the filter in pixels a long track keeps a wrong observation up to the normalised
+//! threshold (36 px on a 20-megapixel drone camera): pycolmap's global mapper without its
+//! retriangulation leaves the same tail (a synthetic survey of 90 photos with 4 % of its key
+//! points 4-40 px off: a mean error of 1.42 px against 0.69 px with it).
 //!
 //! Everything runs in a fixed order (the problems are built in the order of the photos and of the
 //! tracks, the probes of `estimate_sigmas` drawn from a generator seeded here): two runs give the
@@ -450,6 +456,22 @@ fn adjust_with(pb: &Problem, loss: Loss, observe: &mut dyn FnMut() -> bool) -> R
 fn filter(state: &mut State, input: &Input, o: &Options, scale: f64) -> Result<(), String> {
     let scaled = Options { max_normalized_reprojection: o.max_normalized_reprojection * scale, ..o.clone() };
     let f = triangulate::filter(&state.tracks, &state.points, input, &state.cams(), &state.poses(), &scaled)?;
+    keep_filtered(state, f);
+    Ok(())
+}
+
+/// The filter of the last adjustment with every track (`triangulate::filter_in_pixels`: the
+/// normalised threshold, `Options::final_max_reprojection_px` and `final_min_triangulation_deg`),
+/// written into the state as `filter` writes it.
+fn filter_final(state: &mut State, input: &Input, o: &Options) -> Result<(), String> {
+    let f = triangulate::filter_in_pixels(&state.tracks, &state.points, input, &state.cams(), &state.poses(), o)?;
+    keep_filtered(state, f);
+    Ok(())
+}
+
+/// The flags of `f` into the state, the points of the tracks with no observation left dropped,
+/// `State::last_filter` set.
+fn keep_filtered(state: &mut State, f: triangulate::Filtered) {
     let mut seen = 0;
     for t in 0..state.tracks.len() {
         let range = state.tracks.offsets[t]..state.tracks.offsets[t + 1];
@@ -462,7 +484,6 @@ fn filter(state: &mut State, input: &Input, o: &Options, scale: f64) -> Result<(
     }
     state.keep = f.keep;
     state.last_filter = (seen, state.keep.iter().filter(|&&k| k).count());
-    Ok(())
 }
 
 /// The tracks of `which` without a point triangulated from the rays of every observation in a
@@ -1097,7 +1118,7 @@ pub fn refine(
         let placed_views = |t: usize| state.tracks.track(t).iter().filter(|&&(i, _)| state.placed(i as usize)).count();
         let every: Vec<usize> = (0..state.tracks.len()).filter(|&t| placed_views(t) >= 3).collect();
         triangulate_missing(state, input, &every);
-        filter(state, input, o, 1.0)?;
+        filter_final(state, input, o)?;
         // the last adjustment frees what the last round freed, and is guarded the same way
         let unguarded = state.clone();
         let (mut cost_initial, mut cost, mut observations, _, _) =
@@ -1124,7 +1145,7 @@ pub fn refine(
         if !observe() {
             return Err("cancelled".into());
         }
-        filter(state, input, o, 1.0)?;
+        filter_final(state, input, o)?;
         let filtered = before.iter().zip(&state.keep).filter(|(b, k)| **b && !**k).count();
         let added = before.iter().zip(&state.keep).filter(|(b, k)| !**b && **k).count();
         reports.push(RoundReport {

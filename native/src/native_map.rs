@@ -206,6 +206,8 @@ fn options(d: &Bound<'_, PyDict>) -> PyResult<Options> {
             "ba_loss_scale_px" => o.ba_loss_scale_px = option(&key, &value, "a number")?,
             "ba_loss_cauchy" => o.ba_loss_cauchy = option(&key, &value, "a bool")?,
             "final_all_tracks" => o.final_all_tracks = option(&key, &value, "a bool")?,
+            "final_max_reprojection_px" => o.final_max_reprojection_px = option(&key, &value, "a number")?,
+            "final_min_triangulation_deg" => o.final_min_triangulation_deg = option(&key, &value, "a number")?,
             "opencv_sensor" => o.opencv_sensor = option(&key, &value, "a list of bools, one per camera")?,
             _ => {
                 let known = options_dict(d.py(), &Options::default())?.keys();
@@ -230,13 +232,17 @@ fn options_dict<'py>(py: Python<'py>, o: &Options) -> PyResult<Bound<'py, PyDict
     d.set_item("ba_loss_scale_px", o.ba_loss_scale_px)?;
     d.set_item("ba_loss_cauchy", o.ba_loss_cauchy)?;
     d.set_item("final_all_tracks", o.final_all_tracks)?;
+    d.set_item("final_max_reprojection_px", o.final_max_reprojection_px)?;
+    d.set_item("final_min_triangulation_deg", o.final_min_triangulation_deg)?;
     d.set_item("opencv_sensor", o.opencv_sensor.clone())?;
     Ok(d)
 }
 
 /// The options of the native mapper with their defaults (the fields of the engine's `Options`):
 /// ``max_normalized_reprojection`` and ``min_triangulation_deg`` are pycolmap's
-/// ``GlobalPipelineOptions().mapper.max_normalized_reproj_error`` and ``.mapper.min_tri_angle_deg``.
+/// ``GlobalPipelineOptions().mapper.max_normalized_reproj_error`` and ``.mapper.min_tri_angle_deg``;
+/// ``final_max_reprojection_px`` and ``final_min_triangulation_deg`` are pycolmap's
+/// ``IncrementalPipelineOptions().mapper.filter_max_reproj_error`` and ``.mapper.filter_min_tri_angle``.
 #[pyfunction]
 pub(crate) fn native_mapper_defaults(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     options_dict(py, &Options::default())

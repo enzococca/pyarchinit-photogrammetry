@@ -15,7 +15,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use common::{convergent, ring, ring_with_relief, scene, InputOptions, Kind, Random, Scene};
+use common::{convergent, corridor, ring, ring_with_relief, scene, InputOptions, Kind, Random, Scene};
 use nalgebra::{Matrix3, Rotation3, Vector3};
 use ppg_engine::bundle::synthetic::pitched_block;
 use ppg_engine::bundle::{intrinsics_variances, Loss};
@@ -217,6 +217,38 @@ fn the_mapper_holds_the_drifting_ring_with_gnss() {
         assert!((sh - 1.0).abs() < 0.25, "seed {seed}: horizontal sigma {sh} m, noise 1 m");
         assert!((sv - 2.0).abs() < 0.5, "seed {seed}: vertical sigma {sv} m, noise 2 m");
     }
+}
+
+/// The last filter is COLMAP's retriangulation's, in pixels (`Options::final_max_reprojection_px`,
+/// 4 px, and `final_min_triangulation_deg`, 1.5 deg), not only the normalised threshold of the
+/// rounds (0.01, 10 px at this focal length, 36 px on a 20-megapixel drone camera): a survey whose
+/// tracks are long (80 / 70 % overlap) with 5 % of its key points displaced by 5 to 9 px (a wrong
+/// feature taken for the right one in every pair) keeps no observation beyond 4 px after the last
+/// adjustment, and its mean reprojection error is that of the noise (0.5 px: a mean of 0.63 px).
+#[test]
+fn the_last_filter_keeps_no_observation_beyond_four_pixels() {
+    let s = corridor(4, 30, 12.0, 24.0, 40.0, 15.0, 0.06, 131);
+    let input = s.input(&InputOptions {
+        noise_px: 0.5,
+        displaced_share: 0.05,
+        displaced_px: [5.0, 9.0],
+        seed: 132,
+        ..InputOptions::default()
+    });
+    let gnss = gnss_with(&s, 1.0, 2.0, [5.0, 5.0, 10.0], 133, &[]);
+    let o = Options::default();
+    assert_eq!((o.final_max_reprojection_px, o.final_min_triangulation_deg), (4.0, 1.5));
+    let mut m = Mapper::new(input.clone(), o).expect("a mapper");
+    let report = run(&mut m, Some(&gnss), None);
+    let errors = m.state().expect("refined").reprojection_px(&input);
+    let worst = errors.iter().copied().fold(0.0, f64::max);
+    let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+    let centres = largest(&centre_residuals(&s, &m));
+    eprintln!("{} observations kept, mean {mean:.3} px, worst {worst:.2} px, centres {centres:.4} m",
+              errors.len());
+    assert_eq!(report.placed, s.poses.len());
+    assert!(worst <= 4.0, "an observation {worst} px off is kept");
+    assert!(mean < 0.7, "mean reprojection error {mean} px");
 }
 
 /// The world turned by 30 degrees about (1, 2, 3) (the poses, the points and the positions; the

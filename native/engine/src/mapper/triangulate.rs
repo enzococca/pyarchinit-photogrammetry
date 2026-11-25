@@ -102,6 +102,38 @@ pub fn filter(
     poses: &[Option<Pose>],
     o: &Options,
 ) -> Result<Filtered, String> {
+    filter_by(t, points, input, cams, poses, o.max_normalized_reprojection, None, o.min_triangulation_deg)
+}
+
+/// `filter` as COLMAP's retriangulation filters (`IncrementalMapper::FilterPoints`, the filter of
+/// the last adjustment of its global mapper): an observation goes also when its reprojection error
+/// in pixels exceeds `o.final_max_reprojection_px`, and the observations of a point go when no two
+/// of their rays meet at `o.final_min_triangulation_deg` or more. `Err` as `filter`.
+pub fn filter_in_pixels(
+    t: &Tracks,
+    points: &[Option<[f64; 3]>],
+    input: &Input,
+    cams: &[Camera],
+    poses: &[Option<Pose>],
+    o: &Options,
+) -> Result<Filtered, String> {
+    filter_by(t, points, input, cams, poses, o.max_normalized_reprojection, Some(o.final_max_reprojection_px),
+              o.final_min_triangulation_deg)
+}
+
+/// `filter` with its thresholds: the normalised error, the error in pixels (`None`: not
+/// measured) and the angle in degrees.
+#[allow(clippy::too_many_arguments)]
+fn filter_by(
+    t: &Tracks,
+    points: &[Option<[f64; 3]>],
+    input: &Input,
+    cams: &[Camera],
+    poses: &[Option<Pose>],
+    max_normalized: f64,
+    max_px: Option<f64>,
+    min_deg: f64,
+) -> Result<Filtered, String> {
     t.check(input)?;
     if points.len() != t.len() {
         return Err(format!("{} points for {} tracks", points.len(), t.len()));
@@ -111,7 +143,7 @@ pub fn filter(
     }
     check_cameras(input, cams)?;
     let centres: Vec<Option<Vector3<f64>>> = poses.iter().map(|p| p.as_ref().map(centre)).collect();
-    let min_angle = o.min_triangulation_deg.to_radians();
+    let min_angle = min_deg.to_radians();
     let mut out = Filtered { keep: vec![false; t.observations.len()], by_reprojection: 0, by_angle: 0, no_point: 0 };
     let mut left = Vec::new();
     for (track, p) in points.iter().enumerate() {
@@ -132,9 +164,14 @@ pub fn filter(
                 continue;
             }
             let px = input.keypoint(image, k);
-            let (u, v) = cams[input.images[image].camera].normalised(px[0], px[1]);
+            let cam = &cams[input.images[image].camera];
+            let (u, v) = cam.normalised(px[0], px[1]);
             let error = (x / z - u).hypot(y / z - v);
-            if error <= o.max_normalized_reprojection {
+            let in_pixels = max_px.is_none_or(|max| {
+                let (pu, pv) = cam.pixel(x / z, y / z);
+                (pu - px[0]).hypot(pv - px[1]) <= max
+            });
+            if error <= max_normalized && in_pixels {
                 left.push(i);
             }
         }
