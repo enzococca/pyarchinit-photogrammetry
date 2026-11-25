@@ -646,18 +646,29 @@ gruppi di foto allineati sui core, poi uniti.
 ### L'allineamento nativo
 
 `align_cameras(engine="native")` (o `PPG_ENGINE=native`) allinea le foto con il mapper globale del motore
-nativo (`engine.native_map`, `ppg_core` API 16) al posto di quello di COLMAP: legge le camere, i punti chiave e
+nativo (`engine.native_map`, `ppg_core` API 19) al posto di quello di COLMAP: legge le camere, i punti chiave e
 le coppie verificate di `database.db` (qualunque motore le abbia abbinate), costruisce il grafo delle viste,
 media le rotazioni, stabilisce le tracce (`tiepoint_limit / 4` per foto, almeno 500, come il mapper globale
 classico), posiziona le camere - sul GPS delle foto quando almeno tre ce l'hanno, sugli stessi assi metrici
-meno un offset tondo dei prior di posa del motore classico; sistema `gnss` quando le posizioni orientano il
+meno un offset tondo dei prior di posa del motore classico, partendo da quelle posizioni (i soli raggi solo come
+ripiego di una partenza che non supera il suo controllo); sistema `gnss` quando le posizioni orientano il
 blocco, `similarity` quando si spargono troppo poco per la loro accuratezza e lo collocano soltanto, `free`
-senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo, solo dove il blocco le determina: una camera la
-cui focale ha uno scarto a posteriori marginale (con liberi tutti i termini che l'ultimo turno libera: anche fx e fy, il
-punto principale e i termini di decentramento dove quel turno allarga la camera a OPENCV) sopra lo
-0,5 % dopo il primo turno - un blocco nadirale piatto, che non
-distingue la focale dalla quota - tiene la calibrazione ferma, come una la cui focale un turno libero sposta di
-più del 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` e le note lo dicono). Il modello viene
+senza di esse - e compensa il blocco a turni (focale e distorsione radiale libere dal secondo, solo dove il
+blocco le determina: una camera la cui focale ha uno scarto a posteriori marginale (con liberi tutti i termini
+che l'ultimo turno libera: anche fx e fy, il punto principale e i termini di decentramento dove quel turno
+allarga la camera a OPENCV) sopra lo 0,5 % dopo il primo turno - un blocco nadirale piatto, che non distingue
+la focale dalla quota - tiene ferma la focale, con il punto principale e i termini di decentramento, e i suoi
+termini radiali sono giudicati con la focale ferma: liberi dove lo scarto dello spostamento che causano
+all'angolo della foto è al più 0,5 px, fermi sopra; un turno libero che sposta la focale di più del 20 %, o
+l'angolo di più di un quarto della semidiagonale con i termini radiali, viene ripetuto con essi fermi;
+`report["focal_sd"]`, `report["intrinsics_held"]` (la focale ferma), `report["radial_sd"]`,
+`report["radial_held"]` e le note lo dicono). Dopo i turni ogni traccia di tre foto o più viene triangolata di
+nuovo e il blocco compensato ancora una volta con tutte, filtrato prima e dopo in pixel come filtra la
+ritriangolazione di COLMAP (un'osservazione a più di 4 px, un punto i cui raggi si incontrano a meno di 1,5
+gradi: le opzioni `final_max_reprojection_px` e `final_min_triangulation_deg` del mapper, i valori predefiniti
+C++ del mapper incrementale di COLMAP); una camera i cui termini radiali sono rimasti fermi viene provata dopo
+una correzione radiale adattata ai suoi errori (nulla viene riscritto), a 4 px o a quattro sigma robusti degli
+errori corretti, il maggiore dei due. Il modello viene
 scritto nel formato di COLMAP e l'allineamento prosegue come con i mapper classici. `auto`, il predefinito,
 è l'allineamento nativo da quando ha superato il suo collaudo (nove blocchi reali, 2026-11-25) quando il mapper
 che `auto` sceglie per il chunk è quello globale, con la catena classica dietro come sotto; `engine="classic"`
@@ -665,8 +676,9 @@ mantiene l'allineamento classico.
 
 Ciò che il mapper nativo non fa resta classico, con il motivo nel log e in
 `meta["engine"]["align_cameras"]["fallback"]` (con `auto` l'allineamento classico è allora la scelta del
-programma, senza ripiego registrato): il core nativo assente o più vecchio dell'API 16
-(`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, il mapper `incremental` o
+programma, senza ripiego registrato): il core nativo assente o più vecchio dell'API 19
+(un core più vecchio porta il mapper che non ha superato il collaudo dell'allineamento)
+(`the native core with the mapper (API 19) is not installed`), `PPG_NATIVE=0`, il mapper `incremental` o
 `hierarchical` richiesto, foto aggiunte a un allineamento (`reset=False`), rig a 360 gradi, calibrazioni tenute
 fisse, un modello di camera che non conosce (uno fisheye).
 
