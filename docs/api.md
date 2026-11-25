@@ -143,8 +143,8 @@ updated in place (the same axes), the photos added get theirs. `meta["sfm"]` rec
 ### The native matching
 
 `match_photos(engine="native")` (or `PPG_ENGINE=native`; `engine` is `auto`, `classic` or `native`, and
-`auto`, the default, is the native engine for this step since it passed its gate - the classic one for the
-alignment and the depth maps) does the step with the native engine of the core (`engine.native_match`,
+`auto`, the default, is the native engine for this step since it passed its gate, as for the alignment - the classic
+one for the depth maps) does the step with the native engine of the core (`engine.native_match`,
 `ppg_core` API 15): its own SIFT (following VLFeat's, as COLMAP's does) on the GPUs and the CPU together, the generic preselection on the small images, and
 a matching of the pairs in two stages - the points of the largest scales first, then along the
 epipolar lines of the model they give; brute force where the first stage is unsure, and a pair the
@@ -638,11 +638,14 @@ principal point and the decentring terms too where that round widens the camera 
 nadir block, which cannot tell its focal length from its height - keeps its calibration held, as does one whose
 focal length a freed round moves by more than 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` and the
 notes say so). The model is
-written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, stays the
-classic alignment until the native one has passed its gate.
+written in COLMAP's format and the alignment goes on as with the classic mappers. `auto`, the default, is the
+native alignment since it passed its gate (nine real blocks, 2026-11-25) when the mapper `auto` picks for the
+chunk is the global one, with the classic chain behind it as below; `engine="classic"` keeps the classic
+alignment.
 
 What the native mapper does not do stays classic, with the reason in the log and in
-`meta["engine"]["align_cameras"]["fallback"]`: the native core missing or older than API 16
+`meta["engine"]["align_cameras"]["fallback"]` (under `auto` the classic alignment is then the program's choice,
+with no fallback recorded): the native core missing or older than API 16
 (`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, the `incremental` or
 `hierarchical` mapper asked, photos added to an alignment (`reset=False`), 360-degree rigs, calibrations held
 fixed, a camera model it does not know (a fisheye one).

@@ -145,8 +145,8 @@ database vengono aggiornati sul posto (gli stessi assi), le foto aggiunte ricevo
 ### Il matching nativo
 
 `match_photos(engine="native")` (oppure `PPG_ENGINE=native`; `engine` è `auto`, `classic` o `native`, e
-`auto`, il predefinito, è il motore nativo per questo passo da quando ha superato il suo collaudo - il
-classico per l'allineamento e le depth map) fa il passo con il motore nativo del nucleo
+`auto`, il predefinito, è il motore nativo per questo passo da quando ha superato il suo collaudo, come per
+l'allineamento - il classico per le depth map) fa il passo con il motore nativo del nucleo
 (`engine.native_match`, `ppg_core` API 15): il suo SIFT (che segue quello di VLFeat, come fa COLMAP) sulle GPU e sulla CPU insieme, la preselezione generica sulle
 immagini piccole e un abbinamento delle coppie in due fasi - prima i punti delle scale più grandi, poi
 lungo le linee epipolari del modello che danno; forza bruta dove la prima fase è incerta, e una coppia
@@ -659,10 +659,13 @@ punto principale e i termini di decentramento dove quel turno allarga la camera 
 distingue la focale dalla quota - tiene la calibrazione ferma, come una la cui focale un turno libero sposta di
 più del 20 %; `report["focal_sd"]`, `report["intrinsics_held"]` e le note lo dicono). Il modello viene
 scritto nel formato di COLMAP e l'allineamento prosegue come con i mapper classici. `auto`, il predefinito,
-resta l'allineamento classico finché quello nativo non ha superato il suo collaudo.
+è l'allineamento nativo da quando ha superato il suo collaudo (nove blocchi reali, 2026-11-25) quando il mapper
+che `auto` sceglie per il chunk è quello globale, con la catena classica dietro come sotto; `engine="classic"`
+mantiene l'allineamento classico.
 
 Ciò che il mapper nativo non fa resta classico, con il motivo nel log e in
-`meta["engine"]["align_cameras"]["fallback"]`: il core nativo assente o più vecchio dell'API 16
+`meta["engine"]["align_cameras"]["fallback"]` (con `auto` l'allineamento classico è allora la scelta del
+programma, senza ripiego registrato): il core nativo assente o più vecchio dell'API 16
 (`the native core with the mapper (API 16) is not installed`), `PPG_NATIVE=0`, il mapper `incremental` o
 `hierarchical` richiesto, foto aggiunte a un allineamento (`reset=False`), rig a 360 gradi, calibrazioni tenute
 fisse, un modello di camera che non conosce (uno fisheye).
