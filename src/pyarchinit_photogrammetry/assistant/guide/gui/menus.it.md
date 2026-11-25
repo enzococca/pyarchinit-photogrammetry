@@ -152,6 +152,7 @@ La guida passo passo è nel [tutorial](../tutorials/tell.md); i dettagli di ogni
 | **Costruisci DEM...** · **Costruisci ortofoto...** | i raster in pianta |
 | **Regione di ricostruzione** | [vedi sotto](#flusso-di-lavoro-regione-di-ricostruzione) |
 | **Prospetto o sviluppo cilindrico...** | ortofoto e rilievo di un muro, o una sezione, su un piano (una traccia di sezione, marker con gli assi scelti), o di un pozzo e una torre su un cilindro ([prospetti](processing.md#prospetti)) |
+| **Muro tracciato in pianta...** | il pannello di un muro tracciato in pianta: la sua linea cliccata o seguita sulla pianta, agganciata alla faccia, il prospetto disteso girando gli spigoli; altre campagne, scheda di confronto, composito ([un muro tracciato in pianta](processing.md#un-muro-tracciato-in-pianta)) |
 | **Elabora tutto...** ++ctrl+r++ | tutti i passi in fila con le scelte predefinite |
 
 !!! info "Foto che non si leggono"

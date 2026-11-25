@@ -125,15 +125,16 @@ def drawings(chunk, eid: str, world: bool = False) -> dict:
     * a stone: ``n`` (1, 2, ...), ``geometry`` (Polygon ``(u, v)``).
 
     ``world``: each also with ``world``, the geometry with Z in the system of the elevation (units, lines and stones
-    on its plane; spot heights and measuring points on the surface, where they were read). Empty when the elevation
+    on its plane - on the surface of the wall for a wall path, :func:`..engine.elevation._placer`; spot heights and
+    measuring points on the surface, where they were read). Empty when the elevation
     has none; ``KeyError`` when ``chunk`` has no elevation ``eid``."""
-    from .elevation import _drawing_items, _on_plane
+    from .elevation import _drawing_items, _placer
 
     entry = entry_of(chunk, eid)
     if entry is None:
         raise KeyError(f"no elevation {eid!r} in the chunk {getattr(chunk, 'label', '')!r}")
     items = _drawing_items(chunk, entry, copy.deepcopy(_frames(chunk).get(eid) or {}))
-    place = _on_plane(entry) if world else None
+    place = _placer(chunk, entry) if world else None
     from shapely.geometry import Point
 
     out = {"units": [], "quote": [], "points": [], "lines": [], "stones": []}
@@ -209,12 +210,37 @@ def give_frame(chunk, eid: str, data: dict | None) -> None:
 
 
 # ---------------------------------------------------------------- the drawings of one elevation on another
-def _carry(source: dict, target: dict, uv, depths) -> np.ndarray:
-    """``(u, v)`` of ``source`` to ``(u, v)`` of ``target`` through their world point at ``depths``."""
+LAND_TOLERANCE = 0.05  # m, the least: how far from the surface of a wall path a drawing given to it may land
+
+
+def _carry(chunk, source: dict, target: dict, uv, depths) -> np.ndarray:
+    """``(u, v)`` of ``source`` to ``(u, v)`` of ``target`` through their world point at ``depths``; NaN where the
+    world point does not land on ``target`` (:func:`_landed`)."""
     uv = np.asarray(uv, np.float64).reshape(-1, 2)
     if not len(uv):
         return uv
-    return uv_of(target, world_of_uv(source, uv, depths))[:, :2]
+    return _landed(chunk, target, uv_of(target, world_of_uv(source, uv, depths)))
+
+
+def _landed(chunk, target: dict, uvd: np.ndarray) -> np.ndarray:
+    """``(u, v)`` of ``uvd`` ``(N, 3)`` on the elevation ``target``, NaN for the rows that do not land on it: off its
+    frame; for a wall path also outside its depth band, or farther than ``max(3 resolution, LAND_TOLERANCE)`` from
+    its surface there (from its line where the relief has no value) - a point 8 m in front of a corner is on the
+    frame of a wall path, not on the wall."""
+    uvd = np.asarray(uvd, np.float64).reshape(-1, 3)
+    out = uvd[:, :2].copy()
+    if target["frame"].get("kind") != "path":
+        return out
+    ok = np.isfinite(uvd).all(axis=1)
+    if target.get("depth"):
+        lo, hi = (float(x) for x in target["depth"])
+        ok[ok] = (uvd[ok, 2] >= lo - 1e-9) & (uvd[ok, 2] <= hi + 1e-9)
+    if ok.any():
+        tol = max(3.0 * float(target.get("resolution") or 0.0), LAND_TOLERANCE)
+        surface = surface_depths(chunk, target, uvd[ok, :2])
+        ok[ok] = np.abs(uvd[ok, 2] - np.where(np.isfinite(surface), surface, 0.0)) <= tol
+    out[~ok] = np.nan
+    return out
 
 
 def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool = True) -> dict:
@@ -223,8 +249,9 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
     ``source`` (its relief) when ``surface`` and the relief has a value there, else on its plane - and lands at the
     ``(u, v)`` of ``target`` there. Spot heights and measuring points keep their world point (``x``, ``y``, height):
     their ``(u, v)`` are those of ``target``. They join the drawings ``target`` has, with new identities when copied
-    (``copy_``), else they leave ``source``. Both elevations must be in the same system. Returns
-    ``{kind: how many}``."""
+    (``copy_``), else they leave ``source``. A drawing with a vertex that does not land on ``target`` (off its
+    frame; off the wall of a wall path, :func:`_carry`) stays where it is, said in the log, and is not counted. Both
+    elevations must be in the same system. Returns ``{kind: how many}``."""
     from shapely import transform as shapely_transform
     from shapely import wkt
 
@@ -244,15 +271,29 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
     def move(uv):
         uv = np.asarray(uv, np.float64).reshape(-1, 2)
         d = surface_depths(chunk, a, uv) if surface else np.full(len(uv), np.nan)
-        return _carry(a, b, uv, np.where(np.isfinite(d), d, 0.0))
+        return _carry(chunk, a, b, uv, np.where(np.isfinite(d), d, 0.0))
+
+    off = {k: 0 for k in KINDS}
+
+    def move_all(uv):
+        moved = move(uv)
+        if not np.isfinite(moved).all():
+            raise _OffTarget
+        return moved
 
     done = {k: 0 for k in KINDS}
     out = {"units": [], "quote": [], "points": [], "lines": [], "stones": []}
+    left = {"units": [], "quote": [], "points": [], "lines": [], "stones": []}  # what stays on ``source``
     for rec in data.get("units") or []:
         try:
-            geom = shapely_transform(wkt.loads(rec["wkt"]), move)
+            geom = shapely_transform(wkt.loads(rec["wkt"]), move_all)
+        except _OffTarget:
+            off["units"] += 1
+            left["units"].append(rec)
+            continue
         except Exception as exc:  # noqa: BLE001 - a broken record stays where it is, said
-            log.warning("Unità non spostata sull'altro prospetto: %s", exc)
+            log.warning("Unit not moved to the other elevation: %s", exc)
+            left["units"].append(rec)
             continue
         rec = {**rec, "wkt": geom.wkt, "attributes": dict(rec.get("attributes") or {})}
         if copy_:
@@ -262,30 +303,51 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
         for rec in data.get(key) or []:
             if not isinstance(rec, dict):
                 continue
-            rec = dict(rec)
+            original, rec = rec, dict(rec)
             if "u" not in rec or "v" not in rec:
+                left[key].append(original)
                 continue
             if "x" in rec and "y" in rec and rec.get(height) not in (None, ""):
                 world = np.array([[float(rec["x"]), float(rec["y"]), float(rec[height])]])
-                rec["u"], rec["v"] = (float(c) for c in uv_of(b, world)[0, :2])
+                uv = _landed(chunk, b, uv_of(b, world))[0]
             else:
-                rec["u"], rec["v"] = (float(c) for c in move([[rec["u"], rec["v"]]])[0])
+                uv = move([[rec["u"], rec["v"]]])[0]
+            if not np.isfinite(uv).all():
+                off[key] += 1
+                left[key].append(original)
+                continue
+            rec["u"], rec["v"] = (float(c) for c in uv)
             if copy_ and key == "quote":
                 rec["ppg_id"] = uuid.uuid4().hex
             out[key].append(rec)
-    for rec in data.get("lines") or []:
-        rec = copy.deepcopy(rec)
+    for original in data.get("lines") or []:
+        rec = copy.deepcopy(original)
         coords = rec.get("coords") or []
         moved = move([[c[0], c[1]] for c in coords])
+        if not np.isfinite(moved).all():
+            off["lines"] += 1
+            left["lines"].append(original)
+            continue
         rec["coords"] = [[float(m[0]), float(m[1])] + list(c[2:3]) for m, c in zip(moved, coords)]
         if copy_:
             rec["id"] = uuid.uuid4().hex
         out["lines"].append(rec)
     for text in (data.get("stones") or {}).get(source) or []:
         try:
-            out["stones"].append(shapely_transform(wkt.loads(text), move).wkt)
+            geom = shapely_transform(wkt.loads(text), move_all)
+        except _OffTarget:
+            off["stones"] += 1
+            left["stones"].append(text)
+            continue
         except Exception as exc:  # noqa: BLE001
-            log.warning("Pietra non spostata sull'altro prospetto: %s", exc)
+            log.warning("Stone not moved to the other elevation: %s", exc)
+            left["stones"].append(text)
+            continue
+        out["stones"].append(geom.wkt)
+    if any(off.values()):
+        log.warning("Drawings of the elevation %s that fall outside the elevation %s: they stay where they are (%s)",
+                    a.get("name") or source, b.get("name") or target,
+                    ", ".join(f"{n} {_KIND_WORDS[k]}" for k, n in off.items() if n))
     frames = _frames(chunk, create=True)
     dest = frames.setdefault(target, {"units": [], "quote": []})
     for key in ("units", "quote", "points", "lines"):
@@ -298,8 +360,27 @@ def transfer(chunk, source: str, target: str, copy_: bool = True, surface: bool 
     dest.setdefault("units", [])
     dest.setdefault("quote", [])
     if not copy_:
-        take_frame(chunk, source)
+        if not any(left.values()):
+            take_frame(chunk, source)
+        else:
+            kept = frames[source]
+            for key in ("units", "quote", "points", "lines"):
+                if key in kept or left[key]:
+                    kept[key] = left[key]
+            stones = kept.get("stones")
+            if isinstance(stones, dict) and source in stones:
+                if left["stones"]:
+                    stones[source] = left["stones"]
+                else:
+                    stones.pop(source)
     return done
+
+
+_KIND_WORDS = {"units": "units", "quote": "heights", "points": "points", "lines": "lines", "stones": "stones"}
+
+
+class _OffTarget(Exception):
+    """A vertex of a drawing does not land on the elevation it is given to (:func:`transfer`)."""
 
 
 # ---------------------------------------------------------------- projects made before 1.7.0

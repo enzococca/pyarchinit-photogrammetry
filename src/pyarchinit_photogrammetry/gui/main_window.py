@@ -39,6 +39,7 @@ from .dialogs import (QUALITY, ConnectDialog, ErrorDialog, Field, GradualSelecti
 from .elevation_drawing_actions import ElevationDrawingActions
 from .free_drawing_actions import FREE_KINDS, LAYER_PREFIX, FreeDrawingActions  # noqa: F401 - names kept here
 from .model_measure_actions import ModelMeasureActions
+from .wall_path_actions import PROPOSALS_LAYER, TRACE_PREVIEW_LAYER, WallPathActions
 from .i18n import decimal_comma, engine, number, thousands_points, tr, translate
 from .icons import app_icon, icon
 from .image_views import RASTER_TITLES, RELIEF_KINDS, US_COLORS, PhotoView, RasterView
@@ -534,7 +535,7 @@ def chunk_alignment_lines(report: dict, reference: str, metric: bool) -> list[st
             lines.append("    " + tr("nessuna sovrapposizione con {0}", reference))
     return lines
 
-class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureActions, QMainWindow):
+class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureActions, WallPathActions, QMainWindow):
     refreshed = Signal()  # the window shows the project again (a plugin's Context.on_refresh)
     features_deleted = Signal(str, object)  # layer, attributes of the features the user deleted (on_features_deleted)
     UPDATE_WINDOW_POLL_MS = 400  # a window of the update flow held back looks this often for the open one to close
@@ -699,8 +700,11 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self.ortho_view.breakline_finished.connect(self._breakline_drawn)
         self.ortho_view.free_finished.connect(self._free_from_2d)
         self.ortho_view.feature_double_clicked.connect(self._feature_double_clicked)
+        self.ortho_view.feature_double_clicked.connect(self._trace_double_clicked)  # the trace of an elevation
+        self.ortho_view.feature_clicked.connect(self._proposal_clicked)  # a wall proposed: the line of the wall
         self.ortho_view.raster_loaded.connect(self._draw_free_2d)
         self.ortho_view.raster_loaded.connect(self._raster_loaded)  # also a raster or a frame shown by a plugin
+        self.ortho_view.raster_loaded.connect(self._draw_traces)  # the traces of the elevations, on the plan only
         self.ortho_view.probe_clicked.connect(self._probe_clicked)
         self.ortho_view.marker_clicked.connect(self._marker_clicked_on_raster)
         self.ortho_view.photos_at_point.connect(lambda x, y: self.filter_photos_by_point(self._raster_point(x, y)))
@@ -841,6 +845,11 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         # the water of several levels: the table per chunk or date, the basins, the factor, the correction
         self.water_pane = WaterPane(self)
         add(self.water_pane, tr("Acqua: livelli e bacini"), icon("water"), name="pane_water", place="right")
+        from .wall_path_pane import WallPathPane
+
+        # a wall traced on the plan: the line, its snap onto the face, side and heights, the build
+        self.wall_pane = WallPathPane(self)
+        add(self.wall_pane, tr("Muro tracciato in pianta"), icon("elevation"), name="pane_wall_path", place="right")
         self.ms_pane.add_requested.connect(self.ms_add)
         self.thermal_pane.add_requested.connect(lambda: self.ms_add(thermal=True))
         for pane in (self.ms_pane, self.thermal_pane):
@@ -1173,6 +1182,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self._act(m, tr("Prospetto o sviluppo cilindrico..."), self.build_elevation, processing=True,
                   icon_name="elevation",
                   tip=tr("Ortofoto e rilievo su un piano (muri) o su un cilindro (pozzi, torri)"))
+        self._build_wall_path_actions(m)
         m.addSeparator()
         self._act(m, tr("Elabora tutto..."), self.process_all, "Ctrl+R", processing=True, icon_name="process_all")
         # ------------------------------------------------------------ Tools
@@ -2018,6 +2028,12 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             # has changes the user chose not to save: what came from RustGIS would go with them, so it stays there
             self._rustgis_leave(unsaved_stay=True)
             self._settle_removals(shown)
+            wall = getattr(self, "wall_pane", None)
+            if wall is not None:  # the line of a wall is of a chunk of the project left (keys repeat across projects)
+                wall.set_trace(None)
+                wall.candidates, wall.candidates_chunk = [], None
+                self.ortho_view.remove_layer(TRACE_PREVIEW_LAYER)
+                self.ortho_view.remove_layer(PROPOSALS_LAYER)
             pane = getattr(self, "assistant", None)
             if pane is not None:  # an action of the assistant waiting or running for the project left: stopped
                 pane.project_changed()
@@ -2119,6 +2135,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self._update_workflow_states()
         self._refresh_water_dialog()
         self._refresh_mosaic_dialog()
+        self.wall_pane.refresh()  # emptied when its line is of another chunk
         self.refreshed.emit()
 
     def _load_raster(self, kind: str | None = None, path=None, bands=None, title: str | None = None) -> None:
@@ -5450,7 +5467,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         """What :meth:`rebuild_stale` does with ``items`` (default :func:`..core.stamps.stale_products`): ``(steps,
         by_hand, versions)`` - ``steps`` ``[(name, job(progress))]`` in the order of the items, with the parameters
         each product was built with; ``by_hand`` the names of what needs its own inputs (results of the raster
-        calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it); ``versions`` the
+        calculator, multispectral, thermal and satellite rasters, a DEM from a TIN made from it, a composite of
+        campaigns); ``versions`` the
         kept versions made in another system - not those a rebuild kept itself (``"by_rebuild"``: made in the old
         system on purpose, kept only to look back at). The DEM and the orthomosaic replaced are kept as versions
         first when :meth:`_rebuild_keep` says so (as the build dialogs' *Conservala per confrontarla*; back when the
@@ -5526,7 +5544,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                     by_hand.append(name)
             elif kind == "elevation":
                 entry = next((e for e in ch.meta.get("elevations") or [] if e.get("id") == item.get("id")), None)
-                if entry is not None:
+                if entry is not None and (entry.get("kind") == "composite" or entry.get("source") == "rasters"):
+                    by_hand.append(name)  # made from the rasters of others: made again from them, by hand
+                elif entry is not None:
                     steps.append((name, lambda p, ch=ch, eid=entry["id"]: self._rebuild_elevation(ch, eid, p)))
             elif kind == "relief":
                 name = product_name(product)  # the names of the relief menu, not the codes of the methods
@@ -5648,12 +5668,15 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         frame = E.frame_from_dict(old["frame"])
         scale = old.get("scale") or "cylinder"
         wall = scale == "wall" and getattr(frame, "u_map", None) is not None
+        if frame.kind == "path":  # a wall traced on the plan: its frame as it is, with its map or without
+            scale, wall = "keep", False
         new = E.build_elevation(ch, frame, resolution=old.get("resolution"),
                                 name=old.get("name"), depth=depth, bounds=E.bounds_of(ch, old), kind=kind,
                                 scale=scale, u_map=frame.u_map if wall else None,  # the grid on the wall kept
                                 blending=settings["blending"],
                                 colour_correction=settings["colour_correction"], ghosting=settings["ghosting"],
-                                fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p)
+                                fill_holes=settings["fill_holes"], max_angle=settings["max_angle"], progress=p,
+                                skip_backlit=bool(old.get("skip_backlit", False)))
         nid = new["id"]
         root = ch.data_dir / "elevations"
         entries = ch.meta["elevations"]
@@ -9581,6 +9604,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             Field("blending", "Fusione", "mosaic",
                   choices=[("mosaic", "Mosaico senza cuciture"), ("disabled", "Nessuna (una foto per cella)")]),
             Field("colour", "Correzione colore", True),
+            Field("skip_backlit", tr("Lascia fuori le foto in controluce (oltre il 2 % di pixel bruciati)"), False,
+                  tip=tr("Le foto scattate contro luce, con il cielo bruciato dietro il muro, non dipingono il "
+                         "prospetto; quante ne sono state lasciate fuori resta scritto nel prospetto")),
             Field("name", "Nome", "", kind="text")]
 
     def build_elevation(self, section: dict | None = None, view: dict | None = None, points=None,
@@ -9634,11 +9660,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 choices.append((("markers", None), tr("Piano dei {0} marker selezionati", len(markers))))
             if poly is not None:
                 choices.append((("cylinder", None), "Cilindro dal poligono selezionato (pozzo, torre)"))
-            if not choices:
-                self._warn("Traccia una sezione lungo il muro (Disegno > Traccia sezione), oppure seleziona tre o più "
-                           "marker sulla parete nel pannello Riferimenti, oppure seleziona un poligono attorno a un "
-                           "pozzo o a una torre.")
-                return
+            choices.append((("path", None), tr("Muro tracciato in pianta")))  # a line clicked on the plan, always
             labels = [(k, ch.marker_by_key(k).label) for k in markers] if len(markers) >= 3 else None
             v = ParamDialog.ask(self, "Prospetto", [Field("source", "Superficie", choices[0][0], choices=choices)]
                                 + self._elevation_fields("cylinder" if choices[0][0][0] == "cylinder" else "plane",
@@ -9648,6 +9670,14 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             if not v:
                 return
             kind, idx = v["source"]
+            if kind == "path":  # the pane takes the answers and the line is traced on the plan
+                if v.get("type") == "section":
+                    self._warn(tr("Su un muro tracciato in pianta non si fa una sezione: viene costruito il "
+                                  "prospetto del muro."))
+                self.wall_pane.set_values(v)
+                self.show_wall_path_pane()
+                self.wall_trace_start()
+                return
             if kind == "section":
                 section = self.sections[idx]
         else:
@@ -9751,7 +9781,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         scale = "wall" if frame.kind == "cylinder" and v.get("wall_scale") else "cylinder"
         self.run_task("Prospetto", lambda p: E.build_elevation(
             ch, frame, v.get("resolution"), name, depth, v.get("blending", "mosaic"),
-            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what, scale=scale), self.show_elevation,
+            bool(v.get("colour", True)), progress=p, bounds=bounds, kind=what, scale=scale,
+            skip_backlit=bool(v.get("skip_backlit", False))), self.show_elevation,
             refresh=False)
 
     def show_elevation(self, entry: dict) -> None:
@@ -9790,6 +9821,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         else:
             text = tr("{0}: coordinate del prospetto in metri (u lungo la parete, v in alto); Z = rilievo verso chi "
                       "guarda", entry['name'])
+        if self.composite_stale(self.chunk, entry):
+            text += "  -  " + tr("Composito da rifare: una campagna è cambiata dopo che è stato fatto")
         self.statusBar().showMessage(text, 15000)
         if clean:  # what reading and drawing it added (identities, default layers) is no edit
             h.rebase()
@@ -12727,6 +12760,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             self._redraw_overlays_now(skip)
 
     def _redraw_overlays_now(self, skip: set | None) -> None:
+        from ..engine import elevation as E
+
         v = self.ortho_view
         skip = skip or set()
         self._ensure_ppg_ids()  # copies of a unit (a part split off) get an identity of their own
@@ -12734,7 +12769,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         stamps = {n: lay["plan_stamp"] for n, lay in v.layers.items() if "plan_stamp" in lay}
         order = list(v.layer_order)
         modelled = set(self.line_layers) | {"Sezioni", QUOTE_LAYER, PATCH_LAYER, "Marker", STONES_LAYER, PROBE_LAYER,
-                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER}
+                                            PROFILE_LAYER, LINES_LAYER, TIN_LAYER, E.TRACES_LAYER, TRACE_PREVIEW_LAYER,
+                                            PROPOSALS_LAYER}
         others = []
         for name in order:
             lay = v.layers[name]
@@ -12764,6 +12800,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             self._draw_tin()
             self._draw_patches()
             self._draw_markers_on_raster()
+        self._draw_traces()  # the traces of the elevations and the line of the wall pane: on the plan only
         self._draw_lines()
         self._draw_stones()
         self._draw_free_2d()
@@ -13753,6 +13790,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         previews of its dialogs): it is changed in the program, what is edited of it in QGIS is not taken and the next
         write puts it back. The others - those of the plugins, those drawn in QGIS - are held by the 2D view alone:
         their edits come back and are kept with the chunk (:data:`PLAN_EDITS`)."""
+        from ..engine import elevation as E
         from ..engine import mosaic
         from .colour_mask_dialog import PREVIEW_LAYER
         from .common_points import PENDING_LAYER, RESIDUAL_LAYER, TIE_LAYER
@@ -13762,7 +13800,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         if name in self.line_layers or name in (
                 "Sezioni", "Marker", QUOTE_LAYER, PROBE_LAYER, CROP_LAYER, PATCH_LAYER, STONES_LAYER, PROFILE_LAYER,
                 LINES_LAYER, TIN_LAYER, PREVIEW_LAYER, TIE_LAYER, PENDING_LAYER, RESIDUAL_LAYER, AREAS_VIEW_LAYER,
-                EDGE_LAYER, mosaic.AREAS_LAYER, "Unita' stratigrafiche"):
+                EDGE_LAYER, mosaic.AREAS_LAYER, "Unita' stratigrafiche", E.TRACES_LAYER, TRACE_PREVIEW_LAYER,
+                PROPOSALS_LAYER):
             return True
         if name.startswith((LAYER_PREFIX, "US ", "Sezioni", tr("Zone {0}", ""))) or name.startswith("Zone "):
             return True
@@ -16254,10 +16293,14 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         return tex
 
     def _texture_painted(self, frame: str | None = None) -> bool:
-        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model:
-        said in the window's words (patches choose photos, there are none). True when it was."""
+        """The orthophoto (or the elevation ``frame``) of the active chunk was painted from the texture of the model,
+        or the elevation was made from the rasters of others (a composite of campaigns): said in the window's words
+        (patches choose photos, there are none). True when it was."""
         from ..engine import patches as P
 
+        if self.chunk is not None and P.from_rasters(self.chunk, frame):  # a composite of campaigns: no photos
+            self._warn(tr("Patch: {0}.", tr(P.COMPOSITE_IT)))
+            return True
         if self.chunk is not None and P.texture_painted(self.chunk, frame):
             self._warn(tr("Patch: {0}.", tr(P.TEXTURE_IT)))
             return True
@@ -16947,8 +16990,24 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         elif kind == "elevation":
             menu.addAction(icon("view"), tr("Mostra"), on(lambda: self.show_elevation(payload)))
             menu.addAction(icon("export"), tr("Esporta..."), on(lambda: self.export_elevation(payload)))
+            menu.addAction(icon("export"), tr("Esporta per la pubblicazione..."),
+                           lambda: self.wall_finish(payload, chunk))
             menu.addAction(icon("line"), tr("Disegni da un altro prospetto..."),
                            on(lambda: self.transfer_elevation_drawings(payload, chunk)))
+            menu.addAction(icon("elevation"), tr("Stesso prospetto su altri chunk..."),
+                           lambda: self.wall_campaigns(payload, chunk))
+            from ..engine.elevation_groups import group_of
+
+            if group_of(self.doc, chunk, payload.get("id")) is not None:
+                menu.addAction(icon("export"), tr("Scheda di confronto..."), lambda: self.wall_sheet(payload, chunk))
+                menu.addAction(icon("elevation"), tr("Composito delle campagne..."),
+                               lambda: self.wall_composite(payload, chunk))
+            elif payload.get("kind") == "composite":
+                menu.addAction(icon("elevation"), tr("Composito delle campagne..."),
+                               lambda: self.wall_composite(payload, chunk))
+            if payload.get("kind") == "composite":
+                menu.addAction(icon("refresh"), tr("Rifai il composito"),
+                               lambda: self.wall_composite(payload, chunk, ask=False))
             remove(tr("Rimuovi"))
         if menu.actions():
             menu.exec(pos)

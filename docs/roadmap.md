@@ -297,6 +297,10 @@ on the public WorldView-3 datasets.
   Open3D) stays behind it through 2.x. With it: the record of a stratigraphic unit opened from the published
   site, the proxies of the blender-em plugin in the site, no names of people on a published site, the binaries
   stated GPL-3.0-or-later.
+* **Walls traced on the plan** (built, waiting for a check on a real wall): the elevation of a wall that turns
+  corners or curves, its line clicked or followed on the plan and snapped onto the face, unrolled round its corners;
+  the same wall in several campaigns on one grid, the comparison sheet, the composite of the campaigns, the finishing
+  for a publication, backlit photos left out ([a wall traced on the plan](gui/processing.md#a-wall-traced-on-the-plan)).
 * **Checks on real data** (no version yet): the import from WebODM, a satellite scene of one's own, `ppg remote` on
   a remote machine, network nodes on two real computers, a whole MicaSense flight to the reflectance orthomosaic.
 * **Change detection between surveys** (no version yet): distances between the clouds and models of two dates

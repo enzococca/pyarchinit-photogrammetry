@@ -393,6 +393,28 @@ def processed_auto(scene_dir, tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
+def wall_dataset(tmp_path_factory) -> Path:
+    """The synthetic wall with a corner (``testing.synthetic.make_wall_scene``) seen from outside - a convex corner:
+    the folder of its photos from known poses, its model and ``poses.json`` (``write_wall_dataset``). The documents
+    of the tests are made of it by ``tests/wall_helpers.py``."""
+    from pyarchinit_photogrammetry.testing.synthetic import write_wall_dataset
+
+    d = tmp_path_factory.mktemp("wall")
+    write_wall_dataset(d)
+    return d
+
+
+@pytest.fixture(scope="session")
+def wall_dataset_inside(tmp_path_factory) -> Path:
+    """The same wall seen from inside its corner (``viewer="left"``: a re-entrant corner)."""
+    from pyarchinit_photogrammetry.testing.synthetic import make_wall_scene, write_wall_dataset
+
+    d = tmp_path_factory.mktemp("wall_inside")
+    write_wall_dataset(d, make_wall_scene(viewer="left"))
+    return d
+
+
+@pytest.fixture(scope="session")
 def processed_native(scene_dir, tmp_path_factory):
     """The trench processed as ``processed_auto``, matched and aligned by the native engine (``engine="native"``: the
     native matching and the native global mapper, where the native core carries them). For the metric gates of

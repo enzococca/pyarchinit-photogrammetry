@@ -222,6 +222,17 @@ I file stanno in `<progetto>.ppg.files/mosaics/<id>/`: `mosaic.tif` (RGBA per l'
 `chunk` e `priority`) e `mosaic.json`. I percorsi delle sorgenti sono relativi al progetto: un progetto spostato o
 rinominato resta com'era.
 
+## Lo stesso muro in più campagne
+
+Un muro in alzato rilevato in più anni - ogni anno un chunk del progetto, i chunk già messi insieme - si confronta sul
+suo prospetto: il prospetto del muro (un piano, un cilindro o
+[un muro tracciato in pianta](processing.md#un-muro-tracciato-in-pianta)) si costruisce di nuovo sugli altri chunk
+sulla **stessa griglia** (*Stesso prospetto su altri chunk...*, clic destro sul prospetto), le campagne restano insieme
+come un gruppo con le loro date, la **scheda di confronto** le mette una sopra l'altra su un asse solo con le quote e
+gli spigoli, e il **composito** dà il muro com'era quando era più scoperto (una campagna più vecchia dove è più
+profonda di oltre 0,15 m). Tutto è in [Lo stesso muro in più campagne](processing.md#lo-stesso-muro-in-piu-campagne) e
+nelle sezioni che seguono.
+
 ## Riga di comando
 
 ```bash
@@ -247,3 +258,7 @@ ppg mosaic remove scavo.ppg m1a2b3c4d
 `--areas` prende un GeoPackage di poligoni con l'attributo `chunk` (nome o chiave) e, facoltativo, `priority`.
 `ppg mosaic remove` cancella subito i file (la finestra li mette da parte per *Annulla*). Tutte le opzioni sono
 nell'[API Python](../api.md#piu-rilievi-maschere-acqua-prodotti-uniti).
+
+Le campagne di un muro dalla riga di comando: `ppg elevation scavo.ppg --like ID --chunks "2019,2024"`, poi
+`--like ID --compare confronto.png` e `--like ID --composite [--deeper 0.15]`
+([dalla riga di comando](processing.md#dalla-riga-di-comando)).

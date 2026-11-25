@@ -192,6 +192,47 @@ def _remap_keys(value, mapping: dict, lost: list):
     return value
 
 
+def _relink_groups(meta: dict, mapping: dict) -> list[str]:
+    """The groups of elevations kept in ``meta`` (``elevation_groups``: their members, the record of their composite
+    with its sources, campaigns left out and order) and the sources of the composites among its elevations with the
+    chunk keys turned into those of the chunks appended (``mapping``: old key -> new key). A group with a chunk not
+    appended is dropped (its campaigns there are not in this project) and its name returned; a source of a composite
+    on a chunk not appended gets the key None: never a key that names another chunk of this project."""
+    from ..engine.elevation_groups import KEY
+
+    def keys_of(group: dict) -> list:
+        record = group.get("composite") or {}
+        keys = [m.get("chunk") for m in group.get("members") or []]
+        keys += [s.get("chunk") for s in (record.get("sources") or []) + (record.get("left_out") or [])]
+        return keys + [o[0] for o in record.get("order") or [] if o]
+
+    dropped, kept = [], []
+    for group in meta.get(KEY) or []:
+        if not isinstance(group, dict):
+            continue
+        if not all(k in mapping for k in keys_of(group)):
+            dropped.append(str(group.get("name") or group.get("id")))
+            continue
+        record = group.get("composite") or {}
+        for m in (group.get("members") or []) + (record.get("sources") or []) + (record.get("left_out") or []):
+            m["chunk"] = mapping[m["chunk"]]
+        for o in record.get("order") or []:
+            if o:
+                o[0] = mapping[o[0]]
+        kept.append(group)
+    if KEY in meta:
+        if kept:
+            meta[KEY] = kept
+        else:
+            meta.pop(KEY)
+    for entry in meta.get("elevations") or []:
+        if isinstance(entry, dict) and entry.get("kind") == "composite":
+            for s in entry.get("sources") or []:
+                if isinstance(s, dict) and "chunk" in s:
+                    s["chunk"] = mapping.get(s["chunk"])
+    return dropped
+
+
 def _free_name(folder: Path, name: str) -> Path:
     target = folder / name
     stem, suffix, n = Path(name).stem, Path(name).suffix, 2
@@ -424,7 +465,8 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
     each with a copy of its data folder. ``on_chunk(chunk)``: called for each new chunk as soon as it is in ``doc``,
     before its folder is filled (all the chunks are made first, then filled). Paths into the folders of the chunks
     appended point at the copies, the zoning GeoPackages are copied, the keys of chunks kept in the settings
-    (*Allinea chunk*, coregistration) turned into the new ones - or dropped when that chunk is not appended, said in
+    (*Allinea chunk*, coregistration) and those of the groups of elevations and their composites
+    (:func:`_relink_groups`) turned into the new ones - or dropped when that chunk is not appended, said in
     ``report["warnings"]``, with the files of the source project the chunks still point to and a site of the source
     other than this project's. ``report["sections"]``: the sections of the source (:func:`source_sections`). The
     ties of the source between chunks all appended are copied with them (:func:`_carry_ties`: ``report["ties"]``
@@ -490,6 +532,9 @@ def append_ppg(doc, path, chunks=None, progress=None, on_chunk=None, report: dic
             if len(lost) > int(dropped):
                 warnings.append(f"«{ch.label}»: rimanda a un chunk del progetto di origine che non è stato aggiunto "
                                 "(riferimento della coregistrazione): il collegamento è tolto")
+            for name in _relink_groups(meta, mapping):
+                warnings.append(f"«{ch.label}»: il gruppo di prospetti «{name}» comprende campagne di chunk non "
+                                "aggiunti: il gruppo è tolto (i prospetti restano)")
             ch.meta = meta
             _copy_zoning(ch, new)
             products = {}

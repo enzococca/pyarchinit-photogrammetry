@@ -6,7 +6,7 @@ avvio sono in tre gruppi:
 | Dove | Pannelli |
 | --- | --- |
 | a sinistra | [Area di lavoro](#area-di-lavoro), [Riferimenti](#riferimenti), [Layer](#layer) - sempre presenti |
-| a destra | [PyArchInit](#pyarchinit), [Proxy US](#proxy-us), [Multispettrale e Termico](multispectral.md), i pannelli dei plugin |
+| a destra | [PyArchInit](#pyarchinit), [Proxy US](#proxy-us), [Multispettrale e Termico](multispectral.md), [Muro tracciato in pianta](#muro-tracciato-in-pianta), i pannelli dei plugin |
 | in basso | [Foto](#foto), [Sezioni](#sezioni), [Console Python](#console-python), [Assistente](#assistente), [Log](#log) |
 
 Le schede di un gruppo sono in alto, ognuna con l'icona del suo pannello; la barra del titolo sotto di esse
@@ -87,6 +87,7 @@ tiene i pulsanti che non ci stanno):
 | il progetto | *Aggiungi chunk*, *Aggiungi progetti...* |
 | *Prodotti uniti* | *Ortofoto e DEM uniti...* |
 | un prodotto unito | *Mostra*, *Apri la cartella*, *Rimuovi* ([prodotti uniti](multi-survey.md#ortofoto-e-dem-uniti)) |
+| un prospetto | *Mostra*, *Esporta...*, *Esporta per la pubblicazione...*, *Disegni da un altro prospetto...*, *Stesso prospetto su altri chunk...*; in un gruppo di campagne anche *Scheda di confronto...* e *Composito delle campagne...*; su un composito *Rifai il composito*; *Rimuovi* ([un muro tracciato in pianta](processing.md#un-muro-tracciato-in-pianta)) |
 
 I comandi lavorano anche sui chunk che non sono quello attivo: rimuovere, rinominare, attivare e disattivare
 agiscono sul chunk dell'elemento e lasciano com'è il chunk attivo, mentre mostrare un elemento e i comandi
@@ -324,3 +325,24 @@ Come si fanno i solidi e come seguono le loro unità è in
 [Strumenti per l'archeologia](archaeology.md#proxy-3d-delle-us).
 
 <div style="clear: both"></div>
+
+## Muro tracciato in pianta
+
+*Flusso di lavoro > Muro tracciato in pianta...* lo apre, davanti, e fa partire il tracciamento. Il prospetto di un
+muro che gira gli spigoli o curva, in cinque passi, ognuno con il suo segno (da fare, in corso, fatto) e una riga che
+dice cosa ha trovato:
+
+1. *Linea del muro sulla pianta*: *Traccia sulla pianta* (clic nella vista 2D), *Segui il muro fra due clic*, *Usa SAM
+   dove il muro è basso*, *Tieni*, *Aggiungi punti di passaggio*, *Proponi i muri*;
+2. *Aggancio alla faccia del muro*: la linea agganciata proposta sulla pianta con di quanto ha spostato i vertici,
+   *Aggancia alla faccia* (non spuntato all'inizio: il prospetto si costruisce sulla linea cliccata), *Fascia di
+   ricerca*, *Smussa la linea*, *Aggancia di nuovo*;
+3. *Lato, quote e profondità*: *Lato da cui guardare*, *Quota più bassa*, *Quota più alta*, *Profondità davanti*,
+   *Profondità dietro*, *Prolunga prima*, *Prolunga dopo*;
+4. *Prospetto*: *Risoluzione*, *Fusione*, *Correzione colore*, *Senza le foto in controluce*, *Nome*, *Costruisci il
+   prospetto*, *Esporta per la pubblicazione...*;
+5. *Altre campagne*: *Stesso prospetto su altri chunk...*, *Scheda di confronto...*, *Composito delle campagne...*,
+   *Rifai il composito*.
+
+La linea appartiene al chunk attivo: un altro chunk o un altro progetto svuota il pannello. Ogni passo è descritto in
+[Un muro tracciato in pianta](processing.md#un-muro-tracciato-in-pianta).

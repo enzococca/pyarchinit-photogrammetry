@@ -209,6 +209,33 @@ def test_local_site_folder_and_manifest(trench_site):
         assert float(((cog.read(4) == 0) != empty).mean()) < 0.01  # transparent where the DEM is empty
 
 
+GEO_TAGS = (33550, 33922, 34264, 34735, 34736, 34737, 42112, 42113)  # GeoTIFF keys, GDAL metadata and nodata
+
+
+def _geo_tags_with(path, code: int) -> list[int]:
+    """The GeoTIFF and GDAL tags of a TIFF whose values hold ``code`` (as a number, or in a text)."""
+    from PIL import Image
+
+    Image.MAX_IMAGE_PIXELS = None
+    with Image.open(path) as im:
+        tags = dict(im.tag_v2)
+    found = []
+    for key in GEO_TAGS:
+        value = tags.get(key)
+        values = value if isinstance(value, tuple) else (value,)
+        if any((isinstance(v, (int, float)) and v == code) or (isinstance(v, (str, bytes)) and
+               str(code) in (v.decode("latin-1") if isinstance(v, bytes) else v)) for v in values):
+            found.append(key)
+    return found
+
+
+def test_geo_tags_of_a_projected_tiff_name_its_code(tmp_path):
+    from pyarchinit_photogrammetry.engine.dem import write_geotiff
+
+    path = write_geotiff(tmp_path / "x.tif", np.zeros((4, 4), np.float32), (2480000.0, 4500000.0), 1.0, "EPSG:3004")
+    assert _geo_tags_with(path, 3004)
+
+
 def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
     import rasterio
 
@@ -226,8 +253,10 @@ def test_local_frame_gives_no_place_and_no_path(trench_site, tmp_path):
             assert src.crs is None and not src.tags()
             assert max(abs(v) for v in src.bounds) < 100  # around the origin, not in Gauss-Boaga
         data = (site / "data" / name).read_bytes()
-        for word in (b"EPSG", b"Monte Mario", b"PROJCS", b"3004", b".vrt", b"chunk_0"):
+        # long words only: a short number such as the code 3004 turns up by chance in the compressed cells
+        for word in (b"EPSG", b"Monte Mario", b"PROJCS", b".vrt", b"chunk_0"):
             assert word not in data, f"{name} holds {word!r}"
+        assert not _geo_tags_with(site / "data" / name, 3004), f"{name} names the code 3004 in its tags"
     text = "".join((site / n).read_text(encoding="utf-8") for n in
                    ("site.json", "data/units.geojson", "data/drawings.geojson", "index.html"))
     tileset_text = (site / "data/model/tileset.json").read_text(encoding="utf-8")

@@ -39,6 +39,9 @@ def refusal_texts() -> dict[str, str]:
         "collinear": tr("I punti sono allineati: non danno un piano"),
         "plane_points": tr("Troppo pochi punti, o un'area troppo stretta, per un piano"),
         "plane_rough": tr("I punti dell'area non stanno su un piano"),
+        "path_elevations": tr("I prospetti dei muri tracciati in pianta seguono solo un orientamento che lascia la "
+                              "verticale com'è (una rotazione in pianta, uno spostamento, una scala): toglili "
+                              "prima, e traccia di nuovo i muri dopo l'orientamento"),
     }
 
 

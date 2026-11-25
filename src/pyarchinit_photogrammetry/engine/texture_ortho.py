@@ -326,20 +326,26 @@ def build_orthomosaic(chunk: "Chunk", resolution: float | None = None, progress:
 
 def frame_rays(chunk: "Chunk", surface):
     """The ray maker of an elevation frame (:class:`.elevation.FrameSurface`): from the viewer side of the frame,
-    at ``dmax``, towards it; what lies behind ``dmin`` is not seen (as on the relief)."""
+    at the top of its depth band, towards it; what lies behind the band is not seen (as on the relief). The band
+    is that of the surface at the ``u`` of each ray (:meth:`.elevation.FrameSurface.band`: on the line of a wall
+    the frame ends where two parts of it are equally near), so the furthest hit kept is one number per ray; a
+    ray where the frame leaves no band sees nothing."""
     inv = np.linalg.inv(np.asarray(chunk.transform, float))
     res = surface.resolution
+    scale = float(chunk.scale)
+    behind = bool(np.isfinite(surface.dmin))
 
     def rays(r, c):
         u = surface.origin[0] + c * res
         v = surface.origin[1] - r * res
-        start = surface.frame.point(u, v, np.full(len(u), surface.dmax))
+        lo, hi = surface.band(u)
+        seen = hi > lo
+        start = surface.frame.point(u, v, np.where(seen, hi, 0.0))
         direction = -surface.frame.view(u, v)
         s = start @ inv[:3, :3].T + inv[:3, 3]
         d = direction @ inv[:3, :3].T
+        max_t = np.where(seen, (hi - lo) / scale, -1.0) if behind else None
         return s, d / np.linalg.norm(d, axis=1, keepdims=True), max_t
-
-    max_t = (surface.dmax - surface.dmin) / float(chunk.scale) if np.isfinite(surface.dmin) else None
 
     return rays
 

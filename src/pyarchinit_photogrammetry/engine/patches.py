@@ -149,6 +149,36 @@ class TexturePainted(ValueError):
         self.english, self.italian = TEXTURE_EN, TEXTURE_IT
 
 
+COMPOSITE_IT = ("le patch scelgono le foto di un'area, ma questo prospetto è fatto dai raster di altri prospetti (il "
+                "composito delle campagne): metti le patch sulle campagne e rifai il composito")
+COMPOSITE_EN = ("patches choose the photos of an area, but this elevation is made from the rasters of other elevations "
+                "(the composite of the campaigns): patch the campaigns and make the composite again")
+
+
+class CompositePatched(ValueError):
+    """Patches asked on an elevation made from rasters (a composite of campaigns, :mod:`.elevation_composite`):
+    ``str()`` English, ``italian`` Italian."""
+
+    def __init__(self):
+        super().__init__(COMPOSITE_EN)
+        self.english, self.italian = COMPOSITE_EN, COMPOSITE_IT
+
+
+def from_rasters(chunk: Chunk, frame: str | None) -> bool:
+    """Whether the elevation ``frame`` of ``chunk`` was made from rasters (a composite of campaigns): it has no
+    photos for patches to choose from."""
+    if frame is None:
+        return False
+    return next((e.get("kind") == "composite" or e.get("source") == "rasters"
+                 for e in chunk.meta.get("elevations") or [] if e.get("id") == frame), False)
+
+
+def refuse_rasters(chunk: Chunk, frame: str | None) -> None:
+    """:class:`CompositePatched` when the elevation ``frame`` was made from rasters."""
+    if from_rasters(chunk, frame):
+        raise CompositePatched()
+
+
 def texture_painted(chunk: Chunk, frame: str | None = None) -> bool:
     """Whether the orthophoto (or the elevation ``frame``) of ``chunk`` was painted from the texture of the model
     (:mod:`.texture_ortho`): patches of photos do not apply to it."""
@@ -164,6 +194,7 @@ def add_patch(chunk: Chunk, polygon, photos, mode: str = "assign", surface: str 
     only from ``photos`` (labels) with ``mode="assign"``, from every photo but them with ``"exclude"``;
     ``surface`` "dem" or "ground" (see the module; an elevation takes its relief, "dem", only). Call
     :func:`update_orthomosaic` / :func:`update_elevation` (or build the product) to apply it."""
+    refuse_rasters(chunk, frame)
     if texture_painted(chunk, frame):
         raise TexturePainted()
     if mode not in MODES:
@@ -334,10 +365,11 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     """Redraw the cells of the patches added, changed or removed since the orthophoto of the elevation (or section)
     ``frame`` was written, painted as the elevation was built (the rest of the file is left as it is, its relief
     never changes), then its overviews. Returns the path of the orthophoto."""
-    from .elevation import elevation_paths, entry_settings, frame_grid
+    from .elevation import elevation_paths, entry_settings, frame_grid, frame_tile
     from .ortho import _context, correction_for
     from .visibility import raycaster_for_chunk, readable_cameras
 
+    refuse_rasters(chunk, frame)
     if texture_painted(chunk, frame):
         raise TexturePainted()
 
@@ -358,7 +390,7 @@ def update_elevation(chunk: Chunk, frame: str, progress: Progress | None = None,
     surf = frame_grid(chunk, entry, raycaster, lock)
     resolution = float(entry["resolution"])
     frm = surf.frame
-    tile = 512 if frm.kind == "plane" else max(32, min(512, int(0.15 * frm.radius / resolution)))  # as built
+    tile = frame_tile(frm, resolution)  # as built
     settings = entry_settings(entry)  # as the file was made, so that the patches match the rest
     current = [dict(p) for p in entry.get("patches") or []]
     ctx = _context(chunk, resolution, cams, surf, raycaster, settings["blending"], settings["max_angle"],
@@ -412,6 +444,7 @@ def photos_for_area(chunk: Chunk, polygon, limit: int = 12, skip_unreadable: boo
     from .ortho import _colour, _context, _on_grid, _surface, stored_blending
     from .visibility import project_valid, raycaster_for_chunk, readable_cameras
 
+    refuse_rasters(chunk, frame)
     geom = _geometry(polygon)
     cams, _bad = readable_cameras(chunk, skip_unreadable)
     raycaster = raycaster_for_chunk(chunk)
@@ -520,6 +553,7 @@ def previews(chunk: Chunk, polygon, photos, max_side: int = 320, surfaces=SURFAC
 
     from .ortho import _context, _on_grid, _PhotoCache, _surface, _tile, correction_for
 
+    refuse_rasters(chunk, frame)
     progress = progress or (lambda *_a, **_k: None)
     bounds, shape, res = preview_grid(polygon, max_side)
     rows, cols = np.mgrid[0:shape[0], 0:shape[1]]

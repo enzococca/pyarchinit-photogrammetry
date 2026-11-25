@@ -453,7 +453,10 @@ viene da:
   l'alto dello schermo in alto, la destra a destra; quello che si vede nella vista, o tutto il modello;
 * **tre punti cliccati** nella vista 3D (*Prospetto > Piano per tre punti*): l'asse orizzontale dal primo al
   secondo;
-* il **cilindro di un poligono selezionato**: lo sviluppo di un pozzo o di una torre, visto da dentro o da fuori.
+* il **cilindro di un poligono selezionato**: lo sviluppo di un pozzo o di una torre, visto da dentro o da fuori;
+* un **muro tracciato in pianta**: una linea cliccata sull'ortofoto o sul DEM, spezzata o curva, lungo la quale la
+  faccia del muro viene distesa girando gli spigoli (*Flusso di lavoro > Muro tracciato in pianta...*, vedi
+  [Un muro tracciato in pianta](#un-muro-tracciato-in-pianta)).
 
 **L'asse di uno sviluppo cilindrico.** Il dialogo di un cilindro chiede l'*Asse*:
 
@@ -540,6 +543,231 @@ opzione della superficie va con lui. Un'altra campagna sullo stesso muro, in un 
 riferimento, sta allora sugli stessi pixel e i due si confrontano cella per cella. Due chunk in un sistema LOCAL hanno
 mondi propri: `--same-frame` dice che stanno nello stesso sistema (allineati, uniti, orientati sugli stessi marker),
 senza il comando rifiuta. Senza `--name` il prospetto nuovo prende il nome di partenza reso distinto ("Torre (2)").
+
+**Foto in controluce.** Ogni dialogo di un prospetto ha *Lascia fuori le foto in controluce (oltre il 2 % di pixel
+bruciati)*: una foto scattata contro luce, con il cielo bruciato dietro il muro, non dipinge il prospetto. Una foto è
+in controluce quando più del 2 % dei suoi pixel ha tutti e tre i canali a 250 o oltre. Il prospetto dice quante ne
+sono state lasciate fuori (il suo tooltip nell'area di lavoro); la correzione del colore di quella costruzione è
+misurata sulle foto tenute, e quella del chunk non cambia. Quando tutte le foto sono in controluce la costruzione si
+ferma con un errore. Dalla riga di comando: `--skip-backlit`.
+
+### Un muro tracciato in pianta
+
+Un muro che gira gli spigoli, si piega o curva - un recinto, le stanze di un edificio, un muro di terrazza che segue
+il pendio di una collina - non sta su un piano solo. *Flusso di lavoro > Muro tracciato in pianta...* (oppure *Muro
+tracciato in pianta* come superficie nel dialogo del prospetto) apre a destra il pannello **Muro tracciato in pianta**:
+la linea del muro si traccia sulla pianta, e la sua faccia viene distesa lungo quella linea in un prospetto solo,
+girando gli spigoli, senza i riquadri di più piani incollati insieme.
+
+**I passi del pannello.** Ogni passo ha un segno (da fare, in corso, fatto) e una riga che dice cosa ha trovato.
+
+1. **Linea del muro sulla pianta.** *Traccia sulla pianta*: clic sui vertici della linea del muro nella vista 2D
+   (l'ortofoto o il DEM; se è aperto un prospetto viene mostrata prima la pianta), **Backspace** toglie l'ultimo,
+   **Invio** o un doppio clic finisce, **Esc** rinuncia. Un muro curvo si clicca con molti punti: la linea che li
+   attraversa è una linea liscia, non a faccette. Clic più vicini di 1 mm sono un punto solo; un ultimo clic entro
+   5 cm dal primo, su una linea di quattro punti o più, chiude la linea su di esso (una stanza tracciata tutt'intorno).
+   La linea viene controllata subito: una linea che **si incrocia o si tocca**, una che **torna indietro** su se
+   stessa (una svolta di oltre 170 gradi: traccia le due facce come due muri) o una senza due punti diversi è
+   rifiutata, e il pannello lo dice. Gli altri due modi di avere la linea - seguire il muro fra due clic e i muri
+   proposti sulla pianta - sono in [Tracciamento automatico](#tracciamento-automatico) più sotto.
+2. **Aggancio alla faccia del muro.** Il prospetto si costruisce sulla linea **come è stata cliccata**, a meno che
+   non spunti *Aggancia alla faccia* (non spuntato all'inizio; la spunta resta finché il programma è aperto).
+   L'aggancio è una proposta: tracciata la linea, il programma ne sposta una copia sulla faccia del modello e la
+   disegna sulla pianta (tratteggiata, "agganciata (proposta)") con di quanto si è spostata, e spunti la casella solo
+   se sta sulla faccia che intendevi. Lavora un tratto dritto alla volta: una linea cliccata sulla cresta, in mezzo al muro o
+   sul piano davanti finisce sulla faccia. *Fascia di ricerca* (2,5 m) è quanto lontano, davanti e dietro la linea
+   cliccata, si cerca la faccia. Ciò su cui sta il clic decide la direzione: sul muro o sul terreno accanto a una
+   trincea la faccia è la prima superficie davanti, incontrata da dentro; sul piano davanti al muro o nell'aria di una
+   trincea è la prima superficie dietro. L'altro lato di una stanza stretta o di una trincea non viene preso per lei;
+   in una trincea o in un corridoio più stretti della fascia, usa una fascia più piccola della loro larghezza. La
+   faccia è sempre quella vista dal tuo lato: su un muro addossato a un terreno più alto (sabbia dal tuo lato, una
+   trincea profonda dall'altro) viene presa la faccia bassa sopra il terreno, anche se alta 20 cm, mai quella alta
+   della trincea; se dal tuo lato non c'è una faccia, resta la linea cliccata. *Smussa
+   la linea* (0 m, nessuna) smussa su quella lunghezza un muro curvo cliccato con molti punti incerti, prima
+   dell'aggancio. La riga di stato dice di quanto la proposta ha spostato i vertici (mediana e
+   massimo, in cm) e quanti tratti ha lasciato come cliccati, lo spostamento di ogni vertice è elencato e la linea
+   sulla pianta porta gli stessi valori. La linea su cui si costruisce il prospetto è disegnata piena, l'altra
+   tratteggiata; *Aggancia di nuovo* rifà la proposta dopo un cambio di fascia o di smussatura.
+   **Lascia la casella vuota** quando la proposta ha spostato un vertice dove non volevi (un cumulo di crollo, un
+   contrafforte, un muro davanti, la faccia lontana di una trincea), quando la faccia è così rotta che nessun tratto
+   dritto la segue, o quando la linea era già stata disegnata con cura sulla faccia. Quando la faccia non viene trovata
+   lungo la linea non c'è proposta e il pannello lo dice.
+3. **Lato, quote e profondità.** *Lato da cui guardare*: *Dove sono le foto* (il predefinito: il lato dove sta la
+   maggior parte delle foto allineate, ognuna pesata per la distanza e per come guarda il muro, così un volo nadirale
+   non vince sulle foto ravvicinate della faccia), *A sinistra della traccia* o *A destra della traccia* (percorrendola
+   dal primo clic). Quando il lato più debole pesa il 60 % del più forte o più, la finestra chiede, con i due pesi;
+   sono mostrati anche nel pannello. Un cambio di lato rifà la proposta (si cerca un'altra faccia). *Quota
+   più bassa* e *Quota più alta* sono lette sul modello lungo la linea usata - le quote del muro, non del terreno
+   intorno - arrotondate verso l'esterno a 5 cm; si cambiano liberamente. *Profondità davanti* e *Profondità dietro*
+   (0,5 m ciascuna) tengono solo la superficie vicina alla faccia: un'impalcatura o un muro davanti vengono
+   attraversati. *Prolunga prima* e *Prolunga dopo* allungano il prospetto oltre il primo e l'ultimo punto, nelle
+   direzioni in cui finisce la linea (la linea resta come tracciata): un tratto del muro che la pianta non mostra
+   bene, o il terreno ai suoi capi.
+4. **Prospetto.** *Risoluzione* (automatica: il GSD), *Fusione*, *Correzione colore*, *Senza le foto in controluce*,
+   *Nome* (predefinito "Prospetto del muro"), poi **Costruisci il prospetto**. Viene elencato nell'area di lavoro come
+   ogni altro prospetto e mostrato nella vista raster; *Esporta per la pubblicazione...* è descritto
+   [più sotto](#finitura-per-una-pubblicazione).
+5. **Altre campagne.** Lo stesso muro negli altri chunk: vedi [più sotto](#lo-stesso-muro-in-piu-campagne).
+
+La linea resta con il suo chunk e il suo progetto: un altro chunk reso attivo, o un altro progetto, svuota il pannello.
+
+**`u` corre lungo la faccia.** Su un prospetto di un muro tracciato `u` è la **lunghezza misurata sulla faccia del
+muro**, dal primo punto (o dall'inizio del prolungamento) da sinistra a destra per chi guarda, e `v` è la **quota**.
+Un muro che si incurva, o la cui linea è stata cliccata un po' fuori, è lungo sul prospetto quanto sul terreno: la
+faccia è misurata in colonne di 1 cm, una colonna è della faccia dove il modello è incontrato ad almeno il 10 % delle
+sue quote, e una ruvidità sotto i 5 cm non aggiunge lunghezza. Con `--scale trace` (riga di comando) `u` è invece la
+lunghezza lungo la linea. Il tooltip del prospetto nell'area di lavoro dice quale. Un muro lungo la cui linea non si
+trova nessuna colonna di faccia viene rifiutato con questa regola, nel pannello, e non si costruisce nulla.
+
+**Com'è uno spigolo.** A ogni vertice la linea gira lungo un piccolo arco, così la direzione di vista gira senza
+salti. A uno **spigolo convesso** (il fuori di un edificio) la vista si apre a ventaglio intorno allo spigolo: le
+pietre dello spigolo si vedono in una fascia continua, senza vuoti. A uno **spigolo rientrante** (il dentro di una
+stanza) nulla si ripiega: nessuna pietra si vede due volte. L'arco è grande quanto la profondità davanti più 2 cm,
+così uno spigolo rientrante tiene tutta la profondità davanti; a una svolta stretta è più piccolo. La fascia di
+profondità finisce dove due parti della linea sono ugualmente vicine - il mezzo di una stanza stretta, il centro di un
+arco - 2 cm prima di quel posto: quello che sta oltre appartiene all'altra parte del muro e non viene preso due volte.
+Gli spigoli sono contati nel risultato ("corners: 2") e segnati sulla scheda di confronto.
+
+**Disegni attraverso uno spigolo.** Unità, quote e gli altri disegni si disegnano sul prospetto come su ogni altro,
+nei suoi metri (u, v), e possono passare uno spigolo. Quando sono esportati in 3D (il `_disegni_mondo.gpkg`, il DXF
+3D, il collegamento dal vivo con QGIS o RustGIS) ogni vertice viene messo sulla superficie del muro al suo posto, il
+contorno infittito ogni 2 cm (o due volte la risoluzione): un'unità attraverso uno spigolo lo gira, e in pianta cade
+sul muro dove è stata disegnata. Un buco del rilievo fino a 0,25 m lungo il muro è scavalcato con le profondità ai
+due lati. *Disegni da un altro prospetto...* su un muro tracciato sposta un disegno solo dove cade entro 5 cm (o tre
+pixel, quando sono di più) dalla superficie di quel muro; gli altri restano dove sono, e il log lo dice.
+
+**Il layer *Tracce dei prospetti*.** La pianta mostra la traccia di ogni prospetto del chunk - muri tracciati, piani e
+cilindri; le sezioni hanno il loro layer - come una linea con il nome del prospetto, solo sulla pianta, mai su un
+prospetto. Un doppio clic su una traccia apre il suo prospetto. Il layer va a QGIS con il collegamento dal vivo, in un
+verso solo, con i campi `etichetta`, `prospetto` (il nome), `prospetto_id`, `tipo` (`plane`, `cylinder`, `path`) e
+`lunghezza_m`; la traccia tiene gli spigoli vivi della linea, non i suoi archi. Il GeoPackage 3D di un prospetto
+contiene anche la sua traccia, come tabella `traccia`, a metà altezza.
+
+#### Lo stesso muro in più campagne
+
+Un muro rilevato in più anni, ogni anno un chunk dello stesso progetto già messi insieme (legami fra chunk, gli stessi
+marker, lo stesso sistema di riferimento), si costruisce su **una griglia sola**: *Stesso prospetto su altri chunk...*
+(clic destro sul prospetto nell'area di lavoro, oppure *Altre campagne* nel pannello) elenca gli altri chunk con un
+modello, spuntati quelli nello stesso sistema di riferimento, con una **data** per ciascuno (*AAAA-MM-GG*: la data del
+chunk, se no la data di mezzo delle sue foto; anche le date delle campagne già nel gruppo si cambiano lì). Ogni chunk
+spuntato riceve il prospetto sullo stesso sistema, griglia, limiti, risoluzione, profondità e impostazioni del mosaico
+(come `--like`), così le ortofoto stanno sugli stessi pixel. I prospetti fatti restano insieme come il **gruppo** di
+quel muro; il tooltip di ciascuno dice il gruppo, quante campagne contiene e la sua data.
+
+Un chunk viene rifiutato, con il motivo, quando è già nel gruppo, non ha un modello, o è in un altro sistema di
+riferimento (sono nominati tutti e due). Due chunk in un sistema **LOCAL** hanno mondi propri: la finestra chiede se
+stanno nello stesso sistema (allineati, uniti, orientati sugli stessi marker); se no, non si costruisce nulla. Un
+chunk dove il muro non si trova viene detto vuoto. Quello che è stato costruito prima di un errore resta.
+
+#### La scheda di confronto
+
+*Scheda di confronto...* (su un prospetto di un gruppo, oppure nel pannello) scrive un'immagine (PNG, o JPEG) e un PDF
+accanto: le campagne **una sopra l'altra sullo stesso asse u**, la più vecchia in alto, ognuna con il suo nome e la sua
+data; le quote ogni 0,5 m a sinistra di ogni fascia, le distanze lungo il muro, gli **spigoli** della traccia come
+linee rosse tratteggiate attraverso tutte le fasce con un triangolo sopra; il titolo è il nome del gruppo o quello
+dato. La griglia è quella del prospetto di riferimento del gruppo; una campagna su un'altra griglia (ricostruita a
+un'altra risoluzione, o spostata di una parte di pixel) viene lasciata fuori con il motivo. Un muro lungo viene ridotto
+di un fattore intero a 6.000 pixel al massimo. Un'immagine o un PDF che esistono già vengono sostituiti solo dopo una
+domanda (dalla riga di comando, `--overwrite`).
+
+#### Il composito delle campagne
+
+*Composito delle campagne...* fa un prospetto del muro **com'era quando era più scoperto**: per ogni cella la
+campagna più recente, sostituita da una più vecchia dove quella è **più profonda di oltre 0,15 m** (la soglia si può
+cambiare) o dove la recente non ha nulla - un tratto poi coperto da sabbia, crolli o un rinterro. I colori delle
+campagne più vecchie vengono accordati a quelli della più recente sulle celle che hanno in comune vicino a dove
+subentrano (*Accorda i colori...*, attivo per difetto; il cambio è tenuto entro un guadagno fra 0,5 e 2). Il composito
+è un prospetto del chunk su cui è stato tracciato il muro (tipo `composite`, con il nome "<muro> <primo anno>-<ultimo
+anno>"): si può disegnare, esportare, rifinire e confrontare; un raster `sources.tif` dice per ogni cella da quale
+campagna viene, e il prospetto registra la soglia e le sue fonti. Ogni campagna ha bisogno di una data (la finestra
+chiede prima quella che manca).
+
+È **da rifare** quando una campagna viene ricostruita, corretta con una patch, o la sua data cambia l'ordine: il
+tooltip e la barra di stato dicono "Composito da rifare"; *Rifai il composito* (clic destro sul composito, oppure nel
+pannello) lo rifà al suo posto con la stessa soglia e gli stessi colori. Un composito non ha foto: le patch e la
+pittura della texture vi sono rifiutate.
+
+#### Finitura per una pubblicazione
+
+*Esporta per la pubblicazione...* (clic destro su qualsiasi prospetto, oppure nel pannello) scrive una copia per un
+libro o un poster - **il prospetto resta come misurato**: ortofoto e rilievo nel progetto non vengono toccati. In
+ordine:
+
+* **Riempi i buchi**: un buco largo fino a *Buco più grande da riempire* (0,5 m) viene riempito con colore e trama dai
+  bordi; uno più grande solo dove il rilievo vi ha superficie (colore mancante su un muro misurato); uno più grande
+  senza superficie è un'**apertura** - una porta, una finestra - e resta aperto. Il messaggio dice quante aperture sono
+  rimaste aperte.
+* **Fuori dal muro bianco**: quello che sta fuori dall'estensione del muro (il cielo sopra la cresta, frammenti di
+  terreno) bianco in un JPEG, trasparente in un TIFF.
+* **Uniforma il colore**: i cambi lenti di luce lungo il muro vengono tolti (Lab, su circa 250 pixel). Uniforma anche
+  l'ombreggiatura vera fra parti del muro che guardano la luce in modo diverso: toglilo quando conta.
+* **Copri le mire**: i marker che stanno sul prospetto, 18 cm intorno a ciascuno.
+
+*Un pixel ogni* N riduce l'immagine. Il file è un JPEG (`.jpg`, bianco fuori) o un GeoTIFF (`.tif`, trasparente fuori,
+nei metri del prospetto) e va scritto fuori dalla cartella dei dati del progetto.
+
+#### Tracciamento automatico
+
+Oltre ai clic, il passo *Linea del muro sulla pianta* ha due modi di trovare la linea sul **DEM**:
+
+* **Segui il muro fra due clic**: clic sui due capi del muro (e, se serve, su punti per cui passa, in ordine), doppio
+  clic per finire. La linea segue la cresta del muro sul rilievo locale del DEM (e sui bordi dell'ortofoto) ed è
+  mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
+  e il pannello lo dice: **Aggiungi punti di passaggio** (un clic dove passa il muro; la linea viene cercata di nuovo
+  passando di lì), oppure spunta **Usa SAM dove il muro è basso** (SAM 2.1 ritaglia il muro sull'ortofoto a partire
+  dai clic, quando è installato). **Tieni** fa della proposta la linea del muro, con il suo aggancio proposto e le sue
+  quote (il lato viene chiesto quando le foto stanno da tutte e due le parti).
+* **Proponi i muri**: le creste dei muri di tutta la pianta (un rilievo locale oltre 0,3 m, lunghe almeno 3 m), come
+  linee tratteggiate nel layer *Muri proposti*; un clic su una ne fa la linea del muro, controllata e con l'aggancio
+  proposto come se fosse stata cliccata.
+
+La linea seguita corre sulla cima del muro e taglia uno spigolo interno attraverso la cima: l'aggancio proposto rimette
+la linea sulla faccia e lo spigolo al suo posto. Controllalo sulla pianta e spunta *Aggancia alla faccia* prima di
+costruire.
+
+#### Limiti
+
+* La linea è una linea **sulla pianta**: niente tracce in 3D, niente tracce inclinate. `v` è sempre la quota; un muro
+  a scarpa è un cambio di profondità, una cresta in pendenza va bene.
+* Una **linea chiusa** (una stanza tracciata tutt'intorno) viene distesa come una striscia dal primo punto fino a
+  tornarci: i due capi si incontrano in uno spigolo vivo, senza arco, e la striscia non si chiude ad anello. Una
+  torre tonda o un pozzo sono un cilindro.
+* Un orientamento del chunk che lo **inclina** (una nuova verticale) viene rifiutato finché ha prospetti di muri
+  tracciati, con i loro nomi: toglili e traccia di nuovo i muri dopo. Una rotazione intorno alla verticale, uno
+  spostamento e una scala li muovono con il chunk.
+* Su un muro tracciato non si fa una sezione: si costruisce il prospetto (la finestra lo dice).
+* L'aggancio (e la sua proposta) ha bisogno di un modello lungo la linea; la linea seguita e le proposte di un DEM.
+
+#### Dalla riga di comando
+
+```bash
+ppg elevation scavo.ppg --path "X1,Y1 X2,Y2 X3,Y3" [--side auto|left|right|X,Y] [--extend 5,5]
+    [--heights V0,V1] [--snap] [--snap-band 2.5] [--smooth 0] [--scale wall|trace]
+    [--front 0.5] [--back 0.5] [--resolution R] [--skip-backlit] [--name NOME] [--chunk CHUNK]
+ppg elevation scavo.ppg --like ID --chunks "2019,2024" [--dates "2019=2019-06-10,2024=2024-07-02"] [--same-frame]
+ppg elevation scavo.ppg --like ID --compare confronto.png [--title T] [--overwrite]
+ppg elevation scavo.ppg --like ID --composite [--deeper 0.15]
+ppg elevation scavo.ppg --like ID --finish prospetto.jpg [--no-fill] [--no-mask] [--no-level] [--no-targets]
+    [--reduce N] [--max-hole 0.5]
+```
+
+* `--path`: la linea, due punti almeno, nel sistema di riferimento del chunk, separati da spazi. Stampa
+  `NOME: W x H px at R m/px; v = height; L m along the wall; corners: N` e, se agganciata, di quanto si sono spostati
+  i vertici. `--side` prende una parola o un punto dal lato di chi guarda (anche con `--trace`); `--extend A,B` metri
+  prima del primo punto e dopo l'ultimo; `--heights` le quote (predefinite: quelle del muro sul modello); la linea
+  si usa come data; `--snap` (spento all'inizio) costruisce sulla linea agganciata alla faccia, `--snap-band` (con
+  `--snap`) e `--smooth` come nel pannello; `--scale wall` (predefinito) o `trace`.
+  `--section` è rifiutato con `--path`, e le opzioni del percorso senza.
+* `--chunks` (con `--like`, non con `--chunk`): una riga per chunk - costruito, rifiutato con il motivo, o vuoto - e
+  una per il gruppo; codice di uscita 1 quando non si è costruito nulla. `--dates` dà la data alle campagne.
+* `--compare` non costruisce nulla e stampa l'immagine e il PDF, e le campagne lasciate fuori; `--title` il titolo;
+  senza `--overwrite` i file che ci sono restano e il comando fallisce.
+* `--composite` fa (o rifà) il composito del gruppo di `--like`; `--deeper` la soglia in metri.
+* `--finish` esporta il prospetto `--like` rifinito: `--no-fill`, `--no-mask`, `--no-level`, `--no-targets` tolgono
+  un passo, `--reduce N` un pixel ogni N, `--max-hole` il buco più grande riempito dappertutto.
+* `--skip-backlit` va con una costruzione, non con `--like` (vale l'impostazione di quel prospetto).
+* Un prospetto che non è in un gruppo dà un errore con `--compare` e `--composite`. Queste opzioni vogliono `--like`;
+  `--chunks`, `--compare`, `--composite` e `--finish` non vanno insieme.
 
 ### Disegni sui prospetti e sulle sezioni
 
