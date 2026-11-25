@@ -1,7 +1,7 @@
 """The native mapper of ``ppg_core`` (``NativeMapper``, milestone 3) seen from Python.
 
 Every test here is skipped only when ``_native.native_mapper()`` gives no class (a core without the
-mapper, API 16, or ``PPG_NATIVE=0``): the stages on a synthetic strip, the progress callback that
+mapper of API 19, or ``PPG_NATIVE=0``): the stages on a synthetic strip, the progress callback that
 raises, the arrays refused, the thresholds taken from pycolmap and the model the mapper writes in
 COLMAP's binary format, read by pycolmap and written again by it byte for byte.
 """
@@ -20,7 +20,7 @@ def _mapper_class():
     return get() if get is not None else None
 
 
-pytestmark = pytest.mark.skipif(_mapper_class() is None, reason="ppg_core has no NativeMapper (API 16)")
+pytestmark = pytest.mark.skipif(_mapper_class() is None, reason="ppg_core has no NativeMapper of API 19")
 
 FOCAL, WIDTH, HEIGHT = 1000.0, 2000, 1500
 
@@ -130,6 +130,9 @@ def test_the_stages_run_on_a_small_synthetic_input():
             "seconds"} <= set(rounds[0])
     report = mapper.report()
     assert report["placed"] == 12 and report["photos"] == 12 and report["points"] > 0
+    # per camera whose focal length is held, the sd of its radial terms at the corner and whether they stay held
+    assert {"focal_sd", "intrinsics_held", "radial_sd", "radial_held"} <= set(report)
+    assert report["radial_sd"] == [(1, None)] and report["radial_held"] == []  # the prior focal of the strip is freed
     assert report["frame"] == "free" and len(report["rounds"]) == len(rounds)
     assert report["median_reprojection_px"] < 1.0
     # the same arrays give the same block, bit for bit
@@ -229,6 +232,8 @@ def test_the_filter_thresholds_are_colmaps():
     mapper = pycolmap.GlobalPipelineOptions().mapper
     assert defaults["max_normalized_reprojection"] == mapper.max_normalized_reproj_error
     assert defaults["min_triangulation_deg"] == mapper.min_tri_angle_deg
+    if "final_max_reprojection_px" not in defaults:  # a core older than API 19
+        pytest.skip("ppg_core has no filter in pixels of the last adjustment (API 19)")
     # the filter of the last adjustment: the C++ defaults of COLMAP's IncrementalMapper::Options, with which the
     # retriangulation of its global mapper filters (not fields of GlobalPipelineOptions: its retriangulation holds
     # the triangulator's 15 px and 1 deg); pycolmap shows them on the incremental pipeline's mapper options
@@ -255,13 +260,13 @@ def test_the_options_are_checked():
 def test_the_switch_and_the_api(monkeypatch):
     import ppg_core
 
-    assert _native.MAPPER_API == 16 and _native.api() >= 16
+    assert _native.MAPPER_API == 19 and _native.api() >= 19
     assert _native.FEATURES["native_mapper"] == "NativeMapper" and _native.has("native_mapper")
     assert _mapper_class() is ppg_core.NativeMapper
     monkeypatch.setenv("PPG_NATIVE", "0")
     assert _native.native_mapper() is None
     monkeypatch.delenv("PPG_NATIVE")
-    monkeypatch.setattr(_native, "api", lambda: 15)
+    monkeypatch.setattr(_native, "api", lambda: 18)  # the mapper that failed the gate of the alignment: not taken
     assert _native.native_mapper() is None
 
 

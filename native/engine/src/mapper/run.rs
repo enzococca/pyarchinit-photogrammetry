@@ -82,9 +82,13 @@ pub struct MapperReport {
     pub rounds: Vec<RoundReport>,
     pub notes: Vec<String>,
     /// Per camera, the relative posterior sd of its focal length after round 1 (`None`: not taken)
-    /// and whether its intrinsics stayed held (ruling R16, `rounds`).
+    /// and whether its focal length stayed held (ruling R16, `rounds`; with it the principal point
+    /// and the decentring terms); per camera whose focal length is held, the sd in pixels at the
+    /// image corner of its radial terms, and whether they stayed held (ruling R-B1).
     pub focal_sd: Vec<Option<f64>>,
     pub intrinsics_held: Vec<bool>,
+    pub radial_sd: Vec<Option<f64>>,
+    pub radial_held: Vec<bool>,
 }
 
 /// The native mapper on one input (see the module of `mapper`): `view_graph`, `rotations`,
@@ -391,6 +395,8 @@ impl Mapper {
                 r.notes.clone_from(&state.notes);
                 r.focal_sd.clone_from(&state.focal_sd);
                 r.intrinsics_held.clone_from(&state.intrinsics_held);
+                r.radial_sd.clone_from(&state.radial_sd);
+                r.radial_held.clone_from(&state.radial_held);
                 self.state = Some(state);
                 self.stage = Stage::Refine;
                 Ok(&self.report.rounds)

@@ -1,6 +1,6 @@
 """The alignment of the native engine: the global mapper of the native core behind ``align_cameras(engine="native")``.
 
-The mapper (``ppg_core.NativeMapper``, API 16: :func:`.._native.native_mapper`) starts from COLMAP's database that
+The mapper (``ppg_core.NativeMapper``, API 19: :func:`.._native.native_mapper`) starts from COLMAP's database that
 the matching wrote (:func:`read_database`: the cameras, the key points and the verified pairs with their inlier
 matches) and goes through its stages one by one - the view graph, the rotations averaged, the tracks, the global
 positioning (in the frame of the GPS of the photos when there are three positions or more, :func:`gnss_input`), the
@@ -19,7 +19,7 @@ rules, and the reason is kept (``chunk.meta["sfm"]["native_fallback"]``, then th
 
 What the native mapper does not do stays classic (:func:`cannot_run`): the incremental and hierarchical mappers,
 photos added to an alignment, rigs, calibrations held fixed, camera models it does not know; and without the native
-core of API 16 or with ``PPG_NATIVE=0`` nothing changes. ``auto`` gives it the alignment (the step is in
+core of API 19 or with ``PPG_NATIVE=0`` nothing changes. ``auto`` gives it the alignment (the step is in
 :data:`.switch.AUTO_NATIVE_STEPS` since its gate) when the global mapper is the one ``auto`` picks (:func:`auto_takes`).
 
 Two variables tune the mapper for the trials of the plan: ``PPG_NATIVE_TRACKS_PER_PHOTO`` (the tracks kept per photo
@@ -82,7 +82,7 @@ class NativeMapperRejected(RuntimeError):
 
 def core_unavailable() -> str | None:
     """Why the native core cannot run the mapper on this computer, or None: switched off (``PPG_NATIVE=0``), missing
-    or below API 16 - the reasons of :func:`cannot_run` that are of the installation, not of the request."""
+    or below API 19 - the reasons of :func:`cannot_run` that are of the installation, not of the request."""
     if not _native.enabled():
         return "PPG_NATIVE=0"
     if _native.native_mapper() is None:

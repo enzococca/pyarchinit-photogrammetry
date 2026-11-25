@@ -598,6 +598,12 @@ impl NativeMapper {
         let held: Vec<u32> =
             r.intrinsics_held.iter().enumerate().filter(|(_, h)| **h).map(|(c, _)| self.camera_id(c)).collect();
         d.set_item("intrinsics_held", held)?;
+        let radial_sd: Vec<(u32, Option<f64>)> =
+            r.radial_sd.iter().enumerate().map(|(c, sd)| (self.camera_id(c), *sd)).collect();
+        d.set_item("radial_sd", radial_sd)?;
+        let radial_held: Vec<u32> =
+            r.radial_held.iter().enumerate().filter(|(_, h)| **h).map(|(c, _)| self.camera_id(c)).collect();
+        d.set_item("radial_held", radial_held)?;
         d.set_item("stopped", seen.stopped.clone())?;
         Ok(d)
     }

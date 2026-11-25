@@ -676,7 +676,7 @@ def test_the_commands_ask_the_steps_for_the_engine(tmp_path, monkeypatch, idle_e
 def test_process_with_the_native_engine_asked_for(scene_dir, tmp_path, monkeypatch):
     """``ppg process --engine native`` on the trench of the session: the whole chain ends well - the matching on the
     native engine where the native core carries it, on the classic one with the core named as the reason where it
-    does not; the alignment likewise (the native mapper, API 16); the depth maps on the classic engine; the project
+    does not; the alignment likewise (the native mapper, API 19); the depth maps on the classic engine; the project
     keeps what was asked and what was
     used for each of the three steps, and the report says it once for each."""
     from pyarchinit_photogrammetry import _native
