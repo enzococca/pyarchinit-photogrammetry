@@ -397,7 +397,7 @@ def test_a_build_reads_only_the_photos_that_see_its_part(processed, tmp_path, mo
     assert set(seen["read"]) <= set(seeing)
     assert entry["backlit_skipped"] == 1
     stored = ch.meta["blown_shares"]
-    assert sorted(by_label_of(ch, stored)) == seeing and stored[by_label[seeing[0]].path][2] == pytest.approx(0.05)
+    assert sorted(by_label_of(ch, stored)) == seeing and stored[str(by_label[seeing[0]].key)][2] == pytest.approx(0.05)
     for k in seen:
         seen[k].clear()
     again = E.build_like(ch, entry)                               # the shares kept: nothing decoded
@@ -410,8 +410,59 @@ def test_a_build_reads_only_the_photos_that_see_its_part(processed, tmp_path, mo
 
 
 def by_label_of(ch, stored: dict) -> list[str]:
-    labels = {c.path: c.label for c in ch.cameras}
-    return [labels[p] for p in stored]
+    labels = {str(c.key): c.label for c in ch.cameras}
+    return [labels[k] for k in stored]
+
+
+def test_the_kept_shares_carry_no_path_follow_a_moved_project_and_drop_removed_photos(processed, tmp_path,
+                                                                                        monkeypatch):
+    """``blown_shares`` is keyed on the cameras, not on the photos' paths: the saved project holds no path, the
+    project moved with its photos (same times) decodes none again, an entry of an older project keyed on a path is
+    a miss (no error) and is dropped with the entries of cameras removed from the chunk."""
+    import threading
+
+    from pyarchinit_photogrammetry.engine.visibility import raycaster_for_chunk
+
+    doc, ch = _copy(processed, tmp_path)
+    frame = _trench_frame(ch)
+    kw = dict(resolution=0.02, depth=(-0.08, 0.08), max_angle=89.0)
+    full = E.FrameSurface(ch, raycaster_for_chunk(ch), frame, 0.02, threading.Lock(), kw["depth"], None)
+    u0, v0 = full.bounds[:2]
+    bounds = (u0, v0, u0 + 0.2, v0 + 0.2)
+    part = E.FrameSurface(ch, raycaster_for_chunk(ch), frame, 0.02, threading.Lock(), kw["depth"], bounds)
+    seeing = sorted(c.label for c in E.photos_seeing(ch, part))
+    assert len(seeing) >= 2
+    gone = next(c for c in ch.cameras if c.label not in seeing)
+    old = str(ch.data_dir.resolve() / "photos" / "vecchia.jpg")
+    ch.meta["blown_shares"] = {old: [1, 2, 0.5], str(gone.key): [1, 2, 0.5]}
+    seen = _counting(monkeypatch, ch, {})
+    E.build_elevation(ch, frame, bounds=bounds, skip_backlit=True, **kw)
+    assert sorted(seen["decoded"]) == seeing
+    stored = ch.meta["blown_shares"]
+    assert old not in stored and all(k.isdigit() for k in stored)
+    ch.remove_cameras([gone])
+    seen["decoded"].clear()
+    E.build_elevation(ch, frame, bounds=bounds, skip_backlit=True, **kw)
+    assert seen["decoded"] == []                                   # the kept shares: nothing decoded again
+    assert sorted(by_label_of(ch, ch.meta["blown_shares"])) == seeing   # the removed camera's entry dropped
+    doc.save()
+    found = []
+
+    def look(node):
+        if isinstance(node, dict):
+            found.extend([node["blown_shares"]] if "blown_shares" in node else [])
+            for v in node.values():
+                look(v)
+        elif isinstance(node, list):
+            for v in node:
+                look(v)
+
+    look(json.loads(doc.path.read_text()))
+    assert found and all(k.isdigit() for f in found for k in f)    # no path saved, absolute or not
+    moved, mch = _copy((doc, ch, None), tmp_path, name="spostato")      # copied elsewhere, same times
+    seen = _counting(monkeypatch, mch, {})
+    E.build_elevation(mch, frame, bounds=bounds, skip_backlit=True, **kw)
+    assert seen["decoded"] == []
 
 
 def test_the_photos_that_see_a_part_paint_it_as_all_the_photos(processed, tmp_path, monkeypatch):

@@ -1371,19 +1371,22 @@ def _photo_stamp(cam) -> list | None:
 
 
 def blown_shares(chunk: Chunk, cams: list) -> list[float]:
-    """:func:`blown_share` of each camera, kept in ``chunk.meta["blown_shares"]`` (photo path -> ``[size, mtime
-    in ns, share]``): a photo whose file has the same size and time is not decoded again, by a later build, a
-    rebuild or a campaign of the same chunk; one that changed is."""
+    """:func:`blown_share` of each camera, kept in ``chunk.meta["blown_shares"]`` (camera key -> ``[size, mtime in
+    ns, share]``): a photo whose file has the same size and time is not decoded again, by a later build, a rebuild
+    or a campaign of the same chunk - also after the project and its photos are moved; one that changed is. The
+    keys are the cameras' own, never the photos' paths (a shared project carries no path of the computer that
+    built it); entries of cameras no longer in the chunk are dropped when the cache is written, and entries of
+    older projects (keyed on paths) are misses."""
     import os
     from concurrent.futures import ThreadPoolExecutor
 
     kept = chunk.meta.get("blown_shares")
-    kept = kept if isinstance(kept, dict) else {}
+    kept = dict(kept) if isinstance(kept, dict) else {}
     stamps = [_photo_stamp(c) for c in cams]
     shares: list = [None] * len(cams)
     todo = []
     for i, (cam, stamp) in enumerate(zip(cams, stamps)):
-        hit = kept.get(str(cam.path))
+        hit = kept.get(str(cam.key))
         if stamp is not None and isinstance(hit, list) and len(hit) == 3 and hit[:2] == stamp:
             shares[i] = float(hit[2])
         else:
@@ -1393,8 +1396,12 @@ def blown_shares(chunk: Chunk, cams: list) -> list[float]:
             for i, share in zip(todo, pool.map(blown_share, [cams[i] for i in todo])):
                 shares[i] = float(share)
                 if stamps[i] is not None:
-                    kept[str(cams[i].path)] = [*stamps[i], shares[i]]
-        chunk.meta["blown_shares"] = kept
+                    kept[str(cams[i].key)] = [*stamps[i], shares[i]]
+    present = {str(c.key) for c in chunk.cameras}
+    pruned = {k: v for k, v in kept.items() if k in present}
+    if todo or pruned != chunk.meta.get("blown_shares"):
+        if pruned or "blown_shares" in chunk.meta:
+            chunk.meta["blown_shares"] = pruned
     return shares
 
 

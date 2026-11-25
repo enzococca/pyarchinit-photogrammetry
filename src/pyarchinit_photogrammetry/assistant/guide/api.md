@@ -2212,8 +2212,9 @@ three channels at `BLOWN_LEVEL` (250) or over; `build_elevation(..., skip_backli
 photos kept for that build only; `RuntimeError` when every photo is backlit. `build_like` builds as the source was
 built. CLI: `ppg elevation ... --skip-backlit`. Only the photos that see the part built are opened and looked at
 (`elevation.photos_seeing(chunk, surface)`: a grid of points of the frame projected in each photo, poses and sensors
-only), and their shares are kept in `chunk.meta["blown_shares"]` (photo path -> size, time, share): a later build,
-a rebuild or a campaign of the same chunk decodes only the photos whose file changed (`elevation.blown_shares`).
+only), and their shares are kept in `chunk.meta["blown_shares"]` (camera key -> size, time, share; no path, so a moved project
+keeps them): a later build, a rebuild or a campaign of the same chunk decodes only the photos whose file changed
+(`elevation.blown_shares`).
 
 ### Walls traced on the plan
 
