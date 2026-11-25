@@ -1193,7 +1193,12 @@ def build_elevation(chunk: Chunk, frame, resolution: float | None = None, name: 
     else:
         # only the photos that see the part built: their headers read once, the backlit ones looked for among them
         progress(0.02, "Checking the photos")
-        cams, _bad = readable_cameras(chunk, True, cameras=photos_seeing(chunk, surf))
+        seeing = photos_seeing(chunk, surf)
+        if not seeing and chunk.aligned_cameras:  # an empty orthophoto would be written: said instead (a chunk
+            # without aligned photos nor texture keeps its relief alone)
+            raise NoPhotoSees("no photo sees this part of the frame: move the frame, widen its bounds or its depth "
+                              "band, or build from the texture of the model")
+        cams, _bad = readable_cameras(chunk, True, cameras=seeing)
         if skip_backlit and cams:
             progress(0.02, "Looking for backlit photos")
             cams, left = _without_backlit(chunk, cams)
@@ -1310,6 +1315,10 @@ def blown_share(cam) -> float:
     if img.size == 0:
         return 0.0
     return float((img >= BLOWN_LEVEL).all(axis=-1).mean())
+
+
+class NoPhotoSees(RuntimeError):
+    """No aligned photo sees the part of the frame asked (:func:`photos_seeing`): nothing to paint it from."""
 
 
 SEEING_STEP = 0.1  # metres between the points of a frame looked for in the photos (:func:`photos_seeing`)

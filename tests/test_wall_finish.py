@@ -465,6 +465,20 @@ def test_the_kept_shares_carry_no_path_follow_a_moved_project_and_drop_removed_p
     assert seen["decoded"] == []
 
 
+def test_a_part_no_photo_sees_is_refused(processed, tmp_path):
+    """A part of the frame that no aligned photo sees is refused with a clear error, not built as an empty
+    orthophoto; nothing is added to the chunk or written in its folder."""
+    _doc, ch = _copy(processed, tmp_path)
+    frame = _trench_frame(ch)
+    before = len(ch.meta.get("elevations", []))
+    files = sorted(p for p in ch.data_dir.rglob("*") if p.is_file())
+    with pytest.raises(E.NoPhotoSees, match="no photo sees this part of the frame"):
+        E.build_elevation(ch, frame, resolution=0.02, depth=(-0.08, 0.08), max_angle=89.0,
+                          bounds=(500.0, 0.0, 501.0, 1.0))           # half a kilometre along the wall
+    assert len(ch.meta.get("elevations", [])) == before
+    assert sorted(p for p in ch.data_dir.rglob("*") if p.is_file()) == files
+
+
 def test_the_photos_that_see_a_part_paint_it_as_all_the_photos(processed, tmp_path, monkeypatch):
     """Building from the photos that see the part only (:func:`elevation.photos_seeing`) paints the same elevation
     as from every photo of the chunk."""
