@@ -476,7 +476,8 @@ class Context:
 
         self.contributions.rasters.append(rastercalc.register(provider, owner=self.name))
 
-    site_hook = 2  # the form of add_site_contributions: 2 adds ``with_site`` (absent before: the program has no hook)
+    site_hook = 3  # the form of add_site_contributions: 2 adds ``with_site``, 3 the kind ``unit_groups`` (absent
+    #                before: the program has no hook)
 
     def add_site_contributions(self, provider: Callable, with_site: bool = False) -> None:
         """Since 1.10.0: what the plugin adds to the web site of a survey (``ppg web build``, the pane *Pubblica sul
@@ -494,7 +495,10 @@ class Context:
         :class:`..io.site_plugins.Site`: the frame of the site (``frame``, ``crs``, ``shift``), its ``languages``,
         the ``elevations`` it publishes and ``xy``/``height``/``position``/``uv``, which put the numbers of a table
         or a page into that frame; a layer with ``"elevation": <id>`` goes on that elevation in its ``(u, v)``, and
-        values and pages can be ``{"it": ..., "en": ...}``. A plugin finds the hook with
+        values and pages can be ``{"it": ..., "en": ...}``. Since :attr:`site_hook` 3 (2.1.0) a contribution can
+        also be ``{"kind": "unit_groups", "id", "title", "groups": [{"name", "title", "colour", "units": [{"tipo",
+        "us", "area"}]}]}``: groups of the stratigraphic units that colour their volumes on the site, one set a
+        chunk (see :mod:`..io.site_plugins`). A plugin finds the hook with
         ``getattr(context, "site_hook", 1) if hasattr(context, "add_site_contributions") else 0``."""
         from ..io import site_plugins
 

@@ -376,3 +376,85 @@ def test_an_unreadable_or_open_volume_is_left_out(volumes_doc, tmp_path):
         ch.meta["proxies"] = saved
         broken.unlink(missing_ok=True)
         open_ply.unlink(missing_ok=True)
+
+
+def _groups_provider(chunk, site):
+    return [{"kind": "unit_groups", "id": "epoche", "title": {"it": "Epoche", "en": "Epochs"},
+             "groups": [{"name": "fase-1", "title": "Fase 1", "colour": "#112233",
+                         "units": [{"tipo": "US", "us": "12"}, {"tipo": "US", "us": "999"}]},
+                        {"name": "fase-2", "colour": "red",
+                         "units": [{"tipo": "us", "us": 12}, {"us": " 14 ", "area": "2"}, {"tipo": "US"}]}]},
+            {"kind": "unit_groups", "id": "altre", "groups": [{"name": "x", "colour": "#000000",
+                                                               "units": [{"us": "14"}]}]}]
+
+
+def test_hook_3_groups_colour_the_volumes(volumes_doc, tmp_path):
+    import json
+
+    from pyarchinit_photogrammetry.archaeo.proxies import PROXY_COLOURS
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    doc, _ch = volumes_doc
+    entry = site_plugins.register(_groups_provider, owner="em", with_site=True)
+    try:
+        site, manifest = _site(doc, tmp_path / "site", products=("proxies",))
+    finally:
+        site_plugins.unregister(entry)
+    data = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))
+    by_us = {v["us"]: v for v in data["volumes"]}
+    # US 12 is named by both groups: the first takes it; US 14 is in area 1, not 2: no group, the program colour
+    assert by_us["12"]["group"] == "fase-1" and by_us["12"]["colour"] == "#112233"
+    assert by_us["14"]["group"] is None and by_us["14"]["colour"] == PROXY_COLOURS[1]
+    assert data["groups"] == [
+        {"name": "fase-1", "title": {"it": "Fase 1", "en": "Fase 1"}, "colour": "#112233", "count": 1},
+        {"name": "fase-2", "title": {"it": "fase-2", "en": "fase-2"}, "colour": PROXY_COLOURS[1], "count": 0},
+        {"name": "", "title": {"it": "Senza gruppo", "en": "No group"}, "colour": None, "count": 1}]
+    layer = next(x for x in manifest["chunks"][0]["layers"] if x["id"] == "volumes")
+    assert layer["groups"] == data["groups"]
+    assert not (site / "data" / "plugins").exists() and "plugins" not in manifest["chunks"][0]
+    notes = manifest["build"]["notes"]
+    assert any("plugin em" in n and "altre" in n and "one set of unit groups" in n for n in notes), notes
+
+
+def test_unit_groups_need_volumes(volumes_doc, tmp_path):
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    doc, _ch = volumes_doc
+    entry = site_plugins.register(lambda chunk, site: _groups_provider(chunk, site)[:1], owner="em",
+                                  with_site=True)
+    try:
+        site, manifest = _site(doc, tmp_path / "site", products=("dem",))
+    finally:
+        site_plugins.unregister(entry)
+    assert not (site / "data" / "proxies.json").exists() and not (site / "data" / "plugins").exists()
+    assert not any("plugin em" in n for n in manifest["build"]["notes"])
+
+
+def test_unit_groups_without_a_list_are_left_out(tmp_path):
+    from types import SimpleNamespace
+
+    from pyarchinit_photogrammetry.io import site_plugins
+    from pyarchinit_photogrammetry.io.site import _Shift
+
+    entry = site_plugins.register(_groups_provider, owner="em", with_site=True)
+    notes = []
+    try:
+        site_plugins.write(SimpleNamespace(label="C"), tmp_path, "data", _Shift(), lambda v: v, str, notes)
+    finally:
+        site_plugins.unregister(entry)
+    assert len(notes) == 2 and all("unit groups" in n for n in notes)
+    assert not (tmp_path / "plugins").exists()
+
+
+def test_apply_groups():
+    volumes = [{"tipo": "US", "us": "1", "area": None, "colour": "#aaaaaa", "group": None},
+               {"tipo": "USM", "us": "1", "area": "3", "colour": "#bbbbbb", "group": None}]
+    groups = {"plugin": "em", "id": "g", "title": {"it": "G", "en": "G"},
+              "groups": [{"name": "a", "title": {"it": "A", "en": "A"}, "colour": "#010101",
+                          "units": [{"tipo": "USM", "us": "1", "area": "2"}]},
+                         {"name": "b", "title": {"it": "B", "en": "B"}, "colour": "#020202",
+                          "units": [{"tipo": "USM", "us": "1", "area": "3"}, {"tipo": "US", "us": "1"}]}]}
+    assert site_volumes.apply_groups([dict(v) for v in volumes], None) == []
+    legend = site_volumes.apply_groups(volumes, groups)
+    assert [(v["group"], v["colour"]) for v in volumes] == [("b", "#020202"), ("b", "#020202")]
+    assert [(g["name"], g["count"]) for g in legend] == [("a", 0), ("b", 2)]  # no "Senza gruppo" row: none left

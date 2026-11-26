@@ -42,6 +42,20 @@ Since the second form of the hook (:data:`HOOK`, 2): a provider registered with 
 
 A provider of the first form (one argument) works as before.
 
+Since the third form (:data:`HOOK` 3): ``"unit_groups"`` - groups of the stratigraphic units, which colour the
+volumes of the units (product ``proxies``) and give their legend, a switch per group::
+
+    {"kind": "unit_groups", "id": "epochs", "title": {"it": "Epoche", "en": "Epochs"},
+     "groups": [{"name": "e1", "title": "Epoca I", "colour": "#d62728",
+                 "units": [{"tipo": "US", "us": "12", "area": "1"}, {"us": 14}, ...]}, ...]}
+
+A unit is named by its type (``"US"`` when not given) and number, with its area when the plugin knows it (then
+the area of the volume must agree, when it has one); a unit named by two groups belongs to the first; a unit with
+no volume is ignored; the volumes in no group keep the colours of the program, in a last group *Senza gruppo* /
+*No group*. A ``colour`` that is not ``#rrggbb`` takes the colour of the program by the index of the group. One
+set of groups a chunk: a second contribution is left out with a note; groups for a chunk without volumes are
+ignored. Names and titles are cleaned as every text; nothing of it goes in ``data/plugins/``.
+
 What goes out: ``data/plugins/<plugin>/`` (``data/<n>/plugins/<plugin>/`` with several chunks) holds ``<id>.geojson``,
 ``<id>.json`` or ``<id>.html`` and the pictures (``<id>-<n>.jpg``); ``site.json`` lists them in ``plugins`` of the
 chunk (a layer also among the ``layers`` of the chunk, drawn by the plan as the drawings of the program).
@@ -74,8 +88,9 @@ from xml.sax.saxutils import escape, quoteattr
 
 log = logging.getLogger("pyarchinit_photogrammetry")
 
-KINDS = ("layer", "table", "html")
-HOOK = 2  # the form of the hook: 2 since providers can take the site (``with_site``) and put layers on elevations
+KINDS = ("layer", "table", "html", "unit_groups")
+HOOK = 3  # the form of the hook: 2 since providers can take the site (``with_site``) and put layers on elevations,
+#           3 since they can group the units (``unit_groups``)
 WORDS = ("it", "en")  # the languages of a value given in both
 DECIMALS = 4  # of the coordinates, as the drawings of the program
 IMAGE_SIDE = 1600
@@ -322,13 +337,14 @@ def _features(data) -> list[dict]:
 
 
 def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], frame: str = "local", crs=None,
-          languages=WORDS, sections=()) -> tuple[list[dict], list[dict], int]:
+          languages=WORDS, sections=(), unit_groups: list | None = None) -> tuple[list[dict], list[dict], int]:
     """The contributions of every registered plugin for ``chunk`` written under ``data/plugins``: the layers for the
     ``layers`` of the chunk in ``site.json``, the entries of its ``plugins`` (tables and pages; the layers too) and
     the bytes written. ``notes``: where what was left out is said. ``frame``, ``crs``, ``languages``: of the site, for
     the :class:`Site` of the providers of the second form; ``sections``: pairs ``(entry of the elevation in the chunk,
     its record in site.json)`` of the elevations published - a layer on one of them goes among the ``layers`` of its
-    record."""
+    record. ``unit_groups``: the list the groups of the units go to (``{"plugin", "id", "title", "groups"}``, one
+    a chunk, for :func:`.site_volumes.apply_groups`); None: the site takes none, they are left out with a note."""
     sections = [(e, r) for e, r in sections or ()]
     site = Site(shift, frame, crs, languages,
                 [{"elevation": str(e.get("id")), "section": r["id"], "name": r.get("name", ""), "kind": r.get("kind"),
@@ -359,6 +375,15 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], fr
                     if target is None:
                         raise _Refused(f"layer {cid}: the elevation {scrub(str(on))!r} is not on the site")
                 seen.add(key)
+                if kind == "unit_groups":
+                    if unit_groups is None:
+                        raise _Refused(f"unit groups {cid}: this site takes no unit groups")
+                    if unit_groups:
+                        raise _Refused(f"unit groups {cid}: one set of unit groups a chunk, "
+                                       f"{unit_groups[0]['plugin']} {unit_groups[0]['id']} came first")
+                    unit_groups.append({"plugin": owner, "id": cid, "title": _title(item.get("title"), scrub, cid),
+                                        "groups": _unit_groups(item, cid, scrub)})
+                    continue
                 folder = data / "plugins" / owner
                 folder.mkdir(parents=True, exist_ok=True)
                 url = f"{rel}/plugins/{owner}"
@@ -394,6 +419,36 @@ def write(chunk, data: Path, rel: str, shift, clean, scrub, notes: list[str], fr
                 notes.append(f"{chunk.label}: plugin {owner}: a contribution left out "
                              f"({type(exc).__name__}, see the log)")
     return layers, listed, size
+
+
+def _unit_groups(item: dict, cid: str, scrub) -> list[dict]:
+    """The groups of a ``unit_groups`` contribution as the site takes them: a name (text, once), a title, a colour
+    ``#rrggbb`` (else the program's by the index of the group) and the units with a number, as trimmed text."""
+    from ..archaeo.proxies import PROXY_COLOURS
+    from .site_records import unit_text
+
+    given = item.get("groups")
+    if not isinstance(given, list):
+        raise _Refused(f"unit groups {cid}: 'groups' is not a list")
+    out, names = [], set()
+    for g in given:
+        if not isinstance(g, dict) or not isinstance(g.get("name"), str):
+            continue
+        name = scrub(g["name"].strip())
+        if not name or name in names:
+            continue
+        names.add(name)
+        units = []
+        for u in g.get("units") or []:
+            if not isinstance(u, dict) or not unit_text(u.get("us")):
+                continue
+            units.append({"tipo": unit_text(u.get("tipo")) or "US", "us": unit_text(u.get("us")),
+                          "area": unit_text(u.get("area")) or None})
+        index = len(out)
+        out.append({"name": name, "title": _title(g.get("title"), scrub, name),
+                    "colour": _colour(g.get("colour"), PROXY_COLOURS[index % len(PROXY_COLOURS)]).lower(),
+                    "units": units})
+    return out
 
 
 def _move(c, move):

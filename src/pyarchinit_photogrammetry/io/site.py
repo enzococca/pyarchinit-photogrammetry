@@ -896,9 +896,11 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                                       "title": TITLES["drawings"], "visible": True, "count": len(feats),
                                       "groups": groups}
                 boxes.append(_bounds(feats))
+        unit_groups: list[dict] = []  # one set a chunk, for its volumes (ignored without volumes)
         plugin_layers, plugin_list, _ = site_plugins.write(
             ch, data, rel, shift, clean, scrub, notes, frame=frame, crs=written_crs, languages=languages,
-            sections=list(zip(item["sections"], section_list)))  # write_sections keeps the order of the entries
+            sections=list(zip(item["sections"], section_list)),  # write_sections keeps the order of the entries
+            unit_groups=unit_groups)
         for layer in plugin_layers:
             layers[layer["id"]] = layer
             path = folder / layer["url"]
@@ -912,7 +914,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 return records.key(*unit) if unit is not None else None
 
             layer = site_volumes.write(ch, volumes, data, rel, shift, scrub,
-                                       None if records is None else volume_record, None, notes)
+                                       None if records is None else volume_record,
+                                       unit_groups[0] if unit_groups else None, notes)
             volumes = None
             if layer is not None:
                 layers["volumes"] = layer

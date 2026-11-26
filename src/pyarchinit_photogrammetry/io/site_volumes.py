@@ -316,7 +316,7 @@ def write(chunk, prepared, data, rel: str, shift, scrub, record_of, groups, note
             if record:
                 v["record"] = record
         volumes.append(v)
-    legend: list[dict] = []  # the groups of the plugins come with site hook 3
+    legend = apply_groups(volumes, groups)
     (data / "proxies.glb").write_bytes(prepared["blob"])
     (data / "proxies.json").write_text(json.dumps({"title": TITLES["volumes"], "volumes": volumes,
                                                    "groups": legend},
@@ -332,3 +332,37 @@ def write(chunk, prepared, data, rel: str, shift, scrub, record_of, groups, note
         layer["origin"] = prepared["origin"]
     return layer
 
+
+NO_GROUP = {"it": "Senza gruppo", "en": "No group"}
+
+
+def apply_groups(volumes: list[dict], groups: dict | None) -> list[dict]:
+    """Set ``group`` and ``colour`` of each of ``volumes`` (as :func:`write` makes them) by the unit groups of a
+    plugin (``{"plugin", "id", "title", "groups": [{"name", "title", "colour", "units": [{"tipo", "us",
+    "area"}]}]}``, :func:`.site_plugins.write`): a volume goes to the first group naming its type and number, and
+    its area when both have one (trimmed text, the type in capitals). Returns the legend ``[{"name", "title",
+    "colour", "count"}]``, one row a group, and last ``{"name": "", "title": Senza gruppo / No group, "colour":
+    None}`` for the volumes in no group, which keep the colours of the program; ``[]`` without groups."""
+    from .site_records import _type, unit_text
+
+    if not groups or not groups.get("groups"):
+        return []
+    legend = [{"name": g["name"], "title": g["title"], "colour": g["colour"], "count": 0} for g in groups["groups"]]
+    rest = 0
+    for v in volumes:
+        tipo, us, area = _type(v.get("tipo")), unit_text(v.get("us")), unit_text(v.get("area"))
+        found = None
+        for n, g in enumerate(groups["groups"]):
+            if any(_type(u.get("tipo")) == tipo and unit_text(u.get("us")) == us
+                   and (not area or not unit_text(u.get("area")) or unit_text(u.get("area")) == area)
+                   for u in g.get("units") or ()):
+                found = n
+                break
+        if not us or found is None:
+            rest += 1
+            continue
+        v["group"], v["colour"] = legend[found]["name"], legend[found]["colour"]
+        legend[found]["count"] += 1
+    if rest:
+        legend.append({"name": "", "title": dict(NO_GROUP), "colour": None, "count": rest})
+    return legend
