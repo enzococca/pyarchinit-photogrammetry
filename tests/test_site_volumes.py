@@ -372,6 +372,8 @@ def test_an_unreadable_volume_is_left_out_an_open_one_kept(volumes_doc, tmp_path
         rows = [{"sito": SITE, "area": "1", "us": u, "unita_tipo": "US"} for u in ("12", "14", "98", "99")]
         labels = [r["label"] for r in site_records.match_report(doc, None, rows) if r["what"] == "volume"]
         assert sorted(labels) == ["US12", "US14", "US98"]
+        quick = [r["label"] for r in site_records.match_report(doc, None, rows, read=False) if r["what"] == "volume"]
+        assert sorted(quick) == ["US12", "US14", "US98", "US99"]  # the meshes not read: the file is there
         site, manifest = _site(doc, tmp_path / "site", products=("proxies",))
         meshes = _glb_meshes(site / "data" / "proxies.glb")
         assert sorted(meshes) == ["US12", "US14", "US98"] and len(meshes["US98"][1]) == 2  # as given

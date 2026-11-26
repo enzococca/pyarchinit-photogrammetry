@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 
 from ..io import site
 from ..io import site_publish
+from ..io import site_records
 from .dialogs import message
 from .flow_layout import FlowLayout
 from .i18n import number, tr
@@ -30,6 +31,20 @@ STEPS = ("contents", "build", "preview", "publish")
 STATE_ICONS = {"todo": "step_todo", "done": "step_done", "stale": "warning", "running": "step_running",
                "failed": "error", "unavailable": "step_todo"}
 TEXTURES = (0, 1024, 2048, 4096, 8192)  # the largest side of a texture page of the model (0: vertex colours)
+# the choices added in 2.1.0 as a site recorded before them was built: without records, names or masonry heights
+OPTION_DEFAULTS = {"records": False, "people": False, "usm_heights": "none"}
+
+
+def usm_height_names() -> dict[str, str]:
+    """The heights of the masonry units a site may publish (:data:`..io.site_records.USM_HEIGHTS`)."""
+    return {"none": tr("non pubblicare"), "relative": tr("relative"), "absolute": tr("assolute")}
+
+
+def match_reasons() -> dict[str, str]:
+    """Why a unit has no record (:func:`..io.site_records.match_unit`) in the words of the pane."""
+    return {site_records.NO_NUMBER: tr("senza numero"), site_records.NO_SITE: tr("senza sito"),
+            site_records.NO_ROW: tr("nessuna scheda con questo numero"),
+            site_records.SEVERAL: tr("più schede possibili")}
 
 
 def data_modes() -> dict[str, str]:
@@ -108,6 +123,10 @@ def plan_text(plan) -> str:
         public += f" <span style='color:{PALETTE['red']}'><b>{tr('Con le coordinate VERE del rilievo.')}</b></span>"
     else:
         public += " " + tr("Coordinate nel sistema locale: il luogo del rilievo non è scritto.")
+    if getattr(plan, "records", 0):
+        public += " " + tr("Anche le schede di {0} unità stratigrafiche.", number(plan.records))
+    if getattr(plan, "people", False):
+        public += " " + tr("Anche i nomi delle persone (chi ha schedato, diretto, disegnato).")
     rows.append(public)
     texts = issue_texts()
     for kind, code, values in plan.codes:
@@ -373,6 +392,41 @@ class WebPane(QWidget):
             self.products[key] = c
             bar.addWidget(c)
         form.addWidget(products)
+        self.pa = None  # the PyArchInit bridge of the window (set_pa)
+        self.records = QCheckBox(tr("Schede US da PyArchInit"))
+        self.records_tip = tr("Le schede US del database di PyArchInit collegato, accanto alle unità, ai "
+                              "contorni e ai volumi che hanno lo stesso sito, area e numero. Sono quelle del "
+                              "momento in cui si costruisce il sito: cambiate in PyArchInit, costruisci di "
+                              "nuovo.")
+        self.records.setToolTip(self.records_tip)
+        self.records.setEnabled(False)  # until the window says the bridge is connected (set_pa)
+        self.records.toggled.connect(lambda _on: self._records_changed())
+        form.addWidget(self.records)
+        self.records_note = QLabel("")
+        self.records_note.setWordWrap(True)
+        self.records_note.setContentsMargins(20, 0, 0, 0)
+        self.records_note.setVisible(False)
+        form.addWidget(self.records_note)
+        self.w_usm = QWidget()
+        urow = QHBoxLayout(self.w_usm)
+        urow.setContentsMargins(20, 0, 0, 0)
+        urow.addWidget(QLabel(tr("Quote delle USM:")))
+        self.usm_heights = QComboBox()
+        for key, name in usm_height_names().items():
+            self.usm_heights.addItem(name, key)
+        self.usm_heights.setToolTip(tr("Le quote minima e massima delle unità murarie (quota_min_usm, "
+                                       "quota_max_usm) nelle schede: non pubblicate, oppure relative o assolute "
+                                       "come le hai scritte. Con le coordinate vere sono scritte come sono."))
+        self.usm_heights.currentIndexChanged.connect(lambda _i: self.update_states())
+        urow.addWidget(self.usm_heights)
+        urow.addStretch(1)
+        form.addWidget(self.w_usm)
+        self.people = QCheckBox(tr("Nomi delle persone"))
+        self.people.setToolTip(tr("I nomi di chi ha schedato, diretto e di chi è responsabile (schedatore, "
+                                  "direttore_us, responsabile_us) e di chi ha disegnato (disegnatore). Spenta, il "
+                                  "sito non scrive il nome di nessuno."))
+        self.people.toggled.connect(lambda _on: self.update_states())
+        form.addWidget(self.people)
         fields = QFormLayout()
         self.title = QLineEdit()
         self.title.setToolTip(tr("Il titolo della pagina (vuoto: il sito del progetto, o il nome del file)"))
@@ -669,7 +723,53 @@ class WebPane(QWidget):
         return folder if site_publish.publication_recorded(folder) else None
 
     def _chunks_changed(self) -> None:
+        self.count_records()
         self.update_states()
+
+    # --------------------------------------------------------------- records of PyArchInit
+    def set_pa(self, pa) -> None:
+        """The PyArchInit bridge of the window, connected (``pa``) or not (None): the box of the records follows."""
+        self.pa = pa
+        self.records.setEnabled(pa is not None)
+        self.records.setToolTip(self.records_tip if pa is not None else
+                                tr("Collega PyArchInit (menu PyArchInit) per pubblicare le schede US."))
+        self.count_records()
+        self.update_states()
+
+    def _records_changed(self) -> None:
+        self.count_records()
+        self.update_states()
+
+    def count_records(self) -> None:
+        """The units of the chunks ticked that have their record, counted at once with the matching of the build
+        (:func:`..io.site_records.match_report`, the meshes of the volumes not read); the units without one in the
+        tooltip, with the reason. A database that cannot be read is said beside the box, which stays ticked."""
+        note = self.records_note
+        if self.pa is None or self.document is None or not self.records.isChecked():
+            note.setText("")
+            note.setToolTip("")
+            note.setVisible(False)
+            return
+        note.setVisible(True)
+        chunks = self.chosen_chunks()
+        try:
+            rows = self.pa.us_rows(site_records.unit_sites(self.document, chunks))
+            report = site_records.match_report(self.document, chunks, rows, read=False)
+        except Exception as exc:  # noqa: BLE001 - any error of the database: said, the box stays ticked
+            log.warning("Schede US non lette: %s", exc)
+            note.setText(tr("PyArchInit non leggibile"))
+            note.setToolTip(str(exc))
+            note.setStyleSheet(f"color: {PALETTE['red']};")
+            return
+        matched, total = site_records.summary(report)
+        note.setText(tr("{0} unità su {1} con la scheda", matched, total))
+        note.setStyleSheet("")
+        reasons = match_reasons()
+        missing = [f"{r['chunk']}: {r['label']} ({reasons.get(r['reason'], r['reason'])})"
+                   for r in report if not r.get("step")]
+        if len(missing) > 30:
+            missing = missing[:30] + ["..."]
+        note.setToolTip(tr("Senza scheda:") + "\n" + "\n".join(missing) if missing else "")
 
     def chosen_chunks(self) -> list:
         """The chunks ticked, in the order of the project."""
@@ -697,7 +797,10 @@ class WebPane(QWidget):
                 "title": self.title.text().strip(), "description": self.description.text().strip(),
                 "languages": languages, "quality": int(self.quality.value()),
                 "model_texture": int(self.texture.currentData() or 0), "budget_mb": int(self.budget.value()),
-                "cloud_points": int(self.cloud_points.value()), "timeline": bool(self.timeline.isChecked())}
+                "cloud_points": int(self.cloud_points.value()), "timeline": bool(self.timeline.isChecked()),
+                "records": bool(self.records.isChecked()),
+                "people": bool(self.people.isChecked()),
+                "usm_heights": str(self.usm_heights.currentData() or "none")}
 
     def folder_path(self) -> Path | None:
         text = self.folder.text().strip()
@@ -755,6 +858,15 @@ class WebPane(QWidget):
         self.budget.setValue(int(options.get("budget_mb", site.BUDGET_MB) or 0))
         self.cloud_points.setValue(int(options.get("cloud_points") or site.CLOUD_POINTS))
         self.timeline.setChecked(bool(options.get("timeline")))
+        for w in (self.records, self.people, self.usm_heights):
+            w.blockSignals(True)
+        self.records.setChecked(bool(options.get("records", OPTION_DEFAULTS["records"])))
+        self.people.setChecked(bool(options.get("people", OPTION_DEFAULTS["people"])))
+        k = self.usm_heights.findData(options.get("usm_heights", OPTION_DEFAULTS["usm_heights"]))
+        self.usm_heights.setCurrentIndex(max(k, 0))
+        for w in (self.records, self.people, self.usm_heights):
+            w.blockSignals(False)
+        self.count_records()
         if record is not None:
             self.folder.setText(str(site.site_folder(document, record)))
         else:
@@ -865,6 +977,8 @@ class WebPane(QWidget):
             c.setToolTip(tr("Ce l'hanno: {0}", ", ".join(owners)) if owners else
                          tr("Nessun chunk spuntato ha {0}", names[key]))
         self.crs_warning.setVisible(self.frame_crs.isChecked())
+        self.w_usm.setVisible(not self.frame_crs.isChecked())  # in true coordinates every height as written
+        self.w_usm.setEnabled(self.records.isChecked())
         problems = self.problems()
         folder = self.folder.text().strip()
         contents = "failed" if folder and folder_problem(folder) else ("todo" if problems else "done")
@@ -875,7 +989,10 @@ class WebPane(QWidget):
             text = " ".join(problems)
         else:
             frame = tr("coordinate vere") if o["frame"] == "crs" else tr("sistema locale")
-            text = tr("{0} chunk, {1}; {2}.", len(o["chunks"]), ", ".join(names[p] for p in o["products"]), frame)
+            extras = [frame] + ([tr("schede US di PyArchInit")] if o["records"] else []) + \
+                ([tr("nomi delle persone")] if o["people"] else [])
+            text = tr("{0} chunk, {1}; {2}.", len(o["chunks"]), ", ".join(names[p] for p in o["products"]),
+                      ", ".join(extras))
             text += " " + folder_note(folder)
         self.states["contents"].setText(text)
         self.states["contents"].setStyleSheet(f"color: {PALETTE['red']};" if contents == "failed" else "")
@@ -897,7 +1014,7 @@ class WebPane(QWidget):
             if build == "stale":
                 text = tr("Da rifare: cambiati dopo il sito {0}.", ", ".join(self.stale)) + " " + text
             built_with = record.get("options") or {}
-            if any(built_with.get(k) != v for k, v in o.items()):
+            if any(built_with.get(k, OPTION_DEFAULTS.get(k)) != v for k, v in o.items()):
                 text += " " + tr("Le scelte del passo 1 sono cambiate da allora: costruisci di nuovo per applicarle.")
         self.states["build"].setText(text)
         self.states["build"].setStyleSheet(f"color: {PALETTE['red']};" if build == "failed" else "")
@@ -1009,6 +1126,7 @@ class WebPublishing(QObject):
         super().__init__(window)
         self.window = window
         self.pane = WebPane()
+        self.pane.set_pa(getattr(window, "pa", None))
         self.preview: site.Preview | None = None
         self._building = False
         self.pane.build_requested.connect(self.build)
@@ -1053,6 +1171,15 @@ class WebPublishing(QObject):
         except ValueError as exc:
             w._warn(str(exc))
             return False
+        rows = None  # the records read here, in the thread of the window: the worker never touches the database
+        if o.get("records"):
+            if pane.pa is None:
+                log.warning(tr("Sito senza le schede US: PyArchInit non è collegato"))
+            else:
+                try:
+                    rows = pane.pa.us_rows(site_records.unit_sites(doc, o["chunks"]))
+                except Exception as exc:  # noqa: BLE001 - the site is built without the records, said in the log
+                    log.warning(tr("Sito senza le schede US: PyArchInit non leggibile ({0})", exc))
 
         def job(progress):
             path = site.export_site(doc, folder, chunks=o["chunks"], products=o["products"], frame=o["frame"],
@@ -1061,7 +1188,8 @@ class WebPublishing(QObject):
                                     model_texture=o["model_texture"] or None, progress=progress,
                                     budget_mb=o.get("budget_mb") or None,
                                     cloud_points=o.get("cloud_points") or site.CLOUD_POINTS,
-                                    timeline=bool(o.get("timeline")))
+                                    timeline=bool(o.get("timeline")), unit_records=rows,
+                                    people=bool(o.get("people")), usm_heights=o.get("usm_heights") or "none")
             return path, site.site_size(path.parent)
 
         def done(result):
@@ -1447,6 +1575,8 @@ class WebPublishing(QObject):
             self.set_document(doc)  # another project, a chunk added or removed: the list made again
             return
         pane.refresh_chunks()
+        if pane.isVisible():
+            pane.count_records()  # units drawn or removed meanwhile
         pane.read_record()
 
     def close(self) -> None:

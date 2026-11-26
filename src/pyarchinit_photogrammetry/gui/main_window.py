@@ -18704,6 +18704,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         def done(pa):
             self.pa = pa
             self.pa_pane.set_connection(pa, pa.label)
+            self.web_pane.set_pa(pa)  # the records of the units offered to the web site
             if self._pottery_win is not None:
                 self._pottery_win.set_connected(True)
             log.info("PyArchInit connesso: %s", pa.label)

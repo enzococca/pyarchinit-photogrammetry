@@ -48,6 +48,7 @@ def win(qapp, project, tmp_path, monkeypatch):
 
     doc = ppg.Document.open(project)
     doc.meta.pop("web_site", None)
+    doc.meta.pop("sito", None)
     for ch in doc.chunks:
         ch.meta.pop("drawings", None)
     doc.save()
@@ -308,3 +309,160 @@ def test_cloud_budget_and_dates_among_the_contents(win, qapp, tmp_path):
     assert w.doc.meta["web_site"]["options"]["cloud_points"] == 20_000
     pane.set_document(w.doc)  # the choices of the last site come back
     assert pane.products["cloud"].isChecked() and pane.cloud_points.value() == 20_000 and pane.budget.value() == 300
+
+
+# --- the unit records of PyArchInit, the names of people, the heights of the masonry units ---
+
+SITE = "Sito di prova"
+
+
+class FakePyArchInit:
+    """What the pane reads of the bridge: ``us_rows`` of the sites asked (US 1 and US 2 of the trench; US 3 has
+    none), or the error of a database that cannot be read."""
+
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.asked: list = []
+
+    def us_rows(self, sites):
+        self.asked.append(list(sites))
+        if self.error is not None:
+            raise self.error
+        return [{"sito": SITE, "area": "1", "us": n, "unita_tipo": "US", "d_stratigrafica": f"Strato {n}",
+                 "descrizione": f"Descrizione {n}", "schedatore": "Mario Schedatore"}
+                for n in ("1", "2") if SITE in sites]
+
+
+def _units(w, qapp):
+    """Three unit polygons on the trench (US 1, 2, 3 of area 1) and the site of the project."""
+    import rasterio
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    with rasterio.open(w.chunk.dem_path) as src:
+        b = src.bounds
+    x, y = (b.left + b.right) / 2, (b.bottom + b.top) / 2
+    w.doc.meta["sito"] = SITE
+    w.chunk.meta["drawings"] = {"units": [
+        UnitPolygon(box(x + 0.3 * n, y, x + 0.3 * n + 0.2, y + 0.2), us=str(n + 1), area="1").to_dict()
+        for n in range(3)]}
+    w._reload_drawings(redraw=False)
+    pane = _front(w, qapp)
+    pane.set_document(w.doc)
+    return pane
+
+
+def test_records_box_off_by_default_and_needs_pyarchinit(win, qapp):
+    pane = _units(win, qapp)
+    assert not pane.records.isChecked() and not pane.records.isEnabled()  # no PyArchInit connected
+    assert not pane.people.isChecked() and pane.people.isEnabled()
+    tip = pane.people.toolTip()
+    assert all(c in tip for c in ("schedatore", "direttore_us", "responsabile_us", "disegnatore"))
+    o = pane.options()
+    assert (o["records"], o["people"], o["usm_heights"]) == (False, False, "none")
+    assert [pane.usm_heights.itemData(i) for i in range(pane.usm_heights.count())] == ["none", "relative",
+                                                                                       "absolute"]
+    pane.set_pa(FakePyArchInit())
+    assert pane.records.isEnabled() and not pane.records.isChecked()
+    pane.records.setChecked(True)
+    pane.set_pa(None)  # the bridge went: the box cannot be used, the choice is kept
+    assert not pane.records.isEnabled() and pane.options()["records"]
+
+
+def test_records_note_counts_the_units(win, qapp):
+    pane = _units(win, qapp)
+    fake = FakePyArchInit()
+    pane.set_pa(fake)
+    assert not pane.records_note.isVisibleTo(pane)
+    pane.records.setChecked(True)
+    assert fake.asked[-1] == [SITE]
+    assert pane.records_note.isVisibleTo(pane)
+    assert pane.records_note.text() == "2 unità su 3 con la scheda"
+    assert "US 3" in pane.records_note.toolTip()
+    for i in range(pane.chunks.count()):  # no chunk: no unit
+        pane.chunks.item(i).setCheckState(pane.chunks.item(i).checkState().Unchecked)
+    assert pane.records_note.text() == "0 unità su 0 con la scheda"
+
+
+def test_records_note_says_pyarchinit_cannot_be_read(win, qapp):
+    pane = _units(win, qapp)
+    pane.set_pa(FakePyArchInit(RuntimeError("database is locked")))
+    pane.records.setChecked(True)
+    assert pane.records.isChecked()  # the box stays ticked
+    assert "PyArchInit non leggibile" in pane.records_note.text()
+    assert "database is locked" in pane.records_note.toolTip()
+
+
+def test_usm_heights_hidden_in_true_coordinates(win, qapp):
+    pane = _units(win, qapp)
+    assert pane.usm_heights.isVisibleTo(pane)
+    pane.usm_heights.setCurrentIndex(pane.usm_heights.findData("absolute"))
+    pane.frame_crs.setChecked(True)
+    assert not pane.usm_heights.isVisibleTo(pane)
+    assert pane.options()["usm_heights"] == "absolute"  # kept all the same
+    pane.frame_local.setChecked(True)
+    assert pane.usm_heights.isVisibleTo(pane)
+
+
+def test_build_with_records_writes_them(win, qapp, tmp_path):
+    w = win
+    pane = _units(w, qapp)
+    pane.set_pa(FakePyArchInit())
+    pane.records.setChecked(True)
+    assert "schede US" in pane.states["contents"].text()
+    _build(w, qapp, pane, tmp_path / "sito", products=("dem", "units"))
+    site_dir = tmp_path / "sito"
+    records = json.loads((site_dir / "data" / "records.json").read_text(encoding="utf-8"))
+    assert sorted(r["title"] for r in records.values()) == ["US 1 - Strato 1", "US 2 - Strato 2"]
+    manifest = json.loads((site_dir / "site.json").read_text(encoding="utf-8"))
+    assert manifest["people"] is False
+    assert "Mario Schedatore" not in (site_dir / "data" / "records.json").read_text(encoding="utf-8")
+
+
+def test_build_without_pyarchinit_says_so(win, qapp, tmp_path, caplog):
+    import logging
+
+    w = win
+    pane = _units(w, qapp)
+    pane.set_pa(FakePyArchInit())
+    pane.records.setChecked(True)
+    pane.set_pa(FakePyArchInit(RuntimeError("database is locked")))
+    with caplog.at_level(logging.WARNING, logger="pyarchinit_photogrammetry.gui"):
+        _build(w, qapp, pane, tmp_path / "sito", products=("dem", "units"))
+    assert not (tmp_path / "sito" / "data" / "records.json").exists()
+    assert any("database is locked" in r.getMessage() for r in caplog.records)
+
+
+def test_options_kept_with_the_project(win, qapp, tmp_path):
+    w = win
+    pane = _units(w, qapp)
+    pane.set_pa(FakePyArchInit())
+    pane.records.setChecked(True)
+    pane.people.setChecked(True)
+    pane.usm_heights.setCurrentIndex(pane.usm_heights.findData("relative"))
+    _build(w, qapp, pane, tmp_path / "sito", products=("dem", "units"))
+    o = w.doc.meta["web_site"]["options"]
+    assert (o["records"], o["people"], o["usm_heights"]) == (True, True, "relative")
+    manifest = json.loads((tmp_path / "sito" / "site.json").read_text(encoding="utf-8"))
+    assert manifest["people"] is True
+    pane.records.setChecked(False)
+    pane.people.setChecked(False)
+    pane.usm_heights.setCurrentIndex(0)
+    assert "Le scelte del passo 1 sono cambiate" in pane.states["build"].text()
+    pane.set_document(w.doc)  # the pane opened again on the project: the three choices restored
+    assert pane.records.isChecked() and pane.people.isChecked()
+    assert pane.usm_heights.currentData() == "relative"
+    assert "Le scelte del passo 1 sono cambiate" not in pane.states["build"].text()
+
+
+def test_a_site_built_before_the_records_keeps_its_choices(win, qapp, tmp_path):
+    """A site recorded before the three choices existed: its options lack them, they count as the defaults."""
+    w = win
+    pane = _front(w, qapp)
+    _build(w, qapp, pane, tmp_path / "sito", products=("dem",))
+    for k in ("records", "people", "usm_heights"):
+        w.doc.meta["web_site"]["options"].pop(k)
+    pane.set_document(w.doc)
+    assert pane.step_states["build"] == "done"
+    assert "Le scelte del passo 1 sono cambiate" not in pane.states["build"].text()

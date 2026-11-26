@@ -149,6 +149,12 @@ def present(chunk) -> list[dict]:
     return [e for e in entries(chunk) if path(chunk, e).is_file()]
 
 
+def listed(chunk) -> list[dict]:
+    """The entries :func:`load` would read, short of reading their files: present (:func:`present`) with their
+    heights as pairs. Cheap: what the pane counts while the user ticks its boxes."""
+    return [e for e in present(chunk) if _pair(e.get("z_top")) and _pair(e.get("z_bottom"))]
+
+
 def _name(entry: dict) -> str:
     from ..archaeo.proxies import proxy_name
 
