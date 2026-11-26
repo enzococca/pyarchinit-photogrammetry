@@ -9,13 +9,14 @@
 
 import {open} from './cog.js';
 import {WORDS, pick, isWords} from './i18n.js';
+import {recordBlock} from './records.js';
 
 const ol = window.ol;
 const $ = (id) => document.getElementById(id);
 const state = {site: null, language: 'it', map: null, entries: [], dems: [], hidden: new Set(), draw: null,
   last: null, whole: false, left: [], tab: 'plan', models: [], view3d: null, opening: null, result3d: null,
   epoch: -1, sections: [], section: null, sectionMap: null, sectionSketch: null, highlight: null, extras: [],
-  sketch: null, drawMap: null};
+  sketch: null, drawMap: null, records: new Map(), selected: null};
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -382,6 +383,69 @@ function rows(table, pairs) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------- records
+// The records of the units of ``chunk`` (its records.json, read once), or null when it has none.
+async function loadRecords(chunk) {
+  if (!chunk || !chunk.records || !chunk.records.url) return null;
+  if (!state.records.has(chunk.id)) {
+    state.records.set(chunk.id, fetch(chunk.records.url).then((answer) => {
+      if (!answer.ok) throw new Error(`${chunk.records.url}: HTTP ${answer.status}`);
+      return answer.json();
+    }).catch((error) => {
+      console.error(error);
+      return {};
+    }).then((records) => {
+      state.records.set(chunk.id, records);
+      return records;
+    }));
+  }
+  return state.records.get(chunk.id);
+}
+
+// the records already read of ``chunk`` (null while they are being read, or when it has none)
+function recordsOf(chunk) {
+  const records = chunk ? state.records.get(chunk.id) : null;
+  return records && !(records instanceof Promise) ? records : null;
+}
+
+async function loadRecordsOf(features) {
+  await Promise.all([...new Set(features.map((f) => f.chunk).filter(Boolean))].map(loadRecords));
+}
+
+function recordOf(chunk, key) {
+  const block = recordsOf(chunk);
+  const record = block && key ? block[key] : null;
+  if (!record) return el('p', word('noRecord'), 'note');
+  const node = recordBlock(record, {
+    title: (name) => title((state.site.record_groups || {})[name]) || name,
+    fieldName: (column) => fieldName(column, null),
+    word,
+    onRelation: (other) => selectRecord(chunk, other),
+  });
+  node.setAttribute('aria-label', word('record'));
+  return node;
+}
+
+// The unit ``key`` of ``chunk`` selected: on the plan its polygons drawn over it and in view, in the 3D view its
+// volume marked; the panel shows its record.
+async function selectRecord(chunk, key) {
+  await loadRecords(chunk);
+  if (state.tab === 'plan') {
+    state.highlight.getSource().clear();
+    const units = state.entries.filter((e) => e.chunk === chunk && e.def.id === 'units');
+    const found = units.flatMap((e) => e.layer.getSource().getFeatures()).filter((f) => f.get('record') === key);
+    for (const feature of found) state.highlight.getSource().addFeature(feature.clone());
+    if (found.length) {
+      state.map.getView().fit(state.highlight.getSource().getExtent(), {padding: [80, 80, 80, 80], maxZoom: 22});
+    }
+  } else if (state.tab === '3d' && state.view3d && state.view3d.highlight) {
+    state.view3d.highlight(chunk.id, key);
+  }
+  document.documentElement.dataset.highlight = key;
+  state.last = {tab: state.tab, features: [], selected: {chunk, key}};
+  showInfo();
+}
+
 function showInfo() {
   const box = $('info');
   box.replaceChildren();
@@ -389,6 +453,10 @@ function showInfo() {
   if (!last || last.tab !== state.tab) {
     const hints = {'3d': 'hint3d', sections: 'hintSection'};
     box.append(el('p', word(hints[state.tab] || 'hint'), 'note'));
+    return;
+  }
+  if (last.selected) {
+    box.append(recordOf(last.selected.chunk, last.selected.key));
     return;
   }
   const table = el('table');
@@ -400,13 +468,15 @@ function showInfo() {
   }
   box.append(table);
   if (last.model && state.site.chunks.length > 1) box.append(el('p', `${word('model')}: ${last.model}`, 'note'));
-  for (const {properties, fields} of last.features) {
-    const {label, colour, kind, section, ...others} = properties; // of the drawing, not for reading
+  for (const {properties, fields, chunk, def} of last.features) {
+    const {label, colour, kind, section, record, ...others} = properties; // of the drawing, not for reading
     box.append(el('h3', (label ? text(label) : '') || others.layer || ''));
     const list = el('table');
     rows(list, Object.entries(others).filter(([, v]) => v !== null && v !== '')
       .map(([k, v]) => [fieldName(k, fields), text(v)]));
     box.append(list);
+    if (record) box.append(recordOf(chunk, record));
+    else if (chunk && chunk.records && def && def.id === 'units') box.append(el('p', word('noRecord'), 'note'));
   }
 }
 
@@ -466,7 +536,9 @@ function featuresAt(map, pixel, skip) {
     const {geometry, ...properties} = feature.getProperties();
     const extras = state.section && state.tab === 'sections' ? state.section.extra || [] : [];
     const entry = state.entries.find((e) => e.layer === layer) || extras.find((e) => e.layer === layer);
-    found.push({properties, fields: entry ? entry.def.fields : null, layer, def: entry ? entry.def : null});
+    const onSection = state.tab === 'sections' && state.section; // the map of the sections shows one chunk
+    const chunk = entry && entry.chunk ? entry.chunk : onSection ? state.section.chunk : null;
+    found.push({properties, fields: entry ? entry.def.fields : null, layer, def: entry ? entry.def : null, chunk});
   }, {hitTolerance: 5});
   return found;
 }
@@ -490,6 +562,7 @@ async function clicked(event) {
   } catch (error) {
     console.error(error);
   }
+  await loadRecordsOf(features);
   state.last = {x, y, height, features, tab: 'plan'};
   showInfo();
 }
@@ -604,10 +677,11 @@ async function openModel() {
 }
 
 // ---------------------------------------------------------------------------------------------- the sections
-function sectionPick(event) {
+async function sectionPick(event) {
   if (state.draw || !state.section) return;
   const [u, v] = event.coordinate;
   const features = featuresAt(state.sectionMap, event.pixel, [state.sectionSketch]);
+  await loadRecordsOf(features);
   state.last = {x: u, y: v, heights: state.section.section.heights, features, tab: 'sections'};
   showInfo();
 }
@@ -906,7 +980,7 @@ async function start() {
   }
   showWords();
   window.ppgSite = {map: state.map, site, state, heightAt, measured, setTab, openModel, openSection, setEpoch,
-    showOnPlan};
+    showOnPlan, selectRecord};
   const nothingOnPlan = !state.entries.length && !state.dems.length;
   if (nothingOnPlan && (state.models.length || state.sections.length)) {
     await setTab(state.models.length ? '3d' : 'sections'); // a survey without a plan opens on what it has

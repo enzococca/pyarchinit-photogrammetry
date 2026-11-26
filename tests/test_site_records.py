@@ -357,3 +357,59 @@ def test_unit_sites_and_report(tmp_path):
     assert R.summary(report) == (2, 3)
     assert R.summary([]) == (0, 0)
     assert R.summary(R.match_report(doc, None, [])) == (0, 3)
+
+
+def test_record_in_the_page(tmp_path):
+    """A click on US 12 on the plan opens its record in the panel (groups by their titles, the markup of a
+    description as text); a relation toward a unit of the site is a button that selects it, one toward a unit not
+    in the site is text; the group titles follow the language."""
+    import json
+
+    import pytest
+    from test_site import Browser, _serving, find_browser
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    markup = "<img src=x onerror=alert(1)>"
+    site, _manifest, units, _records = _build(_units_document(tmp_path), tmp_path / "site",
+                                              unit_records=_unit_rows(descrizione=markup))
+    k14 = units["14"]["record"]
+    feature = next(f for f in json.loads((site / "data/units.geojson").read_text(encoding="utf-8"))["features"]
+                   if f["properties"]["us"] == "12")
+    ring = feature["geometry"]["coordinates"][0][:-1]
+    ux, uy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+    with _serving(site) as port:
+        origin = f"http://127.0.0.1:{port}"
+        browser = Browser(executable, tmp_path / "profilo")
+        try:
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            box = browser.js("(() => { const r = document.getElementById('map').getBoundingClientRect();"
+                             " return [r.left, r.top]; })()")
+            px = browser.js(f"ppgSite.map.getPixelFromCoordinate([{ux!r}, {uy!r}])")
+            browser.click(box[0] + px[0], box[1] + px[1])
+            browser.wait("document.querySelector('#info .record') !== null", 10)
+            info = browser.js("document.getElementById('info').innerText")
+            assert "US 12 - Strato" in info and "Definizione" in info
+            assert markup in info and browser.js("document.querySelectorAll('#info img').length") == 0
+            buttons = browser.js("[...document.querySelectorAll('#info .record button')].map((b) => b.textContent)")
+            assert any("Copre" in b and "14" in b for b in buttons), buttons
+            assert "Taglia 99" in info and not any("Taglia" in b for b in buttons), buttons
+
+            browser.js("document.getElementById('language').click()")
+            info = browser.js("document.getElementById('info').innerText")
+            assert "Definition" in info and "Definizione" not in info
+
+            browser.js("[...document.querySelectorAll('#info .record button')]"
+                       ".find((b) => b.textContent.includes('Copre')).click()")
+            browser.wait(f"document.documentElement.dataset.highlight === {k14!r}", 10)
+            info = browser.js("document.getElementById('info').innerText")
+            assert "US 14" in info and "US 12 - Strato" not in info
+            assert browser.js("ppgSite.state.highlight.getSource().getFeatures().length") == 1
+            assert not browser.errors, browser.errors
+            outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
+            assert not outside, outside
+        finally:
+            browser.close()

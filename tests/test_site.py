@@ -802,8 +802,8 @@ def test_viewer_needs_nothing_from_the_network():
 
     page = (site_mod.VIEWER / "index.html").read_text(encoding="utf-8")
     assert "Content-Security-Policy" in page and "default-src 'self'" in page
-    for name in ("index.html", "app/main.js", "app/view3d.js", "app/cog.js", "app/i18n.js", "app/style.css",
-                 "app/vendor/ol.css"):
+    for name in ("index.html", "app/main.js", "app/view3d.js", "app/cog.js", "app/i18n.js", "app/records.js",
+                 "app/style.css", "app/vendor/ol.css"):
         text = (site_mod.VIEWER / name).read_text(encoding="utf-8")
         assert not re.search(r"https?://|//cdn|@import|innerHTML|eval\(", text), name
     notice = (site_mod.VIEWER / "app/THIRD_PARTY.txt").read_text(encoding="utf-8")

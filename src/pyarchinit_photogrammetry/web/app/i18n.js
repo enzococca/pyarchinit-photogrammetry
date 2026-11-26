@@ -28,6 +28,8 @@ export const WORDS = {
     u: 'u lungo la traccia (m)', v: 'v (m)', vHeight: 'v = quota', showOnPlan: 'Mostra in pianta',
     drawingSvg: 'Disegno (SVG)', downloadCloud: 'Scarica la nuvola (COPC)', dates: 'Date',
     nothingThisDate: 'Niente a questa data.',
+    record: 'Scheda', relations: 'Rapporti stratigrafici', noRecord: 'Nessuna scheda per questa unità.',
+    volumes: 'Volumi delle US', noGroup: 'Senza gruppo',
   },
   en: {
     layers: 'Layers', measure: 'Measure', distance: 'Distance', area: 'Area', stop: 'Done',
@@ -56,6 +58,8 @@ export const WORDS = {
     u: 'u along the trace (m)', v: 'v (m)', vHeight: 'v = height', showOnPlan: 'Show on the plan',
     drawingSvg: 'Drawing (SVG)', downloadCloud: 'Download the cloud (COPC)', dates: 'Dates',
     nothingThisDate: 'Nothing at this date.',
+    record: 'Record', relations: 'Stratigraphic relations', noRecord: 'No record for this unit.',
+    volumes: 'Unit volumes', noGroup: 'No group',
   },
 };
 
