@@ -230,20 +230,31 @@ def cases() -> dict[str, Problem]:
 RING_K1 = -0.04  # the radial term of the lens of the ring of :func:`flat_ring`, as the rendered weak ring has it
 
 
-def flat_ring(seed, n: int = 80, n_points: int = 6000, noise: float = 0.2) -> Problem:
+def flat_ring(seed, n: int = 80, n_points: int = 6000, noise: float = 0.2, tilt: float = 0.0,
+              bend_px: float = 0.0) -> Problem:
     """The weak ring as numbers: ``n`` nadir photos of the OPENCV lens of 1000 px with ``k1`` :data:`RING_K1` on a
     circle 60 m across, 15 m above nearly flat ground (the small relief of the synthetic scenes, 8 cm), as
     :func:`..testing.synthetic.weak_ring_poses` flies it; ``n_points`` tie points drawn by ``seed`` in the band
     under the strip, seen with Gaussian ``noise`` (px) where they fall; twelve markers on the circle under it,
     measured to 0.05 px, those of even number control points at 5 mm. Every observation is white noise around the
     truth: what the ring does not determine comes from its geometry alone. The problem starts at the truth, with
-    the focal length held (the ring cannot tell it from its height) and the radial terms free."""
+    the focal length held (the ring cannot tell it from its height) and the radial terms free. ``tilt``: every
+    camera leaning towards the centre of the ring by so many radians (a convergent ring, which tells its radial
+    terms apart to first order). ``bend_px``: the observations are those of the ring bent to suit radial terms that
+    move the corner of the photo by so many pixels from the true lens (the block adjusted, without noise, with them
+    held there; the control points where that block puts its markers) - a block whose optimum is itself off the
+    true lens, along the valley of the radial terms, as systematic errors of real tie points leave it."""
     import pycolmap
 
     from .synthetic import weak_ring_poses
 
     rng = np.random.default_rng(seed)
     poses = weak_ring_poses(n, 60.0, 15.0)
+    if tilt:  # about the y axis of each camera (the tangent): the optical axis towards the centre
+        c, s_ = np.cos(tilt), np.sin(tilt)
+        lean = np.array([[c, 0.0, -s_], [0.0, 1.0, 0.0], [s_, 0.0, c]])
+        for p in poses:
+            p[:3, :3] = p[:3, :3] @ lean
     rotations = np.array([p[:3, :3].T for p in poses])
     centres = np.array([p[:3, 3] for p in poses])
     angle, radius = rng.uniform(0, 2 * np.pi, n_points), rng.uniform(21.0, 39.0, n_points)
@@ -267,11 +278,24 @@ def flat_ring(seed, n: int = 80, n_points: int = 6000, noise: float = 0.2) -> Pr
 
     oi, op, oxy = observe(points)
     mi, mm, mxy = observe(markers)
-    pb = Problem(rotations, centres, np.zeros(n, int), [("OPENCV", params, W, H)], points, oi, op,
-                 oxy + rng.normal(0, noise, oxy.shape), markers=markers.copy(), mobs_image=mi, mobs_marker=mm,
-                 mobs_xy=mxy + rng.normal(0, 0.05, mxy.shape), free_intrinsics=[[4, 5]])
+    pb = Problem(rotations, centres, np.zeros(n, int), [("OPENCV", params, W, H)], points, oi, op, oxy,
+                 markers=markers.copy(), mobs_image=mi, mobs_marker=mm, mobs_xy=mxy, free_intrinsics=[[4, 5]])
     pb = bundle._without_held(pb, np.bincount(op, minlength=n_points) >= 2)
     pb.gcps = [(k, markers[k].copy(), np.full(3, 0.005)) for k in range(0, 12, 2)]
+    if bend_px:
+        gain = max(np.linalg.norm(jac[:, 0]) for jac in bundle.corner_jacobians("OPENCV", params, W, H, [4]))
+        bent = list(params)
+        bent[4] = RING_K1 + bend_px / gain
+        held = bundle.Problem(**{**pb.__dict__, "cameras": [("OPENCV", bent, W, H)], "free_intrinsics": [[]]})
+        pb = bundle.problem_at(held, bundle.adjust(held, max_iterations=200))
+        model = bundle._Model(pb)
+        rot, cen, prm, pts, mks, _rs, _bias = model.unpack(model.start())
+        pb.obs_xy = model._project(rot, cen, prm, None, pb.obs_image, pts[pb.obs_point], pb.obs_xy)
+        pb.mobs_xy = model._project(rot, cen, prm, None, pb.mobs_image, mks[pb.mobs_marker], pb.mobs_xy)
+        pb.gcps = [(k, pb.markers[k].copy(), sigma) for k, _target, sigma in pb.gcps]
+        pb.free_intrinsics = [[4, 5]]
+    pb.obs_xy = pb.obs_xy + rng.normal(0, noise, pb.obs_xy.shape)
+    pb.mobs_xy = pb.mobs_xy + rng.normal(0, 0.05, pb.mobs_xy.shape)
     return pb
 
 

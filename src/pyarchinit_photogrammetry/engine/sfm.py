@@ -3291,7 +3291,8 @@ _WHOLE_OR_NOT = "COLMAP's adjustment refines the distortion whole or not at all"
 
 
 def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool, together: bool = False,
-                       marker_weight: float | None = None) -> tuple[dict, dict, dict]:
+                       marker_weight: float | None = None, progress: Progress | None = None,
+                       walk: bool = True) -> tuple[dict, dict, dict]:
     """What an adjustment of ``pb`` (:class:`.bundle.Problem` of ``chunk``, its ``ids``) may refine of each
     calibration: each group of intrinsics only where the block determines it - the rule of the rounds of the
     native mapper, applied to the camera optimisation group by group and on one scale
@@ -3353,8 +3354,18 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
         return record, {}, {}
     record["checked"] = True
     sensors = _camera_sensors(chunk, rec, ids["cameras"])
-    sds, verdicts, factor = bundle.judge_intrinsics(pb, together=together, marker_weight=marker_weight)
+    walks: dict = {}
+    sds, verdicts, factor = bundle.judge_intrinsics(pb, together=together, marker_weight=marker_weight,
+                                                    progress=progress, walks=walks, walk=walk)
     record["variance_factor"] = None if factor is None else float(factor)
+    for c, walked in sorted(walks.items()):  # the radial walks (bundle._radial_walk): numbers and fixed words
+        if walked.get("deferred"):
+            record["radial_walk_deferred"] = True
+            continue
+        record["radial_sd_plain"].append([sensors[c], walked["plain"]])
+        record["radial_walk"].append([sensors[c], {key: walked[key] for key in
+                                                   ("optimum", "at_optimum", "largest", "sd", "steps", "stopped")
+                                                   if key in walked}])
     held: dict = {}
     for group in bundle.JUDGED:
         for c, camera in enumerate(judged):
@@ -3368,8 +3379,14 @@ def _calibration_check(chunk: Chunk, rec, pb, ids: dict, hold_undetermined: bool
                     continue
                 held.setdefault(c, set()).add(group)
                 if kind == "sd":
-                    note = (f"undetermined, sd {100 * value:.2f} %" if group == "focal"
-                            else f"undetermined, sd {value:.2f} px at the image corner")
+                    plain = walks.get(c, {}).get("plain") if group in bundle.WALKED else None
+                    if group == "focal":
+                        note = f"undetermined, sd {100 * value:.2f} %"
+                    elif plain is not None and value > plain:
+                        note = (f"undetermined along its valley, sd {value:.2f} px at the image corner "
+                                f"({plain:.2f} px at the estimate)")
+                    else:
+                        note = f"undetermined, sd {value:.2f} px at the image corner"
                 elif kind == "with":
                     if sensors[c] in record["held"][group]:
                         continue  # another camera of the same sensor has said why
@@ -3394,7 +3411,7 @@ def _check_record(hold_undetermined: bool, reason: str | None = None) -> dict:
     return {"hold_undetermined": bool(hold_undetermined), "checked": False, "reason": reason,
             "variance_factor": None, "focal_sd": [], "tangential_sd": [], "principal_point_sd": [], "radial_sd": [],
             "held": {"focal": [], "tangential": [], "principal_point": [], "radial": []}, "lens_prior": [],
-            "notes": []}
+            "radial_sd_plain": [], "radial_walk": [], "notes": []}
 
 
 def _hold(record: dict, group: str, sensor, note: str, level: int = logging.INFO) -> None:
@@ -3460,9 +3477,10 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
         gcp.update_transform(chunk)  # references, bars and GNSS positions in the internal frame
     before = _marker_report(chunk) if use_markers else {}
 
-    def judged(rec):
+    def judged(rec, walk: bool = True):
         """The problem of the block as ``rec`` has it, why its focal length is held whatever the block says, what
-        the check of the calibrations holds of it, and the focal lengths to walk towards their lens prior."""
+        the check of the calibrations holds of it, and the focal lengths to walk towards their lens prior.
+        ``walk`` False: the radial terms are not walked along their valley (the record says they were deferred)."""
         pb, ids = bundle.problem_from_chunk(chunk, rec, use_markers=use_markers, gnss=gnss,
                                             rolling_shutter=rolling_shutter,
                                             fit_principal_point=fit_principal_point, hold_focal=hold_focal)
@@ -3474,7 +3492,8 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
             why = FOCAL_HELD_NO_REFERENCES
         else:
             why = FOCAL_HELD_BY_POSITIONS if hold_focal else None
-        check, undetermined, lost = _calibration_check(chunk, rec, pb, ids, hold_undetermined)
+        check, undetermined, lost = _calibration_check(chunk, rec, pb, ids, hold_undetermined,
+                                                       progress=progress.sub(0.0, 0.05), walk=walk)
         if check["checked"] and not pb.absolute and refined:
             # held without a verdict on the block: what the block knows of its focal length is asked apart - the
             # sd it has with the focal length free - and weighed against the lens prior as anywhere else
@@ -3489,13 +3508,16 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
             lost.update(_off_the_lens_prior(chunk, sensors, pb, {c: sds[c]["focal"] for c in refined}))
         return pb, ids, why, check, undetermined, lost
 
-    pb, ids, focal_held, check, undetermined, lost = judged(rec)
+    # the radial walk waits for the walk to the lens prior: where that is followed the block is judged again there
+    pb, ids, focal_held, check, undetermined, lost = judged(rec, walk=False)
     walked = _to_lens_prior(chunk, lost, progress.sub(0.0, 0.05)) if lost else []
     if any(w["followed"] for w in walked):  # judged again where the block now is
         rec = load_reconstruction(chunk)
         drop_missing_points(rec)
         if referenced:
             gcp.update_transform(chunk)
+        pb, ids, focal_held, check, undetermined, _lost = judged(rec)
+    elif check.pop("radial_walk_deferred", False):  # the same block: judged again with the radial terms walked
         pb, ids, focal_held, check, undetermined, _lost = judged(rec)
     _note_lens_prior(check, walked)
     while True:  # once, or again from the same start with what ran away held
@@ -3864,7 +3886,8 @@ def _whole_distortion(record: dict, held: set, tangential: dict, radial: dict) -
 
 
 def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, positions: bool, use_markers: bool,
-                              fit_principal_point: bool, marker_weight: int) -> tuple[dict, set, dict]:
+                              fit_principal_point: bool, marker_weight: int, progress: Progress | None = None,
+                              walk: bool = True) -> tuple[dict, set, dict]:
     """:func:`_calibration_check` for COLMAP's adjustment of ``rec`` (its cameras as that adjustment has them: one
     focal length, :func:`_square_pixels`): on the problem of our own formulation that frees what COLMAP frees - the
     focal length, the distortion and, when asked, the principal point of every camera that is not fixed -, with
@@ -3886,7 +3909,7 @@ def _colmap_calibration_check(chunk: Chunk, rec, *, hold_undetermined: bool, pos
     except ValueError as exc:  # rigs: our formulation does not take them
         return _check_record(True, str(exc)), set(), {}
     record, held, lost = _calibration_check(chunk, rec, pb, ids, True, together=True,
-                                            marker_weight=max(1, int(marker_weight)))
+                                            marker_weight=max(1, int(marker_weight)), progress=progress, walk=walk)
     groups = {group for held_groups in held.values() for group in held_groups}
     if groups & {"radial", "tangential"}:
         sensors = _camera_sensors(chunk, rec, ids["cameras"])
@@ -3944,14 +3967,21 @@ def _optimize_colmap(chunk: Chunk, fit_principal_point: bool, use_markers: bool,
         _square_pixels(chunk, rec)
         opts = pycolmap.BundleAdjustmentOptions()
         if check is None:
+            # the radial walk waits for the walk to the lens prior (judged again where that is followed)
             check, undetermined, lost = _colmap_calibration_check(
                 chunk, rec, hold_undetermined=hold_undetermined, positions=bool(priors), use_markers=constrained,
-                fit_principal_point=fit_principal_point, marker_weight=marker_weight)
+                fit_principal_point=fit_principal_point, marker_weight=marker_weight,
+                progress=progress.sub(0.0, 0.08), walk=walked is not None)
             if walked is None:
                 walked = _to_lens_prior(chunk, lost, progress.sub(0.0, 0.08)) if lost else []
                 if any(w["followed"] for w in walked):  # the block is elsewhere now: from there, judged again
                     start, check = _before_adjusting(chunk), None
                     continue
+                if check.pop("radial_walk_deferred", False):  # the same block: judged again, the radial terms walked
+                    check, undetermined, lost = _colmap_calibration_check(
+                        chunk, rec, hold_undetermined=hold_undetermined, positions=bool(priors),
+                        use_markers=constrained, fit_principal_point=fit_principal_point,
+                        marker_weight=marker_weight, progress=progress.sub(0.0, 0.08))
             _note_lens_prior(check, walked)
         try:
             opts.refine_principal_point = fit_principal_point and "principal_point" not in undetermined
