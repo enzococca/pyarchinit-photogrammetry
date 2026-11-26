@@ -6,10 +6,13 @@ starts its relative altitude again when it takes off with a new battery, so the 
 metres above or below the others while its horizontal positions agree. The alignment places the photos by what they
 see; the georeference on the GPS of the photos (:func:`.gcp.update_transform`) then meets a block whose flights do not
 agree in height, and its error grows by metres. With :data:`OPTION` on (``chunk.meta["gps_height_by_flight"]``) the
-fit estimates one vertical offset per flight together with the similarity (the biggest flight is the datum, its offset
-zero); control points, when they place the chunk, still rule, and the offsets are then measured on the cameras and
-reported. The offsets are kept in ``chunk.meta["gps_flights"]`` and the camera errors
-(:func:`.gcp.camera_reference_errors`) are measured against the references less the offset of their flight.
+fit estimates one vertical offset per flight together with the similarity (:func:`joint_fit`; GPS only: the biggest
+flight is the datum, its offset zero; 1-2 control points with the GPS: every flight free); three or more control
+points still place the chunk, and the offsets are then measured on the cameras and reported. Offsets the flights do
+not determine are not applied (the plain fit, and the reason). The offsets are kept in ``chunk.meta["gps_flights"]``
+with the transform they belong to (:func:`current`) and the camera errors (:func:`.gcp.camera_reference_errors`) are
+measured against the references less the offset of their flight. The note on a flight whose heights are off comes
+from the same joint model, run also with the option off.
 
 Here a flight ends with a pause of more than :data:`GAP_S` seconds between two photos (in the order they were taken,
 whatever the camera); the photos without a time are one group of their own (number 0, "no time"), never shifted. The
@@ -25,7 +28,8 @@ import numpy as np
 GAP_S = 90.0  # seconds: two photos taken further apart belong to different flights
 OPTION = "gps_height_by_flight"  # chunk.meta: the fit estimates one vertical offset per flight
 RECORD = "gps_flights"  # chunk.meta: the errors per flight and the offsets of the last georeference
-NOTE_FACTOR = 3.0  # a flight whose mean dz is this many sd (within the flights) off the others is pointed out
+NOTE_FACTOR = 3.0  # a flight whose offset is this many sd (within the flights) off the others is pointed out
+NOTE_FLOOR = 1.0  # metres: a smaller offset between flights is the normal drift of a consumer GPS, never pointed out
 MIN_PHOTOS = 3  # a flight with fewer photos is not pointed out (its mean says little)
 NO_TIME = 0  # the number of the group of the photos without a time
 
@@ -66,36 +70,129 @@ def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
     return float(np.sum(values * weights) / np.sum(weights)) if np.sum(weights) > 0 else float(np.mean(values))
 
 
-def fit_with_offsets(fit, src, dst, weights, flight, datum: int | None, iterations: int = 500,
-                     tol: float = 1e-6) -> tuple[np.ndarray, dict[int, float]]:
-    """The transform ``fit(src, dst_corrected, weights)`` (a similarity, :func:`.gcp.similarity_with_bars`) estimated
-    together with one vertical offset per flight: ``dst = M @ src + offset[flight] * z``. ``flight`` gives the flight of
-    every row (a negative number for a row that is never shifted - a control point -, :data:`NO_TIME` for a photo
-    without a time, also never shifted); the ``datum`` flight is held at zero (None: every flight is free, the frame
-    comes from the rows never shifted). The two are solved in turn until the offsets settle. Returns the transform
-    and ``{flight: offset}`` (the datum included, 0.0): the offset is how far the flight's heights sit above where the
-    fit puts its photos."""
+SPREAD_FACTOR = 3.0  # a group of photos spans an area when its spread across is this many times their accuracy
+# the joint solve is trusted when the condition number of its normal matrix, scaled to unit diagonal (a matrix of
+# correlations, so units and the size of the site do not matter), is below this. Measured on synthetic surveys of
+# 3 x 180 photos with GPS of 5 m: flights over the whole site ~10, one strip per battery ~90, one line per battery
+# with 10 m of sway across ~800, with 5 m ~2700 (the tilt about the lines is then known to about a degree: metres of
+# height across the site), exactly straight lines infinite. 1000 keeps the strips with a margin of ten and refuses
+# the lines whose sway does not tell a tilt from an offset.
+MAX_CONDITION = 1e3
+MAX_ITERATIONS = 50
+
+
+def _skew(v) -> np.ndarray:
+    return np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+
+
+def _rotation(omega) -> np.ndarray:
+    """The rotation of the vector ``omega`` (Rodrigues)."""
+    angle = float(np.linalg.norm(omega))
+    if angle < 1e-15:
+        return np.eye(3) + _skew(omega)
+    k = _skew(np.asarray(omega, float) / angle)
+    return np.eye(3) + np.sin(angle) * k + (1.0 - np.cos(angle)) * k @ k
+
+
+def spans_area(xy: np.ndarray, accuracy: float) -> bool:
+    """The points ``xy`` (n, 2) spread across their main direction more than :data:`SPREAD_FACTOR` times
+    ``accuracy``: they span an area, not a line."""
+    if len(xy) < 3:
+        return False
+    centred = xy - xy.mean(axis=0)
+    axes = np.linalg.svd(centred, full_matrices=False)[2]
+    return float(np.ptp(centred @ axes[-1])) > SPREAD_FACTOR * accuracy
+
+
+def joint_fit(src, dst, weights, flight, datum: int | None, lengths=(), distances=(), bar_weights=()) -> dict:
+    """The similarity ``dst = s R src + t`` and one vertical offset per flight (``+ offset[flight] * z``) solved
+    together by weighted least squares (Gauss-Newton on scale, rotation, translation and offsets at once, from the
+    plain similarity), with scale bars as further observations of the scale (as :func:`.gcp.similarity_with_bars`).
+    ``flight`` gives the flight of every row: a negative number for a row never shifted (a control point),
+    :data:`NO_TIME` for a photo without a time (never shifted); the ``datum`` flight is held at zero (None: every
+    flight is free, the heights come from the rows never shifted).
+
+    Returns ``{"transform", "offsets" {flight: offset, the datum 0.0}, "condition", "reason"}``: ``reason`` None when
+    the offsets are determined and the solve converged, else why not (``"not determined: ..."``, ``"not converged"``)
+    - the caller then keeps the plain fit. Determined means: some group of rows sharing one height (the rows never
+    shifted, the datum, or a flight) spans an area in plan (:func:`spans_area`) - else a tilt about the lines is the
+    same as the offsets - and the condition number of the normal matrix scaled to unit diagonal is below
+    :data:`MAX_CONDITION`. The offset is how far the heights of the flight sit above where the fit puts its photos."""
+    from ..core import geometry
+
     src, dst, w = (np.asarray(v, float) for v in (src, dst, weights))
     flight = np.asarray(flight, int)
     free = [f for f in sorted(set(flight.tolist())) if f > NO_TIME and f != datum]
-    offsets = {f: 0.0 for f in free}
-    m = fit(src, dst, w)
-    for _ in range(iterations):
-        shift = np.zeros(len(dst))
-        for f, o in offsets.items():
-            shift[flight == f] = o
-        corrected = dst.copy()
-        corrected[:, 2] -= shift
-        m = fit(src, corrected, w)
-        pred = src @ m[:3, :3].T + m[:3, 3]
-        new = {f: _weighted_mean(dst[flight == f, 2] - pred[flight == f, 2], w[flight == f]) for f in free}
-        change = max((abs(new[f] - offsets[f]) for f in free), default=0.0)
-        offsets = new
-        if change < tol:
+    col = {f: i for i, f in enumerate(free)}
+    accuracy = float(np.median(1.0 / np.sqrt(np.maximum(w, 1e-30))))
+    groups = [~np.isin(flight, free)] + [flight == f for f in free]
+    if not any(g.sum() >= 3 and spans_area(dst[g, :2], accuracy) for g in groups):
+        reason = "not determined: no flight spans an area in plan (one line per flight: a tilt about the lines is " \
+                 "the same as the offsets)"
+        return {"transform": None, "offsets": {}, "condition": float("inf"), "reason": reason}
+    # normalised coordinates: centred, unit spread (the normal matrix then compares like with like)
+    wn = w / w.mean()
+    ms, md = wn @ src / wn.sum(), wn @ dst / wn.sum()
+    ss = float(np.sqrt(wn @ np.sum((src - ms) ** 2, axis=1) / wn.sum())) or 1.0
+    sd = float(np.sqrt(wn @ np.sum((dst - md) ** 2, axis=1) / wn.sum())) or 1.0
+    a, b = (src - ms) / ss, (dst - md) / sd
+    d, dist, wb = (np.asarray(v, float) for v in (lengths, distances, bar_weights))
+    wbn = wb / w.mean() if len(wb) else wb
+    m0 = geometry.umeyama(a, b, with_scale=True, weights=wn)
+    s0, rot, t = geometry.decompose_similarity(m0)
+    log_s, t, off = float(np.log(s0)), np.asarray(t, float).copy(), np.zeros(len(free))
+    k = 7 + len(free)
+    sqw = np.sqrt(wn)
+    rows_f = np.array([col.get(f, -1) for f in flight])
+    converged, normal = False, None
+    for _ in range(MAX_ITERATIONS):
+        s = np.exp(log_s)
+        p = s * a @ rot.T
+        r = p + t - b
+        shifted = rows_f >= 0
+        r[shifted, 2] += off[rows_f[shifted]]
+        n = len(a)
+        jac = np.zeros((n, 3, k))
+        jac[:, :, 0] = p
+        jac[:, :, 1:4] = -np.stack([_skew(v) for v in p])
+        jac[:, :, 4:7] = np.eye(3)
+        jac[np.flatnonzero(shifted), 2, 7 + rows_f[shifted]] = 1.0
+        jw = (jac * sqw[:, None, None]).reshape(-1, k)
+        rw = (r * sqw[:, None]).reshape(-1)
+        if len(d):  # the bars: (world scale * length - distance) / sd, in the units of the points
+            scale_world = s * sd / ss
+            rb = (scale_world * d - dist) / sd * np.sqrt(wbn)
+            jb = np.zeros((len(d), k))
+            jb[:, 0] = scale_world * d / sd * np.sqrt(wbn)
+            jw, rw = np.vstack([jw, jb]), np.r_[rw, rb]
+        normal = jw.T @ jw
+        try:
+            step = -np.linalg.solve(normal, jw.T @ rw)
+        except np.linalg.LinAlgError:
             break
+        log_s += step[0]
+        rot = _rotation(step[1:4]) @ rot
+        t = t + step[4:7]
+        off = off + step[7:]
+        if float(np.max(np.abs(step))) < 1e-12:
+            converged = True
+            break
+    if normal is None:
+        return {"transform": None, "offsets": {}, "condition": float("inf"), "reason": "not converged"}
+    diag = np.sqrt(np.maximum(np.diag(normal), 1e-300))
+    condition = float(np.linalg.cond(normal / np.outer(diag, diag)))
+    if not np.isfinite(condition) or condition > MAX_CONDITION:
+        reason = (f"not determined: the offsets and the tilt of the block trade off (condition number "
+                  f"{condition:.3g} > {MAX_CONDITION:g})")
+        return {"transform": None, "offsets": {}, "condition": condition, "reason": reason}
+    if not converged:
+        return {"transform": None, "offsets": {}, "condition": condition, "reason": "not converged"}
+    s_world = float(np.exp(log_s)) * sd / ss
+    transform = geometry.compose_similarity(s_world, rot, sd * t - s_world * rot @ ms + md)
+    offsets = {f: float(sd * off[col[f]]) for f in free}
     if datum is not None:
         offsets[datum] = 0.0
-    return m, dict(sorted(offsets.items()))
+    return {"transform": transform, "offsets": dict(sorted(offsets.items())), "condition": condition, "reason": None}
 
 
 def offsets_against(transform, src, dst, weights, flight) -> dict[int, float]:
@@ -108,10 +205,42 @@ def offsets_against(transform, src, dst, weights, flight) -> dict[int, float]:
             for f in sorted(set(flight.tolist())) if f > NO_TIME}
 
 
+def residual_sd(transform, src, dst, flight, offsets: dict) -> float:
+    """The pooled sd of the height residuals within the flights (each around its own mean) once ``transform`` and
+    ``offsets`` are applied: the scatter of the GPS heights inside one flight."""
+    src, dst = np.asarray(src, float), np.asarray(dst, float)
+    flight = np.asarray(flight, int)
+    pred = src @ np.asarray(transform, float)[:3, :3].T + np.asarray(transform, float)[:3, 3]
+    res = dst[:, 2] - pred[:, 2] - np.array([offsets.get(f, 0.0) for f in flight])
+    total, dof = 0.0, 0
+    for f in set(flight.tolist()):
+        if f <= NO_TIME:
+            continue
+        r = res[flight == f]
+        if len(r) > 1:
+            total += float(np.sum((r - r.mean()) ** 2))
+            dof += len(r) - 1
+    return float(np.sqrt(total / dof)) if dof else 0.0
+
+
+def off_flights(offsets: dict[int, float], photos: dict[int, int], sd_within: float) -> list[int]:
+    """The flights whose height offset - from the joint model (:func:`joint_fit`: against the datum flight, the
+    biggest, or against the control points when they take part) or measured against control points - is larger
+    than ``max(NOTE_FACTOR x sd_within, NOTE_FLOOR)``: a flight whose GPS heights were measured from another zero.
+    ``sd_within`` is the scatter of the heights within the flights once the offsets are applied
+    (:func:`residual_sd`), not the one of all the photos, which the offset itself inflates; the floor keeps the
+    normal drift of a consumer GPS between batteries quiet. Only flights of :data:`MIN_PHOTOS` photos or more, with
+    two flights or more."""
+    timed = [f for f in offsets if f != NO_TIME]
+    if len(timed) < 2:
+        return []
+    limit = max(NOTE_FACTOR * sd_within, NOTE_FLOOR)
+    return sorted(f for f in timed if photos.get(f, 0) >= MIN_PHOTOS and abs(offsets[f]) > limit)
+
+
 def camera_offsets(chunk) -> dict[int, float]:
     """{camera key: vertical offset of its flight} of the last georeference (empty when none was estimated)."""
-    record = chunk.meta.get(RECORD) or {}
-    return {int(k): float(v) for k, v in (record.get("camera_offsets") or {}).items()}
+    return {int(k): float(v) for k, v in (current(chunk).get("camera_offsets") or {}).items()}
 
 
 def flight_errors(chunk, errors: dict | None = None) -> list[dict]:
@@ -127,7 +256,7 @@ def flight_errors(chunk, errors: dict | None = None) -> list[dict]:
         errors = gcp.camera_reference_errors(chunk)
     groups = flight_groups(chunk.cameras)
     by_key = {c.key: c for c in chunk.cameras}
-    offsets = (chunk.meta.get(RECORD) or {}).get("offsets") or {}
+    offsets = current(chunk).get("offsets") or {}
     members: dict[int, list] = {}
     for key, e in errors.items():
         cam = by_key.get(key)
@@ -146,37 +275,33 @@ def flight_errors(chunk, errors: dict | None = None) -> list[dict]:
     return out
 
 
-def off_flights(flights: list[dict]) -> list[int]:
-    """The flights whose mean height error (before any offset) is more than :data:`NOTE_FACTOR` times the sd of the
-    heights within the flights away from the others (the median of the flight means, each counted once per photo -
-    the level of most photos): a flight whose GPS
-    heights were measured from another zero. The sd is the one within the flights (pooled), not the one of all the
-    photos, which the offset itself inflates. Only flights of :data:`MIN_PHOTOS` photos or more, with two flights or
-    more; the photos without a time do not count."""
-    timed = [r for r in flights if r["flight"] != NO_TIME and r["photos"] >= 1]
-    if len(timed) < 2:
-        return []
-    raw = {r["flight"]: r["mean"][2] - (r["offset"] or 0.0) for r in timed}
-    dof = sum(r["photos"] - 1 for r in timed)
-    if dof <= 0:
-        return []
-    sd_within = float(np.sqrt(sum((r["photos"] - 1) * r["sd"][2] ** 2 for r in timed) / dof))
-    level = float(np.median(np.repeat([raw[r["flight"]] for r in timed], [r["photos"] for r in timed])))
-    limit = NOTE_FACTOR * max(sd_within, 1e-3)
-    return [r["flight"] for r in timed if r["photos"] >= MIN_PHOTOS and abs(raw[r["flight"]] - level) > limit]
-
-
 def record(chunk, option: bool, datum: int | None, offsets: dict[int, float], keys_flights: dict[int, int]) -> dict:
     """``chunk.meta["gps_flights"]`` after a georeference: the pause that splits the flights, whether the option was
-    on, the datum flight, the offsets (by flight and by camera), the errors per flight (:func:`flight_errors`) and the
-    flights :func:`off_flights` points out."""
+    on, the datum flight, the offsets (by flight and by camera), the transform they belong to (offsets of another
+    transform are ignored: :func:`current`) and the errors per flight (:func:`flight_errors`). The caller adds
+    ``suggest`` (the flights whose height looks off) and, when the option could not estimate them,
+    ``by_flight_failed``."""
     rec = {"gap_s": GAP_S, "by_flight": bool(option), "datum": datum,
            "offsets": {str(f): float(o) for f, o in offsets.items()},
            "camera_offsets": {str(k): float(offsets[f]) for k, f in keys_flights.items()
-                              if f in offsets and offsets[f] != 0.0}}
+                              if f in offsets and offsets[f] != 0.0},
+           "transform": np.asarray(chunk.transform, float).reshape(-1).tolist()}
     chunk.meta[RECORD] = rec
     rec["flights"] = flight_errors(chunk)
-    rec["suggest"] = off_flights(rec["flights"])
+    return rec
+
+
+def current(chunk) -> dict:
+    """``chunk.meta["gps_flights"]`` when it belongs to the transform the chunk has now, else an empty dict: a
+    transform set outside the georeference (ties, the alignment of chunks, a hand orientation) leaves no stale
+    offset applied."""
+    rec = chunk.meta.get(RECORD) or {}
+    stamp = rec.get("transform")
+    if stamp is None:
+        return rec  # written before the stamps (a project of this branch): taken as it is
+    here = np.asarray(chunk.transform, float).reshape(-1)
+    if len(stamp) != len(here) or not np.allclose(here, np.asarray(stamp, float), rtol=1e-12, atol=1e-9):
+        return {}
     return rec
 
 
@@ -193,12 +318,19 @@ def summary_lines(rec: dict | None) -> list[str]:
         offset = f", height offset {r['offset']:+.2f} m" if r.get("offset") is not None else ""
         out.append(f"GPS {name}: {r['photos']} photos, mean dX/dY/dZ {mean} m, sd {sd} m, RMSE {r['rmse']:.2f} m"
                    + offset)
-    if rec.get("offsets"):
-        out.append("GPS height by flight: one vertical offset per flight estimated with the georeference"
-                   + (f" (datum flight {rec['datum']})" if rec.get("datum") is not None
-                      else " (the control points give the heights)"))
-    elif rec.get("suggest"):
+    if rec.get("by_flight_failed"):
+        out.append(f"GPS height by flight: offsets not determined ({rec['by_flight_failed']}); the plain fit is kept")
+    elif rec.get("offsets"):
+        if rec.get("measured"):
+            out.append("GPS height by flight: the control points place the chunk; the offset of every flight is "
+                       "measured on the cameras, not estimated")
+        else:
+            out.append("GPS height by flight: one vertical offset per flight estimated with the georeference"
+                       + (f" (datum flight {rec['datum']})" if rec.get("datum") is not None
+                          else " (every flight free: the control points give the heights)"))
+    if rec.get("suggest") and not rec.get("by_flight"):
         out.append(f"note: the GPS height of flight(s) {', '.join(map(str, rec['suggest']))} is off from the others by "
-                   f"more than {NOTE_FACTOR:g} times the scatter within a flight (a drone that starts its altitude "
-                   "again with every battery): try --gps-height-by-flight (ppg align) or gps_height_by_flight=True")
+                   f"more than {NOTE_FACTOR:g} times the scatter within a flight (and {NOTE_FLOOR:g} m; a drone that "
+                   "starts its altitude again with every battery): try --gps-height-by-flight (ppg align, ppg "
+                   "reference) or gps_height_by_flight=True")
     return out

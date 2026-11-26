@@ -525,8 +525,8 @@ class Chunk:
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
         chunk is georeferenced/scaled again automatically; ``gps_height_by_flight`` (None: the
         choice of the chunk) is passed to :meth:`update_transform`: one vertical offset per flight of
-        the photos in the fit on their GPS. The positioning of the alignment itself is not changed
-        by it (the shape of the block comes from the photos).
+        the photos in the fit on their GPS. The alignment itself does not take the offsets: with
+        ``use_gps`` the incremental mapper is still held, with a robust loss, to the raw GPS heights.
         """
         from ..engine import native_map, sfm, switch
         from ..markers import flights as flights_mod
@@ -558,13 +558,13 @@ class Chunk:
             self.triangulate_markers()
         has_refs = (sum(1 for m in self.markers if m.reference.location and m.position is not None) >= 3
                     or sum(1 for c in self.aligned_cameras if c.reference.location) >= 3 or self.scalebars)
-        if gps_height_by_flight is not None:
+        if has_refs:
+            self.update_transform(gps_height_by_flight=gps_height_by_flight)  # kept when the fit succeeds
+        elif gps_height_by_flight is not None:  # nothing to fit now: the choice kept for the first georeference
             if gps_height_by_flight:
                 self.meta[flights_mod.OPTION] = True
             else:
                 self.meta.pop(flights_mod.OPTION, None)
-        if has_refs:
-            self.update_transform()
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,

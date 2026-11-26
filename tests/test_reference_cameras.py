@@ -62,7 +62,7 @@ def test_camera_errors_in_the_reference_pane(gps_cameras, qapp):
     pane = ReferencePane()
     pane.set_chunk(ch)
     headers = [pane.cams.horizontalHeaderItem(c).text() for c in range(pane.cams.columnCount())]
-    assert headers[5:] == ["Rif. X", "Rif. Y", "Rif. Z", "Errore (m)", "Precisione X/Y/Z (mm)", "Volo"]
+    assert headers[5:] == ["Rif. X", "Rif. Y", "Rif. Z", "Errore (m)", "Precisione X/Y/Z (mm)", "Volo", "Offset Z (m)"]
     row = next(r for r in range(pane.cams.rowCount()) if pane.cams.item(r, 1).text() == "si")
     assert float(pane.cams.item(row, 8).text()) == pytest.approx(float(np.linalg.norm(offset)), abs=2e-3)
     world_x = float(pane.cams.item(row, 2).text())
