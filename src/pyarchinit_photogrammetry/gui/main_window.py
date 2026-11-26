@@ -747,6 +747,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self.reference = ReferencePane()
         self.reference.import_requested.connect(self.import_reference)
         self.reference.update_requested.connect(self.update_transform)
+        self.reference.by_flight_requested.connect(lambda on: self.update_transform(by_flight=on))
         self.reference.optimize_requested.connect(self.optimize_cameras)
         self.reference.changed.connect(lambda: self._dirty(True))
         self.reference.scalebar_requested.connect(self.new_scalebar)
@@ -3429,14 +3430,15 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         message(self, "warning", tr("Griglia del geoide"), text)
 
     def run_task(self, label: str, fn, on_done=None, refresh: bool = True, save: bool = True,
-                 undo: bool = False) -> bool:
+                 undo: bool = False, on_failed=None) -> bool:
         """``fn(progress)`` in the background, then the project saved and the views refreshed.
         ``undo``: the step is an edit (refined markers, a patch) that Modifica > Annulla takes back;
         so is a step announced with ``history.backup`` (points, faces); a processing step is not.
         A step that stops for want of the grid of a geoid (:class:`..gnss.heights.GridMissing`, also as
         the cause of another error) is said in the window's own words, with the download offered and the
-        step run again after it (:meth:`_grid_missing`)."""
-        again = (label, fn, on_done, refresh, save, undo)
+        step run again after it (:meth:`_grid_missing`). ``on_failed()``: called on the interface thread when the step
+        fails (before the error is shown), to put back what the window showed for it."""
+        again = (label, fn, on_done, refresh, save, undo, on_failed)
         label = tr(label)  # also the name of the step in Modifica > Annulla
         missing: list = []
 
@@ -3475,6 +3477,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         def failed(*args):
             if self.history is not None:
                 self.history.discard_pending()
+            if on_failed is not None:
+                on_failed()
             if missing:
                 log.warning("%s", args[0] if args else label)
                 self._grid_missing(missing[0], label, lambda: self.run_task(*again))
@@ -7554,6 +7558,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         before the matching, not after it."""
         from ..markers import gcp
 
+        aligned_chunk = self.chunk  # the chunk the task runs on, whatever is shown when it ends
+
         def job(p):
             gcp.preflight(self.chunk, bool(v.get("gps")))
             self.chunk.match_photos(v["quality"], v["keypoint_limit"], v["tiepoint_limit"], progress=p.sub(0, 0.5),
@@ -7570,18 +7576,22 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
 
         def done(n) -> None:
             self.statusBar().showMessage(tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000)
-            self._say_flights()
+            self._say_flights(aligned_chunk)
             self._say_stale_ties()
 
         self.run_task("Allineamento", job, done)
 
-    def _say_flights(self) -> None:
-        """After a georeference on the GPS of the photos: the flights whose GPS height is off from the others said
-        in the log, with the option that estimates an offset per flight (:mod:`..markers.flights`)."""
+    def _say_flights(self, ch) -> None:
+        """After a georeference of ``ch`` (the chunk the task ran on) on the GPS of the photos: the offsets per flight,
+        the reason they could not be estimated, or the flights whose GPS height is off from the others said in the
+        log, with the option that estimates an offset per flight (:mod:`..markers.flights`)."""
         from ..markers import flights as flights_mod
 
-        record = (self.chunk.meta.get(flights_mod.RECORD) or {}) if self.chunk is not None else {}
-        if record.get("offsets"):
+        record = flights_mod.current(ch) if ch is not None else {}
+        if record.get("by_flight_failed"):
+            self.log_pane.warning(tr("Quota GPS per volo: offset non determinati ({0}); resta il fit semplice",
+                                     record["by_flight_failed"]))
+        elif record.get("offsets"):
             shifts = ", ".join(f"{f}: {float(o):+.2f}" for f, o in record["offsets"].items() if float(o) != 0.0)
             self.log_pane.info(tr("Quota GPS per volo: offset di quota (m) {0}", shifts or "0"))
         elif record.get("suggest") and not record.get("by_flight"):
@@ -7755,8 +7765,12 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         self.statusBar().showMessage(tr("Barre di scala: {0}", csv), 15000)
         self.log_pane.info(tr("Barra di scala stampabile: {0} (CSV delle barre: {1})", files[0], csv))
 
-    def update_transform(self) -> None:
+    def update_transform(self, by_flight: bool | None = None) -> None:
+        """The georeference of the current chunk again; ``by_flight``: with the option *Quota GPS per volo* switched
+        on or off (None: as the chunk has it), kept by the chunk only when the fit succeeds - the tick of the pane is
+        put back when it fails or cannot start."""
         if not self._need_chunk(aligned=True):
+            self.reference.set_chunk(self.chunk)
             return
         ch = self.chunk
         before = float(ch.scale)
@@ -7766,7 +7780,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             self.reference.set_chunk(ch, rep)
             self._show_pane(self.left_tabs, self.reference)
             self._draw_markers_on_raster()
-            self._say_flights()
+            self._say_flights(ch)
             change = float(ch.scale) / before - 1 if before else 0.0
             stale = [n for k, n in (("dem", "DEM"), ("orthomosaic", "ortofoto")) if k in ch.products]
             if abs(change) > 1e-6 and stale:
@@ -7775,7 +7789,9 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 self.log_pane.warning(text)
                 self.statusBar().showMessage(text, 20000)
 
-        self.run_task("Georeferenziazione", lambda p: ch.update_transform(), done)
+        if not self.run_task("Georeferenziazione", lambda p: ch.update_transform(gps_height_by_flight=by_flight), done,
+                             on_failed=lambda: self.reference.set_chunk(ch)):
+            self.reference.set_chunk(ch)  # busy: the tick back as the chunk has it
 
     def add_marker_at(self, point, where: str = "sul modello") -> None:
         """A marker at a point of the model, the cloud or the orthophoto (internal frame), as

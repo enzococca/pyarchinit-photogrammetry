@@ -1103,6 +1103,7 @@ class ReferencePane(QWidget):
 
     import_requested = Signal()
     update_requested = Signal()
+    by_flight_requested = Signal(bool)  # the tick "Quota GPS per volo": georeference again with the option
     optimize_requested = Signal()
     changed = Signal()
     scalebar_requested = Signal(object)  # keys of the markers chosen (0, 1 or 2)
@@ -1164,7 +1165,10 @@ class ReferencePane(QWidget):
             "La georeferenziazione sul GPS delle foto stima un offset verticale per ogni volo (foto a più di 90 s "
             "l'una dall'altra iniziano un nuovo volo; il volo più grande fa da riferimento). Serve quando un drone "
             "riparte con la quota relativa a ogni batteria: un volo intero sta metri sopra o sotto gli altri. Con "
-            "i punti di controllo le quote le danno loro: gli offset sono solo misurati"))
+            "1-2 punti di controllo insieme al GPS ogni volo è libero e le quote le danno loro; con 3 o più punti di "
+            "controllo sono loro a collocare il rilievo e gli offset sono solo misurati. Un volo qui è separato da "
+            "una pausa di oltre 90 s (non i 20 minuti della tabella di qualità GNSS). Se i voli non determinano gli "
+            "offset (una linea per batteria) resta il fit semplice e il riepilogo lo dice"))
         self.c_by_flight.toggled.connect(self._by_flight_toggled)
         bar.addWidget(self.c_by_flight)
         lay.addLayout(bar)
@@ -1199,9 +1203,10 @@ class ReferencePane(QWidget):
         self.bars.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.bars.customContextMenuRequested.connect(self._bar_menu)
         split.addWidget(self.bars)
-        self.cams = QTableWidget(0, 11)
+        self.cams = QTableWidget(0, 12)
         self.cams.setHorizontalHeaderLabels(["Camera", tr("Allineata"), "X", "Y", "Z", tr("Rif. X"), tr("Rif. Y"),
-                                             tr("Rif. Z"), tr("Errore (m)"), tr("Precisione X/Y/Z (mm)"), tr("Volo")])
+                                             tr("Rif. Z"), tr("Errore (m)"), tr("Precisione X/Y/Z (mm)"), tr("Volo"),
+                                             tr("Offset Z (m)")])
         self.cams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.cams.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cams.setAlternatingRowColors(True)
@@ -1368,7 +1373,7 @@ class ReferencePane(QWidget):
             row = [cam.label, "si" if cam.aligned else "no", _fmt(c[0], 3), _fmt(c[1], 3), _fmt(c[2], 3),
                    _fmt(ref[0], 3), _fmt(ref[1], 3), _fmt(ref[2], 3), _fmt(entry.get("error"), 3),
                    _precision(cam.meta.get("precision")),
-                   str(groups[cam.key]) if groups.get(cam.key) else tr("senza ora")]
+                   str(groups[cam.key]) if groups.get(cam.key) else tr("senza ora"), _fmt(entry.get("offset"), 3)]
             for k, v in enumerate(row):
                 it = QTableWidgetItem(v)
                 if k == 0:
@@ -1381,7 +1386,7 @@ class ReferencePane(QWidget):
                 if k == 8 and entry.get("offset") is not None:
                     it.setToolTip(tr("Errore dopo l'offset di quota del suo volo ({0} m)", _fmt(entry["offset"], 2)))
                 self.cams.setItem(r, k, it)
-        flight_rows = self._fill_flights(chunk, cam_refs, groups)
+        self._fill_flights(chunk, cam_refs, groups)
         rep = self.last_report or {}
         parts = []
         cam_errors = [e["delta"] for e in cam_refs.values() if "delta" in e]
@@ -1390,12 +1395,16 @@ class ReferencePane(QWidget):
             parts.append(tr("Camere (GPS): errore {0} m (X {1}, Y {2}, Z {3})", _fmt(float(np.sqrt((d ** 2).sum(1).mean())), 2),
                             _fmt(float(np.sqrt((d[:, 0] ** 2).mean())), 2), _fmt(float(np.sqrt((d[:, 1] ** 2).mean())), 2),
                             _fmt(float(np.sqrt((d[:, 2] ** 2).mean())), 2)))
-        record = chunk.meta.get(flights_mod.RECORD) or {}
-        if record.get("offsets"):
+        record = flights_mod.current(chunk)
+        if record.get("by_flight_failed"):
+            parts.append("<span style='color:%s'>%s</span>" % (PALETTE["red"], tr(
+                "quota GPS per volo: offset non determinati ({0}), resta il fit semplice", record["by_flight_failed"])))
+        elif record.get("offsets"):
             shifts = ", ".join(f"{f}: {float(o):+.2f}" for f, o in record["offsets"].items() if float(o) != 0.0)
-            parts.append(tr("offset di quota per volo (m) {0}", shifts or "0"))
-        elif not record.get("by_flight"):
-            off = flights_mod.off_flights(flight_rows)
+            parts.append(tr("offset di quota per volo (m) {0}", shifts or "0")
+                         + (tr(" (misurati: le quote le danno i punti di controllo)") if record.get("measured") else ""))
+        if not record.get("by_flight"):
+            off = record.get("suggest") or []
             if off:
                 parts.append("<span style='color:%s'>%s</span>" % (PALETTE["red"], tr(
                     "quota GPS del volo {0} spostata rispetto agli altri: prova «Quota GPS per volo»",
@@ -1442,8 +1451,8 @@ class ReferencePane(QWidget):
         self.flights.setVisible(len(rows) >= 2)
         if len(rows) < 2:
             return rows
-        off = set(flights_mod.off_flights(rows)) if not (chunk.meta.get(flights_mod.RECORD) or {}).get("by_flight") \
-            else set()
+        record = flights_mod.current(chunk)
+        off = set(record.get("suggest") or []) if not record.get("by_flight") else set()
         self.flights.setRowCount(len(rows))
         for r, row in enumerate(rows):
             values = [str(row["flight"]) if row["flight"] != flights_mod.NO_TIME else tr("senza ora"),
@@ -1455,23 +1464,26 @@ class ReferencePane(QWidget):
                 if c == 5 and row["flight"] in off:
                     it.setForeground(QColor(PALETTE["red"]))
                     it.setToolTip(tr("La quota GPS di questo volo è spostata rispetto agli altri di più di 3 volte la "
-                                     "dispersione dentro un volo: prova «Quota GPS per volo»"))
+                                     "dispersione dentro un volo (e di più di 1 m): prova «Quota GPS per volo»"))
                 self.flights.setItem(r, c, it)
         return rows
 
     def _by_flight_toggled(self, on: bool) -> None:
-        """The option kept in the chunk; an aligned chunk is georeferenced again with it."""
+        """An aligned chunk: the georeference asked again with the option (:attr:`by_flight_requested`), which the
+        chunk keeps only when the fit succeeds (the window puts the tick back otherwise). A chunk not aligned yet: the
+        choice kept at once, for its first georeference."""
         from ..markers import flights as flights_mod
 
         if self.chunk is None or self._filling:
+            return
+        if self.chunk.aligned_cameras:
+            self.by_flight_requested.emit(bool(on))
             return
         if on:
             self.chunk.meta[flights_mod.OPTION] = True
         else:
             self.chunk.meta.pop(flights_mod.OPTION, None)
         self.changed.emit()
-        if self.chunk.aligned_cameras:
-            self.update_requested.emit()
 
     def _estimated_toggled(self, _on: bool) -> None:
         self._est_chosen = True
