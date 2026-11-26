@@ -711,17 +711,24 @@ nei metri del prospetto) e va scritto fuori dalla cartella dei dati del progetto
 Oltre ai clic, il passo *Linea del muro sulla pianta* ha due modi di trovare la linea sul **DEM**:
 
 * **Segui il muro fra due clic**: clic sui due capi del muro (e, se serve, su punti per cui passa, in ordine), doppio
-  clic per finire. La linea segue la cresta del muro sul rilievo locale del DEM (e sui bordi dell'ortofoto) ed è
-  mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
+  clic per finire. La linea segue il mezzo della cresta del muro sul DEM (e i bordi dell'ortofoto): una cresta è ciò che
+  sta più in alto del terreno da tutte e due le parti entro 2 m, cercando il terreno solo fino alla prima cosa più alta,
+  così che il crollo contro una faccia, il bordo di una trincea accanto al muro o un muro parallelo a 0,5 m non vengano
+  presi per il muro; la cima di un muro addossato a una torre vale metà. È mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
   e il pannello lo dice: **Aggiungi punti di passaggio** (un clic dove passa il muro; la linea viene cercata di nuovo
   passando di lì), oppure spunta **Usa SAM dove il muro è basso** (SAM 2.1 ritaglia il muro sull'ortofoto a partire
   dai clic, quando è installato). **Tieni** fa della proposta la linea del muro, con il suo aggancio proposto e le sue
   quote (il lato viene chiesto quando le foto stanno da tutte e due le parti).
-* **Proponi i muri**: le creste dei muri di tutta la pianta (un rilievo locale oltre 0,3 m, lunghe almeno 3 m), come
+* **Proponi i muri**: le creste dei muri di tutta la pianta (più di 0,3 m sopra il terreno da tutte e due le parti,
+  lunghe almeno 3 m), come
   linee tratteggiate nel layer *Muri proposti*; un clic su una ne fa la linea del muro, controllata e con l'aggancio
   proposto come se fosse stata cliccata.
 
-La linea seguita corre sulla cima del muro e taglia uno spigolo interno attraverso la cima: l'aggancio proposto rimette
+Dove un muro si distingue appena da ciò che gli si appoggia (crollo fino a pochi centimetri dalla cima, una striscia di
+terreno più stretta di circa 0,25 m fra il muro e una trincea) la linea può scostarsi di qualche centimetro dal mezzo
+della cima; un blocco piccolo più alto del muro e addossato ad esso (una torre di 3 m di lato) può tirare la linea
+sulla propria cima: aggiungi lì un punto di passaggio sul muro. La linea seguita corre sulla cima del muro e taglia uno
+spigolo interno attraverso la cima: l'aggancio proposto rimette
 la linea sulla faccia e lo spigolo al suo posto. Controllalo sulla pianta e spunta *Aggancia alla faccia* prima di
 costruire.
 

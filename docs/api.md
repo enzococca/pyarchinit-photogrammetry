@@ -2347,6 +2347,7 @@ a group in `chunk.meta["elevation_groups"]` (`KEY`) of the reference chunk: `id`
 | `follow(chunk, points, mask=None, radius=2.0, progress=None)` | the line between the clicked ends (and via points, in order) along the crest: `{"points", "on_ridge", "cell"}`; `on_ridge` under 0.5 is weak; `FollowRefused` (`points`, `outside`, `no_path`); `RuntimeError` without a DEM |
 | `proposals(chunk, min_height=0.3, min_length=3.0, radius=2.0, progress=None)` | the walls of the plan as candidate lines, longest first |
 | `sam_mask(chunk, segmenter, points, margin=10.0, max_side=1536)` | `(mask, transform)` of the wall on the orthophoto cut by SAM 2.1 (a worker process) from the clicks, for `follow(mask=...)` |
+| `crest_map(dem, resolution, reach=2.0)` | `(height, centred, walled)` of each cell: how much it stands above the ground on both sides within `reach` m (the ground looked for only up to the first cell `BLOCK` = 0.05 m higher), how near the middle of the top it is (0-1), and whether one side is a taller structure (`STEP_RISE` 0.5 m; strength times `STEP_WEIGHT` 0.5); the DEM opened and closed by a disc of `SMOOTH` 0.1 m first |
 | `strength_map(dem, resolution, ortho=None, mask=None, radius=2.0)`, `least_cost(strength, start, goal, resolution)`, `simplify_line(points, tolerance=0.1)` | the pieces |
 
 **Command line.** `ppg elevation P --path "X1,Y1 X2,Y2 ..." [--side auto|left|right|X,Y] [--extend A,B]
