@@ -162,8 +162,9 @@ def _pair(value) -> bool:
 
 def load(chunk, notes: list[str]) -> list[tuple[dict, object]]:
     """``[(entry, mesh), ...]``: the volumes of ``chunk`` read from their PLY (world coordinates); an entry that is
-    malformed (its heights not pairs), a file that is missing or unreadable, or a mesh that is not closed is left
-    out with a note in ``notes``."""
+    malformed (its heights not pairs), a file that is missing or unreadable, or one with no faces is left out with
+    a note in ``notes``. An open mesh is read all the same (blender-em keeps some open on purpose): at or under the
+    target of faces it is published as given, over it :func:`thin_volume` rebuilds it closed or leaves it out."""
     import trimesh
 
     out = []
@@ -181,9 +182,6 @@ def load(chunk, notes: list[str]) -> list[tuple[dict, object]]:
             mesh = None
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
             notes.append(f"{chunk.label}: volume {_name(e)} left out (unreadable)")
-            continue
-        if not mesh.is_watertight:
-            notes.append(f"{chunk.label}: volume {_name(e)} left out (not a closed mesh)")
             continue
         out.append((e, mesh))
     return out

@@ -348,9 +348,9 @@ def test_a_malformed_volume_entry_is_left_out(volumes_doc, tmp_path):
     assert any("US14" in n and "malformed" in n for n in manifest["build"]["notes"])
 
 
-def test_an_unreadable_or_open_volume_is_left_out(volumes_doc, tmp_path):
-    """A PLY that is there but unreadable, or a mesh that is not closed: left out of the site with a note, and
-    not counted by the report of the matches."""
+def test_an_unreadable_volume_is_left_out_an_open_one_kept(volumes_doc, tmp_path):
+    """A PLY that is there but unreadable: left out of the site with a note, and not counted by the report of the
+    matches. An open mesh (blender-em keeps some) is read and counted: small, it is published as given."""
     import copy
 
     import trimesh
@@ -366,12 +366,16 @@ def test_an_unreadable_or_open_volume_is_left_out(volumes_doc, tmp_path):
         trimesh.Trimesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], [[0, 1, 2], [0, 1, 3]]).export(str(open_ply))
         ch.meta["proxies"].append(dict(saved[0], name="US98", us="98", file="proxies/US98.ply"))
         notes = []
-        assert [e["us"] for e, _m in site_volumes.load(ch, notes)] == ["12", "14"]
+        assert [e["us"] for e, _m in site_volumes.load(ch, notes)] == ["12", "14", "98"]
         assert any("US99" in n and "unreadable" in n for n in notes)
-        assert any("US98" in n and "closed" in n for n in notes)
+        assert not any("US98" in n for n in notes)
         rows = [{"sito": SITE, "area": "1", "us": u, "unita_tipo": "US"} for u in ("12", "14", "98", "99")]
         labels = [r["label"] for r in site_records.match_report(doc, None, rows) if r["what"] == "volume"]
-        assert sorted(labels) == ["US12", "US14"]
+        assert sorted(labels) == ["US12", "US14", "US98"]
+        site, manifest = _site(doc, tmp_path / "site", products=("proxies",))
+        meshes = _glb_meshes(site / "data" / "proxies.glb")
+        assert sorted(meshes) == ["US12", "US14", "US98"] and len(meshes["US98"][1]) == 2  # as given
+        assert any("US99" in n and "unreadable" in n for n in manifest["build"]["notes"])
     finally:
         ch.meta["proxies"] = saved
         broken.unlink(missing_ok=True)
