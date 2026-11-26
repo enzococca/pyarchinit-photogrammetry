@@ -80,6 +80,8 @@ def _with_drawings(processed, folder: Path):
     unit = UnitPolygon(box(cx - 0.4, cy - 0.3, cx + 0.4, cy + 0.3), us="12", area="1", sito="Sito di prova",
                        attributes={"d_stratigrafica": "Strato", "note": str(Path.home() / "scavi" / SECRET),
                                    "_private": "x", "ppg_id": "abc"})
+    # volumes other tests left on the shared project would add a layer: this site has none of its own
+    ch.meta.pop("proxies", None)
     d = ch.meta.setdefault("drawings", {})
     d["units"] = [unit.to_dict() | {"attributes": dict(unit.attributes)}]
     d["quote"] = [{"x": x, "y": y, "quota_q": z, "us_q": "12", "area_q": "1"}]
