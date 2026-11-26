@@ -354,13 +354,16 @@ export async function createView(container, models) {
   view.selected = () => loaded.flatMap((m) => (m.volumes ? [...m.volumes.values()] : []))
     .filter((v) => v.outline).map((v) => v.data.key);
 
-  // the visible models and clouds, every tile they need loaded (the volumes are loaded with the view)
+  // the visible models and clouds, every tile they need loaded (the volumes are loaded with the view, their files
+  // read before the view was made): a volumes layer shown never stands for the tiles of a model or a cloud still on
+  // their way, the tiles shown must have some tile in view; volumes alone are ready at once
   view.ready = () => {
     const shown = loaded.filter((m) => m.holder.visible);
     const tiled = shown.filter((m) => m.tiles);
-    return shown.length > 0 && tiled.every((m) => m.tiles.root && m.tiles.loadProgress === 1
+    if (!tiled.length) return shown.length > 0;
+    return tiled.every((m) => m.tiles.root && m.tiles.loadProgress === 1
       && m.tiles.stats.downloading + m.tiles.stats.parsing + m.tiles.stats.queued === 0)
-      && shown.some((m) => m.volumes || m.tiles.visibleTiles.size > 0);
+      && tiled.some((m) => m.tiles.visibleTiles.size > 0);
   };
 
   // a click (not a drag) picks a point; the second click of a double click ends the measure
