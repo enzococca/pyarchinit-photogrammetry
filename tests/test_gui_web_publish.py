@@ -199,6 +199,50 @@ def test_plan_consent_publish_and_the_address(make_window, home, monkeypatch, qa
     assert pane.step_states["publish"] == "stale"
 
 
+def test_the_consent_names_the_records_and_the_names_of_people(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home)
+    w = make_window()
+    folder = w.doc.path.parent / "scavo_sito_web"
+    data = json.loads((folder / "site.json").read_text())
+    (folder / "data" / "records.json").write_text("{}")
+    data["chunks"][0]["records"] = {"url": "data/records.json", "count": 2}
+    data["people"] = True
+    (folder / "site.json").write_text(json.dumps(data))
+    pane = _check(w, qapp)
+    pane.b_publish.click()  # declined: nothing sent
+    _settle(w, qapp)
+    assert len(w.asked) == 1
+    text = w.asked[0][1]
+    assert "schede di 2 unità stratigrafiche" in text and "nomi delle persone" in text
+    assert text.index("schede") < text.index("Pubblicare?")
+    assert [c for c in fake.calls(home) if c[:1] == ["pages"]] == []
+
+
+def test_the_consent_without_records_says_nothing_of_them(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home)
+    w = make_window()
+    pane = _check(w, qapp)
+    pane.b_publish.click()
+    _settle(w, qapp)
+    assert "schede" not in w.asked[0][1] and "nomi delle persone" not in w.asked[0][1]
+
+
+def test_names_of_people_added_after_the_consent_are_not_sent(make_window, home, monkeypatch, qapp):
+    fake.environment(monkeypatch, home)
+    w = make_window()
+    pane = _check(w, qapp)  # checked without names of people
+    folder = w.doc.path.parent / "scavo_sito_web"
+    data = json.loads((folder / "site.json").read_text())
+    data["people"] = True  # the site built again with the names before publishing
+    (folder / "site.json").write_text(json.dumps(data))
+    w.answers.append(_yes())
+    pane.b_publish.click()
+    _settle(w, qapp)
+    assert "nomi delle persone" not in w.asked[0][1]
+    assert not any(c[:2] == ["pages", "deploy"] for c in fake.calls(home))
+    assert "published" not in w.doc.meta["web_site"]
+
+
 def test_large_data_need_a_bucket_and_go_to_r2(make_window, home, monkeypatch, qapp):
     fake.environment(monkeypatch, home)
     w = make_window(data_files={"ortho.tif": 26 * MiB, "units.geojson": 300})

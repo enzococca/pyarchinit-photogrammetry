@@ -1215,8 +1215,14 @@ class WebPublishing(QObject):
         if plan.data == "r2":
             where += " " + tr("e nel bucket R2 {0} (indirizzo pubblico)", plan.bucket)
         text = tr("Il sito diventa PUBBLICO: chiunque abbia l'indirizzo può aprirlo e scaricarne i file ({0}). Per "
-                  "limitare l'accesso dopo, usa Cloudflare Access dalla dashboard (vedi la guida).\n\nPubblicare?",
-                  where)
+                  "limitare l'accesso dopo, usa Cloudflare Access dalla dashboard (vedi la guida).", where)
+        if plan.records:
+            text += "\n\n" + tr("Diventano pubbliche anche le schede di {0} unità stratigrafiche, testi compresi: i "
+                                 "nomi scritti dentro un testo non vengono cercati.", plan.records)
+        if plan.people:
+            text += "\n\n" + tr("Diventano pubblici i nomi delle persone delle schede e dei disegni (chi ha "
+                                 "schedato, diretto, disegnato).")
+        text += "\n\n" + tr("Pubblicare?")
         if message(self.window, "question", tr("Pubblica sul web"), text, buttons=yes | no, default=no) != yes:
             return False, False
         if plan.frame == "local":
@@ -1246,7 +1252,7 @@ class WebPublishing(QObject):
         def job(progress):
             fresh = site_publish.plan(folder, o["project"], bucket=o["bucket"], data=o["data"],
                                       data_url=o["data_url"])  # what is on the disk now
-            if fresh.frame != plan.frame:
+            if fresh.frame != plan.frame or fresh.records > plan.records or (fresh.people and not plan.people):
                 raise site_publish.ConsentError("the site changed since it was checked: check it again")
             return site_publish.publish(fresh, public=public, coordinates=coordinates, wrangler=wrangler,
                                         progress=progress)
