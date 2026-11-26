@@ -19,6 +19,19 @@ from pathlib import Path
 
 import numpy as np
 
+# the colours of the proxies in the program (one per unit, in turn); the published site uses the same ones
+PROXY_COLOURS: tuple[str, ...] = ("#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4",
+                                  "#46f0f0", "#f032e6", "#bcf60c", "#008080", "#9a6324", "#800000")
+
+
+def entry_site(unit_site: str | None, chosen_site: str | None, project_site: str | None) -> str:
+    """The site a new proxy entry records: the site of its unit polygon, else the PyArchInit site chosen in the
+    dialog, else the site of the project; ``""`` when none is known."""
+    for s in (unit_site, chosen_site, project_site):
+        if s:
+            return str(s)
+    return ""
+
 
 @dataclass
 class UnitProxy:
@@ -32,6 +45,7 @@ class UnitProxy:
     z_top: tuple[float, float]  # min, max of the top surface
     z_bottom: tuple[float, float]
     attributes: dict = field(default_factory=dict)
+    sito: str | None = None
 
 
 def proxy_name(tipo: str | None, us: str | None) -> str:
@@ -140,6 +154,7 @@ def proxies_for_units(dem_path, units, base=None, thickness=None, top_dem=None, 
             p.area_m2 = sum(q.area_m2 for q in parts)
         proxy = parts[0]
         proxy.attributes = {k: v for k, v in (u.attributes or {}).items() if not str(k).startswith("_")}
+        proxy.sito = getattr(u, "sito", None)
         out.append(proxy)
     return out
 

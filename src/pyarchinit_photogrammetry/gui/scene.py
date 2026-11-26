@@ -251,9 +251,13 @@ def confidence_legend() -> list[tuple[int, str]]:
     return [(i, bin_label(lo, hi)) for i, (lo, hi) in enumerate(BINS)]
 
 
-PROXY_COLORS = np.array([[230, 25, 75], [60, 180, 75], [255, 225, 25], [67, 99, 216], [245, 130, 49], [145, 30, 180],
-                         [70, 240, 240], [240, 50, 230], [188, 246, 12], [0, 128, 128], [154, 99, 36], [128, 0, 0]],
-                        np.uint8)
+def _proxy_colors() -> np.ndarray:
+    from ..archaeo.proxies import PROXY_COLOURS
+
+    return np.array([[int(h[i:i + 2], 16) for i in (1, 3, 5)] for h in PROXY_COLOURS], np.uint8)
+
+
+PROXY_COLORS = _proxy_colors()
 
 
 def best_view(chunk) -> str:
