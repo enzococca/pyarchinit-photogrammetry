@@ -108,10 +108,8 @@ def drawing_features(chunk, entry: dict, dv: float, dz: float, clean, record_of=
 
     def add(layer, geom, props, record=None):
         props = {"layer": layer, **clean(props)}
-        if record is not None:
-            props.pop("record", None)  # an attribute so named would read as a record of the site
-            if record:
-                props["record"] = record
+        if record:  # ``clean`` never keeps an attribute ``record``: only the build's key is one
+            props["record"] = record
         feats.append({"type": "Feature", "properties": props, "geometry": _geometry(geom, dv)})
 
     for line in items["profile"]:

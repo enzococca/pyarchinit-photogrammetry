@@ -262,6 +262,45 @@ def test_relations_from_plain_text(tmp_path):
     assert records[units["12"]["record"]]["relations"] == []
 
 
+def test_an_attribute_named_record_never_opens_a_record(tmp_path):
+    """``record`` is the build's key: a spot height, a unit or a plugin's feature with an attribute of that name
+    carries no ``record`` (no record of another unit opened under it), with or without records."""
+    import json
+
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    doc = _units_document(tmp_path)
+    ch = doc.chunks[0]
+    ch.meta["drawings"]["quote"][0]["record"] = "u1"
+    units = ch.meta["drawings"]["units"]
+    units[2] = UnitPolygon(box(1006.0, 5000.0, 1008.0, 5002.0), us="15", area="1", sito=SITE,
+                           attributes={"record": "u1"}).to_dict()
+
+    def provider(chunk):
+        return [{"kind": "layer", "id": "propria", "title": "Propria",
+                 "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [1001.0, 5001.0]},
+                               "properties": {"us": "1", "record": "u1"}}]}]
+
+    entry = site_plugins.register(provider, owner="prova-record")
+    try:
+        for name, rows in (("with", _unit_rows()), ("without", None)):
+            site = doc.export_site(tmp_path / name, products=("units", "drawings"), unit_records=rows).parent
+            drawings = json.loads((site / "data" / "drawings.geojson").read_text(encoding="utf-8"))["features"]
+            spot = next(f["properties"] for f in drawings if f["properties"].get("layer") == "Quote")
+            assert "record" not in spot, name
+            plugin = json.loads(next(site.rglob("prova-record/propria.geojson")).read_text(encoding="utf-8"))
+            assert "record" not in plugin["features"][0]["properties"], name
+            plan = json.loads((site / "data" / "units.geojson").read_text(encoding="utf-8"))["features"]
+            assert "record" not in next(f["properties"] for f in plan if f["properties"]["us"] == "15"), name
+            if rows:  # the build's own keys are still there
+                assert next(f["properties"] for f in plan if f["properties"]["us"] == "12")["record"]
+    finally:
+        site_plugins.unregister(entry)
+
+
 def test_built_again_without_records(tmp_path):
     doc = _units_document(tmp_path)
     folder = tmp_path / "site"

@@ -131,6 +131,9 @@ FIELDS = {  # the attributes the viewer names in both languages (the others keep
     "area_m2": {"it": "Superficie (m²)", "en": "Surface (m²)"},
 }
 _TECHNICAL = ("ppg_id", "ppg_sig", "ppg_parte", "basis")  # identities of the program: of no use on a page
+# ``record`` is the build's own key of a unit record: an attribute so named (of a drawing, an imported layer, a
+# plugin's feature) is never published, so only the build sets it, after the cleaning
+_RESERVED = _TECHNICAL + ("record",)
 
 
 # ------------------------------------------------------------------------------------------------ what goes out
@@ -263,7 +266,7 @@ def _attributes(values: dict, roots: list[str], people: bool = False) -> dict:
     name."""
     out = {}
     for k, v in (values or {}).items():
-        if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
+        if str(k).startswith("_") or k in _RESERVED or v is None or v == "":
             continue
         key = _scrub(str(k), roots)
         if not _personal(key, people):
@@ -318,12 +321,9 @@ def _unit_features(chunk, shift: _Shift, roots, people: bool = False, record_of=
                  "tipo": tipo, "area_m2": round(float(u.geometry.area), 3)}
         props.update(_attributes(u.attributes, roots, people))
         props = _attributes(props, roots, people)
-        if record_of is not None:
-            key = record_of(u)
-            if key:
-                props["record"] = key
-            else:
-                props.pop("record", None)  # an attribute so named would read as a record of the site
+        key = record_of(u) if record_of is not None else None
+        if key:
+            props["record"] = key
         feats.append({"type": "Feature", "properties": props, "geometry": shift.geometry(u.geometry)})
     return feats
 
