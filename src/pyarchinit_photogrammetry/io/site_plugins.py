@@ -48,19 +48,19 @@ chunk (a layer also among the ``layers`` of the chunk, drawn by the plan as the 
 
 What the site makes sure of, whatever the plugin gives: the coordinates of a layer are moved into the frame of the
 site (the local one: shifted, the heights ``z`` too); every text goes through the same cleaning as the texts of the
-program (no path of the computer, no private key ``_...``) and holds no name of a person and no account of whoever
-wrote a record - an attribute of ``assistant.privacy.PEOPLE_FIELDS`` or ``ACCOUNT_FIELDS`` is left out of the
-properties of a feature and of the rows of a table, and has no column, no name among the ``fields`` and no legend
-(its values, the names, would be in ``site.json``); what a plugin writes under another key, in a title, in an
-``id`` or a ``kind``, or in the text of a page is its own; the pictures are decoded and written again as JPEG of at
-most :data:`IMAGE_SIDE` pixels, made new from the pixels (no EXIF, no GPS, no comment: nothing but the pixels); the
-HTML keeps only the tags and attributes of :data:`TAGS` (no script, no style, no event, no link but
-``http(s)``/``mailto``, pictures only among its ``images``), and the page cleans it again when it shows it. A
-provider that fails, or a contribution that is not understood, is left out and said in the notes of the build; the
-site is built all the same. The notes are published with the site (``site.json``): of what the site itself refuses
-they give the reason, of an error of the plugin the kind alone - what that error says is the plugin's, it may hold
-a value of the survey or a folder of the computer, and goes to the log of the program.
-"""
+program (no path of the computer, no private key ``_...``) and holds no name of a person - unless the site is built
+with them (``export_site(people=True)``: the same box as for the program's own records, one filter, ``clean``) - and
+never the account of whoever wrote a record: such an attribute (``assistant.privacy.PEOPLE_FIELDS``,
+``ACCOUNT_FIELDS``) is left out of the properties of a feature and of the rows of a table, and has no column, no
+name among the ``fields`` and no legend (its values, the names, would be in ``site.json``); what a plugin writes
+under another key, in a title, in an ``id`` or a ``kind``, or in the text of a page is its own; the pictures are
+decoded and written again as JPEG of at most :data:`IMAGE_SIDE` pixels, made new from the pixels (no EXIF, no GPS,
+no comment: nothing but the pixels); the HTML keeps only the tags and attributes of :data:`TAGS` (no script, no
+style, no event, no link but ``http(s)``/``mailto``, pictures only among its ``images``), and the page cleans it
+again when it shows it. A provider that fails, or a contribution that is not understood, is left out and said in the
+notes of the build; the site is built all the same. The notes are published with the site (``site.json``): of what
+the site itself refuses they give the reason, of an error of the plugin the kind alone - what that error says is the
+plugin's, it may hold a value of the survey or a folder of the computer, and goes to the log of the program. """
 from __future__ import annotations
 
 import json

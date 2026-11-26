@@ -27,14 +27,15 @@ alone (a VRT), so no tag of the source files reaches the site, the photos and th
 text typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
 description - that holds the path of a computer is cut to its last name.
 
-The names of people are not published: an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew,
-who recorded, who filled in, who directed, who was in charge, the team) or the account of whoever wrote the record
-(``ACCOUNT_FIELDS``: who created it, who changed it last) is left out of every feature of the site - units, spot
-heights, lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of
-what the plugins give (:mod:`.site_plugins`), wherever the record keeps it and however its name is written
-(:func:`_attributes`; how a name is recognised: ``assistant.privacy.is_people_field``). Names are not looked for in
-the texts: one written elsewhere - a title, a description, a label, a note, another attribute - is published as
-written.
+The names of people are not published unless the build is asked for them (``people=True``; ``site.json`` says
+which, ``people``): an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew, who recorded, who
+filled in, who directed, who was in charge, the team) is left out of every feature of the site - units, spot heights,
+lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of what the
+plugins give (:mod:`.site_plugins`), wherever the record keeps it and however its name is written (:func:`_attributes`,
+the one filter of them all; how a name is recognised: ``assistant.privacy.is_people_field``). The account of whoever
+wrote the record (``ACCOUNT_FIELDS``: who created it, who changed it last) never is, whatever the build. Names are
+not looked for in the texts: one written elsewhere - a title, a description, a label, a note, another attribute - is
+published as written.
 
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
 parts - bound to this computer alone unless another host is asked for; :class:`Preview` runs it in a thread of its
@@ -226,34 +227,37 @@ def _scrub(value, roots: list[str]):
     return _scrub(str(value), roots)
 
 
-def _personal(name) -> bool:
-    """Whether an attribute named ``name`` holds the name of a person or the account of whoever wrote the record
-    (``assistant.privacy.PEOPLE_FIELDS``, ``ACCOUNT_FIELDS``), however the name is written."""
-    return is_people_field(name) or is_account_field(name)
+def _personal(name, people: bool = False) -> bool:
+    """Whether an attribute named ``name`` is left out of the site: the account of whoever wrote the record
+    (``assistant.privacy.ACCOUNT_FIELDS``) always, the name of a person (``PEOPLE_FIELDS``) unless the build is
+    asked for them (``people``), however the name is written."""
+    return is_account_field(name) or (not people and is_people_field(name))
 
 
-def _without_people(value):
-    """``value`` (JSON-like) without the attributes that hold the name of a person or an account, at any depth."""
+def _without_people(value, people: bool = False):
+    """``value`` (JSON-like) without the attributes that hold an account, nor the name of a person unless
+    ``people``, at any depth."""
     if isinstance(value, Mapping):
-        return {k: _without_people(v) for k, v in value.items() if not _personal(k)}
+        return {k: _without_people(v, people) for k, v in value.items() if not _personal(k, people)}
     if isinstance(value, (list, tuple)):
-        return [_without_people(v) for v in value]
+        return [_without_people(v, people) for v in value]
     return value
 
 
-def _attributes(values: dict, roots: list[str]) -> dict:
-    """The attributes of a feature as the page shows them: no private key, no identity, no empty value, no name
-    of a person and no account of whoever wrote the record (``assistant.privacy.PEOPLE_FIELDS`` and
-    ``ACCOUNT_FIELDS``, also inside a value: the site is public and they are names of other people). Everything
-    the site publishes of a record passes through here. The names of the attributes are judged as they are
-    published - after the cleaning of the paths, which cuts one to its last name."""
+def _attributes(values: dict, roots: list[str], people: bool = False) -> dict:
+    """The attributes of a feature as the page shows them: no private key, no identity, no empty value, no
+    account of whoever wrote the record (``assistant.privacy.ACCOUNT_FIELDS``) and - unless ``people``, the box
+    of the build - no name of a person (``PEOPLE_FIELDS``), also inside a value: the site is public and they are
+    names of other people. Everything the site publishes of a record passes through here. The names of the
+    attributes are judged as they are published - after the cleaning of the paths, which cuts one to its last
+    name."""
     out = {}
     for k, v in (values or {}).items():
         if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
             continue
         key = _scrub(str(k), roots)
-        if not _personal(key):
-            out[key] = _without_people(_scrub(v, roots))
+        if not _personal(key, people):
+            out[key] = _without_people(_scrub(v, roots), people)
     return out
 
 
@@ -286,7 +290,7 @@ class _Shift:
         return {"type": m["type"], "coordinates": walk(m["coordinates"])}
 
 
-def _unit_features(chunk, shift: _Shift, roots) -> list[dict]:
+def _unit_features(chunk, shift: _Shift, roots, people: bool = False) -> list[dict]:
     from ..archaeo.stratigraphy import UnitPolygon
 
     feats = []
@@ -300,13 +304,13 @@ def _unit_features(chunk, shift: _Shift, roots) -> list[dict]:
         tipo = u.tipo or "US"
         props = {"label": f"{tipo} {u.us}" if u.us else tipo, "us": u.us, "area": u.area, "sito": u.sito,
                  "tipo": tipo, "area_m2": round(float(u.geometry.area), 3)}
-        props.update(_attributes(u.attributes, roots))
-        feats.append({"type": "Feature", "properties": _attributes(props, roots),
+        props.update(_attributes(u.attributes, roots, people))
+        feats.append({"type": "Feature", "properties": _attributes(props, roots, people),
                       "geometry": shift.geometry(u.geometry)})
     return feats
 
 
-def _drawing_features(chunk, shift: _Shift, roots) -> tuple[list[dict], list[dict]]:
+def _drawing_features(chunk, shift: _Shift, roots, people: bool = False) -> tuple[list[dict], list[dict]]:
     """The other drawings of the plan as features, each with its ``layer``, and the layers met:
     ``{name, title, colour, count}``."""
     from ..archaeo import breaklines
@@ -319,7 +323,7 @@ def _drawing_features(chunk, shift: _Shift, roots) -> tuple[list[dict], list[dic
     def add(name: str, title: dict, colour: str, geometry: dict, props: dict) -> None:
         g = groups.setdefault(name, {"name": name, "title": title, "colour": colour, "count": 0})
         g["count"] += 1
-        feats.append({"type": "Feature", "properties": {"layer": name, **_attributes(props, roots)},
+        feats.append({"type": "Feature", "properties": {"layer": name, **_attributes(props, roots, people)},
                       "geometry": geometry})
 
     name, title, colour = GROUPS["quote"]
@@ -638,7 +642,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 model_texture: int | None = MODEL_TEXTURE, model_faces: int = MODEL_FACES,
                 budget_mb: float | None = BUDGET_MB, cloud_points: int | None = CLOUD_POINTS,
                 cloud_copc: bool = True, labels: dict | None = None, dates: dict | None = None,
-                timeline: bool | None = None, progress=None) -> Path:
+                timeline: bool | None = None, people: bool = False, progress=None) -> Path:
     """Build the web site of ``document`` in ``folder`` (see the module docstring) and return the path of its
     manifest, ``site.json``.
 
@@ -664,7 +668,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     projects) the name of a chunk on the page; ``dates``: ``{chunk: "YYYY-MM-DD"}`` (or pairs) the date of its
     survey. ``timeline``: the page shows one date at a time with a
     selector of the dates (default: when ``dates`` is given); every chunk needs a date then - given, set on the
-    chunk, or that of its photos (:func:`chunk_date`); chunks of one date are shown together. A folder that holds
+    chunk, or that of its photos (:func:`chunk_date`); chunks of one date are shown together. ``people``: the
+    names of people of the records and of what the plugins give are published too (the module docstring; the
+    accounts of who wrote a record never are). A folder that holds
     anything but a site built here is refused."""
     from ..archaeo.terrain import hillshade
     from . import site_cloud, site_plugins, site_sections
@@ -711,8 +717,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         ortho = _raster(ch, "orthomosaic") if "orthomosaic" in products else None
         dem = _raster(ch, "dem") if "dem" in products else None
         raw = _Shift()
-        units = _unit_features(ch, raw, roots) if "units" in products else []
-        drawn = _drawing_features(ch, raw, roots)[0] if "drawings" in products else []
+        units = _unit_features(ch, raw, roots, people) if "units" in products else []
+        drawn = _drawing_features(ch, raw, roots, people)[0] if "drawings" in products else []
         model = _model_info(ch) if "model" in products and _model(ch) is not None else None
         cloud = _cloud(ch) if "cloud" in products else None
         sections = site_sections.entries(ch) if "sections" in products else []
@@ -762,8 +768,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                        float(math.floor(min(lows))) if lows else 0.0)
     written_crs = crs if frame == "crs" else None
 
-    def clean(values):
-        return _attributes(values, roots)
+    def clean(values):  # the one filter of every record of the site, the plugins' included
+        return _attributes(values, roots, people)
 
     def scrub(text):
         return _scrub(text, roots)
@@ -827,7 +833,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 boxes.append(_bounds(traces))
         sub(0.9, f"{ch.label}: drawings")
         if "units" in products:
-            feats = _unit_features(ch, shift, roots)
+            feats = _unit_features(ch, shift, roots, people)
             if feats:
                 _write_geojson(data / "units.geojson", feats, written_crs)
                 layers["units"] = {"id": "units", "type": "vector", "url": f"{rel}/units.geojson",
@@ -835,7 +841,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                                    "colour": UNIT_COLOUR}
                 boxes.append(_bounds(feats))
         if "drawings" in products:
-            feats, groups = _drawing_features(ch, shift, roots)
+            feats, groups = _drawing_features(ch, shift, roots, people)
             if feats:
                 _write_geojson(data / "drawings.geojson", feats, written_crs)
                 layers["drawings"] = {"id": "drawings", "type": "vector", "url": f"{rel}/drawings.geojson",
@@ -991,6 +997,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         "title": _scrub(str(name), roots), "description": _scrub(str(description or ""), roots),
         "languages": languages,
         "frame": frame, "crs": written_crs, "unit": "m",
+        "people": bool(people),
         "fields": FIELDS,
         "chunks": entries,
     }

@@ -89,3 +89,44 @@ def test_matching_details():
     assert (f.row, f.step, f.ignored) == (ROWS[1], 3, ("area",))
     assert match_unit(ROWS, "A", "9", "US", "12") == Found(None, 0, "no row", ())     # an area never widens
     assert match_unit(ROWS, None, "1", "US", None).reason == "no site"                    # the site first
+
+
+def test_names_of_people_only_when_asked(tmp_path):
+    """The box of the names of people: off (the default) no feature, table or plugin contribution of the site holds
+    one; on, the names of people pass - in the drawings and in what a plugin gives - and the accounts of who wrote
+    a record never do. ``site.json`` says which (``people``)."""
+    import json
+
+    from test_site import ACCOUNTS, PEOPLE, _document_with_people, _people_in
+
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    def provider(chunk):
+        return [{"kind": "layer", "id": "persone", "title": "Unita'",
+                 "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [1001.0, 5001.0]},
+                               "properties": {"us": "1", "disegnatore": PEOPLE["disegnatore"],
+                                              "created_by": ACCOUNTS["created_by"]}}]}]
+
+    doc = _document_with_people(tmp_path)
+    entry = site_plugins.register(provider, owner="prova-persone")
+    try:
+        closed = doc.export_site(tmp_path / "closed").parent
+        opened = doc.export_site(tmp_path / "opened", people=True).parent
+    finally:
+        site_plugins.unregister(entry)
+
+    def plugin_layer(site):
+        return next(site.rglob("prova-persone/persone.geojson")).read_text(encoding="utf-8")
+
+    assert _people_in(closed) == []
+    assert json.loads((closed / "site.json").read_text(encoding="utf-8"))["people"] is False
+    assert PEOPLE["disegnatore"] not in plugin_layer(closed)
+
+    assert json.loads((opened / "site.json").read_text(encoding="utf-8"))["people"] is True
+    text = "".join(f.read_text(encoding="utf-8") for f in opened.rglob("*") if f.suffix in (".json", ".geojson"))
+    for field in ("disegnatore", "schedatore", "responsabile", "draa", "direttore_us"):
+        assert PEOPLE[field] in text, field
+    every = b"".join(f.read_bytes() for f in opened.rglob("*") if f.is_file())
+    assert all(name.encode() not in every for name in ACCOUNTS.values())
+    assert PEOPLE["disegnatore"] in plugin_layer(opened)
+    assert ACCOUNTS["created_by"] not in plugin_layer(opened)
