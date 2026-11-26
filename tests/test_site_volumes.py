@@ -292,3 +292,87 @@ def test_glb_names_its_nodes():
     assert [n["name"] for n in gltf["nodes"]] == ["a", "b"]
     assert [n["mesh"] for n in gltf["nodes"]] == [0, 1] and len(gltf["meshes"]) == 2
     assert gltf["scenes"][0]["nodes"] == [0, 1]
+
+
+def test_a_volume_dropped_by_thinning_has_no_record(volumes_doc, tmp_path, monkeypatch):
+    """Thinning runs before the records: a volume it leaves out has no record and no line in the report."""
+    import json
+
+    doc, _ch = volumes_doc
+    rows = [{"sito": SITE, "area": "1", "us": "12", "unita_tipo": "US", "d_stratigrafica": "Strato"},
+            {"sito": SITE, "area": "1", "us": "14", "unita_tipo": "US", "d_stratigrafica": "Riempimento"}]
+    thin, calls = site_volumes.thin_volume, []
+
+    def second_dropped(mesh, target):
+        calls.append(target)
+        return (None, "dropped") if len(calls) == 2 else thin(mesh, target)
+
+    monkeypatch.setattr(site_volumes, "thin_volume", second_dropped)
+    site, manifest = _site(doc, tmp_path / "site", products=("proxies",), unit_records=rows)
+    volumes = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))["volumes"]
+    assert [v["us"] for v in volumes] == ["12"]
+    records = json.loads((site / "data" / "records.json").read_text(encoding="utf-8"))
+    assert set(records) == {volumes[0]["record"]}
+    notes = manifest["build"]["notes"]
+    assert any("US14" in n and "thinned" in n for n in notes)
+    assert any("records of 1 of 1 units" in n for n in notes), notes
+
+
+def test_volumes_over_the_size_have_no_record(volumes_doc, tmp_path, monkeypatch):
+    from pyarchinit_photogrammetry.io import site_publish
+
+    doc, _ch = volumes_doc
+    rows = [{"sito": SITE, "area": "1", "us": "12", "unita_tipo": "US", "d_stratigrafica": "Strato"}]
+    monkeypatch.setattr(site_publish, "PAGES_FILE_BYTES", 100)
+    site, manifest = _site(doc, tmp_path / "site", products=("units", "proxies"), unit_records=rows)
+    assert not (site / "data" / "proxies.glb").exists()
+    assert "volumes" not in [x["id"] for x in manifest["chunks"][0]["layers"]]
+    notes = manifest["build"]["notes"]
+    assert any("over" in n and "MiB" in n for n in notes)
+    assert any("records of 1 of 2 units" in n for n in notes), notes  # the two polygons, no volume
+
+
+def test_a_malformed_volume_entry_is_left_out(volumes_doc, tmp_path):
+    import copy
+    import json
+
+    doc, ch = volumes_doc
+    saved = copy.deepcopy(ch.meta["proxies"])
+    try:
+        ch.meta["proxies"][1]["z_top"] = 12.5  # a scalar: not a pair
+        site, manifest = _site(doc, tmp_path / "site", products=("proxies",))
+    finally:
+        ch.meta["proxies"] = saved
+    volumes = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))["volumes"]
+    assert [v["key"] for v in volumes] == ["US12"]
+    assert any("US14" in n and "malformed" in n for n in manifest["build"]["notes"])
+
+
+def test_an_unreadable_or_open_volume_is_left_out(volumes_doc, tmp_path):
+    """A PLY that is there but unreadable, or a mesh that is not closed: left out of the site with a note, and
+    not counted by the report of the matches."""
+    import copy
+
+    import trimesh
+
+    from pyarchinit_photogrammetry.io import site_records
+
+    doc, ch = volumes_doc
+    saved = copy.deepcopy(ch.meta["proxies"])
+    broken = ch.data_dir / "proxies" / "US99.ply"
+    open_ply = ch.data_dir / "proxies" / "US98.ply"
+    try:
+        broken.write_bytes(b"not a mesh at all")
+        trimesh.Trimesh([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], [[0, 1, 2], [0, 1, 3]]).export(str(open_ply))
+        ch.meta["proxies"].append(dict(saved[0], name="US98", us="98", file="proxies/US98.ply"))
+        notes = []
+        assert [e["us"] for e, _m in site_volumes.load(ch, notes)] == ["12", "14"]
+        assert any("US99" in n and "unreadable" in n for n in notes)
+        assert any("US98" in n and "closed" in n for n in notes)
+        rows = [{"sito": SITE, "area": "1", "us": u, "unita_tipo": "US"} for u in ("12", "14", "98", "99")]
+        labels = [r["label"] for r in site_records.match_report(doc, None, rows) if r["what"] == "volume"]
+        assert sorted(labels) == ["US12", "US14"]
+    finally:
+        ch.meta["proxies"] = saved
+        broken.unlink(missing_ok=True)
+        open_ply.unlink(missing_ok=True)

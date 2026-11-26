@@ -823,11 +823,14 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         item["rel"], item["data"] = rel, data
         layers, boxes = {}, []
         records = None
+        # the volumes thinned and packed first: one left out (thinning, size) has no record and no match
+        volumes = site_volumes.prepare(ch, item["volumes"], shift, frame, scrub, notes) if item["volumes"] else None
+        item["volumes"] = None  # the meshes read are not needed any more
         if unit_records is not None:
             records = site_records.chunk_records(
                 ch, unit_records, project_site, frame=frame, dz=shift.dz, fixed=heights_fixed,
                 usm_heights=usm_heights, people=people, scrub=scrub, units="units" in products,
-                sections=item["sections"], volumes=[e for e, _m in item["volumes"]])
+                sections=item["sections"], volumes=[e for e, _m in volumes["kept"]] if volumes else [])
         with tempfile.TemporaryDirectory(prefix=".ppg-site-", dir=folder) as tmp:
             tmp = Path(tmp)
             if item["ortho"] is not None:
@@ -900,7 +903,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             layers[layer["id"]] = layer
             path = folder / layer["url"]
             boxes.append(_bounds(json.loads(path.read_text(encoding="utf-8"))["features"]))
-        if item["volumes"]:
+        if volumes:
             sub(0.95, f"{ch.label}: unit volumes")
             polygons = site_records.chunk_polygons(ch)
 
@@ -908,9 +911,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 unit = site_records.volume_unit(entry, polygons, project_site)
                 return records.key(*unit) if unit is not None else None
 
-            layer = site_volumes.write(ch, item["volumes"], data, rel, shift, frame, scrub,
+            layer = site_volumes.write(ch, volumes, data, rel, shift, scrub,
                                        None if records is None else volume_record, None, notes)
-            item["volumes"] = None  # the meshes are not needed any more
+            volumes = None
             if layer is not None:
                 layers["volumes"] = layer
                 b = layer["box"]

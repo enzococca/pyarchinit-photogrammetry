@@ -591,14 +591,16 @@ def unit_sites(document, chunks=None) -> list[str]:
 
 def match_report(document, chunks, rows: list[dict]) -> list[dict]:
     """How the units of ``chunks`` (default all) match ``rows`` of ``us_table`` (:func:`chunk_records`, the
-    project's site for a unit without one; the volumes whose file is there, :func:`.site_volumes.present`): the ``report`` of each chunk, every entry with ``"chunk"``, the label of
-    its chunk. Matching only: no value of a record is written for it."""
+    project's site for a unit without one; the volumes a site can read, :func:`.site_volumes.load`): the
+    ``report`` of each chunk, every entry with ``"chunk"``, the label of its chunk. Matching only: no value of a
+    record is written for it."""
     from . import site_volumes
 
     project = (document.meta or {}).get("sito")
     out = []
     for chunk in _document_chunks(document, chunks):
-        for entry in chunk_records(chunk, rows, project, volumes=site_volumes.present(chunk)).report:
+        volumes = [e for e, _m in site_volumes.load(chunk, [])]
+        for entry in chunk_records(chunk, rows, project, volumes=volumes).report:
             out.append({"chunk": chunk.label, **entry})
     return out
 

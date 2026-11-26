@@ -8,8 +8,10 @@ accepts it only when it stays sound, else rebuilds the solid on a coarser grid f
 leaves the volume out.
 
 In a site (product ``proxies`` of :func:`.site.export_site`) the volumes of a chunk are its entries of
-``chunk.meta["proxies"]`` (:func:`entries`) read from their PLY (:func:`load`) and written as
-``data/[<n>/]proxies.glb`` and ``proxies.json`` (:func:`write`): no path, no id, no ``sito`` of an entry.
+``chunk.meta["proxies"]`` (:func:`entries`) read from their PLY (:func:`load`), thinned and packed
+(:func:`prepare`, before the records of the site are matched, so that a volume left out has no record) and
+written as ``data/[<n>/]proxies.glb`` and ``proxies.json`` (:func:`write`): no path, no id, no ``sito`` of an
+entry.
 """
 from __future__ import annotations
 
@@ -153,13 +155,22 @@ def _name(entry: dict) -> str:
     return str(entry.get("name") or proxy_name(entry.get("tipo"), entry.get("us")))
 
 
+def _pair(value) -> bool:
+    """A height pair of an entry (``z_top``, ``z_bottom``) as the program writes it: absent, or a list."""
+    return value is None or isinstance(value, (list, tuple))
+
+
 def load(chunk, notes: list[str]) -> list[tuple[dict, object]]:
-    """``[(entry, mesh), ...]``: the volumes of ``chunk`` read from their PLY (world coordinates); a file that is
-    missing, unreadable or not a closed mesh is left out with a note in ``notes``."""
+    """``[(entry, mesh), ...]``: the volumes of ``chunk`` read from their PLY (world coordinates); an entry that is
+    malformed (its heights not pairs), a file that is missing or unreadable, or a mesh that is not closed is left
+    out with a note in ``notes``."""
     import trimesh
 
     out = []
     for e in entries(chunk):
+        if not (_pair(e.get("z_top")) and _pair(e.get("z_bottom"))):
+            notes.append(f"{chunk.label}: volume {_name(e)} left out (malformed entry)")
+            continue
         p = path(chunk, e)
         if not p.is_file():
             notes.append(f"{chunk.label}: volume {_name(e)} left out (missing)")
@@ -170,6 +181,9 @@ def load(chunk, notes: list[str]) -> list[tuple[dict, object]]:
             mesh = None
         if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
             notes.append(f"{chunk.label}: volume {_name(e)} left out (unreadable)")
+            continue
+        if not mesh.is_watertight:
+            notes.append(f"{chunk.label}: volume {_name(e)} left out (not a closed mesh)")
             continue
         out.append((e, mesh))
     return out
@@ -218,30 +232,22 @@ def _thinned(chunk, loaded, target: int, notes: list[str]) -> list[tuple[dict, o
     return out
 
 
-def write(chunk, loaded, data, rel: str, shift, frame: str, scrub, record_of, groups, notes: list[str]) -> dict | None:
-    """Write the volumes ``loaded`` (:func:`load`) of ``chunk`` in ``data``: ``proxies.glb`` (one mesh and one node
-    per volume, named by its key, Y-up as the tiles of the model) and ``proxies.json`` (what the viewer shows of
-    each), and return their layer of ``site.json``; None when no volume is left.
+def prepare(chunk, loaded, shift, frame: str, scrub, notes: list[str]) -> dict | None:
+    """The volumes ``loaded`` (:func:`load`) of ``chunk`` thinned and packed as ``proxies.glb``, before anything
+    is written: ``{"kept": [(entry, thinned mesh), ...], "keys", "blob", "lo", "hi", "origin"}``, None when no
+    volume is left. Run before the records are matched (``kept`` are the volumes the site publishes).
 
     Each volume is thinned to ``min(VOLUME_FACES, CHUNK_VOLUME_FACES // n)`` faces (:func:`thin_volume`); a
     ``proxies.glb`` over the limit of a Pages file has its targets halved once, else the volumes are left out with
     a note. ``shift``: the local frame (``frame == "local"``); in ``"crs"`` the positions are around the centre of
-    the volumes, the ``origin`` of the layer. Heights less ``shift.dz``. ``scrub``: what removes the paths of the
-    computer from a text; ``record_of(entry)``: the key of the record of a volume, None: no record (None: the site
-    has no records, no ``record`` is written); ``groups``: the unit groups a plugin gives (None: each volume the
-    colour of the program by its index). The ``sito`` of an entry, its file and its ids are never written."""
-    import json
-
-    from ..archaeo.proxies import PROXY_COLOURS
-    from .site import DECIMALS, TITLES
+    the volumes, the ``origin`` of the layer. ``scrub``: what removes the paths of the computer from a text (the
+    keys, the names of the nodes)."""
     from .site_publish import PAGES_FILE_BYTES
     from .web import _glb
 
     if not loaded:
         return None
-    every = chunk.meta.get("proxies") or []
     target = min(VOLUME_FACES, CHUNK_VOLUME_FACES // len(loaded))
-    blob = None
     for attempt in (target, target // 2):
         tried: list[str] = []
         kept = _thinned(chunk, loaded, attempt, tried)
@@ -269,12 +275,30 @@ def write(chunk, loaded, data, rel: str, shift, frame: str, scrub, record_of, gr
         blob = _glb(prims, names=keys)
         if len(blob) <= PAGES_FILE_BYTES:
             notes.extend(tried)
-            break
-        blob = None
-    if blob is None:
-        notes.append(f"{chunk.label}: volumes left out (proxies.glb over {PAGES_FILE_BYTES // 2**20} MiB a file "
-                     "even with half the faces)")
+            return {"kept": kept, "keys": keys, "blob": blob, "lo": lo, "hi": hi, "origin": origin}
+    notes.append(f"{chunk.label}: volumes left out (proxies.glb over {PAGES_FILE_BYTES // 2**20} MiB a file "
+                 "even with half the faces)")
+    return None
+
+
+def write(chunk, prepared, data, rel: str, shift, scrub, record_of, groups, notes: list[str]) -> dict | None:
+    """Write the volumes ``prepared`` (:func:`prepare`) of ``chunk`` in ``data``: ``proxies.glb`` (one mesh and one
+    node per volume, named by its key, Y-up as the tiles of the model) and ``proxies.json`` (what the viewer shows
+    of each), and return their layer of ``site.json``; None when no volume is left (``prepared`` None).
+
+    Heights less ``shift.dz``. ``scrub``: what removes the paths of the computer from a text; ``record_of(entry)``:
+    the key of the record of a volume, None: no record (None: the site has no records, no ``record`` is written);
+    ``groups``: the unit groups a plugin gives (:func:`apply_groups`; None: each volume the colour of the program by
+    its index). The ``sito`` of an entry, its file and its ids are never written."""
+    import json
+
+    from ..archaeo.proxies import PROXY_COLOURS
+    from .site import DECIMALS, TITLES
+
+    if not prepared:
         return None
+    every = chunk.meta.get("proxies") or []
+    kept, keys, lo, hi = prepared["kept"], prepared["keys"], prepared["lo"], prepared["hi"]
     volumes = []
     for n, ((e, _mesh), key) in enumerate(zip(kept, keys)):
         index = next((i for i, x in enumerate(every) if x is e), n)
@@ -292,14 +316,19 @@ def write(chunk, loaded, data, rel: str, shift, frame: str, scrub, record_of, gr
             if record:
                 v["record"] = record
         volumes.append(v)
-    (data / "proxies.glb").write_bytes(blob)
-    (data / "proxies.json").write_text(json.dumps({"title": TITLES["volumes"], "volumes": volumes, "groups": []},
+    legend: list[dict] = []  # the groups of the plugins come with site hook 3
+    (data / "proxies.glb").write_bytes(prepared["blob"])
+    (data / "proxies.json").write_text(json.dumps({"title": TITLES["volumes"], "volumes": volumes,
+                                                   "groups": legend},
                                                   ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     box_lo, box_hi = lo - np.array([shift.dx, shift.dy, shift.dz]), hi - np.array([shift.dx, shift.dy, shift.dz])
     layer = {"id": "volumes", "type": "volumes", "url": f"{rel}/proxies.glb", "data": f"{rel}/proxies.json",
              "title": TITLES["volumes"], "visible": True, "count": len(volumes),
              "box": [round(float(x), DECIMALS) for x in (*box_lo, *box_hi)],
              "bytes": (data / "proxies.glb").stat().st_size + (data / "proxies.json").stat().st_size}
-    if origin is not None:
-        layer["origin"] = origin
+    if legend:
+        layer["groups"] = legend
+    if prepared["origin"] is not None:
+        layer["origin"] = prepared["origin"]
     return layer
+
