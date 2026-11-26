@@ -301,6 +301,17 @@ The button is active while the sync is connected, unless EMtools says it refuses
 tick **Accept commands from EMStudio** in the sync panel of EMtools (it is off by default). A unit that already has a proxy in
 Blender is said, and left alone.
 
+## On the web site of a survey { #web-site }
+
+With version 0.2.0 (it needs pyarchinit-photogrammetry 2.1.0) the plugin gives the
+[web site of a survey](../gui/web-publish.md#unit-records-and-volumes) the epochs of the units as groups of their
+volumes: for each epoch of the em.json linked to the chunk that holds units, its name, its colour and its units
+(number, type and area, when known), each unit in the epoch where it first appears; the groups follow the start of
+the epochs. The viewer shows them in the legend of *Unit volumes*, coloured by epoch, with a switch per group; the
+volumes in no group go under *No group*, with the program's colours. Only names, colours and unit numbers are sent:
+nothing of the Blender scene (paths, reference system, shift) reaches the site, and without a readable em.json the
+site is built without groups.
+
 ## Real time: how it works { #realtime }
 
 The link with Blender works like the [QGIS link](../integrations.md#qgis-live): files the other program reads

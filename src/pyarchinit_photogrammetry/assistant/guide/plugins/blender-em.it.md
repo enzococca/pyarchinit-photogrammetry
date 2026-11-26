@@ -303,6 +303,17 @@ Il pulsante è attivo mentre la sincronizzazione è collegata, a meno che EMtool
 comandi: in Blender spunta **Accept commands from EMStudio** nel pannello di sincronizzazione di EMtools
 (è spento per default). Un'unità che ha già un proxy in Blender è detta, e lasciata com'è.
 
+## Nel sito web di un rilievo { #web-site }
+
+Con la versione 0.2.0 (richiede pyarchinit-photogrammetry 2.1.0) il plugin dà al
+[sito web di un rilievo](../gui/web-publish.md#schede-e-volumi-delle-us) le epoche delle unità come gruppi dei loro
+volumi: per ogni epoca dell'em.json collegato al chunk che contiene unità, il nome, il colore e le sue unità
+(numero, tipo e area, quando nota), ogni unità nell'epoca in cui compare per prima; i gruppi seguono l'inizio delle
+epoche. Il visualizzatore li mostra nella legenda di *Volumi delle US*, colorati per epoca, con un interruttore per
+gruppo; i volumi che non stanno in nessun gruppo vanno sotto *Senza gruppo*, con i colori del programma. Si inviano
+solo nomi, colori e numeri delle unità: nulla della scena di Blender (percorsi, sistema di riferimento, traslazione)
+arriva al sito, e senza un em.json leggibile il sito si costruisce senza gruppi.
+
 ## Tempo reale: come funziona { #realtime }
 
 Il collegamento con Blender funziona come il [collegamento con QGIS](../integrations.md#qgis-dal-vivo):
