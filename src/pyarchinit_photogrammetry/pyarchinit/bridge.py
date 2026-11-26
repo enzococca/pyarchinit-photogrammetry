@@ -196,6 +196,20 @@ class PyArchInit(TopographicMixin):
             out[str(r["us"])] = {k: r.get(k) for k in US_FIELDS if k in r}
         return out
 
+    def us_rows(self, sites) -> list[dict]:
+        """The rows of ``us_table`` of ``sites`` (each read once, trimmed; an empty or missing one is left out),
+        site after site. Never a query without a site: the database layer drops a None filter, so such a query
+        would read the units of every site."""
+        out: list[dict] = []
+        seen: set[str] = set()
+        for site in sites or ():
+            site = "" if site is None else str(site).strip()
+            if not site or site in seen:
+                continue
+            seen.add(site)
+            out.extend(self.db.query("us_table", sito=site))
+        return out
+
     def finds(self, sito: str, **filters) -> list[dict]:
         return self.db.query("inventario_materiali_table", sito=sito, **filters)
 

@@ -308,3 +308,52 @@ def test_an_elevation_outline_carries_its_record(processed, tmp_path):
     outline = next(f["properties"] for f in feats if f["properties"]["layer"] == "US")
     records = json.loads((site / "data" / "records.json").read_text(encoding="utf-8"))
     assert records[outline["record"]]["title"] == "US 7 - Riempimento"
+
+
+# --- the rows of the sites to read and the report of the matches ---
+
+def test_rows_of_the_sites_only(pa_db):
+    """``us_rows`` reads ``us_table`` site by site: an empty or missing site is never a query (the database layer
+    drops a None filter, and a query with no site would read every site)."""
+    from pyarchinit_photogrammetry.pyarchinit.bridge import PyArchInit
+
+    pa = PyArchInit.connect()
+    rows = pa.us_rows(["Saggio", "", None, " Saggio "])
+    assert sorted(str(r["us"]) for r in rows) == ["1", "2", "3"]
+    assert all(r["sito"] == "Saggio" for r in rows)
+    assert pa.us_rows([]) == []
+    assert pa.us_rows([None, "", "  "]) == []
+    assert pa.us_rows(["Nessun sito"]) == []
+
+
+def test_unit_sites_and_report(tmp_path):
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.io import site_records as R
+
+    doc = _units_document(tmp_path)
+    assert R.unit_sites(doc) == [SITE]
+    ch = doc.chunks[0]
+    ch.meta["drawings"]["units"] = [
+        UnitPolygon(box(0, 0, 1, 1), us="12", area="1", sito="A").to_dict(),
+        UnitPolygon(box(2, 0, 3, 1), us="14", area="1", sito=None).to_dict()]
+    doc.meta["sito"] = "B"
+    assert R.unit_sites(doc) == ["A", "B"]
+    assert R.unit_sites(doc, [ch]) == ["A", "B"]
+    doc.meta["sito"] = None
+    assert R.unit_sites(doc) == ["A"]  # a unit with no site and no project site: no site to read
+    ch.meta["drawings"]["units"] = []
+    assert R.unit_sites(doc) == []
+    ch.meta["proxies"] = [{"name": "US 12", "us": "12", "tipo": "US"}]
+    assert R.unit_sites(doc) == []
+    doc.meta["sito"] = "B"
+    assert R.unit_sites(doc) == ["B"]  # a volume takes the site of the project
+
+    doc = _units_document(tmp_path / "report")
+    report = R.match_report(doc, doc.chunks, _unit_rows())
+    assert [(r["chunk"], r["label"], bool(r["step"])) for r in report] == [
+        ("Saggio 1", "US 12", True), ("Saggio 1", "US 14", True), ("Saggio 1", "US 15", False)]
+    assert R.summary(report) == (2, 3)
+    assert R.summary([]) == (0, 0)
+    assert R.summary(R.match_report(doc, None, [])) == (0, 3)

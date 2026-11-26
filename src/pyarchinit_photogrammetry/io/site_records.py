@@ -553,3 +553,53 @@ def chunk_records(chunk, rows: list[dict], project_site, *, frame: str = "local"
             "groups": _record(row, columns, frame=frame, dz=dz, fixed=fixed, usm_heights=usm_heights, scrub=scrub),
             "relations": _relations(row, matched, key_of, scrub) if RELATIONS_COLUMN in columns else []}
     return ChunkRecords(project, records, keys, report)
+
+
+def _document_chunks(document, chunks) -> list:
+    """The chunks of ``document`` asked for (objects, keys or labels); None: all of them."""
+    if chunks is None:
+        return list(document.chunks)
+    if not isinstance(chunks, (list, tuple)):
+        chunks = [chunks]
+    out = []
+    for c in chunks:
+        ch = c if hasattr(c, "meta") else next(
+            (x for x in document.chunks if x.label == c or str(x.key) == str(c)), None)
+        if ch is None:
+            raise ValueError(f"no chunk {c!r} in the project")
+        out.append(ch)
+    return out
+
+
+def unit_sites(document, chunks=None) -> list[str]:
+    """The sites whose rows of ``us_table`` the units of ``chunks`` (default all) may stand for, sorted: the site of
+    each unit polygon and unit outline of the sections and elevations, else the project's
+    (``document.meta["sito"]``), and the project's when a chunk has volumes. An empty site is never one."""
+    project = unit_text((document.meta or {}).get("sito"))
+    sites: set[str] = set()
+    for chunk in _document_chunks(document, chunks):
+        for p in chunk_polygons(chunk):
+            sites.add(unit_text(p.sito) or project)
+        for _entry, rec in chunk_outlines(chunk):
+            sites.add(unit_text(rec.get("sito")) or project)
+        if chunk.meta.get("proxies"):
+            sites.add(project)
+    sites.discard("")
+    return sorted(sites)
+
+
+def match_report(document, chunks, rows: list[dict]) -> list[dict]:
+    """How the units of ``chunks`` (default all) match ``rows`` of ``us_table`` (:func:`chunk_records`, the
+    project's site for a unit without one): the ``report`` of each chunk, every entry with ``"chunk"``, the label of
+    its chunk. Matching only: no value of a record is written for it."""
+    project = (document.meta or {}).get("sito")
+    out = []
+    for chunk in _document_chunks(document, chunks):
+        for entry in chunk_records(chunk, rows, project).report:
+            out.append({"chunk": chunk.label, **entry})
+    return out
+
+
+def summary(report: list[dict]) -> tuple[int, int]:
+    """``(matched, total)`` of a :func:`match_report`: the units with a record, all the units."""
+    return sum(1 for r in report if r.get("step")), len(report)
