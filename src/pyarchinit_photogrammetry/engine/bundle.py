@@ -83,6 +83,32 @@ GROUP_SD_HOLD_PX = 0.5
 JUDGED = ("focal", "tangential", "principal_point", "radial")
 FOCAL_MOVE_HOLD = 0.2
 K1_MOVE_HOLD = 0.5
+# the radial terms of a flat block trade with a bend of the block, and only to second order: the covariance at the
+# flat block (the true lens) puts them at pixels, but off it the block is bent to suit them and the bend itself tells
+# them apart - the covariance taken there gives a fraction of a pixel, the less the further off (engine-m3b Task C:
+# the rendered weak ring, 0.4-0.5 px reported at the corner for estimates 1.6-2.2 px off the true lens on its seeds
+# 0-4; a numeric ring of white noise, 5.9 px at the true lens and 0.35 px at 2 px from it). A radial group that
+# passes is walked along that valley before it is freed (:func:`_radial_walk`): the block adjusted with its terms
+# free (the optimum of the walk), then its first term moved so that the corner of the photo shifts by
+# RADIAL_WALK_STEP_PX at a time, up to RADIAL_WALK_STEPS steps each way - a profile along the first term, the other
+# terms of the group held at the optimum -, the block adjusted with the group held there, its covariance taken
+# again; a way stops where the observations reject the shift (the chi-square of the adjustment, variance factor
+# included, above the optimum by more than RADIAL_WALK_CHI2, three sigmas). Where the largest sd met is more than
+# RADIAL_WALK_FACTOR times the sd at the estimate, the covariance there does not describe the block, and the
+# group is judged by that largest sd - a detector of a weak direction, not a marginal sd: on a quartic valley it is
+# the curvature of the flattest point the observations allow, near the true lens, and it errs towards holding.
+# Only a group between RADIAL_WALK_FLOOR_PX and the line is walked: above the line it is held already, and below the
+# floor the first step (half a pixel at the corner) gives a chi-square of (0.5 / sd)^2 > 9 / 0.6^2 under the local
+# quadratic - the walk would stop there without a covariance taken (the margin 0.6 for a valley that is not
+# quadratic). A well determined block pays nothing
+RADIAL_WALK_STEP_PX = 0.5
+RADIAL_WALK_STEPS = 6
+RADIAL_WALK_CHI2 = 9.0
+RADIAL_WALK_FACTOR = 1.5
+RADIAL_WALK_FLOOR_PX = 0.6 * RADIAL_WALK_STEP_PX / np.sqrt(RADIAL_WALK_CHI2)  # 0.1 px
+RADIAL_WALK_ITERATIONS = 200  # the optimum of the walk: as the optimisation's own adjustment
+RADIAL_WALK_STEP_ITERATIONS = 30  # a step starts next to its own optimum (5-14 iterations measured)
+WALKED = ("radial",)
 # the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
 # many times the extent of the block: a gauge that adds no information the block has (the sd of a focal length is
 # the same to four digits from a tenth of the extent to a hundred times it). Not looser than the extent itself:
@@ -628,6 +654,9 @@ def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = N
     return res
 
 
+_adjust_for_the_walk = adjust  # the radial walk (_radial_walk) adjusts with this one, whatever replaces adjust
+
+
 def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evaluation:
     """``pb`` evaluated at the parameters it holds by the native engine (API 12; RuntimeError without
     it): the cost, the residual vector of the reference (:meth:`_Model.residuals`), the gradient of the
@@ -848,8 +877,101 @@ def _conditional_covariance(matrix: np.ndarray, kept: list, gone: list) -> np.nd
     return matrix[np.ix_(kept, kept)] - cross @ solved
 
 
+def _radial_walk(probe: Problem, flight, c: int, terms: list, free: list, progress: Progress) -> dict:
+    """The radial terms ``terms`` of camera ``c`` of ``probe`` (the problem as :func:`judge_intrinsics` takes its
+    covariance: gauge, variance factor in the accuracies; ``flight`` its reference flight) walked along their
+    valley (:data:`RADIAL_WALK_STEP_PX`), ``free`` the intrinsics free in the adjustment. Returns the record of the
+    walk: ``optimum`` ("converged", "not converged", "failed"), ``at_optimum`` (the sd of the group at the optimum
+    of the walk, None without it), ``largest`` (the largest sd met, None without any), ``steps`` ([shift at the
+    corner in px, chi-square above the optimum, sd or None]) and ``stopped`` ({"-": why, "+": why}: "chi2",
+    "not converged", "no covariance", "end", or "no optimum"). A walk that stops for anything but the chi-square
+    or its end says so in the log. :class:`..core.progress.Cancelled` from ``progress`` goes through."""
+    from ..core.progress import Cancelled
+
+    record = {"optimum": "failed", "at_optimum": None, "largest": None, "steps": [],
+              "stopped": {"-": "no optimum", "+": "no optimum"}}
+    n = len(probe.cameras)
+    index = {(o, k): j for j, (o, k) in enumerate((o, k) for o in range(n) for k in free[o])}
+    columns = [index[(c, k)] for k in terms]
+
+    def sd_at(problem: Problem) -> float | None:
+        try:
+            cov, _counts = intrinsics_covariance(problem, reference_flight=flight)
+        except Cancelled:
+            raise
+        except RuntimeError:
+            return None
+        model, params, width, height = problem.cameras[c]
+        value = corner_sd(model, params, float(width), float(height), terms, cov[np.ix_(columns, columns)])
+        return float(value) if np.isfinite(value) else None
+
+    total = 2 * RADIAL_WALK_STEPS + 1
+    progress(0.0, "Checking the radial terms along their valley")
+    try:
+        best = _adjust_for_the_walk(replace(probe, free_intrinsics=free), max_iterations=RADIAL_WALK_ITERATIONS,
+                                    progress=progress.sub(0.0, 1.0 / total))
+    except Cancelled:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        log.info("camera optimisation: the radial terms of camera %d not walked along their valley: %s", c, exc)
+        return record
+    if not best.success:
+        record["optimum"] = "not converged"
+        log.info("camera optimisation: the radial terms of camera %d not walked along their valley: its adjustment "
+                 "did not converge in %d iterations", c, RADIAL_WALK_ITERATIONS)
+        return record
+    record["optimum"] = "converged"
+    start = problem_at(replace(probe, free_intrinsics=free), best)
+    record["at_optimum"] = sd_at(start)
+    model, params, width, height = start.cameras[c]
+    gain = max(float(np.linalg.norm(jac[:, 0]))
+               for jac in corner_jacobians(model, params, float(width), float(height), terms[:1]))
+    held_here = [[k for k in free[o] if o != c or k not in terms] for o in range(n)]
+    largest = record["at_optimum"]
+    done = 1
+    for side, sign in (("-", -1.0), ("+", 1.0)):
+        record["stopped"][side] = "end"
+        for step in range(1, RADIAL_WALK_STEPS + 1):
+            shift = sign * step * RADIAL_WALK_STEP_PX
+            progress(done / total, f"Checking the radial terms along their valley: step {done}")
+            moved = [list(p) for p in best.camera_params]
+            moved[c][terms[0]] += shift / gain
+            trial = _problem_at(replace(start, free_intrinsics=held_here), start.rotations, start.centres, moved,
+                                start.points, start.markers)
+            try:
+                res = _adjust_for_the_walk(trial, max_iterations=RADIAL_WALK_STEP_ITERATIONS,
+                                           progress=progress.sub(done / total, 1.0 / total))
+            except Cancelled:
+                raise
+            except (RuntimeError, ValueError):
+                res = None
+            done += 1
+            if res is None or not res.success:
+                record["stopped"][side] = "not converged"
+                break
+            rise = 2.0 * (res.cost - best.cost)
+            if rise > RADIAL_WALK_CHI2:
+                record["steps"].append([shift, float(rise), None])
+                record["stopped"][side] = "chi2"
+                break
+            value = sd_at(replace(problem_at(trial, res), free_intrinsics=free))
+            record["steps"].append([shift, float(rise), value])
+            if value is None:
+                record["stopped"][side] = "no covariance"
+                break
+            largest = value if largest is None else max(largest, value)
+    record["largest"] = largest
+    for side, why in record["stopped"].items():
+        if why not in ("chi2", "end"):
+            log.info("camera optimisation: the walk of the radial terms of camera %d along their valley stopped on "
+                     "the %s side: %s", c, "negative" if side == "-" else "positive", why)
+    progress(1.0, "Checking the radial terms along their valley: done")
+    return record
+
+
 def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float | None = None,
-                     only: tuple | None = None) -> tuple[list, list, float | None]:
+                     only: tuple | None = None, progress: Progress | None = None, walks: dict | None = None,
+                     walk: bool = True) -> tuple[list, list, float | None]:
     """Which groups of the intrinsics of each camera an adjustment of ``pb`` determines, at the parameters of the
     problem (the rule of the rounds of the native mapper, group by group and on one scale). Per camera and per
     group of :data:`JUDGED` that the problem frees, the marginal sd of the group in the adjustment:
@@ -877,6 +999,18 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
     refined; where it fails even without them it is held, and they stay free. The focal length stands first for
     what a flat block cannot tell, not because a lens can do without it: it is given up for the radial terms
     alone, when nothing else is enough, and never for the tangential terms or the principal point.
+
+    A radial group that passes with an sd of at least :data:`RADIAL_WALK_FLOOR_PX` is walked along its valley
+    first (:func:`_radial_walk`, once per camera, the walk reused by the re-judgements of ruling R25): on a flat
+    block the covariance at radial terms off the true lens is taken on a block bent to suit them and finds them
+    determined by that bend; where the largest sd met along the valley, as far as the observations allow, is more
+    than :data:`RADIAL_WALK_FACTOR` times the sd at the parameters of the problem (the sd at the optimum of the walk
+    among those met), the radial terms are judged - and their
+    sd given - by it (engine-m3b Task C). ``walks``: a dict filled with the record of each walk, by camera
+    (:func:`_radial_walk`, with ``plain``, the sd at the parameters of the problem, and ``sd``, the one the group is
+    judged by); ``walk`` False: no walk, the cameras that would have been walked noted ``{"deferred": True}`` (a
+    caller that judges the block again elsewhere walks there). ``progress``: the walk says each step and stops on a
+    cancel (:class:`..core.progress.Cancelled`).
 
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment
     refines a group for all its cameras or for none), and a later group is refined only where giving up the
@@ -956,12 +1090,44 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
                     continue
                 kept = [columns[(c, k)] for k in refined(c, group)]
                 sd, limit = judged(c, group, _conditional_covariance(matrix, kept, gone))
+                if np.isfinite(sd):
+                    sd = walked(c, group, sd, {o: given for o in owners})
                 if np.isfinite(sd) and sd <= limit:
                     trial[c] = (list(given), sd)
             if together and len(trial) < len(pending):
                 continue  # not for every camera: more is given up, or the group is held
             saved.update(trial)
         return saved
+
+    progress = as_progress(progress)
+    walks = {} if walks is None else walks
+
+    def walked(c: int, group: str, sd: float, gone: dict) -> float:
+        """The sd ``group`` of camera ``c`` is judged by: ``sd``, the one at the parameters of the problem, or the
+        largest along its valley (:func:`_radial_walk`) where it is a radial group between the floor and the line
+        and that walk finds the covariance there does not describe the block. ``gone`` ({camera: groups}): what is
+        held besides what is held already, for a camera that has not been walked yet."""
+        if group not in WALKED or not RADIAL_WALK_FLOOR_PX <= sd <= GROUP_SD_HOLD_PX:
+            return sd
+        if c not in walks:
+            if not walk:
+                walks[c] = {"deferred": True, "plain": float(sd), "sd": float(sd)}
+                return sd
+            now = [[k for k in free[o] if not any(k in groups[o][g] for g in gone.get(o, ()))] for o in range(n)]
+            record = _radial_walk(probe, flight, c, [k for k in now[c] if k in groups[c][group]], now,
+                                  progress.sub(0.0, 1.0))
+            record["plain"] = float(sd)
+            walks[c] = record
+        record = walks[c]
+        if record.get("deferred"):
+            return sd
+        # against the sd at the parameters of the problem, not at the optimum of the walk: the optimum is itself a
+        # point of the valley (a flat ring 2 px off: 0.35 px at the problem, 0.65 px at the optimum, 3.7 px along
+        # the valley), and its sd counts among those met (``largest``)
+        judged_by = record["largest"] if (record["largest"] is not None
+                                          and record["largest"] > RADIAL_WALK_FACTOR * sd) else sd
+        record["sd"] = float(max(record.get("sd", 0.0), judged_by))
+        return judged_by
 
     matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
     for position, group in enumerate(JUDGED):
@@ -980,6 +1146,7 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
             if not np.isfinite(sd):
                 held[c][group] = ("no covariance", "its variance is not a number")
                 continue
+            sd = walked(c, group, sd, {})
             sds[c][group] = sd
             if sd > limit:
                 failing[c] = sd
