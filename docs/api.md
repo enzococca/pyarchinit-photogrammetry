@@ -63,8 +63,10 @@ After every georeference on the photo positions `update_transform` returns, and 
 `chunk.meta["gps_flights"]`, the error per flight: `flights` with `flight`, `photos`, `start`, `mean` (dX, dY, dZ,
 estimated minus reference), `sd`, `rmse` and `offset`. With two flights or more the offsets are always estimated
 on the joint model below, also with the option off (its transform is then thrown away and the fit is the plain one,
-bit for bit), and `suggest` lists the flights whose offset is larger than both 3 times the scatter of the heights
-within a flight and 1 m: the report, the Reference pane and the log say it and suggest the option. The note never
+bit for bit), and `suggest` lists the flights whose offset differs from the level of most flights (the median of
+the offsets, one vote per flight, not the datum: the biggest flight may be the one off) by more than both 3 times
+the scatter of the heights within a flight and 1 m; an error of that diagnosis never fails the georeference. The
+report, the Reference pane and the log say it and suggest the option. The note never
 comes from the residuals of the plain fit, which tilts the block to take up a flight flown on its own strip.
 
 `gps_height_by_flight=True` (also `ppg align --gps-height-by-flight` and `ppg reference --gps-height-by-flight`;
@@ -90,7 +92,8 @@ The offset is how far the GPS heights of a flight sit above where the fit puts i
 (`markers.gcp.camera_reference_errors`, with `"offset"`, also a column of the Reference pane and of the camera
 table of the workbook) are measured against the reference less the offset. The record carries the transform it
 was fitted in: a transform set elsewhere (ties, alignment of chunks, a hand orientation) drops it, and its offsets
-are no longer applied. The offsets reach the georeference only: with `use_gps` the incremental alignment is still
+are no longer applied; an optimisation whose georeference follows its internal frame (the cameras did not move in
+the CRS) re-stamps it, and a georeference that fails leaves it as it was. The offsets reach the georeference only: with `use_gps` the incremental alignment is still
 held, with a robust loss, to the raw GPS heights (a flight 13 m off can bend it a little), and the GNSS positions
 that hold an optimisation are only the accurate ones (RTK, PPK).
 
