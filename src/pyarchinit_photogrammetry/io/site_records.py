@@ -249,7 +249,8 @@ def height_value(column: str, value, *, frame: str, dz: float, fixed: bool,
                  usm_heights: str) -> float | str | None:
     """The height ``value`` of ``column`` as the site publishes it, or None to leave it out.
 
-    ``frame`` ``"crs"``: every height column as written (a number as a float), whatever ``usm_heights`` says.
+    ``frame`` ``"crs"``: every height column as written (a number as a float; a text as it is, the caller scrubs it; a
+    value that is not finite left out), whatever ``usm_heights`` says.
     ``frame`` ``"local"``: the absolute heights (and those of a masonry unit when ``usm_heights`` is
     ``"absolute"``) lowered by ``dz``, the base of the heights of the site, and left out when nothing fixes it
     (``fixed`` false); the relative ones (and those of a masonry unit when ``usm_heights`` is ``"relative"``) as
@@ -260,7 +261,9 @@ def height_value(column: str, value, *, frame: str, dz: float, fixed: bool,
         return None
     x = _number(value)
     if frame == "crs":
-        return round(x, 3) if x is not None else value
+        if x is not None:
+            return round(x, 3)
+        return value if isinstance(value, str) else None  # a NaN or an infinity is no height a page can show
     if column in USM_HEIGHT_COLUMNS:
         if usm_heights not in ("relative", "absolute"):
             return None
@@ -353,3 +356,200 @@ def match_unit(rows: list[dict], sito, area, tipo, us) -> Found:
         if found:
             return Found(None, 0, SEVERAL)
     return Found(None, 0, NO_ROW)
+
+
+# --- the records of a chunk: what records.json holds and the key a feature carries (design 3.3) ---
+
+UNIT, ELEVATION, VOLUME = "unit", "elevation", "volume"
+
+
+def _natural(text: str) -> tuple:
+    """``"12b"`` as ``((0, 12), (1, "b"))``: numbers in the order of their value, then the rest as text."""
+    return tuple((0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", text) if t)
+
+
+def _unit_key(sito, area, tipo, us) -> tuple[str, str, str, str]:
+    return unit_text(sito), unit_text(area), _type(tipo), unit_text(us)
+
+
+def volume_unit(entry: dict, polygons: list, project_site) -> tuple[str, str | None, str, str] | None:
+    """The unit a volume (an entry of ``chunk.meta["proxies"]``) stands for, as ``(sito, area, tipo, us)``, or None
+    when it has no record (design 4.2).
+
+    The ``sito`` written in an entry cannot be trusted, so it is never read: the one unit polygon of the chunk
+    (``polygons``, :class:`..archaeo.stratigraphy.UnitPolygon`) with the entry's type and number - and its area
+    when both have one - gives its site (else the project's), area, type and number; with no such polygon (or
+    several) the entry's area, type and number with the site of the project. No number, or no site at all: None."""
+    number = unit_text(entry.get("us"))
+    if not number:
+        return None
+    kind, where = _type(entry.get("tipo")), unit_text(entry.get("area"))
+    same = [p for p in polygons
+            if unit_text(getattr(p, "us", None)) == number and _type(getattr(p, "tipo", None)) == kind
+            and (not where or not unit_text(getattr(p, "area", None)) or unit_text(p.area) == where)]
+    if len(same) == 1:
+        p = same[0]
+        site = unit_text(p.sito) or unit_text(project_site)
+        return (site, p.area, p.tipo or "US", p.us) if site else None
+    site = unit_text(project_site)
+    if not site:
+        return None
+    return site, entry.get("area"), entry.get("tipo") or "US", entry.get("us")
+
+
+def chunk_polygons(chunk) -> list:
+    """The unit polygons of the plan of ``chunk`` that a site draws (those with a geometry)."""
+    from ..archaeo.stratigraphy import UnitPolygon
+
+    out = []
+    for d in (chunk.meta.get("drawings") or {}).get("units") or []:
+        try:
+            u = UnitPolygon.from_dict(d)
+        except Exception:  # noqa: BLE001 - a broken record: left out, as the site does
+            continue
+        if u.geometry is not None and not u.geometry.is_empty:
+            out.append(u)
+    return out
+
+
+def chunk_outlines(chunk, sections=None) -> list[tuple[dict, dict]]:
+    """``[(section entry, unit record), ...]``: the unit outlines drawn on the sections and elevations of ``chunk``
+    (``sections``: their entries, default all of them)."""
+    from ..engine.elevation import frame_drawings
+    from . import site_sections
+
+    out = []
+    for entry in site_sections.entries(chunk) if sections is None else sections:
+        for rec in (frame_drawings(chunk, entry["id"]) or {}).get("units") or []:
+            if isinstance(rec, dict):
+                out.append((entry, rec))
+    return out
+
+
+class ChunkRecords:
+    """The records of the units of one chunk, matched once (:func:`chunk_records`): ``records`` (key -> record, as
+    ``records.json`` holds them), ``key(sito, area, tipo, us)`` (the key of a unit, a lookup) and ``report`` (one
+    entry per unit: ``{"what", "label", "step", "reason", "ignored"}``)."""
+
+    def __init__(self, project_site, records: dict, keys: dict, report: list[dict]):
+        self.project_site = unit_text(project_site)
+        self.records = records
+        self._keys = keys
+        self.report = report
+
+    def key(self, sito, area, tipo, us) -> str | None:
+        """The key of the record of a unit (a unit without a site takes the project's), None when it has none."""
+        return self._keys.get(_unit_key(unit_text(sito) or self.project_site, area, tipo, us))
+
+    @property
+    def matched(self) -> int:
+        """How many units of the report have a record."""
+        return sum(1 for r in self.report if r["step"])
+
+
+def _relations(row: dict, matched: list[dict], key_of: dict, scrub) -> list[list]:
+    """The relations of ``row`` (``rapporti``, :func:`..pyarchinit.bridge.parse_relationships`) as
+    ``[kind, us, area, key or None]``: a relation without site or area is within the record's (as PyArchInit writes
+    them); the key is set when exactly one matched row of the chunk has that site, area and number."""
+    from ..pyarchinit.bridge import parse_relationships
+
+    try:
+        relations = parse_relationships(row.get(RELATIONS_COLUMN))
+    except Exception:  # noqa: BLE001 - a broken text gives no relation, never a failed site
+        return []
+    out = []
+    for kind, us, area, site in relations:
+        site = unit_text(site) or unit_text(row.get("sito"))
+        area = unit_text(area) or unit_text(row.get("area"))
+        number = unit_text(us)
+        if not number:
+            continue
+        hits = [r for r in matched if unit_text(r.get("sito")) == site and unit_text(r.get("area")) == area
+                and unit_text(r.get("us")) == number]
+        key = key_of[id(hits[0])] if len(hits) == 1 else None
+        out.append([scrub(str(kind)), scrub(number), scrub(area), key])
+    return out
+
+
+def _record(row: dict, columns: list[str], *, frame, dz, fixed, usm_heights, scrub) -> list[dict]:
+    """The groups of the record of ``row``: each ``{"name": group id, "fields": [[column, value], ...]}``, the
+    columns in the order of their group, an empty value left out, an empty group too."""
+    heights = set(ABSOLUTE_HEIGHTS + RELATIVE_HEIGHTS + USM_HEIGHT_COLUMNS)
+    groups = list(RECORD_FIELDS) + [PEOPLE_GROUP]
+    published = set(columns)
+    out = []
+    for gid, _title, group_columns in groups:
+        fields = []
+        for column in group_columns:
+            if column not in published:
+                continue
+            value = row.get(column)
+            if column in heights:
+                value = height_value(column, value, frame=frame, dz=dz, fixed=fixed, usm_heights=usm_heights)
+                value = scrub(value) if isinstance(value, str) else value
+            else:
+                value = field_value(column, value, scrub)
+            if value is not None:
+                fields.append([column, value])
+        if fields:
+            out.append({"name": gid, "fields": fields})
+    return out
+
+
+def chunk_records(chunk, rows: list[dict], project_site, *, frame: str = "local", dz: float = 0.0,
+                  fixed: bool = False, usm_heights: str = "none", people: bool = False, scrub=None, volumes=(),
+                  units: bool = True, sections=None) -> ChunkRecords:
+    """Match the units of ``chunk`` to ``rows`` of ``us_table`` (:func:`match_unit`) and build their records.
+
+    The units are its polygons (when ``units``), the unit outlines of its sections and elevations (``sections``:
+    their entries, default all of them) and its volumes (``volumes``: entries of ``chunk.meta["proxies"]``, matched
+    by :func:`volume_unit`); a unit without a site takes ``project_site``. Every unit is matched here, once; the
+    keys (``u1``, ``u2``...) are numbered in the order (site, area, type, number) of the matched rows, so a polygon,
+    its outline and its volume that match one row share a key. ``frame``, ``dz``, ``fixed``, ``usm_heights``: the
+    heights (:func:`height_value`); ``people``: the names of people too; ``scrub``: what removes the paths of the
+    computer from a text."""
+    scrub = scrub or (lambda text: text)
+    project = unit_text(project_site)
+    found: dict[tuple, Found] = {}
+    report: list[dict] = []
+
+    def match(what: str, label: str, sito, area, tipo, us) -> None:
+        unit = _unit_key(unit_text(sito) or project, area, tipo, us)
+        if unit not in found:
+            found[unit] = match_unit(rows, unit[0], area, tipo, us)
+        f = found[unit]
+        report.append({"what": what, "label": label, "step": f.step, "reason": f.reason,
+                       "ignored": list(f.ignored)})
+
+    polygons = chunk_polygons(chunk)
+    for p in polygons if units else []:
+        match(UNIT, f"{p.tipo or 'US'} {p.us}" if p.us else (p.tipo or "US"), p.sito, p.area, p.tipo, p.us)
+    for entry, rec in chunk_outlines(chunk, sections):
+        name = str(entry.get("name") or entry.get("id") or "")
+        label = f"{rec.get('tipo') or 'US'} {rec.get('us') or '?'}"
+        match(ELEVATION, f"{name}: {label}", rec.get("sito"), rec.get("area"), rec.get("tipo"), rec.get("us"))
+    for entry in volumes:
+        unit = volume_unit(entry, polygons, project)
+        label = str(entry.get("name") or f"{entry.get('tipo') or 'US'} {entry.get('us') or '?'}")
+        if unit is None:
+            reason = NO_NUMBER if not unit_text(entry.get("us")) else NO_SITE
+            report.append({"what": VOLUME, "label": label, "step": 0, "reason": reason, "ignored": []})
+        else:
+            match(VOLUME, label, *unit)
+
+    matched = list({id(f.row): f.row for f in found.values() if f.row is not None}.values())
+    matched.sort(key=lambda r: (unit_text(r.get("sito")), unit_text(r.get("area")), _type(r.get("unita_tipo")),
+                                _natural(unit_text(r.get("us")))))
+    key_of = {id(r): f"u{n}" for n, r in enumerate(matched, 1)}
+    keys = {unit: key_of[id(f.row)] for unit, f in found.items() if f.row is not None}
+    columns = published_columns(people)
+    records = {}
+    for row in matched:
+        tipo, us = _type(row.get("unita_tipo")), unit_text(row.get("us"))
+        definition = field_value("d_stratigrafica", row.get("d_stratigrafica"), scrub)
+        title = scrub(f"{tipo} {us} - {definition}" if definition not in (None, "") else f"{tipo} {us}")
+        records[key_of[id(row)]] = {
+            "title": title,
+            "groups": _record(row, columns, frame=frame, dz=dz, fixed=fixed, usm_heights=usm_heights, scrub=scrub),
+            "relations": _relations(row, matched, key_of, scrub) if RELATIONS_COLUMN in columns else []}
+    return ChunkRecords(project, records, keys, report)

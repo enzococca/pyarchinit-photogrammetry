@@ -93,9 +93,11 @@ def _geometry(geom, dv: float) -> dict:
     return {"type": m["type"], "coordinates": walk(m["coordinates"])}
 
 
-def drawing_features(chunk, entry: dict, dv: float, dz: float, clean) -> list[dict]:
+def drawing_features(chunk, entry: dict, dv: float, dz: float, clean, record_of=None) -> list[dict]:
     """The profile and the drawings of ``entry`` as features in ``(u, v - dv)``; heights of the drawings less ``dz``;
-    ``clean``: what makes the attributes fit for the page (:func:`.site._attributes`)."""
+    ``clean``: what makes the attributes fit for the page (:func:`.site._attributes`); ``record_of(rec)``: the key
+    of the record of a unit outline (:class:`.site_records.ChunkRecords`), None when it has none, written as
+    ``record``."""
     from shapely.geometry import LineString
 
     from ..archaeo import breaklines
@@ -104,9 +106,13 @@ def drawing_features(chunk, entry: dict, dv: float, dz: float, clean) -> list[di
     items = _drawing_items(chunk, entry)
     feats = []
 
-    def add(layer, geom, props):
-        feats.append({"type": "Feature", "properties": {"layer": layer, **clean(props)},
-                      "geometry": _geometry(geom, dv)})
+    def add(layer, geom, props, record=None):
+        props = {"layer": layer, **clean(props)}
+        if record is not None:
+            props.pop("record", None)  # an attribute so named would read as a record of the site
+            if record:
+                props["record"] = record
+        feats.append({"type": "Feature", "properties": props, "geometry": _geometry(geom, dv)})
 
     for line in items["profile"]:
         if len(line) > 1:
@@ -114,7 +120,8 @@ def drawing_features(chunk, entry: dict, dv: float, dz: float, clean) -> list[di
     for geom, rec in items["units"]:
         layer = _unit_layer(rec)
         add(layer if layer in LAYERS else "US", geom,
-            {"label": _unit_label(rec), **{k: v for k, v in rec.items() if k not in ("wkt", "layer")}})
+            {"label": _unit_label(rec), **{k: v for k, v in rec.items() if k not in ("wkt", "layer")}},
+            None if record_of is None else (record_of(rec) or ""))
     for geom in items["stones"]:
         add("stones", geom, {"label": ""})
     for geom, rec in items["lines"]:
@@ -195,12 +202,13 @@ def _svg(features: list[dict], extent, name: str, heights: bool) -> str:
 
 
 def write_sections(chunk, data: Path, rel: str, shift, quality: int, clean, scrub, progress=None,
-                   only=None, prefix: str = "") -> tuple[list[dict], list[dict], int]:
+                   only=None, prefix: str = "", record_of=None) -> tuple[list[dict], list[dict], int]:
     """The sections and elevations of ``chunk`` in ``data/sections/`` (see the module docstring): their entries for
     ``site.json``, the features of their traces on the plan (``sections.geojson``, written by the caller) and the
     bytes written. ``shift``: the frame of the site (:class:`.site._Shift`); ``clean``/``scrub``: what makes the
     attributes and the names fit for the page; ``only``: the ids to publish (None: all); ``prefix``: of the ids of the
-    sections on the site (one per chunk, so that the ids of a site are unique)."""
+    sections on the site (one per chunk, so that the ids of a site are unique); ``record_of``: the key of the record
+    of a unit outline (:func:`drawing_features`)."""
     import tempfile
 
     from ..engine import elevation as E
@@ -235,7 +243,7 @@ def write_sections(chunk, data: Path, rel: str, shift, quality: int, clean, scru
             extent = [min(extent[0], b[0]), min(extent[1], b[1]), max(extent[2], b[2]), max(extent[3], b[3])]
             record["ortho"] = {"url": f"{rel}/sections/{n}/ortho.tif", "size": [info["width"], info["height"]]}
             size += cog.stat().st_size
-        feats = drawing_features(chunk, entry, dv, shift.dz, clean)
+        feats = drawing_features(chunk, entry, dv, shift.dz, clean, record_of)
         record["extent"] = [round(float(v), 4) for v in extent]
         if feats:
             path = folder / "drawing.geojson"

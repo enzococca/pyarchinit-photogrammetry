@@ -130,3 +130,181 @@ def test_names_of_people_only_when_asked(tmp_path):
     assert all(name.encode() not in every for name in ACCOUNTS.values())
     assert PEOPLE["disegnatore"] in plugin_layer(opened)
     assert ACCOUNTS["created_by"] not in plugin_layer(opened)
+
+
+# --- the records in the site (records.json, "record" on the features) ---
+
+SITE = "Sito di prova"
+SECRET_ID = 918273  # a value of id_us no coordinate of the site holds
+
+
+def _unit_rows(**extra) -> list[dict]:
+    """Rows of ``us_table``: US 12 with every published column filled (and the columns a site never publishes),
+    US 14 plain, US 15 twice (no record: never a guess)."""
+    from pathlib import Path
+
+    from pyarchinit_photogrammetry.io import site_records as R
+
+    full = {c: f"valore {c}" for c in R.published_columns(people=True)}
+    full.update({c: 1.5 for c in R.ABSOLUTE_HEIGHTS + R.RELATIVE_HEIGHTS + R.USM_HEIGHT_COLUMNS})
+    full.update({"sito": SITE, "area": "1", "us": "12", "unita_tipo": "US", "d_stratigrafica": "Strato",
+                 "descrizione": str(Path.home() / "x.txt"),
+                 "rapporti": f"[['Copre', '14', '1', '{SITE}'], ['Taglia', '99', '1', '{SITE}']]",
+                 "quota_abs": 245.30, "quota_min_usm": 244.0, "schedatore": "Mario Schedatore",
+                 "editing_by": "account-editing-918", "id_us": SECRET_ID, "entity_uuid": "uuid-918273-abcdef",
+                 "colonna_nuova": "valore-nuovo-918"})
+    full.update(extra)
+    plain = {"sito": SITE, "area": "1", "us": "14", "unita_tipo": "US"}
+    twice = [{"sito": SITE, "area": "1", "us": "15", "unita_tipo": "US", "descrizione": n} for n in ("a", "b")]
+    return [full, plain, *twice]
+
+
+def _units_document(tmp_path, spot: bool = True):
+    """A project with one chunk in EPSG:32633 and three unit polygons: US 12 of the site, US 14 with no site (the
+    project's), US 15; a spot height at 245.0 when ``spot``."""
+    from shapely.geometry import box
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    doc = ppg.Document()
+    doc.meta["sito"] = SITE
+    ch = doc.add_chunk("Saggio 1")
+    ch.crs = "EPSG:32633"
+    units = [UnitPolygon(box(1000.0, 5000.0, 1002.0, 5002.0), us="12", area="1", sito=SITE),
+             UnitPolygon(box(1003.0, 5000.0, 1005.0, 5002.0), us="14", area="1", sito=None),
+             UnitPolygon(box(1006.0, 5000.0, 1008.0, 5002.0), us="15", area="1", sito=SITE)]
+    ch.meta["drawings"] = {"units": [u.to_dict() for u in units]}
+    if spot:
+        ch.meta["drawings"]["quote"] = [{"x": 1001.0, "y": 5001.0, "quota_q": 245.0, "us_q": "12", "area_q": "1"}]
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    doc.save(tmp_path / "progetto.ppg")
+    return doc
+
+
+def _build(doc, folder, **kw):
+    import json
+
+    site = doc.export_site(folder, products=("units", "drawings"), **kw).parent
+    manifest = json.loads((site / "site.json").read_text(encoding="utf-8"))
+    units = json.loads((site / "data" / "units.geojson").read_text(encoding="utf-8"))["features"]
+    path = site / "data" / "records.json"
+    records = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    return site, manifest, {f["properties"]["us"]: f["properties"] for f in units}, records
+
+
+def _fields(record) -> dict:
+    return {c: v for g in record["groups"] for c, v in g["fields"]}
+
+
+def test_a_click_gives_the_record_of_its_unit(tmp_path):
+    _site, manifest, units, records = _build(_units_document(tmp_path), tmp_path / "site",
+                                              unit_records=_unit_rows())
+    k12, k14 = units["12"]["record"], units["14"]["record"]
+    assert "record" not in units["15"] and k12 != k14
+    assert set(records) == {k12, k14}
+    assert records[k12]["title"] == "US 12 - Strato" and records[k14]["title"] == "US 14"
+    assert records[k12]["relations"] == [["Copre", "14", "1", k14], ["Taglia", "99", "1", None]]
+    assert manifest["chunks"][0]["records"] == {"url": "data/records.json", "count": 2}
+    assert "people" not in manifest["record_groups"] and "heights" in manifest["record_groups"]
+    assert set(manifest["fields"]["d_stratigrafica"]) == {"it", "en"} and "label" in manifest["fields"]
+    assert any(n == "Saggio 1: records of 2 of 3 units" for n in manifest["build"]["notes"])
+
+
+def test_never_a_column_of_the_never_set_and_no_unknown_column(tmp_path):
+    site, _manifest, units, records = _build(_units_document(tmp_path), tmp_path / "site",
+                                             unit_records=_unit_rows())
+    every = b"".join(f.read_bytes() for f in site.rglob("*") if f.is_file())
+    for word in ("id_us", "entity_uuid", "editing_by", "colonna_nuova", str(SECRET_ID), "uuid-918273",
+                 "account-editing-918", "valore-nuovo-918"):
+        assert word.encode() not in every, word
+    assert _fields(records[units["12"]["record"]])["descrizione"] == "x.txt"
+
+
+def test_record_heights_lowered_like_the_dem(tmp_path):
+    import pytest
+
+    rows = _unit_rows()
+
+    def fields(name, doc, **kw):
+        _s, _m, units, records = _build(doc, tmp_path / name, unit_records=rows, **kw)
+        return _fields(records[units["12"]["record"]])
+
+    doc = _units_document(tmp_path)
+    local = fields("local", doc)
+    assert local["quota_abs"] == round(245.30 - 245.0, 3) and "quota_min_usm" not in local
+    assert fields("absolute", doc, usm_heights="absolute")["quota_min_usm"] == round(244.0 - 245.0, 3)
+    assert fields("relative", doc, usm_heights="relative")["quota_min_usm"] == 244.0
+    assert fields("crs", doc, frame="crs")["quota_abs"] == 245.3
+    assert "quota_abs" not in fields("loose", _units_document(tmp_path / "b", spot=False))
+    with pytest.raises(ValueError):
+        doc.export_site(tmp_path / "bad", products=("units",), unit_records=rows, usm_heights="x")
+
+
+def test_people_of_a_record_only_with_the_box(tmp_path):
+    doc = _units_document(tmp_path)
+    _s, closed, units, records = _build(doc, tmp_path / "closed", unit_records=_unit_rows())
+    assert "schedatore" not in _fields(records[units["12"]["record"]])
+    _s, opened, units, records = _build(doc, tmp_path / "opened", unit_records=_unit_rows(), people=True)
+    assert _fields(records[units["12"]["record"]])["schedatore"] == "Mario Schedatore"
+    assert "people" in opened["record_groups"] and "schedatore" in opened["fields"]
+
+
+def test_relations_from_plain_text(tmp_path):
+    rows = _unit_rows(rapporti="copre 14; tagliato da 7")
+    _s, _m, units, records = _build(_units_document(tmp_path), tmp_path / "site", unit_records=rows)
+    relations = records[units["12"]["record"]]["relations"]
+    assert len(relations) == 2
+    assert relations[0][0] == "Copre" and relations[0][1] == "14" and relations[0][3] == units["14"]["record"]
+    assert relations[1][:2] == ["Tagliato da", "7"] and relations[1][3] is None
+    broken = _unit_rows(rapporti="[['Copre', ")  # neither a list nor words: no relation, no crash
+    _s, _m, units, records = _build(_units_document(tmp_path / "b"), tmp_path / "broken", unit_records=broken)
+    assert records[units["12"]["record"]]["relations"] == []
+
+
+def test_built_again_without_records(tmp_path):
+    doc = _units_document(tmp_path)
+    folder = tmp_path / "site"
+    _build(doc, folder, unit_records=_unit_rows())
+    site, manifest, units, records = _build(doc, folder)
+    assert records is None and not (site / "data" / "records.json").exists()
+    assert b'"record"' not in (site / "data" / "units.geojson").read_bytes()
+    assert "records" not in manifest["chunks"][0] and "record_groups" not in manifest
+    assert not any("records of" in n for n in manifest["build"]["notes"])
+
+
+def test_volume_unit():
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.io.site_records import volume_unit
+
+    polys = [UnitPolygon(box(0, 0, 1, 1), us="12", area="1", tipo="US", sito="Altro sito"),
+             UnitPolygon(box(0, 0, 1, 1), us="14", area="2", tipo="USM", sito=None)]
+    assert volume_unit({"us": "12", "tipo": "US", "sito": "Primo"}, polys, SITE) == ("Altro sito", "1", "US", "12")
+    assert volume_unit({"us": " 14 ", "tipo": "USM", "area": "2"}, polys, SITE) == (SITE, "2", "USM", "14")
+    assert volume_unit({"us": "14", "tipo": "USM", "area": "3", "sito": "Primo"}, polys, SITE) == \
+        (SITE, "3", "USM", "14")  # another area: no polygon, the project's site and never the entry's
+    assert volume_unit({"us": "", "tipo": "US"}, polys, SITE) is None
+    assert volume_unit({"us": "16", "tipo": "US", "sito": "Primo"}, polys, None) is None
+
+
+def test_an_elevation_outline_carries_its_record(processed, tmp_path):
+    import json
+    import shutil
+
+    import numpy as np
+    from test_site import _with_drawings
+    from test_site_more import _section
+
+    doc, ch, _facts = _with_drawings(processed, tmp_path / "progetto")
+    shutil.copytree(processed[0].path.parent / "photos", tmp_path / "progetto" / "photos")
+    _section(ch, np.array([2480000.0, 4500000.0, 100.0]))
+    doc.meta["sito"] = SITE
+    doc.save()
+    rows = [{"sito": SITE, "area": "3", "us": "7", "unita_tipo": "US", "d_stratigrafica": "Riempimento"}]
+    site = doc.export_site(tmp_path / "site", products=("sections",), unit_records=rows).parent
+    feats = json.loads((site / "data" / "sections" / "1" / "drawing.geojson").read_text(encoding="utf-8"))["features"]
+    outline = next(f["properties"] for f in feats if f["properties"]["layer"] == "US")
+    records = json.loads((site / "data" / "records.json").read_text(encoding="utf-8"))
+    assert records[outline["record"]]["title"] == "US 7 - Riempimento"

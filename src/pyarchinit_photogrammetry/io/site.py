@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import math
 import os
 import re
@@ -72,6 +73,9 @@ import numpy as np
 from ..assistant.privacy import is_account_field, is_people_field
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
+from . import site_records
+
+log = logging.getLogger(__name__)
 
 FORMAT = "ppg-site"
 FORMAT_VERSION = 1
@@ -290,7 +294,9 @@ class _Shift:
         return {"type": m["type"], "coordinates": walk(m["coordinates"])}
 
 
-def _unit_features(chunk, shift: _Shift, roots, people: bool = False) -> list[dict]:
+def _unit_features(chunk, shift: _Shift, roots, people: bool = False, record_of=None) -> list[dict]:
+    """The unit polygons of the plan as features; ``record_of(unit)``: the key of the record of a unit
+    (:class:`.site_records.ChunkRecords`), None when it has none, written as ``record``."""
     from ..archaeo.stratigraphy import UnitPolygon
 
     feats = []
@@ -305,8 +311,14 @@ def _unit_features(chunk, shift: _Shift, roots, people: bool = False) -> list[di
         props = {"label": f"{tipo} {u.us}" if u.us else tipo, "us": u.us, "area": u.area, "sito": u.sito,
                  "tipo": tipo, "area_m2": round(float(u.geometry.area), 3)}
         props.update(_attributes(u.attributes, roots, people))
-        feats.append({"type": "Feature", "properties": _attributes(props, roots, people),
-                      "geometry": shift.geometry(u.geometry)})
+        props = _attributes(props, roots, people)
+        if record_of is not None:
+            key = record_of(u)
+            if key:
+                props["record"] = key
+            else:
+                props.pop("record", None)  # an attribute so named would read as a record of the site
+        feats.append({"type": "Feature", "properties": props, "geometry": shift.geometry(u.geometry)})
     return feats
 
 
@@ -642,7 +654,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 model_texture: int | None = MODEL_TEXTURE, model_faces: int = MODEL_FACES,
                 budget_mb: float | None = BUDGET_MB, cloud_points: int | None = CLOUD_POINTS,
                 cloud_copc: bool = True, labels: dict | None = None, dates: dict | None = None,
-                timeline: bool | None = None, people: bool = False, progress=None) -> Path:
+                timeline: bool | None = None, people: bool = False, unit_records: list[dict] | None = None,
+                usm_heights: str = "none", progress=None) -> Path:
     """Build the web site of ``document`` in ``folder`` (see the module docstring) and return the path of its
     manifest, ``site.json``.
 
@@ -670,8 +683,14 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     selector of the dates (default: when ``dates`` is given); every chunk needs a date then - given, set on the
     chunk, or that of its photos (:func:`chunk_date`); chunks of one date are shown together. ``people``: the
     names of people of the records and of what the plugins give are published too (the module docstring; the
-    accounts of who wrote a record never are). A folder that holds
-    anything but a site built here is refused."""
+    accounts of who wrote a record never are).
+
+    ``unit_records``: rows of PyArchInit's ``us_table`` (dicts, :meth:`..pyarchinit.PyArchInit.us_rows`); each unit
+    of the plan, of the sections and elevations that matches exactly one of them (:mod:`.site_records`; a unit
+    without a site takes ``document.meta["sito"]``) gets its record: ``data/[<n>/]records.json`` and ``record`` on
+    its features, the columns of :func:`.site_records.published_columns`. ``usm_heights``: among
+    :data:`.site_records.USM_HEIGHTS`, what the heights of a masonry unit are in a local frame. None: no record,
+    the site as without them. A folder that holds anything but a site built here is refused."""
     from ..archaeo.terrain import hillshade
     from . import site_cloud, site_plugins, site_sections
     from .web import export_3dtiles, export_cog
@@ -679,6 +698,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     progress = as_progress(progress)
     if frame not in FRAMES:
         raise ValueError(f"frame: one of {', '.join(FRAMES)}")
+    if usm_heights not in site_records.USM_HEIGHTS:
+        raise ValueError(f"usm_heights: one of {', '.join(site_records.USM_HEIGHTS)}")
     languages = [language] if isinstance(language, str) else list(language or LANGUAGES)
     if not languages or any(x not in LANGUAGES for x in languages):
         raise ValueError(f"language: among {', '.join(LANGUAGES)}")
@@ -752,6 +773,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     if not plan:
         raise ValueError("nothing to publish: no chunk has the products asked for")
     shift = _Shift()
+    lows: list[float] = []
     if frame == "local":
         box = _union(p["box"] for p in plan) or (0.0, 0.0, 0.0, 0.0)
         # the heights start at the whole metre under the lowest cell of the DEMs: no cell is under zero and the
@@ -767,6 +789,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
                        float(math.floor(min(lows))) if lows else 0.0)
     written_crs = crs if frame == "crs" else None
+    heights_fixed = frame == "crs" or bool(lows)  # the true heights of the records are lowered by dz, or left out
+    project_site = (document.meta or {}).get("sito")
+    with_records = False
 
     def clean(values):  # the one filter of every record of the site, the plugins' included
         return _attributes(values, roots, people)
@@ -786,6 +811,12 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         data.mkdir(parents=True, exist_ok=True)
         item["rel"], item["data"] = rel, data
         layers, boxes = {}, []
+        records = None
+        if unit_records is not None:
+            records = site_records.chunk_records(
+                ch, unit_records, project_site, frame=frame, dz=shift.dz, fixed=heights_fixed,
+                usm_heights=usm_heights, people=people, scrub=scrub, units="units" in products,
+                sections=item["sections"])
         with tempfile.TemporaryDirectory(prefix=".ppg-site-", dir=folder) as tmp:
             tmp = Path(tmp)
             if item["ortho"] is not None:
@@ -824,7 +855,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             sub(0.75, f"{ch.label}: sections")
             section_list, traces, _ = site_sections.write_sections(
                 ch, data, rel, shift, quality, clean, scrub, progress=sub.sub(0.75, 0.15),
-                prefix=f"{n + 1}-" if several else "")
+                prefix=f"{n + 1}-" if several else "",
+                record_of=None if records is None else
+                (lambda rec: records.key(rec.get("sito"), rec.get("area"), rec.get("tipo"), rec.get("us"))))
             if traces:
                 _write_geojson(data / "sections.geojson", traces, written_crs)
                 layers["sections"] = {"id": "sections", "type": "vector", "url": f"{rel}/sections.geojson",
@@ -833,7 +866,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 boxes.append(_bounds(traces))
         sub(0.9, f"{ch.label}: drawings")
         if "units" in products:
-            feats = _unit_features(ch, shift, roots, people)
+            feats = _unit_features(ch, shift, roots, people, record_of=None if records is None else
+                                   (lambda u: records.key(u.sito, u.area, u.tipo, u.us)))
             if feats:
                 _write_geojson(data / "units.geojson", feats, written_crs)
                 layers["units"] = {"id": "units", "type": "vector", "url": f"{rel}/units.geojson",
@@ -864,6 +898,18 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             entry["sections"] = section_list
         if plugin_list:
             entry["plugins"] = plugin_list
+        if records is not None:
+            if records.records:
+                (data / "records.json").write_text(json.dumps(records.records, ensure_ascii=False,
+                                                              separators=(",", ":")), encoding="utf-8")
+                entry["records"] = {"url": f"{rel}/records.json", "count": len(records.records)}
+                with_records = True
+            if records.report:
+                notes.append(f"{entry['label']}: records of {records.matched} of {len(records.report)} units")
+            for r in records.report:  # the list goes to the log, not to the page (call 10)
+                how = f"step {r['step']}" + (f", {' and '.join(r['ignored'])} ignored" if r["ignored"] else "") \
+                    if r["step"] else r["reason"]
+                log.info("site records, %s: %s %s - %s", entry["label"], r["what"], r["label"], how)
         entries.append(entry)
 
     # then the model and the cloud, in what the budget leaves them
@@ -984,7 +1030,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         extent = _union(boxes) or _union([(s["trace"]["coordinates"][0][0], s["trace"]["coordinates"][0][1]) * 2
                                           for s in entry.get("sections", []) if "trace" in s]) or (-1, -1, 1, 1)
         entry["extent"] = [round(v, DECIMALS) for v in extent]
-        entry_keys = ["id", "label", "date", "extent", "layers", "sections", "plugins"]
+        entry_keys = ["id", "label", "date", "extent", "layers", "sections", "plugins", "records"]
         entries[n] = {k: entry[k] for k in entry_keys if k in entry}
 
     name = title or (document.meta or {}).get("sito") or (Path(document.path).stem if document.path else "Rilievo")
@@ -998,9 +1044,12 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         "languages": languages,
         "frame": frame, "crs": written_crs, "unit": "m",
         "people": bool(people),
-        "fields": FIELDS,
-        "chunks": entries,
+        "fields": FIELDS | site_records.COLUMN_TITLES if with_records else FIELDS,
     }
+    if with_records:
+        groups = list(site_records.RECORD_FIELDS) + ([site_records.PEOPLE_GROUP] if people else [])
+        manifest["record_groups"] = {gid: title for gid, title, _columns in groups}
+    manifest["chunks"] = entries
     if timeline:
         days: dict[str, list[str]] = {}
         for e in entries:
