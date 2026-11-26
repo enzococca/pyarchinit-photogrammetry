@@ -726,8 +726,14 @@ Oltre ai clic, il passo *Linea del muro sulla pianta* ha due modi di trovare la 
 
 Dove un muro si distingue appena da ciò che gli si appoggia (crollo fino a pochi centimetri dalla cima, una striscia di
 terreno più stretta di circa 0,25 m fra il muro e una trincea) la linea può scostarsi di qualche centimetro dal mezzo
-della cima; un blocco piccolo più alto del muro e addossato ad esso (una torre di 3 m di lato) può tirare la linea
-sulla propria cima: aggiungi lì un punto di passaggio sul muro. La linea seguita corre sulla cima del muro e taglia uno
+della cima; un blocco piccolo più alto del muro e addossato ad esso (una torre di 3 m di lato), o una torre curva lungo
+cui corre il muro, può tirare la linea sulla propria cima o sul proprio bordo: aggiungi lì un punto di passaggio sul
+muro. Un muro
+ancora sepolto da un lato fino a circa la cima (messo in luce su una faccia sola, con il testimone alla sua cima o fino
+a 0,5 m più in alto) non è una cresta: clicca punti di passaggio o usa SAM. Cespugli più alti del muro accanto ad esso
+nascondono il terreno: usa un DEM senza vegetazione. Su una pianta grande (oltre circa 400 m di lato) i muri sono
+proposti su una griglia più grossa (fino a 4 milioni di celle, circa 0,3 m per 600 m), quindi le loro linee sono meno
+precise; segui un muro fra due clic per averne la linea esatta. La linea seguita corre sulla cima del muro e taglia uno
 spigolo interno attraverso la cima: l'aggancio proposto rimette
 la linea sulla faccia e lo spigolo al suo posto. Controllalo sulla pianta e spunta *Aggancia alla faccia* prima di
 costruire.

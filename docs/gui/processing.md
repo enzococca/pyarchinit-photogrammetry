@@ -708,8 +708,12 @@ Besides the clicks, the step *Line of the wall on the plan* has two ways to find
 
 Where a wall is barely distinct from what leans on it (rubble up to a few centimetres from its top, a ledge of ground
 narrower than about 0.25 m between it and a trench) the line can run off the middle of the top by some centimetres; a
-small block taller than the wall and built against it (a tower 3 m across) can draw the line over its own top: add a
-via point on the wall there. The followed line runs on the top of the wall and cuts an inner corner across its top: the snap proposed puts the line
+small block taller than the wall and built against it (a tower 3 m across), or a curved tower the wall runs along, can
+draw the line over its own top or edge: add a via point on the wall there. A wall still buried on one side up to about
+its top (bared on one face only, the baulk at its top or up to 0.5 m higher) is no crest: click via points or use SAM.
+Bushes taller than the wall beside it hide the ground: use a DEM without vegetation. On a large plan (over about
+400 m a side) the walls are proposed on a coarser grid (up to 4 million cells, about 0.3 m for 600 m), so their lines
+are less precise there; follow a wall between two clicks for its exact line. The followed line runs on the top of the wall and cuts an inner corner across its top: the snap proposed puts the line
 on the face and the corner back in place. Check it on the plan and tick *Snap to the face* before building.
 
 #### Limits
