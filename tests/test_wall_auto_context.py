@@ -112,3 +112,98 @@ def test_stones_on_a_top_do_not_break_the_crest():
     s = A.strength_map(dem, 0.05)
     middle = s[r0 + 7:r0 + 9, 20:180].max(axis=0)
     assert (middle > 0.8).mean() > 0.95
+
+
+# ---------------------------------------------------------------- other angles, cells, no data, coarse plans
+VARIANT_CASES = ("free", "parallel_0.5", "rubble", "trench_edge", "crowded")
+MAKERS = {"free": S.free_wall, "parallel_0.5": lambda: S.parallel(0.5), "rubble": S.rubble,
+          "trench_edge": S.trench_edge, "crowded": S.crowded, "tower_beside": S.tower_beside}
+OBLIQUE_MEAN = 0.08  # m: on a wall across the grid the path is a staircase of cells, simplified within 0.1 m
+
+
+@pytest.mark.parametrize("rot", [30.0, 45.0])
+@pytest.mark.parametrize("name", VARIANT_CASES)
+def test_walls_across_the_grid_are_followed_as_well(folder, name, rot):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    with S.view(rot=rot):
+        case = MAKERS[name]()
+    r = A.follow(S.chunk_of(case, folder), case.clicks)
+    share, mean = S.score(r["points"], case.crest)
+    assert share >= 0.9 and mean <= OBLIQUE_MEAN, (name, rot, share, mean)
+
+
+@pytest.mark.parametrize("cell", [0.02, 0.10])
+@pytest.mark.parametrize("name", VARIANT_CASES)
+def test_dems_of_other_cells_are_followed_as_well(folder, name, cell):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    with S.view(cell=cell):
+        case = MAKERS[name]()
+    r = A.follow(S.chunk_of(case, folder), case.clicks)
+    share, mean = S.score(r["points"], case.crest)
+    assert share >= FOLLOW_SHARE and mean <= FOLLOW_MEAN, (name, cell, share, mean)
+
+
+@pytest.mark.parametrize("name", ["rubble", "crowded"])
+def test_holes_in_the_dem_do_not_lose_the_wall(folder, name):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    case = S.holed(MAKERS[name]())
+    r = A.follow(S.chunk_of(case, folder), case.clicks)
+    share, mean = S.score(r["points"], case.crest)
+    assert share >= 0.9 and mean <= FOLLOW_MEAN, (name, share, mean)
+
+
+@pytest.mark.parametrize("name", ["free", "crowded"])
+def test_walls_are_proposed_on_the_coarse_grid_of_a_large_plan(folder, name):
+    """A plan of 600 m is read at about 0.3 m (MAX_CELLS): a wall 0.7 m thick is 2-3 cells of crest there."""
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    case = S.coarsened(MAKERS[name](), 6)  # 0.30 m
+    found = A.proposals(S.chunk_of(case, folder))
+    share, _mean = S.score_union(found, case.crest, tolerance=0.3)
+    assert share >= 0.85, (name, len(found), share)
+
+
+def test_a_wall_against_a_taller_structure_is_not_called_weak(folder):
+    """The line along a wall against a tower or a baulk is right: ``on_ridge`` must not call it weak."""
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    b = S._Builder(12)
+    line = [(8, 15), (24, 15)]
+    b.wall(line, 0.7, 0.9)
+    b.z = np.where(b.y > 15.35, np.maximum(b.z, b.ground + 0.9 + 0.6), b.z)  # a baulk 0.6 m over its top, north
+    case = S._case("baulk", b, line)
+    r = A.follow(S.chunk_of(case, folder), case.clicks)
+    share, _mean = S.score(r["points"], case.crest)
+    assert share >= FOLLOW_SHARE
+    assert r["on_ridge"] > 0.85
+
+
+@pytest.mark.xfail(reason="a wall still buried on one side up to about its top is no crest (documented limit)",
+                   strict=True)
+def test_a_wall_bared_on_one_face_only(folder):
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    b = S._Builder(13)
+    line = [(8, 15), (24, 15)]
+    b.wall(line, 0.7, 0.9)
+    b.z = np.where(b.y > 15.35, np.maximum(b.z, b.ground + 0.9 + 0.1), b.z)  # the baulk 0.1 m over its top
+    case = S._case("one_face", b, line)
+    share, _mean = S.score(A.follow(S.chunk_of(case, folder), case.clicks)["points"], case.crest)
+    assert share >= 0.9
+
+
+def test_the_crests_can_be_cancelled():
+    from pyarchinit_photogrammetry.core.progress import Cancelled, Progress
+    from pyarchinit_photogrammetry.engine import wall_auto as A
+
+    seen = []
+    p = Progress(lambda f, m: seen.append(f))
+    dem, _r0 = _profile()
+    A.crest_map(dem, 0.05, progress=p)
+    assert len(seen) >= 4  # a step for each direction
+    p.cancel()
+    with pytest.raises(Cancelled):
+        A.crest_map(dem, 0.05, progress=p)

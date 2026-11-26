@@ -9,9 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from contextlib import contextmanager
+
 import numpy as np
 
 CELL = 0.05  # m: the DEM of the cases (the tracer's MIN_CELL)
+CENTRE = (16.0, 15.0)  # local m: the cases are turned about this point
+_VIEW = {"cell": CELL, "rot": 0.0}  # how the cases are built: their cell and the angle they are turned by (deg)
 ORIGIN = (500000.0, 4400030.0)  # the top-left corner of every case, in a projected system
 SIZE = (32.0, 30.0)  # m: width, height of every case
 
@@ -22,12 +26,33 @@ class Case:
     dem: np.ndarray  # (h, w) metres, row 0 at the top (north)
     crest: np.ndarray  # (N, 2) the true crest of the target wall, world x, y
     clicks: np.ndarray  # (2, 2) the clicks at its ends, world x, y
+    cell: float = CELL
+
+
+@contextmanager
+def view(cell: float = CELL, rot: float = 0.0):
+    """The cases built inside this block on cells of ``cell`` m and turned by ``rot`` degrees (anticlockwise) about
+    :data:`CENTRE`: their crests and clicks turned with them."""
+    old = dict(_VIEW)
+    _VIEW.update(cell=float(cell), rot=float(rot))
+    try:
+        yield
+    finally:
+        _VIEW.update(old)
+
+
+def _turn(p, angle):
+    """Local points ``p`` (N, 2) or grids ``(x, y)`` turned by ``angle`` degrees about :data:`CENTRE`."""
+    a = np.radians(angle)
+    x, y = p[0] - CENTRE[0], p[1] - CENTRE[1]
+    return (CENTRE[0] + np.cos(a) * x - np.sin(a) * y, CENTRE[1] + np.sin(a) * x + np.cos(a) * y)
 
 
 def _grid():
-    w, h = int(round(SIZE[0] / CELL)), int(round(SIZE[1] / CELL))
-    x = ORIGIN[0] + (np.arange(w) + 0.5) * CELL
-    y = ORIGIN[1] - (np.arange(h) + 0.5) * CELL
+    cell = _VIEW["cell"]
+    w, h = int(round(SIZE[0] / cell)), int(round(SIZE[1] / cell))
+    x = ORIGIN[0] + (np.arange(w) + 0.5) * cell
+    y = ORIGIN[1] - (np.arange(h) + 0.5) * cell
     return np.meshgrid(x, y)
 
 
@@ -54,9 +79,10 @@ def _local(X, Y):
 
 
 def _smooth_noise(rng, shape, scale_cells, amplitude):
+    """Smooth noise of ``amplitude`` m at most; ``scale_cells`` in cells of 0.05 m (the same metres on any cell)."""
     from scipy.ndimage import gaussian_filter
 
-    n = gaussian_filter(rng.standard_normal(shape), scale_cells)
+    n = gaussian_filter(rng.standard_normal(shape), scale_cells * CELL / _VIEW["cell"])
     return n / max(float(np.abs(n).max()), 1e-9) * amplitude
 
 
@@ -64,7 +90,7 @@ class _Builder:
     def __init__(self, seed: int, slope=(0.02, 0.01), undulation: float = 0.05):
         self.rng = np.random.default_rng(seed)
         X, Y = _grid()
-        self.x, self.y = _local(X, Y)
+        self.x, self.y = _turn(_local(X, Y), -_VIEW["rot"])  # the case's own frame, turned back
         self.ground = 100.0 + slope[0] * self.x + slope[1] * self.y
         if undulation:
             self.ground = self.ground + _smooth_noise(self.rng, X.shape, 60, undulation)
@@ -113,7 +139,8 @@ class _Builder:
 
 def _world(p):
     p = np.asarray(p, np.float64)
-    return np.column_stack([p[:, 0] + ORIGIN[0], p[:, 1] + ORIGIN[1] - SIZE[1]])
+    x, y = _turn((p[:, 0], p[:, 1]), _VIEW["rot"])
+    return np.column_stack([x + ORIGIN[0], y + ORIGIN[1] - SIZE[1]])
 
 
 def _case(name, b: _Builder, crest_local, click_in: float = 0.3):
@@ -123,7 +150,7 @@ def _case(name, b: _Builder, crest_local, click_in: float = 0.3):
     u1 = (crest[-2] - crest[-1]) / np.hypot(*(crest[-2] - crest[-1]))
     ends[0] += u0 * click_in + np.array([-u0[1], u0[0]]) * 0.15  # a click near the end, a little off the crest
     ends[1] += u1 * click_in - np.array([-u1[1], u1[0]]) * 0.15
-    return Case(name, b.z, _world(crest), _world(ends))
+    return Case(name, b.z, _world(crest), _world(ends), _VIEW["cell"])
 
 
 # ---------------------------------------------------------------- the cases
@@ -251,7 +278,8 @@ def chunk_of(case: Case, folder) -> SimpleNamespace:
 
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    path = write_geotiff(folder / f"{case.name}.tif", case.dem.astype(np.float32), ORIGIN, CELL, "EPSG:32633")
+    name = f"{case.name}_{case.cell:.2f}_{abs(hash(case.crest.tobytes())) % 10 ** 8}"
+    path = write_geotiff(folder / f"{name}.tif", case.dem.astype(np.float32), ORIGIN, case.cell, "EPSG:32633")
     return SimpleNamespace(dem_path=path, orthomosaic_path=None)
 
 
@@ -292,3 +320,32 @@ def score_union(lines, crest, tolerance: float = 0.10, trim: float = 0.5):
     s = s[(run >= trim) & (run <= run[-1] - trim)]
     d = np.min([_distance_to(line, s) for line in lines], axis=0)
     return float((d <= tolerance).mean()), float(np.minimum(d, 5.0).mean())
+
+
+def coarsened(case: Case, factor: int) -> Case:
+    """``case`` with its DEM averaged over blocks of ``factor`` x ``factor`` cells (a large plan read coarser)."""
+    h, w = (np.asarray(case.dem.shape) // factor) * factor
+    dem = case.dem[:h, :w].reshape(h // factor, factor, w // factor, factor).mean(axis=(1, 3))
+    return Case(f"{case.name}_x{factor}", dem, case.crest, case.clicks, case.cell * factor)
+
+
+def holed(case: Case, holes: int = 40, seed: int = 0) -> Case:
+    """``case`` with ``holes`` discs of no data (NaN, 0.1-0.3 m across) around the wall and a strip of no data 1 m
+    long across it, from 0.5 m to 1.5 m along its crest."""
+    rng = np.random.default_rng(seed)
+    dem = case.dem.copy()
+    h, w = dem.shape
+    rows, cols = np.mgrid[0:h, 0:w]
+    lo, hi = case.crest.min(axis=0) - 2.0, case.crest.max(axis=0) + 2.0  # holes around the wall, where they matter
+    for _ in range(holes):
+        x, y = rng.uniform(lo[0], hi[0]), rng.uniform(lo[1], hi[1])
+        r = rng.uniform(0.05, 0.15) / case.cell
+        c0, r0 = (x - ORIGIN[0]) / case.cell, (ORIGIN[1] - y) / case.cell
+        dem[(rows - r0) ** 2 + (cols - c0) ** 2 <= r * r] = np.nan
+    a = case.crest[0]
+    u = (case.crest[1] - a) / np.hypot(*(case.crest[1] - a))
+    x = ORIGIN[0] + (cols + 0.5) * case.cell - a[0]
+    y = ORIGIN[1] - (rows + 0.5) * case.cell - a[1]
+    along, across = x * u[0] + y * u[1], -x * u[1] + y * u[0]
+    dem[(along > 0.5) & (along < 1.5) & (np.abs(across) < 1.0)] = np.nan  # a strip of no data across the wall
+    return Case(f"{case.name}_holed", dem, case.crest, case.clicks, case.cell)
