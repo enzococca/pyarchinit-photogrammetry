@@ -580,6 +580,10 @@ def test_web_build_with_pyarchinit(pa_db, tmp_path):
     assert r.exit_code == 0, r.output
     assert "records:" not in r.output
     assert not (tmp_path / "plain" / "data" / "records.json").exists()
+    r = run.invoke(app, base + [str(tmp_path / "nourl"), *units, "--url", str(pa_db)])
+    assert r.exit_code == 0, r.output
+    assert "--url is read only with --pyarchinit" in r.output
+    assert not (tmp_path / "nourl" / "data" / "records.json").exists()
 
     r = run.invoke(app, base + [str(tmp_path / "bad"), *units, "--usm-heights", "all"])
     assert r.exit_code == 2

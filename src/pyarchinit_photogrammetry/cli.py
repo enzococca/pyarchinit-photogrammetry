@@ -6290,6 +6290,8 @@ def web_build(project: Path,
     doc = Document.open(project)
     dates, labels = _site_pairs(date, "--date"), _site_pairs(label, "--label")
     chunks = _site_chunks(doc, chunk)
+    if url and not pyarchinit:
+        typer.echo("--url is read only with --pyarchinit: no records published", err=True)
     rows = _site_unit_rows(doc, chunks, product, url) if pyarchinit else None
 
     def by_chunk(pairs):  # a name of --date/--label that is the label of a chunk of another project
