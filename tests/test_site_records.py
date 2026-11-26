@@ -49,3 +49,43 @@ def test_field_values():
     assert f("inclusi", "[['argilla', 'frequente']]", scrub) == "ARGILLA FREQUENTE"
     assert f("descrizione", "terra bruna", scrub) == "TERRA BRUNA"
     assert f("anno_scavo", 2024, scrub) == 2024 and f("lunghezza_max", Decimal("1.25"), scrub) == 1.25
+
+
+ROWS = [dict(sito="A", area="1", us="12", unita_tipo="US", d_stratigrafica="Strato"),
+        dict(sito="A", area="1", us=" 13 ", unita_tipo="USM"), dict(sito="A", area="2", us="14", unita_tipo="US"),
+        dict(sito="A", area="2", us="14", unita_tipo="USM"), dict(sito="B", area="1", us="12", unita_tipo="US"),
+        dict(sito="A", area="3", us="20", unita_tipo="US"), dict(sito="A", area="4", us="20", unita_tipo="US")]
+
+
+def test_matching_steps():
+    from pyarchinit_photogrammetry.io.site_records import match_unit
+    assert match_unit(ROWS, "A", "1", "US", 12).row is ROWS[0]                       # integer number
+    f = match_unit(ROWS, "A", "1", "US", "13")                                        # type not set on the polygon
+    assert (f.row, f.step, f.ignored) == (ROWS[1], 2, ("type",))
+    f = match_unit(ROWS, "A", None, "USM", "14")
+    assert (f.row, f.step) == (ROWS[3], 3)
+    assert match_unit(ROWS, "A", "2", "USR", "14").reason == "several rows"           # never a guess
+    assert match_unit(ROWS, "A", None, "US", "20").reason == "several rows"
+    assert match_unit(ROWS, "A", "1", "US", "99").reason == "no row"
+    assert match_unit(ROWS, "A", "1", "US", " ").reason == "no number"
+
+
+def test_a_unit_without_a_site_never_matches_another_sites_unit():
+    from pyarchinit_photogrammetry.io.site_records import match_unit
+    assert match_unit(ROWS, None, "1", "US", "12").reason == "no site"
+    assert match_unit(ROWS, "", "1", "US", "12").reason == "no site"
+    assert match_unit(ROWS, "B", "1", "US", "12").row is ROWS[4]
+
+
+def test_matching_details():
+    from pyarchinit_photogrammetry.io.site_records import Found, match_unit, unit_text
+    assert (unit_text(None), unit_text(" 12 "), unit_text(12)) == ("", "12", "12")
+    f = match_unit(ROWS, "A", "1", None, "12")                                         # no type: "US"
+    assert (f.row, f.step, f.ignored, f.reason) == (ROWS[0], 1, (), "")
+    assert match_unit(ROWS, "A", "1", "us", "12").step == 1                            # case of the type
+    f = match_unit(ROWS, "A", "", "USR", "13")                                         # no area, no such type
+    assert (f.row, f.step, f.ignored) == (ROWS[1], 3, ("area", "type"))
+    f = match_unit(ROWS, "A", None, "USM", "13")
+    assert (f.row, f.step, f.ignored) == (ROWS[1], 3, ("area",))
+    assert match_unit(ROWS, "A", "9", "US", "12") == Found(None, 0, "no row", ())     # an area never widens
+    assert match_unit(ROWS, None, "1", "US", None).reason == "no site"                    # the site first

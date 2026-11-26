@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import math
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 
 RECORD_FIELDS: tuple[tuple[str, dict[str, str], tuple[str, ...]], ...] = (
@@ -293,3 +294,62 @@ def field_value(column: str, value, scrub) -> str | int | float | None:
         return scrub(listed) if listed else None
     text = value if isinstance(value, str) else str(value)
     return scrub(text) if text.strip() else None
+
+
+# --- matching a unit of the project to its row of us_table (design 3.2) ---
+
+NO_NUMBER = "no number"
+NO_SITE = "no site"
+NO_ROW = "no row"
+SEVERAL = "several rows"
+
+
+@dataclass(frozen=True)
+class Found:
+    """What matching a unit gave: the row (None when there is none), the step that found it (0 none, 1 area and
+    type, 2 area only, 3 every area), the reason when there is no row and what the step ignored."""
+    row: dict | None
+    step: int
+    reason: str
+    ignored: tuple[str, ...] = ()
+
+
+def unit_text(value) -> str:
+    """A site, area, type or number as the matching compares it: trimmed text, ``""`` for None."""
+    return "" if value is None else str(value).strip()
+
+
+def _type(value) -> str:
+    return (unit_text(value) or "US").upper()  # a unit is "US" until someone sets its type
+
+
+def match_unit(rows: list[dict], sito, area, tipo, us) -> Found:
+    """The row of ``us_table`` a unit of the project stands for, or why there is none.
+
+    ``rows`` are rows of ``us_table`` of any sites (dicts with ``sito``, ``area``, ``us``, ``unita_tipo``);
+    ``tipo`` None means "US". The site is required, so that a unit without one never takes another site's row;
+    the number is compared as trimmed text. Among the rows of the site with the number: those with the unit's
+    area and type (step 1), else those with its area (step 2); a unit without an area looks on every area, with
+    its type, then without (step 3). A step gives the row only when exactly one is left: several end the search
+    (``SEVERAL``), never a guess on a looser step.
+    """
+    site = unit_text(sito)
+    if not site:
+        return Found(None, 0, NO_SITE)
+    number = unit_text(us)
+    if not number:
+        return Found(None, 0, NO_NUMBER)
+    same = [r for r in rows if unit_text(r.get("sito")) == site and unit_text(r.get("us")) == number]
+    kind, where = _type(tipo), unit_text(area)
+    if where:
+        here = [r for r in same if unit_text(r.get("area")) == where]
+        steps = (([r for r in here if _type(r.get("unita_tipo")) == kind], 1, ()), (here, 2, ("type",)))
+    else:
+        steps = (([r for r in same if _type(r.get("unita_tipo")) == kind], 3, ("area",)),
+                 (same, 3, ("area", "type")))
+    for found, step, ignored in steps:
+        if len(found) == 1:
+            return Found(found[0], step, "", ignored)
+        if found:
+            return Found(None, 0, SEVERAL)
+    return Found(None, 0, NO_ROW)
