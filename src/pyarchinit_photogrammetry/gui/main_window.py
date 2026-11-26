@@ -7570,9 +7570,25 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
 
         def done(n) -> None:
             self.statusBar().showMessage(tr("{0}/{1} foto allineate", n, len(self.chunk.cameras)), 10000)
+            self._say_flights()
             self._say_stale_ties()
 
         self.run_task("Allineamento", job, done)
+
+    def _say_flights(self) -> None:
+        """After a georeference on the GPS of the photos: the flights whose GPS height is off from the others said
+        in the log, with the option that estimates an offset per flight (:mod:`..markers.flights`)."""
+        from ..markers import flights as flights_mod
+
+        record = (self.chunk.meta.get(flights_mod.RECORD) or {}) if self.chunk is not None else {}
+        if record.get("offsets"):
+            shifts = ", ".join(f"{f}: {float(o):+.2f}" for f, o in record["offsets"].items() if float(o) != 0.0)
+            self.log_pane.info(tr("Quota GPS per volo: offset di quota (m) {0}", shifts or "0"))
+        elif record.get("suggest") and not record.get("by_flight"):
+            self.log_pane.warning(tr("La quota GPS del volo {0} è spostata rispetto agli altri di più di 3 volte la "
+                                     "dispersione dentro un volo (un drone che riparte con la quota a ogni batteria): "
+                                     "nel pannello Riferimenti spunta «Quota GPS per volo»",
+                                     ", ".join(map(str, record["suggest"]))))
 
     def _say_stale_ties(self) -> None:
         """After a new alignment: the ends of ties placed without photos in the old frame, said in the log (they are
@@ -7750,6 +7766,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
             self.reference.set_chunk(ch, rep)
             self._show_pane(self.left_tabs, self.reference)
             self._draw_markers_on_raster()
+            self._say_flights()
             change = float(ch.scale) / before - 1 if before else 0.0
             stale = [n for k, n in (("dem", "DEM"), ("orthomosaic", "ortofoto")) if k in ch.products]
             if abs(change) > 1e-6 and stale:

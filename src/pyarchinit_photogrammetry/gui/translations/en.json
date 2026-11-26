@@ -4133,7 +4133,19 @@
   "il tipo": "the type",
   "l'area": "the area",
   "Con la scheda trovata ignorando qualcosa:": "With the record found ignoring something:",
-  "ignorando {0}": "ignoring {0}"
+  "ignorando {0}": "ignoring {0}",
+  "Quota GPS per volo": "GPS height by flight",
+  "La georeferenziazione sul GPS delle foto stima un offset verticale per ogni volo (foto a più di 90 s l'una dall'altra iniziano un nuovo volo; il volo più grande fa da riferimento). Serve quando un drone riparte con la quota relativa a ogni batteria: un volo intero sta metri sopra o sotto gli altri. Con i punti di controllo le quote le danno loro: gli offset sono solo misurati": "The georeference on the GPS of the photos estimates one vertical offset per flight (photos more than 90 s apart start a new flight; the biggest flight is the datum). Useful when a drone starts its relative altitude again with every battery: a whole flight sits metres above or below the others. With control points they give the heights: the offsets are only measured",
+  "senza ora": "no time",
+  "Errore del GPS delle foto per volo (stimata - riferimento): media, deviazione standard e RMSE; un volo inizia dopo una pausa di oltre 90 s tra due foto": "GPS error of the photos per flight (estimated - reference): mean, standard deviation and RMSE; a flight starts after a pause of more than 90 s between two photos",
+  "Inizio": "Start",
+  "dX medio": "Mean dX",
+  "dY medio": "Mean dY",
+  "dZ medio": "Mean dZ",
+  "Dev. st. X/Y/Z": "SD X/Y/Z",
+  "RMSE (m)": "RMSE (m)",
+  "Offset Z (m)": "Z offset (m)",
+  "La quota GPS di questo volo è spostata rispetto agli altri di più di 3 volte la dispersione dentro un volo: prova «Quota GPS per volo»": "The GPS height of this flight is off from the others by more than 3 times the scatter within a flight: try “GPS height by flight”"
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",
@@ -5465,7 +5477,12 @@
   "Linea proposta: {0} vertici, {1} m, {2} % sulla cresta": "Proposed line: {0} vertices, {1} m, {2} % on the crest",
   "{0} muri proposti: clic su uno nella vista 2D": "{0} walls proposed: click one in the 2D view",
   "Il muro non si può seguire: il punto {0} è fuori dal DEM. Clicca dentro la pianta.": "The wall cannot be followed: point {0} is outside the DEM. Click inside the plan.",
-  "SAM 2.1 non ha potuto ritagliare il muro: {0}": "SAM 2.1 could not cut the wall out: {0}"
+  "SAM 2.1 non ha potuto ritagliare il muro: {0}": "SAM 2.1 could not cut the wall out: {0}",
+  "Errore dopo l'offset di quota del suo volo ({0} m)": "Error after the height offset of its flight ({0} m)",
+  "offset di quota per volo (m) {0}": "height offset per flight (m) {0}",
+  "quota GPS del volo {0} spostata rispetto agli altri: prova «Quota GPS per volo»": "GPS height of flight {0} off from the others: try “GPS height by flight”",
+  "Quota GPS per volo: offset di quota (m) {0}": "GPS height by flight: height offsets (m) {0}",
+  "La quota GPS del volo {0} è spostata rispetto agli altri di più di 3 volte la dispersione dentro un volo (un drone che riparte con la quota a ogni batteria): nel pannello Riferimenti spunta «Quota GPS per volo»": "The GPS height of flight {0} is off from the others by more than 3 times the scatter within a flight (a drone that starts its altitude again with every battery): tick “GPS height by flight” in the Reference pane"
  },
  "engine": {
   "Contatto {0}": "Contacting {0}",
