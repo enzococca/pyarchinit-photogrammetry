@@ -10,7 +10,7 @@ written: the em.json of the site, exported by PyArchInit or written by EMStudio 
 plugin reads it, gives every proxy the name of its unit in the matrix - the name EMtools pairs a proxy
 with - and writes the files where an EM project keeps them.
 
-This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later.
+This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 2.1.0 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/blender-em).
 

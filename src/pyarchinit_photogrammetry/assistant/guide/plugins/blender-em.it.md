@@ -10,7 +10,7 @@ del sito, esportato da PyArchInit o scritto da EMStudio ed EMtools. Il plugin lo
 il nome della sua unità nella matrice (il nome con cui EMtools abbina un proxy) e scrive i file dove un
 progetto EM li tiene.
 
-Questa pagina descrive la versione 0.1.2 del plugin, che richiede pyarchinit-photogrammetry 1.3.4 o
+Questa pagina descrive la versione 0.2.0 del plugin, che richiede pyarchinit-photogrammetry 2.1.0 o
 successiva. README e codice sorgente sono nel
 [repository dei plugin](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/blender-em).
 
