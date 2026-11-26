@@ -448,10 +448,12 @@ class ChunkRecords:
         return sum(1 for r in self.report if r["step"])
 
 
-def _relations(row: dict, matched: list[dict], key_of: dict, scrub) -> list[list]:
+def _relations(row: dict, rows: list[dict], key_of: dict, scrub) -> list[list]:
     """The relations of ``row`` (``rapporti``, :func:`..pyarchinit.bridge.parse_relationships`) as
     ``[kind, us, area, key or None]``: a relation without site or area is within the record's (as PyArchInit writes
-    them); the key is set when exactly one matched row of the chunk has that site, area and number."""
+    them). A relation names no type, so the key is set only when exactly one row of ``rows`` (every row read, of
+    any type) has that site, area and number and that row is matched in the chunk (``key_of``): US 14 and USM 14
+    of one area make the relation plain text, even when only one of them is drawn."""
     from ..pyarchinit.bridge import parse_relationships
 
     try:
@@ -465,9 +467,9 @@ def _relations(row: dict, matched: list[dict], key_of: dict, scrub) -> list[list
         number = unit_text(us)
         if not number:
             continue
-        hits = [r for r in matched if unit_text(r.get("sito")) == site and unit_text(r.get("area")) == area
+        hits = [r for r in rows if unit_text(r.get("sito")) == site and unit_text(r.get("area")) == area
                 and unit_text(r.get("us")) == number]
-        key = key_of[id(hits[0])] if len(hits) == 1 else None
+        key = key_of.get(id(hits[0])) if len(hits) == 1 else None
         out.append([scrub(str(kind)), scrub(number), scrub(area), key])
     return out
 
@@ -552,7 +554,7 @@ def chunk_records(chunk, rows: list[dict], project_site, *, frame: str = "local"
         records[key_of[id(row)]] = {
             "title": title,
             "groups": _record(row, columns, frame=frame, dz=dz, fixed=fixed, usm_heights=usm_heights, scrub=scrub),
-            "relations": _relations(row, matched, key_of, scrub) if RELATIONS_COLUMN in columns else []}
+            "relations": _relations(row, rows, key_of, scrub) if RELATIONS_COLUMN in columns else []}
     return ChunkRecords(project, records, keys, report)
 
 

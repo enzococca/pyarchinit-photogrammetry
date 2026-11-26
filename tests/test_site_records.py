@@ -301,6 +301,25 @@ def test_an_attribute_named_record_never_opens_a_record(tmp_path):
         site_plugins.unregister(entry)
 
 
+def test_a_relation_to_a_number_of_two_types_is_plain_text(tmp_path):
+    """US 14 and USM 14 in one area, only USM 14 drawn: "Copre 14" of US 12 links neither (a relation names no
+    type); with USM 14 alone in the database it links the drawn unit."""
+    from shapely.geometry import box
+
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    doc = _units_document(tmp_path)
+    doc.chunks[0].meta["drawings"]["units"][1] = UnitPolygon(
+        box(1003.0, 5000.0, 1005.0, 5002.0), us="14", area="1", sito=SITE, tipo="USM").to_dict()
+    usm = {"sito": SITE, "area": "1", "us": "14", "unita_tipo": "USM"}
+    rows = _unit_rows() + [usm]  # US 14 (not drawn) and USM 14 (drawn)
+    _s, _m, units, records = _build(doc, tmp_path / "both", unit_records=rows)
+    assert units["14"]["record"] and records[units["12"]["record"]]["relations"][0] == ["Copre", "14", "1", None]
+    rows = [r for r in _unit_rows() if r.get("us") != "14"] + [usm]
+    _s, _m, units, records = _build(doc, tmp_path / "one", unit_records=rows)
+    assert records[units["12"]["record"]]["relations"][0] == ["Copre", "14", "1", units["14"]["record"]]
+
+
 def test_built_again_without_records(tmp_path):
     doc = _units_document(tmp_path)
     folder = tmp_path / "site"
