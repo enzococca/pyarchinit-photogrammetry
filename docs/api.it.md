@@ -662,8 +662,9 @@ termini radiali sono giudicati con la focale ferma: liberi dove lo scarto dello 
 all'angolo della foto è al più 0,5 px, fermi sopra; un turno libero che sposta la focale di più del 20 %, o
 l'angolo di più di un quarto della semidiagonale con i termini radiali, viene ripetuto con essi fermi;
 `report["focal_sd"]`, `report["intrinsics_held"]` (la focale ferma), `report["radial_sd"]`,
-`report["radial_held"]` e le note lo dicono). Dopo i turni ogni traccia di tre foto o più viene triangolata di
-nuovo e il blocco compensato ancora una volta con tutte, filtrato prima e dopo in pixel come filtra la
+`report["radial_held"]` e le note lo dicono; i termini radiali liberati con la focale ferma sono provvisori,
+`meta["sfm"]["native_mapper"]["radial_provisional"]`, giudicati di nuovo dall'ottimizzazione delle camere). Dopo i
+turni ogni traccia di tre foto o più viene triangolata di nuovo e il blocco compensato ancora una volta con tutte, filtrato prima e dopo in pixel come filtra la
 ritriangolazione di COLMAP (un'osservazione a più di 4 px, un punto i cui raggi si incontrano a meno di 1,5
 gradi: le opzioni `final_max_reprojection_px` e `final_min_triangulation_deg` del mapper, i valori predefiniti
 C++ del mapper incrementale di COLMAP); una camera i cui termini radiali sono rimasti fermi viene provata dopo
@@ -816,7 +817,16 @@ alla soglia (0,37 px) tiene il suo valore lungo il percorso (al massimo 0,39 px)
 termini radiali dove li ha messi l'allineamento nativo (1,3 px lungo la valle con la formulazione di COLMAP, 2,4
 px con la nostra; l'errore vero di k1 sulle cinque rese si sparge di 1,8 px all'angolo), k1 entro 0,006 da quello
 vero, i target di controllo a 1 mm e quelli di verifica a 5 mm. L'allineamento nativo li libera ancora su un
-blocco così (0,26 px, il suo giudizio, senza percorso). Un ordine secondo quanto ogni gruppo supera il suo limite,
+blocco così (0,26 px, il suo giudizio, preso dopo il suo primo turno con i termini radiali ai valori di partenza,
+senza percorso), e il record dell'allineamento tiene quella liberazione come provvisoria
+(`meta["sfm"]["native_mapper"]["radial_provisional"]`, `[camera, sd]`,
+solo quando ce n'è una; il log lo dice): è questa ottimizzazione a
+giudicarli. Liberarli lì resta giusto: tenuti a zero lasciano i target di verifica a 17 mm, e la stima libera è
+quella che i punti di legame preferiscono (la lente vera sta circa 10 sopra di essa nel chi quadro sulle due rese
+percorse). Tenere il k1 dell'anello debole alla lente vera invece che alla stima non cambia nessuno dei due errori
+oltre la dispersione delle rese (verifica 4,6 contro 4,9 mm, controllo 1,8 contro 1,6 mm, media di cinque), un
+centro della valle sposta k1 da 0,1 a 0,5 px all'angolo senza guadagno misurabile, e un vincolo verso zero lo tira
+dalla parte sbagliata. Un ordine secondo quanto ogni gruppo supera il suo limite,
 provato prima del percorso lungo la valle, rinunciava ai termini radiali al posto di quelli tangenziali della
 nostra formulazione (3,1 px finché quelli sono liberi) e lasciava i target di verifica a 17 mm.
 Foto oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
