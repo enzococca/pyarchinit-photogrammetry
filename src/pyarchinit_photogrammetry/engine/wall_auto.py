@@ -1,7 +1,8 @@
 """A wall traced on the plan by the program: followed between two clicks, or proposed on the whole plan.
 
-A wall stands out of the DEM: its crest is a ridge of the local relief (the DEM less its mean around, ``slrm`` of
-:mod:`..archaeo.relief`), and the orthophoto often shows its edges. :func:`strength_map` turns both into a strength
+A wall stands out of the DEM: its crest is higher than the ground on both sides of it (:func:`crest_map`: the drop
+on each side, looked for only up to the first thing higher - rubble against a face, the edge of a trench beside it, a
+parallel wall are not taken for the wall), and the orthophoto often shows its edges. :func:`strength_map` turns both into a strength
 between 0 and 1 for each cell; :func:`least_cost` finds the path of least cost between two cells, each move costing
 its length times ``1 + COST_GAIN (1 - strength)``, so that a path runs along the crest of a wall rather than across
 the ground; :func:`follow` does it between the points clicked on the plan (the two ends and any via points), on the
@@ -17,20 +18,36 @@ import numpy as np
 
 from ..core.progress import Progress, as_progress
 
-RIDGE_RADIUS = 2.0  # m: the local relief is the DEM less its mean within this
+RIDGE_RADIUS = 2.0  # m: the ground is looked for within this on each side of a crest (half the widest top, and more)
 EDGE_WEIGHT = 0.5  # the strongest edge of the orthophoto counts as this much of a crest
 COST_GAIN = 20.0  # a move on ground of strength 0 costs 1 + this times its length; on a crest, its length
 MASK_STRENGTH = 0.8  # the strength of a cell inside the mask of the wall (SAM), at least
 MIN_CELL = 0.05  # m: the DEM is looked at with cells this large at least
 WINDOW_MARGIN = 10.0  # m around the box of the clicked points: the DEM read to follow the wall
 MAX_CELLS = 4_000_000  # cells at most in what is read: coarser cells over this
+EVEN_FROM = 1.0  # m: the path is evened out on tops this wide at least (narrower ones keep it on their middle)
+EVEN = 0.5  # the followed path evened out along it over this times the width of its top (:func:`_evened`)
+TOP_CLOSE = 0.1  # m: the crests closed by a disc of this radius into the tops of the walls (:func:`_tops`; a gap of
+#                 0.3 m between two walls stays open)
 SIMPLIFY = 0.10  # m: the line found simplified within this (a trace of a few vertices, not one per cell)
+SPECK = 0.05  # m: half the width of the specks and threads of crest opened away before proposals are thinned
+SPECK_UP_TO = 0.10  # m: the specks are opened away on cells up to this (a plan read coarser keeps its thin crests)
+HOLE = 0.25  # m2: a hole in the crests of a wall smaller than this is filled before they are thinned
 SPUR = 1.0  # m: a branch of a skeleton shorter than this, from a junction to a free end, is a spur, not a wall
 RIDGE = 0.5  # the strength over which a cell is on a ridge (``on_ridge`` of :func:`follow`)
 RIDGE_HEIGHT = 0.2  # m of local relief that make a crest at full strength (an absolute scale: a spoil heap or a
 #                     tower nearby does not flatten the low walls)
-GRADE_REACH = 1.5  # m: a cell of a ridge is graded by its distance from the ridge's edge over the largest such
-#                    distance within this (the middle of the top of a wall 3 m thick at most is the cheapest)
+SMOOTH = 0.10  # m: the DEM opened and closed by a disc of this radius before its crests are looked for (stones and
+#               joints of a top evened out, its faces kept sharp); round(SMOOTH / cell) cells: none on cells of 0.2 m
+#               or more, 5 cells across at 2 cm
+EDGE_STEP = 0.15  # m: the edge of a crest on a side is where the fall first reaches this, or half its height if lower
+STEP_RISE = 0.5  # m: a side that meets something this much higher before any edge stands against a structure
+MIN_TOP = 0.25  # m: a crest against a taller structure is that wide at least (not the foot of a face)
+STEP_WEIGHT = 0.5  # the strength of a crest against a taller structure (a tower) is at most this
+BLOCK = 0.10  # m: a cell higher than the one looked from by this hides the ground beyond it (:func:`crest_map`;
+#              0.05 m let the stones of a rough top hide its own faces, and the line left for a curved tower wall)
+GRADE_REACH = 1.5  # m: a cell of the mask (SAM) is graded by its distance from the mask's edge over the largest such
+#                    distance within this (the middle of a wall 3 m thick at most is the cheapest)
 
 
 class FollowRefused(ValueError):
@@ -55,18 +72,179 @@ def _over_p98(values: np.ndarray) -> np.ndarray:
     return np.clip(v / top, 0.0, 1.0) if top > 0 else np.zeros_like(v)
 
 
-def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS):
-    """``(strength, ridge)``: the strength of :func:`strength_map` and the cells on a ridge (bool: strength over
-    :data:`RIDGE` before the grading, or inside ``mask``)."""
-    from scipy.ndimage import distance_transform_edt, maximum_filter
+def _shifted(z: np.ndarray, dr: int, dc: int) -> np.ndarray:
+    """``z`` moved so that each cell holds the value of the cell ``(dr, dc)`` away from it; NaN off the grid."""
+    h, w = z.shape
+    out = np.full_like(z, np.nan)
+    if abs(dr) >= h or abs(dc) >= w:
+        return out
+    r0, r1, c0, c1 = max(0, -dr), h - max(0, dr), max(0, -dc), w - max(0, dc)
+    out[r0:r1, c0:c1] = z[r0 + dr:r1 + dr, c0 + dc:c1 + dc]
+    return out
 
-    from ..archaeo.relief import compute
 
+def _smoothed(z: np.ndarray, radius: int) -> np.ndarray:
+    """``z`` opened then closed by a disc of ``radius`` cells (0: as it is): stones standing out of a top and the
+    joints between them, narrower than the disc, evened out; the faces of a wall and the gaps between walls wider than
+    the disc kept. Its NaN cells are kept NaN (filled for the filter by their neighbours' mean)."""
+    import cv2
+    from scipy.ndimage import gaussian_filter
+
+    if radius < 1:
+        return z
+    finite = np.isfinite(z)
+    if not finite.any():
+        return z
+    filled = z
+    if not finite.all():
+        num = gaussian_filter(np.where(finite, z, 0.0), 3.0, mode="nearest")
+        den = gaussian_filter(finite.astype(np.float64), 3.0, mode="nearest")
+        with np.errstate(invalid="ignore", divide="ignore"):
+            fill = np.where(den > 1e-6, num / den, float(np.nanmean(z)))
+        filled = np.where(finite, z, fill)
+    base = float(np.nanmean(z))  # float32 keeps millimetres on heights of a few metres about their mean
+    disc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    f = (filled - base).astype(np.float32)
+    f = cv2.morphologyEx(cv2.morphologyEx(f, cv2.MORPH_OPEN, disc, borderType=cv2.BORDER_REPLICATE),
+                         cv2.MORPH_CLOSE, disc, borderType=cv2.BORDER_REPLICATE)
+    return np.where(finite, f.astype(np.float64) + base, np.nan)
+
+
+def crest_map(dem: np.ndarray, resolution: float, reach: float = RIDGE_RADIUS, progress: Progress | None = None):
+    """``(height, centred, walled)``: how much each cell of ``dem`` stands above the ground on both sides of it,
+    how near the middle between its two edges it is, and whether one of those sides is a taller structure it stands
+    against rather than ground.
+
+    Across each of four directions (the grid's axes and diagonals) the ground is looked for on each side within
+    ``reach`` m, but only up to the first cell higher than this one by :data:`BLOCK`: what lies beyond a higher thing
+    - a wall seen from the rubble against it, a wall seen from the edge of a trench beside it - is not its ground.
+    The drop on a side is the largest fall met so, ``height`` the smaller of the two sides' drops; the edge on a side
+    is the first cell where the fall reaches :data:`EDGE_STEP` - or half the larger drop when that is less - and still
+    does at the next cell (the face
+    of the wall, not the foot of the rubble or the bottom of the trench beyond it). ``centred`` is the nearer edge's
+    distance (plus a cell) over the farther one's, at most 1: 1 in the middle of the top of a wall, towards 0 at its
+    edges. A side that meets something :data:`STEP_RISE` higher before any edge (the top of a wall against a tower)
+    is ``walled`` (when the two edges are :data:`MIN_TOP` apart at least): its edge is where it is blocked and
+    ``height`` is the other side's drop. Of the four directions
+    the one whose strength - ``height`` over :data:`RIDGE_HEIGHT`, clipped to 1, times ``centred``, times
+    :data:`STEP_WEIGHT` when walled - is the largest is kept. The DEM is opened and closed by a disc of radius
+    :data:`SMOOTH` first. NaN
+    cells (no data) count as neither ground nor higher; a NaN cell itself gives 0."""
     z = np.asarray(dem, np.float64)
     if z.ndim != 2:
         raise ValueError("the DEM must be a 2D array")
-    rel = np.nan_to_num(compute(z, float(resolution), "slrm", float(radius)), nan=0.0)
-    s = np.clip(rel / RIDGE_HEIGHT, 0.0, 1.0)
+    finite = np.isfinite(z)
+    z = _smoothed(z, int(round(SMOOTH / float(resolution))))
+    best_h, best_c = np.zeros(z.shape), np.zeros(z.shape)
+    best_w = np.zeros(z.shape, bool)
+    best = np.full(z.shape, -1.0)
+    progress = as_progress(progress)
+    for i, (dr, dc) in enumerate(((0, 1), (1, 0), (1, 1), (1, -1))):
+        progress(i / 4.0)  # each direction a quarter; a cancel asked is honoured here
+        n = max(1, int(np.ceil(float(reach) / (float(resolution) * float(np.hypot(dr, dc))))))
+
+        def scan(sgn, thr=None):
+            """Side ``sgn``: ``(drop, blocked at, highest rise)`` (``thr`` None), or the first step where the fall
+            reaches ``thr`` (n + 1 where none)."""
+            blocked = np.zeros(z.shape, bool)
+            at = np.full(z.shape, float(n + 1))
+            rise = np.zeros(z.shape)
+            out = np.zeros(z.shape) if thr is None else np.full(z.shape, float(n + 1))
+            prev = np.zeros(z.shape, bool)
+            with np.errstate(invalid="ignore"):
+                for k in range(1, n + 1):
+                    zk = _shifted(z, sgn * k * dr, sgn * k * dc)
+                    ok = ~blocked & np.isfinite(zk)
+                    if thr is None:
+                        out = np.where(ok, np.maximum(out, z - zk), out)
+                        rise = np.fmax(rise, zk - z)
+                    else:  # a fall kept over two cells: a face, not the gap between two stones
+                        hit = ok & (z - zk >= thr)
+                        out = np.where((out > n) & prev & hit, float(k - 1), out)
+                        prev = hit
+                    newly = ~blocked & (zk > z + BLOCK)
+                    at = np.where(newly, float(k), at)
+                    blocked |= newly
+            if thr is not None:
+                out = np.where((out > n) & prev, float(n), out)
+            return out if thr is not None else (out, at, rise)
+
+        (d0, at0, rise0), (d1, at1, rise1) = scan(1), scan(-1)
+        thr = np.minimum(0.5 * np.maximum(d0, d1), EDGE_STEP)
+        thr = np.where(thr > 0, thr, np.inf)
+        e0, e1 = scan(1, thr), scan(-1, thr)
+        top = MIN_TOP / (float(resolution) * float(np.hypot(dr, dc)))  # in steps
+        w0 = (e0 > n) & (e1 <= n) & (at0 <= n) & (rise0 >= STEP_RISE) & (at0 + e1 >= top)  # side 0 against
+        w1 = (e1 > n) & (e0 <= n) & (at1 <= n) & (rise1 >= STEP_RISE) & (at1 + e0 >= top)  # something taller
+        candidates = [(np.minimum(d0, d1), e0, e1, np.zeros(z.shape, bool), 1.0),
+                      (np.where(w0, d1, 0.0), np.where(w0, at0, e0), e1, w0, STEP_WEIGHT),
+                      (np.where(w1, d0, 0.0), e0, np.where(w1, at1, e1), w1, STEP_WEIGHT)]
+        for height, a0, a1, walled, weight in candidates:
+            # within a cell of the middle counts as the middle (a top an even number of cells wide has none)
+            centred = np.minimum(1.0, (np.minimum(a0, a1) + 1.0) / np.maximum(a0, a1))
+            score = np.clip(height / RIDGE_HEIGHT, 0.0, 1.0) * centred * weight
+            take = (score > best) & ((weight == 1.0) | walled)
+            best = np.where(take, score, best)
+            best_h = np.where(take, height, best_h)
+            best_c = np.where(take, centred, best_c)
+            best_w = np.where(take, walled, best_w)
+    best_h = np.where(finite, np.clip(best_h, 0.0, None), 0.0)
+    return best_h, np.where(finite, best_c, 0.0), best_w & finite
+
+
+def _graded(m: np.ndarray, resolution: float, apart: bool = False) -> np.ndarray:
+    """The cells of ``m`` (bool) graded towards its middle: their distance from its edge over the largest such
+    distance within :data:`GRADE_REACH` (the middle of the top of a wall 3 m thick at most is 1); ``apart``: that
+    largest distance looked for inside ``m`` only, step by step from the cell (the top of a parallel wall nearby,
+    another piece of ``m``, does not lower the grades of this one)."""
+    import cv2
+    from scipy.ndimage import distance_transform_edt, maximum_filter
+
+    if not m.any():
+        return np.zeros(m.shape)
+    d = distance_transform_edt(m)
+    steps = max(1, int(round(GRADE_REACH / float(resolution))))
+    if apart:
+        top = d.astype(np.float32)
+        kernel = np.ones((3, 3), np.uint8)
+        for _ in range(steps):
+            top = np.where(m, cv2.dilate(top, kernel), 0.0).astype(np.float32)
+        top = top.astype(np.float64)
+    else:
+        top = maximum_filter(d, size=2 * steps + 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(m & (top > 0), d / top, 0.0)
+
+
+def _filled(m: np.ndarray, cell: float) -> np.ndarray:
+    """``m`` (bool) with its holes smaller than :data:`HOLE` m2 filled."""
+    from scipy import ndimage
+
+    holes = ndimage.binary_fill_holes(m) & ~m
+    if not holes.any():
+        return m
+    lab, n = ndimage.label(holes)
+    sizes = ndimage.sum(holes, lab, np.arange(1, n + 1))
+    small = np.zeros(n + 1, bool)
+    small[1:] = sizes * cell * cell < HOLE
+    return m | small[lab]
+
+
+def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS, progress=None):
+    """``(strength, ridge, core)``: the strength of :func:`strength_map`, the cells on a crest (bool, the ``on_ridge``
+    of :func:`follow`: ``height`` over :data:`RIDGE` x :data:`RIDGE_HEIGHT` - on both sides, or on the open side of a
+    top against a taller structure - or inside ``mask``) and the crests standing free on the DEM alone (bool: those over
+    :data:`RIDGE`, not against a structure, the mask aside)."""
+    z = np.asarray(dem, np.float64)
+    if z.ndim != 2:
+        raise ValueError("the DEM must be a 2D array")
+    height, centred, walled = crest_map(z, float(resolution), float(radius), progress)
+    tall = np.clip(height / RIDGE_HEIGHT, 0.0, 1.0)
+    ridge = (tall > RIDGE) & ~walled
+    s = tall * centred * np.where(walled, STEP_WEIGHT, 1.0)
+    top = _filled(ridge, float(resolution)) & ~walled  # the tops of the walls: graded towards their middles
+    graded = np.maximum(_graded(top, resolution, apart=True), np.where(ridge, centred, 0.0))
+    s = np.where(top, np.where(ridge, tall, 1.0) * graded, s)
     if ortho is not None:
         import cv2
 
@@ -77,34 +255,31 @@ def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS)
         if valid.any():
             g = np.where(valid, g, float(np.nanmean(g))).astype(np.float32)
             mag = np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
-            s = np.maximum(s, EDGE_WEIGHT * _over_p98(np.where(valid, mag, 0.0)))
-    m = None
+            edge = EDGE_WEIGHT * _over_p98(np.where(valid, mag, 0.0))
+            s = np.where(ridge, s, np.maximum(s, edge))  # an edge of the photo off the crests: on one, its middle
     if mask is not None:
         m = np.asarray(mask, bool)
         if m.shape != z.shape:
             raise ValueError("the mask must be on the grid of the DEM")
-        s = np.where(m, np.maximum(s, MASK_STRENGTH), s)
-    ridge = s > RIDGE
-    if m is not None:
-        ridge |= m
-    if ridge.any():  # graded towards the middle: a flat top would let the path ride along its edge
-        d = distance_transform_edt(ridge)
-        reach = 2 * max(1, int(round(GRADE_REACH / float(resolution)))) + 1
-        top = maximum_filter(d, size=reach)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            s = np.where(ridge, s * np.where(top > 0, d / top, 0.0), s)
-    return s, ridge
+        s = np.where(m, np.maximum(s, MASK_STRENGTH * _graded(m, resolution)), s)
+        ridge = ridge | m
+    core = (tall > RIDGE) & ~walled  # the tops standing free, from the DEM alone
+    return s, ridge | (walled & (tall > RIDGE)), core  # a top against a tower is on the wall too: not weak
 
 
 def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = None, mask: np.ndarray | None = None,
                  radius: float = RIDGE_RADIUS) -> np.ndarray:
-    """How much each cell of ``dem`` (h, w; NaN = no data) looks like the crest of a wall, from 0 to 1: the
-    positive local relief within ``radius`` m over :data:`RIDGE_HEIGHT` (an absolute scale), clipped to 1; with
-    ``ortho`` (grey, the same grid) the larger of it and :data:`EDGE_WEIGHT` times the Sobel magnitude over its
-    98th percentile; inside ``mask`` (bool, the same grid) :data:`MASK_STRENGTH` at least. The cells of a ridge
-    (over :data:`RIDGE`, or in the mask) are then graded towards its middle - times their distance from its edge
-    over the largest such distance within :data:`GRADE_REACH` - so that a path keeps to the middle of the top of a
-    wall. A cell without data counts 0 (its mask aside)."""
+    """How much each cell of ``dem`` (h, w; NaN = no data) looks like the middle of the crest of a wall, from 0 to
+    1: the ``height`` of :func:`crest_map` (the ground looked for within ``radius`` m on each side) over
+    :data:`RIDGE_HEIGHT` (an absolute scale), clipped to 1, times how near the middle of the top it is - the larger
+    of its ``centred`` and its distance from the edge of the top (the cells over :data:`RIDGE`, holes under
+    :data:`HOLE` filled) over the largest such distance on the same top within :data:`GRADE_REACH` - so that a path
+    keeps to the middle of the top of a wall; times :data:`STEP_WEIGHT` on a crest against a taller structure; with
+    ``ortho``
+    (grey, the same grid), off the crests, the larger of it and :data:`EDGE_WEIGHT` times the Sobel magnitude over
+    its 98th percentile; inside ``mask`` (bool, the same grid) :data:`MASK_STRENGTH` at least, graded towards the
+    mask's middle (its distance from the mask's edge over the largest such distance within :data:`GRADE_REACH`). A
+    cell without data counts 0 (its mask aside)."""
     return _ridge_strength(dem, resolution, ortho, mask, radius)[0]
 
 
@@ -226,7 +401,7 @@ def _on_grid(mask, transform, shape):
     return m
 
 
-def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
+def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS, progress=None):
     """The strength of the cells of the plan of ``chunk`` in ``bounds``: ``(strength, ridge, transform, cell)``."""
     dem_path = chunk.dem_path
     transform, shape, cell = _grid_of(dem_path, bounds, cell)
@@ -239,7 +414,7 @@ def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
         except Exception:  # noqa: BLE001 - an orthophoto that cannot be read: the DEM alone
             grey = None
     m = _on_grid(mask, transform, shape) if mask is not None else None
-    return (*_ridge_strength(dem, cell, ortho=grey, mask=m, radius=radius), transform, cell)
+    return (*_ridge_strength(dem, cell, ortho=grey, mask=m, radius=radius, progress=progress), transform, cell)
 
 
 # ---------------------------------------------------------------- lines
@@ -274,6 +449,62 @@ def _share_on(line, strength, transform, level: float = RIDGE) -> float:
     return float((strength[r, c] > level).mean())
 
 
+def _tops(ridge: np.ndarray, cell: float) -> np.ndarray:
+    """The tops of the walls from the crest cells ``ridge``: closed by a disc of :data:`TOP_CLOSE` m and their holes
+    under :data:`HOLE` m2 filled (the gaps between the stones of a rough top are on the top)."""
+    import cv2
+
+    r = int(round(TOP_CLOSE / float(cell)))
+    m = ridge
+    if r >= 1:
+        disc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        m = cv2.morphologyEx(ridge.astype(np.uint8), cv2.MORPH_CLOSE, disc) > 0
+    return _filled(m, cell)
+
+
+def _half_widths(tops: np.ndarray, cell: float) -> np.ndarray:
+    """For each cell, half the width of the top of the wall it is on (m): the largest distance from the edge of that
+    top met within :data:`GRADE_REACH`, step by step inside the top (a wide block or tower beside a narrow wall does
+    not lend it its width); 0 off the tops."""
+    import cv2
+    from scipy.ndimage import distance_transform_edt
+
+    if not tops.any():
+        return np.zeros(tops.shape)
+    d = (distance_transform_edt(tops) * float(cell)).astype(np.float32)
+    top = d.copy()
+    kernel = np.ones((3, 3), np.uint8)
+    for _ in range(max(1, int(round(GRADE_REACH / float(cell))))):
+        top = np.where(tops, cv2.dilate(top, kernel), 0.0).astype(np.float32)
+    return top.astype(np.float64)
+
+
+def _evened(points: np.ndarray, half: np.ndarray, on: np.ndarray) -> np.ndarray:
+    """The cells of a path (``points``, (N, 2) m) evened out along it: each point on the top of a wall (``on``) moved
+    to the Gaussian mean of the points around it along the path, sigma :data:`EVEN` times the width of its top
+    (``2 half``, m), on tops :data:`EVEN_FROM` wide at least; the window shrunk near the ends so that they stay where
+    they are; a point is moved only by less than half the top's width (it stays on the top). The zig-zags of a path
+    across a wide, rough top are taken out (on a top 2 m wide, those under about 2 m along it)."""
+    n = len(points)
+    if n < 5:
+        return points
+    run = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(points, axis=0).T))])
+    out = points.copy()
+    for k in np.nonzero(on)[0]:
+        if 2.0 * float(half[k]) < EVEN_FROM:  # a narrow top keeps the path on its middle by itself
+            continue
+        sigma = EVEN * 2.0 * float(half[k])
+        reach = min(2.0 * sigma, run[k] - run[0], run[-1] - run[k])  # symmetric: the ends stay put
+        if reach <= 0:
+            continue
+        sel = np.abs(run - run[k]) <= reach
+        wgt = np.exp(-0.5 * ((run[sel] - run[k]) / sigma) ** 2)
+        q = (points[sel] * wgt[:, None]).sum(axis=0) / wgt.sum()
+        if float(np.hypot(*(q - points[k]))) <= float(half[k]):  # within the top's half width: still on it
+            out[k] = q
+    return out
+
+
 # ---------------------------------------------------------------- follow the wall
 def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Progress | None = None) -> dict:
     """The line of the wall between the points clicked on the plan of ``chunk`` - the two ends and any via points
@@ -281,8 +512,10 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
     on :func:`strength_map`) of each leg, on the DEM of the box of the points widened by :data:`WINDOW_MARGIN`, at
     ``max(its cell, MIN_CELL)`` (coarser over :data:`MAX_CELLS`); ``mask``, the wall on the orthophoto
     (``(array, transform)`` as :func:`sam_mask` gives it), raises the strength of its cells. The legs joined, each
-    simplified within :data:`SIMPLIFY` with its clicked points kept. Returns ``{"points": (N, 2), "on_ridge": the
-    share of its length on cells of a ridge (strength over 0.5 before the grading, or in the mask), "cell"}``.
+    evened out across the top of the wall (:func:`_evened`: no zig-zags on a wide rough top) and simplified within
+    :data:`SIMPLIFY` with its clicked points kept. Returns ``{"points": (N, 2), "on_ridge": the
+    share of its length on cells of a crest (``height`` of :func:`crest_map` over :data:`RIDGE` x
+    :data:`RIDGE_HEIGHT`, the tops against a taller structure included, or in the mask), "cell"}``.
     ``RuntimeError`` without a DEM; :class:`FollowRefused` (a ``ValueError``) for fewer than two points, a point
     outside the DEM, no path."""
     import rasterio
@@ -303,17 +536,20 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
         raise FollowRefused("outside", f"point {k} is outside the DEM", point=k)
     progress(0.0, "Relief of the DEM around the wall")
     lo, hi = p.min(axis=0) - WINDOW_MARGIN, p.max(axis=0) + WINDOW_MARGIN
-    strength, ridge, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius)
+    strength, ridge, core, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius,
+                                                      progress.sub(0.0, 0.3))
     h, w = strength.shape
     progress(0.3, "The path along the wall")
     graph = _grid_graph(strength, cell)  # once for all the legs
+    tops = _tops(core, cell)
+    half = _half_widths(tops, cell)
     cols, rows = ~transform @ (p[:, 0], p[:, 1])
     cells = np.column_stack([np.clip(np.floor(rows), 0, h - 1), np.clip(np.floor(cols), 0, w - 1)]).astype(np.int64)
     line = [p[:1]]
     for i in range(len(p) - 1):
         rr, cc = _path_on(graph, (h, w), cells[i], cells[i + 1])
         x, y = transform @ (cc + 0.5, rr + 0.5)
-        leg = np.column_stack([x, y])
+        leg = _evened(np.column_stack([x, y]), half[rr, cc], tops[rr, cc])
         leg[0], leg[-1] = p[i], p[i + 1]  # the clicked points themselves, not the middles of their cells
         line.append(simplify_line(leg)[1:])
         progress(0.4 + 0.6 * (i + 1) / (len(p) - 1))
@@ -465,18 +701,30 @@ def _prune(branches: list[list[int]], nb: dict, spur_px: float, w: int) -> list[
     return out
 
 
+def _clean_mask(high: np.ndarray, cell: float) -> np.ndarray:
+    """The cells of crests ``high`` (bool) cleaned before they are thinned: specks and threads under :data:`SPECK` m
+    opened away (by ``round(SPECK / cell)`` cells, one at least, on cells up to :data:`SPECK_UP_TO`; none on coarser
+    cells, where a wall is 2-3 cells wide),
+    holes smaller than :data:`HOLE` m2 filled (each would make a loop of the skeleton, cut into short branches)."""
+    from scipy import ndimage
+
+    r = max(1, int(round(SPECK / float(cell)))) if float(cell) <= SPECK_UP_TO + 1e-9 else 0
+    if r >= 1:
+        high = ndimage.binary_opening(high, np.ones((2 * r + 1, 2 * r + 1), bool))
+    return _filled(high, cell)
+
+
 def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: float = RIDGE_RADIUS,
               progress: Progress | None = None) -> list[np.ndarray]:
     """The walls of the plan of ``chunk`` as candidate traces: the cells of the DEM (at ``max(its cell,
-    MIN_CELL)``, coarser over :data:`MAX_CELLS`) whose local relief within ``radius`` m is over ``min_height``,
-    thinned to a skeleton, cut at its junctions (spurs shorter than :data:`SPUR` taken away and what then meets two
-    by two joined), each branch walked from an end into a polyline, simplified within :data:`SIMPLIFY` and kept
+    MIN_CELL)``, coarser over :data:`MAX_CELLS`) that stand over ``min_height`` above the ground on both sides
+    within ``radius`` m (the ``height`` of :func:`crest_map`, the tops against a taller structure left out), specks
+    opened away and small holes filled (:func:`_clean_mask`), thinned to a skeleton, cut at its junctions (spurs
+    shorter than :data:`SPUR` taken away and what then meets two by two joined), each branch walked from an end into a polyline, simplified within :data:`SIMPLIFY` and kept
     when ``min_length`` m long at least; longest first, in the chunk's coordinates. ``RuntimeError`` without a
     DEM."""
     import cv2
     import rasterio
-
-    from ..archaeo.relief import compute
 
     progress = as_progress(progress)
     if chunk.dem_path is None:
@@ -486,8 +734,8 @@ def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: f
     transform, shape, cell = _grid_of(chunk.dem_path, (b.left, b.bottom, b.right, b.top), MIN_CELL)
     progress(0.0, "Relief of the DEM")
     dem = _read_on(chunk.dem_path, transform, shape, bands=[1])[0]
-    rel = compute(dem, cell, "slrm", float(radius))
-    high = np.nan_to_num(rel, nan=0.0) > float(min_height)
+    height, _centred, walled = crest_map(dem, cell, float(radius), progress.sub(0.0, 0.5))
+    high = _clean_mask((height > float(min_height)) & ~walled, cell)
     progress(0.5, "Crests of the walls")
     skeleton = cv2.ximgproc.thinning(high.astype(np.uint8) * 255) > 0
     nb = _skeleton_graph(skeleton)

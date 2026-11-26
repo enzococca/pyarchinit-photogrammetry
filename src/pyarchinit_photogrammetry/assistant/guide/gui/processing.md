@@ -695,17 +695,28 @@ outside, in the elevation's metres) and must be written outside the project's da
 Besides the clicks, the step *Line of the wall on the plan* has two ways to find the line on the **DEM**:
 
 * **Follow the wall between two clicks**: click the two ends of the wall (and, if needed, points it passes through, in
-  order), double click to end. The line follows the crest of the wall on the local relief of the DEM (and the edges of
-  the orthophoto) and is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
+  order), double click to end. The line follows the middle of the crest of the wall on the DEM (and the edges of the
+  orthophoto): a crest is what stands higher than the ground on both sides within 2 m, the ground looked for only up to
+  the first thing higher, so that rubble against a face, the edge of a trench beside the wall or a parallel wall 0.5 m
+  away are not taken for it; the top of a wall against a tower counts at half strength. On a wide, rough top the line
+  is evened out along the wall, so that it does not zig-zag across the top between the stones. It is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
   crest it is weak, and the pane says so: **Add via points** (one click where the wall passes; the line is looked for
   again through it), or tick **Use SAM where the wall is low** (SAM 2.1 cuts the wall out of the orthophoto from the
   clicks, when it is installed). **Keep** makes the proposal the line of the wall, with its snap proposed and its heights
   (the side is asked when the photos stand on both sides).
-* **Propose the walls**: the crests of the walls of the whole plan (a local relief over 0.3 m, at least 3 m long), as
+* **Propose the walls**: the crests of the walls of the whole plan (over 0.3 m above the ground on both sides, at least
+  3 m long), as
   dashed lines in the layer *Muri proposti*; a click on one makes it the line of the wall, checked and with its snap
   proposed as if it were clicked.
 
-The followed line runs on the top of the wall and cuts an inner corner across its top: the snap proposed puts the line
+Where a wall is barely distinct from what leans on it (rubble up to a few centimetres from its top, a ledge of ground
+narrower than about 0.25 m between it and a trench) the line can run off the middle of the top by some centimetres; a
+small block taller than the wall and built against it (a tower 3 m across), or a curved tower the wall runs along, can
+draw the line over its own top or edge: add a via point on the wall there. A wall still buried on one side up to about
+its top (bared on one face only, the baulk at its top or up to 0.5 m higher) is no crest: click via points or use SAM.
+Bushes taller than the wall beside it hide the ground: use a DEM without vegetation. On a large plan (over about
+400 m a side) the walls are proposed on a coarser grid (up to 4 million cells, about 0.3 m for 600 m), so their lines
+are less precise there; follow a wall between two clicks for its exact line. The followed line runs on the top of the wall and cuts an inner corner across its top: the snap proposed puts the line
 on the face and the corner back in place. Check it on the plan and tick *Snap to the face* before building.
 
 #### Limits
