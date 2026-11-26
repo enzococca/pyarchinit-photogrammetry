@@ -16,7 +16,19 @@ const $ = (id) => document.getElementById(id);
 const state = {site: null, language: 'it', map: null, entries: [], dems: [], hidden: new Set(), draw: null,
   last: null, whole: false, left: [], tab: 'plan', models: [], view3d: null, opening: null, result3d: null,
   epoch: -1, sections: [], section: null, sectionMap: null, sectionSketch: null, highlight: null, extras: [],
-  sketch: null, drawMap: null, records: new Map(), selected: null};
+  sketch: null, drawMap: null, records: new Map(), selected: null, pick: 0};
+
+// A new pick (a click on the plan, the model or a section, a record chosen): its number. A pick that waited on a
+// file (a records.json, a height) shows nothing when a later one came meanwhile: the panel shows the last one.
+function newPick() {
+  state.pick += 1;
+  return state.pick;
+}
+
+// the volumes of the unit ``key`` of ``chunk`` marked in the 3D view, when there is one (null: none marked)
+function mark3d(chunk, key) {
+  if (state.view3d && state.view3d.highlight) state.view3d.highlight(chunk ? chunk.id : null, key || null);
+}
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -470,7 +482,10 @@ function recordOf(chunk, key) {
 // The unit ``key`` of ``chunk`` selected: on the plan its polygons drawn over it and in view, in the 3D view its
 // volume marked; the panel shows its record.
 async function selectRecord(chunk, key) {
+  const n = newPick();
   await loadRecords(chunk);
+  if (n !== state.pick) return;
+  mark3d(chunk, key); // the 3D view follows the plan and the relations, opened or not
   if (state.tab === 'plan') {
     state.highlight.getSource().clear();
     const units = state.entries.filter((e) => e.chunk === chunk && e.def.id === 'units');
@@ -479,8 +494,6 @@ async function selectRecord(chunk, key) {
     if (found.length) {
       state.map.getView().fit(state.highlight.getSource().getExtent(), {padding: [80, 80, 80, 80], maxZoom: 22});
     }
-  } else if (state.tab === '3d' && state.view3d && state.view3d.highlight) {
-    state.view3d.highlight(chunk.id, key);
   }
   document.documentElement.dataset.highlight = key;
   state.last = {tab: state.tab, features: [], selected: {chunk, key}};
@@ -588,6 +601,7 @@ function featuresAt(map, pixel, skip) {
 
 async function clicked(event) {
   if (state.draw) return;
+  const n = newPick();
   state.highlight.getSource().clear(); // a unit selected before is no longer
   delete document.documentElement.dataset.highlight;
   const [x, y] = event.coordinate;
@@ -608,6 +622,9 @@ async function clicked(event) {
     console.error(error);
   }
   await loadRecordsOf(features);
+  if (n !== state.pick) return;
+  const unit = features.find((f) => f.def && f.def.id === 'units' && f.properties.record);
+  mark3d(unit && unit.chunk, unit && unit.properties.record); // the unit clicked marked in 3D too, or none
   state.last = {x, y, height, features, tab: 'plan'};
   showInfo();
 }
@@ -708,11 +725,13 @@ async function openModel() {
   }
   const view = await state.opening;
   view.onPick = async (point) => {
+    const n = newPick();
     const features = [];
     if (point.feature) { // a unit volume: its fields, its record
       const def = (state.models.find((m) => m.chunk === point.chunk && m.def.type === 'volumes') || {}).def;
       features.push({properties: point.feature.properties, fields: null, def, chunk: point.chunk});
       await loadRecordsOf(features);
+      if (n !== state.pick) return; // a later pick: its volume is the one marked
       if (point.feature.properties.record) document.documentElement.dataset.highlight = point.feature.properties.record;
       else delete document.documentElement.dataset.highlight;
     } else delete document.documentElement.dataset.highlight;
@@ -735,7 +754,9 @@ async function sectionPick(event) {
   if (state.draw || !state.section) return;
   const [u, v] = event.coordinate;
   const features = featuresAt(state.sectionMap, event.pixel, [state.sectionSketch]);
+  const n = newPick();
   await loadRecordsOf(features);
+  if (n !== state.pick) return;
   state.last = {x: u, y: v, heights: state.section.section.heights, features, tab: 'sections'};
   showInfo();
 }

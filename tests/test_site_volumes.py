@@ -587,6 +587,32 @@ def test_volumes_in_the_page(volumes_doc, tmp_path):
 
             browser.js(f"ppgSite.selectRecord(ppgSite.site.chunks[0], {k14!r})")
             assert browser.js("ppgSite.state.view3d.selected()") == ["US14"]
+            # a pick that waited on the records while a later one came shows nothing: the panel is the last pick's
+            browser.js("(() => { const f = window.fetch; window.fetch = (u, o) => String(u).includes('records.json')"
+                       " ? new Promise((r) => setTimeout(r, 1000)).then(() => f(u, o)) : f(u, o);"
+                       " ppgSite.state.records.clear(); })()")
+            browser.js("(() => {{ const v = ppgSite.state.view3d;"
+                       " const p = v.pick(...v.project({}, {}, {}));"
+                       " v.onPick(p); v.onPick({{...p, feature: null}}); }})()".format(*c14))
+            browser.js("new Promise((r) => setTimeout(r, 1500))")
+            assert browser.js("document.querySelector('#info .record')") is None
+            assert browser.js("document.documentElement.dataset.highlight") is None
+            # on the plan a unit clicked marks its volume in the 3D view, a click on no unit clears the mark
+            browser.js("ppgSite.setTab('plan')")
+            browser.wait("ppgSite.state.tab === 'plan'", 10)
+            browser.js("ppgSite.map.updateSize(), ppgSite.map.renderSync()")
+            plan = json.loads((site / "data" / "units.geojson").read_text(encoding="utf-8"))["features"]
+            ring = next(f for f in plan if f["properties"]["us"] == "12")["geometry"]["coordinates"][0][:-1]
+            ux, uy = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+            box = browser.js("(() => { const r = document.getElementById('map').getBoundingClientRect();"
+                             " return [r.left, r.top]; })()")
+            px = browser.js(f"ppgSite.map.getPixelFromCoordinate([{ux!r}, {uy!r}])")
+            browser.click(box[0] + px[0], box[1] + px[1])
+            browser.wait("ppgSite.state.view3d.selected().join() === 'US12'", 10)
+            browser.wait("document.querySelector('#info .record') !== null", 10)
+            assert "US 12 - Strato" in browser.js("document.getElementById('info').innerText")
+            browser.click(box[0] + 3, box[1] + 3)
+            browser.wait("ppgSite.state.view3d.selected().length === 0", 10)
             assert not browser.errors, browser.errors
             outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
             assert not outside, outside
