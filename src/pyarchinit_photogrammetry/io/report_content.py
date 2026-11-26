@@ -143,6 +143,29 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "h_estimated": ("Stimata (m)", "Estimated (m)"),
     "camera_gps": ("Posizioni GPS delle camere", "Camera GPS positions"),
     "cameras_with_gps": ("Camere con una posizione di riferimento", "Cameras with a reference position"),
+    "gps_by_flight": ("Errore del GPS per volo", "GPS error per flight"),
+    "h_start": ("Inizio", "Start"),
+    "h_mean_dxyz": ("dX / dY / dZ medi (m)", "Mean dX / dY / dZ (m)"),
+    "h_sd_xyz": ("Dev. st. X / Y / Z (m)", "SD X / Y / Z (m)"),
+    "h_rmse_m": ("RMSE (m)", "RMSE (m)"),
+    "h_height_offset": ("Offset di quota (m)", "Height offset (m)"),
+    "no_time": ("senza ora", "no time"),
+    "gps_flights_note": ("Un volo finisce con una pausa di oltre {0} secondi tra due foto; d = stimata - riferimento.",
+                         "A flight ends with a pause of more than {0} seconds between two photos; d = estimated - "
+                         "reference."),
+    "gps_flights_off": ("Voli con la quota GPS spostata rispetto agli altri (oltre 3 volte la dispersione dentro un "
+                        "volo): {0}. Succede con un drone che riparte con la quota relativa a ogni batteria: prova "
+                        "\u00abQuota GPS per volo\u00bb nel pannello Riferimenti (gps_height_by_flight).",
+                        "Flights whose GPS height is off from the others (more than 3 times the scatter within a "
+                        "flight): {0}. A drone that starts its relative altitude again with every battery does this: "
+                        "try \u201cGPS height by flight\u201d in the Reference pane (gps_height_by_flight)."),
+    "gps_flights_on": ("Quota GPS per volo: un offset verticale per volo stimato con la georeferenziazione ({0}); "
+                       "gli errori sono misurati dopo l'offset.",
+                       "GPS height by flight: one vertical offset per flight estimated with the georeference ({0}); "
+                       "the errors are measured after the offset."),
+    "gps_flights_datum": ("volo di riferimento: {0}", "datum flight: {0}"),
+    "gps_flights_markers": ("le quote le danno i punti di controllo", "the control points give the heights"),
+    "plus_flights": (", con un offset di quota per volo", ", with a height offset per flight"),
     "gps_rmse": ("Errore delle camere (RMSE X / Y / Z / totale)", "Camera error (RMSE X / Y / Z / total)"),
     "no_reference": ("Nessun riferimento: il rilievo è in coordinate locali.",
                      "No reference: the survey is in local coordinates."),
@@ -1554,7 +1577,41 @@ def _reference(chunk, w: Words) -> Section | None:
             rows.append((w("gps_rmse"), " / ".join(w.length(v) for v in (*r, total))))
         sub.blocks.append(KeyValues(rows))
         sec.blocks.append(sub)
+        part = _gps_flights(chunk, w, cam_refs)
+        if part is not None:
+            sec.blocks.append(part)
     return sec
+
+
+def _gps_flights(chunk, w: Words, cam_refs: dict) -> Section | None:
+    """The error of the GPS of the photos per flight (:func:`..markers.flights.flight_errors`), with the offsets of
+    :data:`..markers.flights.OPTION` and the note on the flights whose height is off (also with the option off).
+    None with a single group of photos."""
+    from ..markers import flights as flights_mod
+
+    rows = flights_mod.flight_errors(chunk, cam_refs)
+    if len(rows) < 2:
+        return None
+
+    def signed(values) -> str:
+        return " / ".join(w.number(v, 2) for v in values)
+
+    table = [[str(r["flight"]) if r["flight"] != flights_mod.NO_TIME else w("no_time"), r["start"] or "-",
+              w.integer(r["photos"]), signed(r["mean"]), signed(r["sd"]), w.number(r["rmse"], 2),
+              w.number(r["offset"], 2) if r["offset"] is not None else "-"] for r in rows]
+    part = Section(w("gps_by_flight"), level=2)
+    part.blocks.append(Table([w("h_flight"), w("h_start"), w("h_photos"), w("h_mean_dxyz"), w("h_sd_xyz"),
+                              w("h_rmse_m"), w("h_height_offset")], table, align=["L", "L"] + ["R"] * 5))
+    record = chunk.meta.get(flights_mod.RECORD) or {}
+    part.blocks.append(Paragraph(w("gps_flights_note", int(flights_mod.GAP_S)), note=True))
+    if record.get("offsets"):
+        datum = record.get("datum")
+        part.blocks.append(Paragraph(w("gps_flights_on", w("gps_flights_datum", datum) if datum is not None
+                                       else w("gps_flights_markers")), note=True))
+    off = flights_mod.off_flights(rows)
+    if off and not record.get("by_flight"):
+        part.blocks.append(Paragraph(w("gps_flights_off", ", ".join(map(str, off))), note=True))
+    return part
 
 
 def _method(chunk, w: Words, markers: list[dict], cam_refs: dict) -> str:
@@ -1573,7 +1630,11 @@ def _method(chunk, w: Words, markers: list[dict], cam_refs: dict) -> str:
         return w("method_scalebars")
     else:
         return ""
-    return text + (w("plus_scalebars") if bars else "")
+    from ..markers import flights as flights_mod
+
+    record = chunk.meta.get(flights_mod.RECORD) or {}
+    by_flight = gps and len(ctrl) < 3 and record.get("by_flight") and record.get("offsets")
+    return text + (w("plus_flights") if by_flight else "") + (w("plus_scalebars") if bars else "")
 
 
 # ---------------------------------------------------------------------------------------- GNSS
