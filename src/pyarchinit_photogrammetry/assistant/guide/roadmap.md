@@ -289,7 +289,7 @@ on the public WorldView-3 datasets.
 
 ## Next
 
-* **2.0.0 - Native engine** (in progress): the photogrammetry engine moved to Rust
+* **2.0.0 - Native engine** (done, released as 2.0.0): the photogrammetry engine moved to Rust
   (GPU and CPU, every system) step by step. Milestone 0 measures 1.10 (engine switch, stage timings, photo cache
   sized on the memory, a synthetic ring flight, `ppg bench`); milestone 1 the native bundle adjustment; milestone 2
   native features, pairs and matching; milestone 3 a native global mapper with the GPS of the photos. A native
@@ -300,7 +300,7 @@ on the public WorldView-3 datasets.
   unit from PyArchInit opened with a click on its polygon, its outline on an elevation or its volume in 3D, its
   relations as buttons; the volumes of the units (the proxies, also those modelled in Blender with the blender-em
   plugin) in the 3D view of the site, grouped by a plugin through site hook 3. A snapshot taken at build time, off
-  unless asked for (box *Schede US da PyArchInit*, `ppg web build --pyarchinit`); names of people only with their
+  unless asked for (box **Unit records from PyArchInit**, `ppg web build --pyarchinit`); names of people only with their
   own box ([unit records and volumes](gui/web-publish.md#unit-records-and-volumes)).
 * **Walls traced on the plan** (built, waiting for a check on a real wall): the elevation of a wall that turns
   corners or curves, its line clicked or followed on the plan and snapped onto the face, unrolled round its corners;
