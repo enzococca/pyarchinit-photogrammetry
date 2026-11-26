@@ -3123,25 +3123,26 @@ def lens_target(estimate: float, sd: float | None, prior: float) -> float:
     return estimate + (prior - estimate) * own / (own + lens)
 
 
-def _confirmed_focals(pb, asked: list, refined: list, verdicts: list) -> tuple[dict, dict]:
+def _confirmed_focals(pb, asked: list, refined: list, verdicts: list) -> dict:
     """The focal lengths among ``refined`` (indices in ``pb``) that had no covariance with the intrinsics ``asked``
     free (``verdicts`` of :func:`bundle.judge_intrinsics` with ``only=("focal",)``), each asked again with only
     its own focal length free - every other intrinsic of every camera held, the poses and the tie points with it.
     The caller knows that the matrix with every focal length held and every other group asked free inverts, so the
-    one of the poses alone, a part of it, does too. Returns ``(singular, undetermined)``: ``{index: why}`` where
-    that question still meets a pivot (or a curvature) that is not positive - the focal length's own information
-    is nil to the last bits, which one platform factors with an sd hundreds of times the focal length and another
-    finds negative (the nadir grid nothing places: macOS and GitHub's Windows runner) -, and ``{index: sd}`` where
-    it inverts with a relative sd above :data:`bundle.FOCAL_SD_HOLD` (a conditional sd, never above the marginal
-    one: a focal length the block does not determine, weighed against the lens prior as anywhere else). A small sd
-    there says the failure came from the other groups (or from focal lengths that are singular only together:
-    two sensors whose ratio the block determines and whose common scale it does not); it and any other failure
-    are no verdict - the focal length is kept at the alignment's estimate (:data:`FOCAL_KEPT_NO_COVARIANCE`)."""
+    one of the poses alone, a part of it, does too. Returns ``{index: why}`` of the focal lengths that are
+    unbounded, which go to the lens prior itself: where that question still meets a pivot (or a curvature) that is
+    not positive - the focal length's own information is nil to the last bits -, and where it inverts with a
+    relative sd above :data:`bundle.FOCAL_SD_HOLD`: a conditional sd, a lower bound of the marginal one, already
+    over the line of a focal length the block does not determine (the nadir grid nothing places: macOS factors the
+    whole matrix with an sd 570 times the focal length, GitHub's Windows runner fails it and gives 6.65 % with only
+    the focal length free - one end, the lens prior, on both). A small sd there says the failure came from the other
+    groups (or from focal lengths that are singular only together: two sensors whose ratio the block determines and
+    whose common scale it does not); it and any other failure are no verdict - the focal length is kept at the
+    alignment's estimate (:data:`FOCAL_KEPT_NO_COVARIANCE`)."""
     from dataclasses import replace
 
     from . import bundle
 
-    singular, undetermined = {}, {}
+    out = {}
     for c in refined:
         if verdicts[c].get("focal", (None,))[0] != "no covariance":
             continue
@@ -3149,11 +3150,13 @@ def _confirmed_focals(pb, asked: list, refined: list, verdicts: list) -> tuple[d
         alone = [[k for k in asked[c] if k in focal] if o == c else [] for o in range(len(pb.cameras))]
         sds, again, _factor = bundle.judge_intrinsics(replace(pb, free_intrinsics=alone), only=("focal",))
         kind, why = again[c].get("focal", (None, None))
+        sd = sds[c]["focal"]
         if kind == "no covariance" and "not positive" in str(why):
-            singular[c] = str(why)
-        elif sds[c]["focal"] is not None and sds[c]["focal"] > bundle.FOCAL_SD_HOLD:
-            undetermined[c] = float(sds[c]["focal"])
-    return singular, undetermined
+            out[c] = f"its normal matrix singular with only its focal length free: {why}"
+        elif sd is not None and sd > bundle.FOCAL_SD_HOLD:
+            out[c] = (f"the block does not determine it: sd {100 * sd:.2f} % with only its focal length free, every "
+                      "other intrinsic held")
+    return out
 
 
 def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, sds: dict, unbounded: dict | None = None) -> dict:
@@ -3290,8 +3293,7 @@ def _note_lens_prior(record: dict, walked: list) -> None:
     for w in walked:
         before, after = w["reprojection"]
         if w.get("singular"):  # an unbounded focal length (:func:`_confirmed_focals`): the prior is the target
-            where = (f"the lens prior, the block holding nothing of its estimate {w['estimate']:.2f} px (its normal "
-                     f"matrix singular with only its focal length free: {w['singular']})")
+            where = f"the lens prior, the block holding nothing of its estimate {w['estimate']:.2f} px ({w['singular']})"
         elif w["sd"] is None:  # nothing known of the estimate: the prior is the target
             where = f"the lens prior, its estimate {w['estimate']:.2f} px being without an sd"
         else:
@@ -3527,9 +3529,7 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
             # then asked again alone, which tells an unbounded focal length from a failure of the other groups
             held_sds = [sd for group in bundle.JUDGED for _sensor, sd in check[f"{group}_sd"]]
             inverted = bool(held_sds) and all(sd is not None for sd in held_sds)
-            unbounded, alone = _confirmed_focals(pb, asked, refined, verdicts) if inverted else ({}, {})
-            for c, sd in alone.items():
-                sds[c]["focal"] = sd
+            unbounded = _confirmed_focals(pb, asked, refined, verdicts) if inverted else {}
             for c in refined:
                 if sds[c]["focal"] is None and sensors[c] is not None and c not in unbounded:
                     note = f"sensor {sensors[c]}: focal: the block gave no covariance; {FOCAL_KEPT_NO_COVARIANCE}"

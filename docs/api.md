@@ -782,8 +782,11 @@ positive there says the focal length is unbounded - singular to the last bits, w
 sd hundreds of times the focal length and another does not (the nadir grid of the tests: macOS and GitHub's
 Windows runner): it goes to the lens prior itself, its `sd` None in `lens_prior` and its note naming the pivot
 (`the block holding nothing of its estimate ... singular with only its focal length free`). Where that question
-inverts, its sd decides: above 0.5 % the focal length is weighed against the lens prior with it, below it the
-failure came from the other groups and the focal length is kept at the alignment's estimate with the warning.
+inverts, its sd decides: above 0.5 % - a conditional sd, never above the marginal one, already over the line of a
+focal length the block does not determine (GitHub's Windows runner on that grid: 6.65 %, the radial terms held)
+- the focal length is unbounded as well and goes to the lens prior itself (`the block does not determine it: sd
+... with only its focal length free`), the end macOS reaches with its sd of 570 times; below it the failure came
+from the other groups and the focal length is kept at the alignment's estimate with the warning.
 Two focal lengths singular only together - two sensors on one flat grid whose ratio the block determines and
 whose common scale it does not - each invert alone with a small sd, and both are kept at the estimate.
 

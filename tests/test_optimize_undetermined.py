@@ -1493,7 +1493,9 @@ def test_the_notes_of_the_walk(caplog):
             {"sensor": 2, "estimate": 3909.22, "sd": 0.0649, "prior": 1000.0, "target": 1017.99, "steps": 15,
              "reprojection": [0.179, 0.512], "followed": False},
             {"sensor": 3, "estimate": 1300.0, "sd": None, "prior": 1000.0, "target": 1000.0, "steps": 3,
-             "reprojection": [0.771, 0.5], "followed": True, "singular": "pivot 7 of the reduced system is not positive"}]
+             "reprojection": [0.771, 0.5], "followed": True,
+             "singular": "its normal matrix singular with only its focal length free: pivot 7 of the reduced system is "
+                         "not positive"}]
     with caplog.at_level(logging.INFO, logger="pyarchinit_photogrammetry.engine.sfm"):
         sfm._note_lens_prior(record, rows)
     assert record["notes"] == [
@@ -1618,15 +1620,12 @@ def test_a_block_nothing_places_weighs_its_focal_length_against_the_lens_as_any_
     assert (walked["sensor"], walked["prior"], walked["prior_sd"], walked["steps"]) == (0, F, 0.02, 3)
     assert walked["estimate"] == pytest.approx(1.3 * F)
     assert not any("gave no covariance" in note for note in rep["intrinsics"]["notes"])
-    if walked["sd"] is None:  # the focal length alone free meets a pivot that is not positive: the prior itself
-        assert walked["target"] == F
-    else:
-        # macOS: the marginal sd, 570 times the focal length (target within 0.1 px of the prior); GitHub's Windows
-        # runner: the matrix fails with the rest free and the focal length alone has a conditional sd of 6.65 %
-        # (the radial terms held), which weighs it to 1015.2 px - both undetermined, both walked
-        assert walked["sd"] > bundle.FOCAL_SD_HOLD
+    if walked["sd"] is None:  # GitHub's Windows runner: the matrix fails with the focal length free and the
+        assert walked["target"] == F  # focal length alone has a conditional sd of 6.65 %: unbounded, the prior
+    else:  # macOS: the marginal sd, 570 times the focal length
+        assert walked["sd"] > 1.0
         assert walked["target"] == pytest.approx(sfm.lens_target(walked["estimate"], walked["sd"], F), rel=1e-12)
-    assert F <= walked["target"] < (F + 0.1 if walked["sd"] is None or walked["sd"] > 1.0 else 1.02 * F)
+    assert F <= walked["target"] < F + 0.1  # the same end on every platform
     assert _calibration(ch)[0][:2] == [pytest.approx(walked["target"], rel=1e-12)] * 2
 
     _doc, ch = _block(tmp_path / "pitched", pitch=PITCH)
@@ -1711,21 +1710,24 @@ def test_a_focal_length_singular_with_it_free_goes_to_the_lens_prior_on_every_pl
 
 
 @needs_core
-def test_a_pivot_the_focal_length_alone_does_not_meet_weighs_it_by_its_sd_alone(tmp_path, monkeypatch):
+def test_a_pivot_the_focal_length_alone_does_not_meet_and_its_sd_alone_over_the_line_is_unbounded(
+        tmp_path, monkeypatch):
     """A matrix that fails with the focal length free together with the rest it is asked with (here the tangential
-    terms) and inverts with the focal length alone free: the failure is not proved the focal length's, and its sd
-    with only it free (a conditional sd, never above the marginal one) decides - above the line of the check
-    (``bundle.FOCAL_SD_HOLD``) it is weighed against the lens prior as on any platform that factors the matrix."""
+    terms) and inverts with the focal length alone free (GitHub's Windows runner on the nadir grid: 6.65 %, the
+    radial terms held): that sd is conditional, a lower bound of the marginal one, and over the line of the check
+    (``bundle.FOCAL_SD_HOLD``) the block does not determine the focal length - unbounded, it goes to the lens prior
+    itself, as the marginal sd of 570 times sends it on macOS."""
     ch = _nadir_grid_nothing_places(tmp_path)
     calls = _platform(monkeypatch, lambda free: SINGULAR if free & {0, 1} and free & TANGENTIAL else None)
     ch.optimize_cameras(engine="ppg")
     intr = ch.meta["sfm"]["optimize"]["intrinsics"]
     assert [[0, 1]] in calls
     walked, = intr["lens_prior"]
-    assert walked["sd"] > bundle.FOCAL_SD_HOLD
-    assert walked["target"] == pytest.approx(sfm.lens_target(walked["estimate"], walked["sd"], F), rel=1e-12)
-    assert intr["notes"][0].startswith(f"sensor 0: focal walked to {walked['target']:.2f} px, between its estimate "
-                                       f"{1.3 * F:.2f} px (sd ")
+    assert walked["sd"] is None and walked["target"] == F
+    assert _calibration(ch)[0][:2] == [F, F]
+    assert re.match(rf"sensor 0: focal walked to {F:.2f} px, the lens prior, the block holding nothing of its "
+                    rf"estimate {1.3 * F:.2f} px \(the block does not determine it: sd \d+\.\d\d % with only its "
+                    r"focal length free, every other intrinsic held\), in 3 steps", intr["notes"][0]), intr["notes"][0]
     assert not any("gave no covariance" in note for note in intr["notes"])
 
 
@@ -1779,8 +1781,8 @@ def _cameras(n: int) -> bundle.Problem:
 def test_each_focal_length_without_a_covariance_is_asked_again_alone(monkeypatch):
     """``sfm._confirmed_focals``: each camera whose focal length had no covariance is asked again with only that
     focal length free (every other intrinsic of every camera held): a pivot that is not positive there is an
-    unbounded focal length (the poses alone are a part of every matrix the check inverted); an sd above the line of
-    the check is one to weigh against the prior; a small sd or another failure is no verdict (kept, with the
+    unbounded focal length (the poses alone are a part of every matrix the check inverted), and so is an sd above
+    the line of the check (conditional, a lower bound of the marginal sd); a small sd or another failure is no verdict (kept, with the
     warning)."""
     pb = _cameras(4)
     asked = [[0, 1, 4, 5]] * 4
@@ -1801,12 +1803,13 @@ def test_each_focal_length_without_a_covariance_is_asked_again_alone(monkeypatch
         return sds, [{"focal": alone[c]} if o == c else {} for o in range(len(free))], 1.0
 
     monkeypatch.setattr(bundle, "judge_intrinsics", judge)
-    singular, undetermined = sfm._confirmed_focals(pb, asked, [0, 1, 2, 3], [{"focal": failed}] * 4)
-    assert singular == {0: SINGULAR} and undetermined == {1: 0.3}
+    assert sfm._confirmed_focals(pb, asked, [0, 1, 2, 3], [{"focal": failed}] * 4) == {
+        0: f"its normal matrix singular with only its focal length free: {SINGULAR}",
+        1: "the block does not determine it: sd 30.00 % with only its focal length free, every other intrinsic held"}
     assert asks == [[[0, 1] if o == c else [] for o in range(4)] for c in range(4)]
     # a camera whose focal length had its covariance is not asked again
     asks.clear()
-    assert sfm._confirmed_focals(pb, asked, [0, 1], [{"focal": ("sd", 0.2)}, {}]) == ({}, {})
+    assert sfm._confirmed_focals(pb, asked, [0, 1], [{"focal": ("sd", 0.2)}, {}]) == {}
     assert asks == []
 
 
@@ -1825,7 +1828,7 @@ def test_two_focal_lengths_singular_only_together_stay_where_the_alignment_put_t
         return sds, [{} for _c in problem.cameras], 1.0
 
     monkeypatch.setattr(bundle, "judge_intrinsics", judge)
-    assert sfm._confirmed_focals(pb, [[0, 1, 4, 5]] * 2, [0, 1], [{"focal": failed}] * 2) == ({}, {})
+    assert sfm._confirmed_focals(pb, [[0, 1, 4, 5]] * 2, [0, 1], [{"focal": failed}] * 2) == {}
 
 
 # ------------------------------------------------------------------- the option, at every door

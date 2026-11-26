@@ -812,8 +812,11 @@ ha limite - singolare fino agli ultimi bit, cosa che una piattaforma fattorizza 
 la focale e un'altra no (la griglia nadirale dei test: macOS e il runner Windows di GitHub): va proprio sul valore
 dell'obiettivo, con `sd` None in `lens_prior` e una nota che nomina il pivot (`the block holding nothing of its
 estimate ... singular with only its focal length free`). Dove quella domanda si inverte decide il suo scarto:
-sopra lo 0,5 % la focale viene pesata con esso contro il valore dell'obiettivo, sotto il fallimento veniva dagli
-altri gruppi e la focale resta alla stima dell'allineamento, con l'avviso. Due focali singolari solo insieme - due
+sopra lo 0,5 % - uno scarto condizionato, mai maggiore di quello marginale, già oltre la soglia di una focale che
+il blocco non determina (il runner Windows di GitHub su quella griglia: 6,65 %, con i termini radiali fermi) - la
+focale è anch'essa senza limite e va proprio sul valore dell'obiettivo (`the block does not determine it: sd ...
+with only its focal length free`), dove arriva macOS con il suo scarto di 570 volte; sotto, il fallimento veniva
+dagli altri gruppi e la focale resta alla stima dell'allineamento, con l'avviso. Due focali singolari solo insieme - due
 sensori sulla stessa griglia piatta di cui il blocco determina il rapporto ma non la scala comune - si invertono
 ciascuna da sola con uno scarto piccolo, ed entrambe restano alla stima.
 

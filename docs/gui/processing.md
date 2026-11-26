@@ -97,8 +97,8 @@ refine everything anyway (`ppg optimize --free-undetermined`; in a batch, the sa
 runs on the native core; without it the calibration is refined as before and the log says so. When the block
 gives no covariance to measure a part by, that part is kept without having been measured, and the log has a
 warning; a focal length kept so stays where the alignment put it, not moved towards the value of the photos. A
-block that nothing places and that cannot be measured with only its focal length free (singular there) does not
-know its focal length at all: that one goes to the value of the photos.
+block that nothing places and that cannot be measured with only its focal length free (singular there), or measures it
+there worse than 0.5 %, does not know its focal length at all: that one goes to the value of the photos.
 
 **Control points only at the corners of a flat block.** A block of nadir photos over flat ground can bend into a
 dome - its middle higher or lower than its edges - while the radial distortion makes up for it in the photos.
