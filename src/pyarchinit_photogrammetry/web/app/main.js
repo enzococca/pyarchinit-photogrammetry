@@ -824,6 +824,7 @@ async function start() {
         state.models.push({chunk, def});
         continue;
       }
+      if (def.type === 'volumes') continue; // the unit volumes: the 3D view draws them (not yet)
       const cog = def.type === 'vector' ? null : await raster(chunk, def);
       if (def.type !== 'vector' && !cog) continue; // left out: the notice names it
       if (def.type === 'heights') {

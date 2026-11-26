@@ -129,7 +129,7 @@ def product_names() -> dict[str, str]:
     """The products of a site (:data:`..io.site.PRODUCTS`) as the pane names them."""
     return {"orthomosaic": tr("Ortofoto"), "dem": tr("DEM e rilievo ombreggiato"), "units": tr("Unità stratigrafiche"),
             "drawings": tr("Disegni"), "model": tr("Modello 3D"), "cloud": tr("Nuvola di punti"),
-            "sections": tr("Sezioni e prospetti")}
+            "sections": tr("Sezioni e prospetti"), "proxies": tr("Volumi delle US")}
 
 
 def size_text(size: int) -> str:

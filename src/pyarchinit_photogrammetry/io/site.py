@@ -13,10 +13,13 @@
         units.geojson     the stratigraphic units of the plan with their attributes
         drawings.geojson  spot heights, break lines, measuring points and free drawings, each with its ``layer``
         model/            the 3D model as 3D Tiles 1.1 (tileset.json, tiles/*.glb, textures/*.jpg): the 3D view
+        proxies.glb       the volumes of the units (:mod:`.site_volumes`), one named node each, thinned
+        proxies.json      what the viewer shows of each volume: label, unit, volume, top and bottom, colour, record
 
 ``frame``: ``"local"`` (default) shifts every coordinate to an origin at the centre of the survey (whole metres; the
 heights to the whole metre under the lowest cell of the DEMs, read whole, so that no cell is under zero; under the
-lowest vertex of the models where there is no DEM, under the lowest drawn height where there is neither) and
+lowest vertex of the models where there is no DEM, then of the clouds, then of the unit volumes, under the lowest
+drawn height where there is none of them) and
 writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written
 either. ``"crs"`` keeps the coordinates and the reference system of the chunks: an explicit choice. The model is in
 the same frame: in the local one its tiles are in the metres of the plan, with no transform to the globe, so that a
@@ -73,15 +76,17 @@ import numpy as np
 from ..assistant.privacy import is_account_field, is_people_field
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
-from . import site_records
+from . import site_records, site_volumes
 
 log = logging.getLogger(__name__)
 
 FORMAT = "ppg-site"
 FORMAT_VERSION = 1
 FRAMES = ("local", "crs")
-PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "cloud", "sections")  # the relief goes with the DEM
-DEFAULT_PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "sections")  # the cloud only when asked
+PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "cloud", "sections",  # the relief goes with the DEM
+            "proxies")
+DEFAULT_PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "sections",  # the cloud only when asked
+                    "proxies")
 MODEL_TEXTURE = 4096  # the side of a texture page of the model on the site: a trench stays within a few hundred MB
 MODEL_FACES = 150_000  # faces of a tile of the model
 BUDGET_MB = 500.0  # the size of a whole site the build keeps to by thinning the model and the cloud
@@ -108,6 +113,7 @@ TITLES = {  # the layers of the viewer, in the languages of the page
     "model": {"it": "Modello 3D", "en": "3D model"},
     "cloud": {"it": "Nuvola di punti", "en": "Point cloud"},
     "sections": {"it": "Sezioni e prospetti", "en": "Sections and elevations"},
+    "volumes": {"it": "Volumi delle US", "en": "Unit volumes"},
 }
 GROUPS = {  # the kinds of drawings of the plan: the name of their ``layer``, its title, its colour in the program
     "quote": ("Quote", {"it": "Quote", "en": "Spot heights"}, "#f59e0b"),
@@ -190,7 +196,7 @@ def _has_content(chunk) -> bool:
     d = chunk.meta.get("drawings") or {}
     return bool(_raster(chunk, "orthomosaic") or _raster(chunk, "dem") or _model(chunk)
                 or any(d.get(k) for k in ("units", "quote", "lines", "points", "free"))
-                or site_sections.entries(chunk) or _cloud(chunk))
+                or site_sections.entries(chunk) or _cloud(chunk) or site_volumes.present(chunk))
 
 
 def _private_roots(document, others=()) -> list[str]:
@@ -646,7 +652,7 @@ def _size(path: Path) -> int:
         (Path(path).stat().st_size if Path(path).exists() else 0)
 
 
-LAYER_ORDER = ("ortho", "hillshade", "dem", "model", "cloud", "sections", "units", "drawings")
+LAYER_ORDER = ("ortho", "hillshade", "dem", "model", "cloud", "volumes", "sections", "units", "drawings")
 
 
 def export_site(document, folder: str | os.PathLike, chunks=None, products=None, frame: str = "local",
@@ -743,6 +749,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         model = _model_info(ch) if "model" in products and _model(ch) is not None else None
         cloud = _cloud(ch) if "cloud" in products else None
         sections = site_sections.entries(ch) if "sections" in products else []
+        volumes = site_volumes.load(ch, notes) if "proxies" in products else []
         traces = []
         for entry in sections:
             from ..engine.elevation import bounds_of
@@ -751,7 +758,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             if g is not None:
                 traces.append({"type": "Feature", "properties": {}, "geometry": g})
         box = _union([_raster_info(p)["bounds"] for p in (ortho, dem) if p is not None]
-                     + [_bounds(units), _bounds(drawn), model[0] if model else None, _bounds(traces)])
+                     + [_bounds(units), _bounds(drawn), model[0] if model else None, _bounds(traces),
+                        site_volumes.bounds(volumes)])
         cloud_box = None
         if cloud is not None:
             pc = ch.point_cloud.transformed(ch.transform)
@@ -769,6 +777,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             raise ValueError(f"chunk {ch.label!r} has none of the products asked for")
         plan.append({"chunk": ch, "ortho": ortho, "dem": dem, "box": box, "model": model, "cloud": cloud,
                      "sections": sections, "heights": _dem_heights(dem) if dem is not None else None,
+                     "volumes": volumes, "volumes_low": site_volumes.lowest(volumes),
                      "lowest": _lowest(units + drawn)})
     if not plan:
         raise ValueError("nothing to publish: no chunk has the products asked for")
@@ -784,6 +793,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             lows = [p["model"][1] for p in plan if p["model"]]
         if not lows:
             lows = [p["cloud"][1] for p in plan if p["cloud"]]
+        if not lows:
+            lows = [p["volumes_low"] for p in plan if p["volumes_low"] is not None]
         if not lows:
             lows = [p["lowest"] for p in plan if p["lowest"] is not None]
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
@@ -816,7 +827,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             records = site_records.chunk_records(
                 ch, unit_records, project_site, frame=frame, dz=shift.dz, fixed=heights_fixed,
                 usm_heights=usm_heights, people=people, scrub=scrub, units="units" in products,
-                sections=item["sections"])
+                sections=item["sections"], volumes=[e for e, _m in item["volumes"]])
         with tempfile.TemporaryDirectory(prefix=".ppg-site-", dir=folder) as tmp:
             tmp = Path(tmp)
             if item["ortho"] is not None:
@@ -889,6 +900,21 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             layers[layer["id"]] = layer
             path = folder / layer["url"]
             boxes.append(_bounds(json.loads(path.read_text(encoding="utf-8"))["features"]))
+        if item["volumes"]:
+            sub(0.95, f"{ch.label}: unit volumes")
+            polygons = site_records.chunk_polygons(ch)
+
+            def volume_record(entry, polygons=polygons, records=records):
+                unit = site_records.volume_unit(entry, polygons, project_site)
+                return records.key(*unit) if unit is not None else None
+
+            layer = site_volumes.write(ch, item["volumes"], data, rel, shift, frame, scrub,
+                                       None if records is None else volume_record, None, notes)
+            item["volumes"] = None  # the meshes are not needed any more
+            if layer is not None:
+                layers["volumes"] = layer
+                b = layer["box"]
+                boxes.append((b[0], b[1], b[3], b[4]))
         label = _lookup(labels, ch)
         entry = {"id": str(n + 1), "label": scrub(str(label if label else ch.label)), "layers": layers,
                  "boxes": boxes}
@@ -1252,7 +1278,7 @@ def chunk_products(chunk) -> list[str]:
     have = {"orthomosaic": _raster(chunk, "orthomosaic") is not None, "dem": _raster(chunk, "dem") is not None,
             "units": bool(d.get("units")), "drawings": any(d.get(k) for k in _DRAWN),
             "model": _model(chunk) is not None, "cloud": _cloud(chunk) is not None,
-            "sections": bool(_section_entries(chunk))}
+            "sections": bool(_section_entries(chunk)), "proxies": bool(site_volumes.present(chunk))}
     return [p for p in PRODUCTS if have[p]]
 
 
@@ -1279,8 +1305,9 @@ def _drawn_state(chunk, keys) -> str:
 
 def product_state(chunk, product: str):
     """What tells ``product`` of ``chunk`` from the same product built again or changed later: the name and the time
-    of change of its files (a raster, the cloud; the model with its texture pages; the orthophotos of the sections),
-    a digest of the records (units, drawings, the sections and their drawings)."""
+    of change of its files (a raster, the cloud; the model with its texture pages; the orthophotos of the sections;
+    the PLY of each volume, with a digest of their entries), a digest of the records (units, drawings, the sections
+    and their drawings)."""
     if product in ("orthomosaic", "dem"):
         return _file_state(_raster(chunk, product))
     if product == "cloud":
@@ -1298,6 +1325,13 @@ def product_state(chunk, product: str):
 
         model = _model(chunk)
         return None if model is None else [_file_state(model)] + [_file_state(Path(p)) for p in texture_pages(chunk)]
+    if product == "proxies":
+        import hashlib
+
+        found = site_volumes.entries(chunk)
+        bare = [{k: v for k, v in e.items() if k != "ppg_id"} for e in found]
+        digest = hashlib.sha1(json.dumps(bare, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return [digest] + [_file_state(site_volumes.path(chunk, e)) for e in found]
     return _drawn_state(chunk, ("units",) if product == "units" else _DRAWN)
 
 

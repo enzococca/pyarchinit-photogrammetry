@@ -6,6 +6,10 @@ closed, its volume and its thickness: a layer a few centimetres thick must not c
 keeps a small solid as it is, else tries the quadric decimation of the meshing engine (Open3D, optional) and
 accepts it only when it stays sound, else rebuilds the solid on a coarser grid from vertical rays, else
 leaves the volume out.
+
+In a site (product ``proxies`` of :func:`.site.export_site`) the volumes of a chunk are its entries of
+``chunk.meta["proxies"]`` (:func:`entries`) read from their PLY (:func:`load`) and written as
+``data/[<n>/]proxies.glb`` and ``proxies.json`` (:func:`write`): no path, no id, no ``sito`` of an entry.
 """
 from __future__ import annotations
 
@@ -45,15 +49,27 @@ def _plan_area(mesh) -> float:
 
 
 def _regrid(mesh, target_faces: int):
-    """The solid rebuilt as a prism on a grid of side ``sqrt(plan_area * 6 / target_faces)``: a vertical ray
-    at each cell centre, cells hit at least twice, top the highest hit and bottom the lowest. ``None`` when
-    nothing is left."""
-    from ..archaeo.proxies import prism_mesh, surfaces
-
+    """The solid rebuilt as a prism on a grid of side ``sqrt(plan_area * 6 / target_faces)`` (:func:`_prism_on`);
+    the walls take faces too, so a solid over the target is built again on a grid made coarser by the excess (a
+    few times at most). ``None`` when nothing is left."""
     plan = _plan_area(mesh)
     if not plan > 0 or target_faces <= 0:
         return None
     side = math.sqrt(plan * 6.0 / target_faces)
+    new = None
+    for _ in range(4):
+        new = _prism_on(mesh, side)
+        if new is None or len(new.faces) <= target_faces:
+            return new
+        side *= math.sqrt(len(new.faces) / target_faces) * 1.02
+    return new
+
+
+def _prism_on(mesh, side: float):
+    """The solid rebuilt as a prism on a grid of cells of ``side``: a vertical ray at each cell centre, cells hit
+    at least twice, top the highest hit and bottom the lowest. ``None`` when nothing is left."""
+    from ..archaeo.proxies import prism_mesh, surfaces
+
     (x_min, y_min, z_min), (x_max, y_max, z_max) = mesh.bounds
     nx = max(1, int(math.ceil((x_max - x_min) / side)))
     ny = max(1, int(math.ceil((y_max - y_min) / side)))
@@ -102,3 +118,188 @@ def thin_volume(mesh, target_faces: int):
     if new is not None and new.is_watertight and len(new.faces) <= _FACE_SLACK * target_faces:
         return new, "regrid"
     return None, "dropped"
+
+
+# ------------------------------------------------------------------------------------------------ the volumes of a chunk
+def path(chunk, entry: dict):
+    """The PLY of ``entry`` (written relative to ``chunk.data_dir``)."""
+    return chunk.data_dir / str(entry["file"])
+
+
+def entries(chunk) -> list[dict]:
+    """The well-formed entries of ``chunk.meta["proxies"]``: a dict with a ``file`` relative to the folder of the
+    chunk's data, inside it. Whether the file is there is :func:`load`'s to say."""
+    from pathlib import PurePath
+
+    out = []
+    for e in chunk.meta.get("proxies") or []:
+        if not isinstance(e, dict) or not isinstance(e.get("file"), str) or not e["file"].strip():
+            continue
+        p = PurePath(e["file"].replace("\\", "/"))
+        if p.is_absolute() or ".." in p.parts:
+            continue
+        out.append(e)
+    return out
+
+
+def present(chunk) -> list[dict]:
+    """The entries (:func:`entries`) whose file is there."""
+    return [e for e in entries(chunk) if path(chunk, e).is_file()]
+
+
+def _name(entry: dict) -> str:
+    from ..archaeo.proxies import proxy_name
+
+    return str(entry.get("name") or proxy_name(entry.get("tipo"), entry.get("us")))
+
+
+def load(chunk, notes: list[str]) -> list[tuple[dict, object]]:
+    """``[(entry, mesh), ...]``: the volumes of ``chunk`` read from their PLY (world coordinates); a file that is
+    missing, unreadable or not a closed mesh is left out with a note in ``notes``."""
+    import trimesh
+
+    out = []
+    for e in entries(chunk):
+        p = path(chunk, e)
+        if not p.is_file():
+            notes.append(f"{chunk.label}: volume {_name(e)} left out (missing)")
+            continue
+        try:
+            mesh = trimesh.load(str(p), force="mesh", process=True)
+        except Exception:  # noqa: BLE001 - any broken file leaves the volume out, never the site
+            mesh = None
+        if not isinstance(mesh, trimesh.Trimesh) or len(mesh.faces) == 0:
+            notes.append(f"{chunk.label}: volume {_name(e)} left out (unreadable)")
+            continue
+        out.append((e, mesh))
+    return out
+
+
+def lowest(loaded) -> float | None:
+    """The lowest point of the volumes ``loaded`` (:func:`load`), None without any."""
+    lows = [float(m.bounds[0][2]) for _e, m in loaded]
+    return min(lows) if lows else None
+
+
+def bounds(loaded) -> tuple[float, float, float, float] | None:
+    """The plan box of the volumes ``loaded`` (:func:`load`)."""
+    if not loaded:
+        return None
+    lo = np.min([m.bounds[0] for _e, m in loaded], axis=0)
+    hi = np.max([m.bounds[1] for _e, m in loaded], axis=0)
+    return float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])
+
+
+def _height(value, dz: float):
+    try:
+        z = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(z - dz, 3) if math.isfinite(z) else None
+
+
+def _number(value, digits: int):
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(x, digits) if math.isfinite(x) else None
+
+
+def _thinned(chunk, loaded, target: int, notes: list[str]) -> list[tuple[dict, object]]:
+    out = []
+    for e, mesh in loaded:
+        new, _how = thin_volume(mesh, target)
+        if new is None:
+            notes.append(f"{chunk.label}: volume {_name(e)} left out (it could not be thinned to {target} faces "
+                         "and stay closed)")
+            continue
+        out.append((e, new))
+    return out
+
+
+def write(chunk, loaded, data, rel: str, shift, frame: str, scrub, record_of, groups, notes: list[str]) -> dict | None:
+    """Write the volumes ``loaded`` (:func:`load`) of ``chunk`` in ``data``: ``proxies.glb`` (one mesh and one node
+    per volume, named by its key, Y-up as the tiles of the model) and ``proxies.json`` (what the viewer shows of
+    each), and return their layer of ``site.json``; None when no volume is left.
+
+    Each volume is thinned to ``min(VOLUME_FACES, CHUNK_VOLUME_FACES // n)`` faces (:func:`thin_volume`); a
+    ``proxies.glb`` over the limit of a Pages file has its targets halved once, else the volumes are left out with
+    a note. ``shift``: the local frame (``frame == "local"``); in ``"crs"`` the positions are around the centre of
+    the volumes, the ``origin`` of the layer. Heights less ``shift.dz``. ``scrub``: what removes the paths of the
+    computer from a text; ``record_of(entry)``: the key of the record of a volume, None: no record (None: the site
+    has no records, no ``record`` is written); ``groups``: the unit groups a plugin gives (None: each volume the
+    colour of the program by its index). The ``sito`` of an entry, its file and its ids are never written."""
+    import json
+
+    from ..archaeo.proxies import PROXY_COLOURS
+    from .site import DECIMALS, TITLES
+    from .site_publish import PAGES_FILE_BYTES
+    from .web import _glb
+
+    if not loaded:
+        return None
+    every = chunk.meta.get("proxies") or []
+    target = min(VOLUME_FACES, CHUNK_VOLUME_FACES // len(loaded))
+    blob = None
+    for attempt in (target, target // 2):
+        tried: list[str] = []
+        kept = _thinned(chunk, loaded, attempt, tried)
+        if not kept:
+            notes.extend(tried)
+            return None
+        lo = np.min([m.bounds[0] for _e, m in kept], axis=0)
+        hi = np.max([m.bounds[1] for _e, m in kept], axis=0)
+        if frame == "crs":
+            centre = (lo + hi) / 2
+            origin = [float(v) for v in centre]
+        else:
+            centre = np.array([shift.dx, shift.dy, shift.dz], float)
+            origin = None
+        keys, prims = [], []
+        for e, mesh in kept:
+            key = scrub(_name(e)) or "volume"
+            base, k = key, 2
+            while key in keys:
+                key, k = f"{base}-{k}", k + 1
+            keys.append(key)
+            v = np.asarray(mesh.vertices, float) - centre
+            prims.append({"position": np.column_stack([v[:, 0], v[:, 2], -v[:, 1]]),
+                          "index": np.asarray(mesh.faces, np.uint32).ravel()})
+        blob = _glb(prims, names=keys)
+        if len(blob) <= PAGES_FILE_BYTES:
+            notes.extend(tried)
+            break
+        blob = None
+    if blob is None:
+        notes.append(f"{chunk.label}: volumes left out (proxies.glb over {PAGES_FILE_BYTES // 2**20} MiB a file "
+                     "even with half the faces)")
+        return None
+    volumes = []
+    for n, ((e, _mesh), key) in enumerate(zip(kept, keys)):
+        index = next((i for i, x in enumerate(every) if x is e), n)
+        tipo = str(e.get("tipo") or "US")
+        us = e.get("us")
+        v = {"key": key, "label": scrub(f"{tipo} {us}" if us not in (None, "") else tipo),
+             "us": None if us in (None, "") else scrub(str(us)),
+             "area": None if e.get("area") in (None, "") else scrub(str(e["area"])), "tipo": scrub(tipo),
+             "volume_m3": _number(e.get("volume_m3"), 4), "area_m2": _number(e.get("area_m2"), 3),
+             "z_top": [_height(z, shift.dz) for z in list(e.get("z_top") or [None, None])[:2]],
+             "z_bottom": [_height(z, shift.dz) for z in list(e.get("z_bottom") or [None, None])[:2]],
+             "colour": PROXY_COLOURS[index % len(PROXY_COLOURS)], "group": None}
+        if record_of is not None:
+            record = record_of(e)
+            if record:
+                v["record"] = record
+        volumes.append(v)
+    (data / "proxies.glb").write_bytes(blob)
+    (data / "proxies.json").write_text(json.dumps({"title": TITLES["volumes"], "volumes": volumes, "groups": []},
+                                                  ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    box_lo, box_hi = lo - np.array([shift.dx, shift.dy, shift.dz]), hi - np.array([shift.dx, shift.dy, shift.dz])
+    layer = {"id": "volumes", "type": "volumes", "url": f"{rel}/proxies.glb", "data": f"{rel}/proxies.json",
+             "title": TITLES["volumes"], "visible": True, "count": len(volumes),
+             "box": [round(float(x), DECIMALS) for x in (*box_lo, *box_hi)],
+             "bytes": (data / "proxies.glb").stat().st_size + (data / "proxies.json").stat().st_size}
+    if origin is not None:
+        layer["origin"] = origin
+    return layer

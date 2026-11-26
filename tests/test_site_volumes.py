@@ -65,3 +65,230 @@ def test_a_volume_that_cannot_be_rebuilt_is_dropped(thin_layer, monkeypatch):
     monkeypatch.setattr(meshing, "_decimate", lambda m, n: m)
     monkeypatch.setattr(site_volumes, "_regrid", lambda m, n: None)
     assert site_volumes.thin_volume(thin_layer, 2000) == (None, "dropped")
+
+
+def test_regrid_keeps_to_the_cap_at_small_targets(thin_layer):
+    # the walls count too: a 2 x 1 m layer asked for 200 faces once came out at 236
+    for target in (60, 200, 500):
+        new = site_volumes._regrid(thin_layer, target)
+        assert new is not None and new.is_watertight
+        assert len(new.faces) <= 1.1 * target
+
+
+def test_volume_unit_of_its_own_polygon():
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.io.site_records import volume_unit
+
+    polys = [UnitPolygon(box(0, 0, 1, 1), us="12", area="1", tipo="US", sito="Sito A")]
+    # no site of the project: the polygon's own site is the one
+    assert volume_unit({"us": "12", "tipo": "US", "sito": "Altro"}, polys, None) == ("Sito A", "1", "US", "12")
+    # a unit drawn in two pieces of one site and area is one unit
+    two = polys + [UnitPolygon(box(2, 0, 3, 1), us="12", area="1", tipo="US", sito="Sito A")]
+    assert volume_unit({"us": "12", "tipo": "US"}, two, "Progetto") == ("Sito A", "1", "US", "12")
+    # pieces that disagree on the site: no polygon decides, the project's site
+    other = polys + [UnitPolygon(box(2, 0, 3, 1), us="12", area="1", tipo="US", sito="Sito B")]
+    assert volume_unit({"us": "12", "tipo": "US", "area": "1"}, other, "Progetto") == ("Progetto", "1", "US", "12")
+
+
+# ------------------------------------------------------------------------------------------------ in the site
+SITE = "Sito di prova"
+
+
+def _with_volumes(processed, folder):
+    """A copy of the trench with two unit polygons (US 12 and US 14 of SITE) and their volumes as the program
+    writes them: US 14's entry names another site, a third entry (US 99) has lost its PLY."""
+    import shutil
+    from pathlib import Path
+
+    import rasterio
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+
+    doc, _ch, _ = processed
+    folder.mkdir(parents=True)
+    shutil.copy2(doc.path, folder / doc.path.name)
+    shutil.copytree(doc.files_dir, folder / doc.files_dir.name)
+    doc = ppg.Document.open(folder / doc.path.name)
+    ch = doc.chunk
+    with rasterio.open(ch.dem_path) as src:
+        b = src.bounds
+    cx, cy = (b.left + b.right) / 2, (b.bottom + b.top) / 2
+    units = [UnitPolygon(box(cx - 0.5, cy - 0.3, cx - 0.05, cy + 0.3), us="12", area="1", sito=SITE),
+             UnitPolygon(box(cx + 0.05, cy - 0.3, cx + 0.5, cy + 0.3), us="14", area="1", sito=SITE)]
+    ch.meta.setdefault("drawings", {})["units"] = [u.to_dict() for u in units]
+    folder_p = ch.data_dir / "proxies"
+    entries = []
+    for px, site in zip(proxies.proxies_for_units(ch.dem_path, units, thickness=0.05), (SITE, "Altro sito")):
+        path = proxies.save_proxy(px, folder_p, "ply")
+        entries.append({"name": px.name, "us": px.us, "area": px.area, "tipo": px.tipo, "sito": site,
+                        "file": str(path.relative_to(ch.data_dir)), "volume_m3": px.volume_m3,
+                        "area_m2": px.area_m2, "z_top": list(px.z_top), "z_bottom": list(px.z_bottom),
+                        "base": "thickness", "thickness": 0.05, "ppg_id": "ppg-segreto-4471",
+                        "base_dem": str(Path.home() / "scavi" / "dem_segreto.tif")})
+    lost = dict(entries[0], name="US99", us="99", file="proxies/US99.ply")
+    entries.append(lost)
+    ch.meta["proxies"] = entries
+    doc.save()
+    return doc, ch
+
+
+@pytest.fixture(scope="module")
+def volumes_doc(processed, tmp_path_factory):
+    return _with_volumes(processed, tmp_path_factory.mktemp("volumi") / "progetto")
+
+
+def _glb_meshes(path):
+    """``{node name: (vertices Z-up, faces)}`` of ``proxies.glb``."""
+    from test_site import _glb
+
+    gltf, blob = _glb(path)
+    out = {}
+    for node in gltf["nodes"]:
+        prim = gltf["meshes"][node["mesh"]]["primitives"][0]
+        acc = gltf["accessors"][prim["attributes"]["POSITION"]]
+        view = gltf["bufferViews"][acc["bufferView"]]
+        v = np.frombuffer(blob, np.float32, acc["count"] * 3, view.get("byteOffset", 0)).reshape(-1, 3)
+        ia = gltf["accessors"][prim["indices"]]
+        iv = gltf["bufferViews"][ia["bufferView"]]
+        f = np.frombuffer(blob, np.uint32, ia["count"], iv.get("byteOffset", 0)).reshape(-1, 3)
+        out[node["name"]] = (np.column_stack([v[:, 0], -v[:, 2], v[:, 1]]), f, acc)
+    return out
+
+
+def _site(doc, folder, **kw):
+    import json
+
+    path = doc.export_site(folder, **kw)
+    return path.parent, json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_volumes_in_the_frame_of_the_site(volumes_doc, tmp_path):
+    import json
+
+    from test_site import _coordinate_leaks, _frame_shift
+
+    doc, ch = volumes_doc
+    site, manifest = _site(doc, tmp_path / "site", products=("dem", "units", "proxies"))
+    layer = next(x for x in manifest["chunks"][0]["layers"] if x["id"] == "volumes")
+    assert layer["type"] == "volumes" and layer["url"] == "data/proxies.glb" and layer["count"] == 2
+    assert layer["data"] == "data/proxies.json" and "origin" not in layer and len(layer["box"]) == 6
+    assert [x["id"] for x in manifest["chunks"][0]["layers"]].index("volumes") < \
+        [x["id"] for x in manifest["chunks"][0]["layers"]].index("units")
+    text = (site / "data" / "proxies.json").read_text(encoding="utf-8")
+    data = json.loads(text)
+    gltf_text = (site / "data" / "proxies.glb").read_bytes()[20:].split(b"BIN\0")[0].decode("utf-8", "replace")
+    for t in (text, gltf_text, json.dumps(layer)):
+        assert _coordinate_leaks(t) == []
+        for word in ("ppg_id", "ppg-segreto", "Altro sito", "sito", "file", "base_dem", "dem_segreto", "/Users",
+                     "proxies/US"):
+            assert word not in t, word
+    dz = _frame_shift(ch, site)[2]
+    meshes = _glb_meshes(site / "data" / "proxies.glb")
+    by_name = {e["name"]: e for e in ch.meta["proxies"]}
+    assert sorted(meshes) == sorted(v["key"] for v in data["volumes"]) == ["US12", "US14"]
+    for v in data["volumes"]:
+        entry = by_name[v["key"]]
+        assert v["z_bottom"][0] == pytest.approx(entry["z_bottom"][0] - dz, abs=0.001)
+        assert v["z_top"][1] == pytest.approx(entry["z_top"][1] - dz, abs=0.001)
+        xyz, _f, acc = meshes[v["key"]]
+        assert all(abs(x) < 100 for x in acc["min"] + acc["max"])
+        assert xyz[:, 2].min() == pytest.approx(entry["z_bottom"][0] - dz, abs=0.005)
+        assert set(v) >= {"key", "label", "us", "area", "tipo", "volume_m3", "area_m2", "z_top", "z_bottom",
+                          "colour"}
+        assert "record" not in v  # no records asked for
+    assert any("US99" in n and "left out" in n for n in manifest["build"]["notes"])
+
+
+def test_volumes_under_the_limits(volumes_doc, tmp_path, monkeypatch):
+    import trimesh
+
+    from pyarchinit_photogrammetry.io import site_publish
+
+    doc, ch = volumes_doc
+    before = max(len(trimesh.load(str(ch.data_dir / e["file"]), force="mesh").faces)
+                 for e in ch.meta["proxies"][:2])
+    monkeypatch.setattr(site_volumes, "VOLUME_FACES", 500)
+    assert before > 550  # the volumes of the trench must be thinned
+    site, _manifest = _site(doc, tmp_path / "site", products=("proxies",))
+    glb = site / "data" / "proxies.glb"
+    assert glb.stat().st_size < site_publish.PAGES_FILE_BYTES
+    meshes = _glb_meshes(glb)
+    assert len(meshes) == 2
+    for xyz, f, _acc in meshes.values():
+        assert len(f) <= 1.1 * 500
+        assert trimesh.Trimesh(xyz.astype(float), f, process=True).is_watertight
+
+
+def test_volume_takes_the_record_of_its_polygon(volumes_doc, tmp_path):
+    import json
+
+    doc, _ch = volumes_doc
+    rows = [{"sito": SITE, "area": "1", "us": "12", "unita_tipo": "US", "d_stratigrafica": "Strato"},
+            {"sito": SITE, "area": "1", "us": "14", "unita_tipo": "US", "d_stratigrafica": "Riempimento"}]
+    site, manifest = _site(doc, tmp_path / "site", products=("units", "proxies"), unit_records=rows)
+    units = json.loads((site / "data" / "units.geojson").read_text(encoding="utf-8"))["features"]
+    unit_key = {f["properties"]["us"]: f["properties"]["record"] for f in units}
+    volumes = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))["volumes"]
+    vol_key = {v["us"]: v["record"] for v in volumes}
+    assert vol_key == unit_key and set(vol_key) == {"12", "14"}  # US 14's entry names "Altro sito"
+    records = json.loads((site / "data" / "records.json").read_text(encoding="utf-8"))
+    assert set(records) == set(unit_key.values())
+
+
+def test_volumes_alone_give_a_3d_view(volumes_doc, tmp_path):
+    import json
+    import math
+
+    doc, ch = volumes_doc
+    site, manifest = _site(doc, tmp_path / "site", products=("proxies",))
+    assert [x["id"] for x in manifest["chunks"][0]["layers"]] == ["volumes"]
+    data = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))
+    lowest = min(e["z_bottom"][0] for e in ch.meta["proxies"][:2])
+    meshes = _glb_meshes(site / "data" / "proxies.glb")
+    # dz is the whole metre under the lowest point of the volumes
+    low = min(v["z_bottom"][0] for v in data["volumes"])
+    assert 0 <= low < 1 and low == pytest.approx(lowest - math.floor(lowest), abs=0.001)
+    assert min(xyz[:, 2].min() for xyz, _f, _a in meshes.values()) >= -0.005
+
+
+def test_volumes_make_the_site_stale(volumes_doc, tmp_path):
+    import os
+
+    from pyarchinit_photogrammetry.io import site as site_mod
+
+    doc, ch = volumes_doc
+    assert "proxies" in site_mod.chunk_products(ch)
+    sources = site_mod.site_sources(doc, None, ["proxies"])
+    manifest = doc.export_site(tmp_path / "site", products=("proxies",))
+    record = site_mod.record_site(doc, manifest, {"products": ["proxies"], "frame": "local"}, sources)
+    assert site_mod.site_stale(doc, record) == []
+    path = ch.data_dir / ch.meta["proxies"][0]["file"]
+    path.write_bytes(path.read_bytes())
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    assert site_mod.site_stale(doc, record) == [f"{ch.label}: proxies"]
+
+
+def test_glb_names_its_nodes():
+    import hashlib
+
+    from test_site import _glb as read
+
+    from pyarchinit_photogrammetry.io.web import _glb
+
+    pos = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], float)
+    prims = [{"position": pos, "index": [0, 1, 2]},
+             {"position": pos + 1, "index": [0, 2, 1], "colour": np.full((3, 3), 200)}]
+    assert hashlib.sha256(_glb(prims)).hexdigest() == \
+        "1bda987a88327aa87da579e222f8ab49f063a546e319309edcf9128199a6f877"  # the tiles as before
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "n.glb"
+        path.write_bytes(_glb(prims, names=["a", "b"]))
+        gltf, _blob = read(path)
+    assert [n["name"] for n in gltf["nodes"]] == ["a", "b"]
+    assert [n["mesh"] for n in gltf["nodes"]] == [0, 1] and len(gltf["meshes"]) == 2
+    assert gltf["scenes"][0]["nodes"] == [0, 1]

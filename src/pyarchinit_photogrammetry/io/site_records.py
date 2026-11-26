@@ -378,8 +378,9 @@ def volume_unit(entry: dict, polygons: list, project_site) -> tuple[str, str | N
 
     The ``sito`` written in an entry cannot be trusted, so it is never read: the one unit polygon of the chunk
     (``polygons``, :class:`..archaeo.stratigraphy.UnitPolygon`) with the entry's type and number - and its area
-    when both have one - gives its site (else the project's), area, type and number; with no such polygon (or
-    several) the entry's area, type and number with the site of the project. No number, or no site at all: None."""
+    when both have one - gives its site (else the project's), area, type and number; a unit drawn in several
+    pieces of one site and area counts as one polygon. With no such polygon (or several that disagree) the entry's
+    area, type and number with the site of the project. No number, or no site at all: None."""
     number = unit_text(entry.get("us"))
     if not number:
         return None
@@ -387,7 +388,7 @@ def volume_unit(entry: dict, polygons: list, project_site) -> tuple[str, str | N
     same = [p for p in polygons
             if unit_text(getattr(p, "us", None)) == number and _type(getattr(p, "tipo", None)) == kind
             and (not where or not unit_text(getattr(p, "area", None)) or unit_text(p.area) == where)]
-    if len(same) == 1:
+    if len({(unit_text(p.sito), unit_text(p.area)) for p in same}) == 1:  # one polygon, or one unit in pieces
         p = same[0]
         site = unit_text(p.sito) or unit_text(project_site)
         return (site, p.area, p.tipo or "US", p.us) if site else None
@@ -590,12 +591,14 @@ def unit_sites(document, chunks=None) -> list[str]:
 
 def match_report(document, chunks, rows: list[dict]) -> list[dict]:
     """How the units of ``chunks`` (default all) match ``rows`` of ``us_table`` (:func:`chunk_records`, the
-    project's site for a unit without one): the ``report`` of each chunk, every entry with ``"chunk"``, the label of
+    project's site for a unit without one; the volumes whose file is there, :func:`.site_volumes.present`): the ``report`` of each chunk, every entry with ``"chunk"``, the label of
     its chunk. Matching only: no value of a record is written for it."""
+    from . import site_volumes
+
     project = (document.meta or {}).get("sito")
     out = []
     for chunk in _document_chunks(document, chunks):
-        for entry in chunk_records(chunk, rows, project).report:
+        for entry in chunk_records(chunk, rows, project, volumes=site_volumes.present(chunk)).report:
             out.append({"chunk": chunk.label, **entry})
     return out
 
