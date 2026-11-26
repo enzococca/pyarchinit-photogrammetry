@@ -198,8 +198,10 @@ class PyArchInit(TopographicMixin):
 
     def us_rows(self, sites) -> list[dict]:
         """The rows of ``us_table`` of ``sites`` (each read once, trimmed; an empty or missing one is left out),
-        site after site. Never a query without a site: the database layer drops a None filter, so such a query
-        would read the units of every site."""
+        site after site; a single text is one site (never read letter by letter). Never a query without a site:
+        the database layer drops a None filter, so such a query would read the units of every site."""
+        if isinstance(sites, str):
+            sites = [sites]
         out: list[dict] = []
         seen: set[str] = set()
         for site in sites or ():

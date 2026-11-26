@@ -1530,7 +1530,7 @@ and the page asks nothing outside its own folder (no CDN).
 | `io.site_records.unit_sites(document, chunks=None)` | since 2.1.0: the sites whose rows the units of the chunks may stand for (that of each polygon and outline, else `document.meta["sito"]`); never an empty one |
 | `io.site_records.match_report(document, chunks, rows, read=True, products=None)`, `summary(report)` | since 2.1.0: how the units match the rows, without writing anything (one dict a unit: `chunk`, `what`, `label`, `step`, `reason`, `ignored`; `read=False` the volumes not read, as the pane counts); `summary` gives `(matched, total)` |
 | `io.site_volumes.thin_volume(mesh, target_faces)` | since 2.1.0: a unit volume thinned for the site, closed and with its thickness: `(mesh, how)`, `how` among `"kept"`, `"quadric"`, `"regrid"`, `"dropped"` (mesh None); `VOLUME_FACES` (20,000), `CHUNK_VOLUME_FACES` (600,000) |
-| `PyArchInit.us_rows(sites)` | since 2.1.0: the rows of `us_table` of the `sites` (each read once, trimmed; an empty one left out), never a query without a site |
+| `PyArchInit.us_rows(sites)` | since 2.1.0: the rows of `us_table` of the `sites` (each read once, trimmed; an empty one left out; a single text is one site), never a query without a site |
 | `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise; `--no-ranges` to see the page as on a host without range requests |
 
 **The folder**: `index.html`, `site.json` (the manifest: format `ppg-site` version 1, title, languages,

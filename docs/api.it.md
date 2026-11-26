@@ -1581,7 +1581,7 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 | `io.site_records.unit_sites(document, chunks=None)` | dalla 2.1.0: i siti delle cui righe possono essere le unità dei chunk (quello di ogni poligono e contorno, altrimenti `document.meta["sito"]`); mai uno vuoto |
 | `io.site_records.match_report(document, chunks, rows, read=True, products=None)`, `summary(report)` | dalla 2.1.0: come le unità corrispondono alle righe, senza scrivere niente (un dizionario per unità: `chunk`, `what`, `label`, `step`, `reason`, `ignored`; `read=False` i volumi non letti, come conta il pannello); `summary` dà `(abbinate, totale)` |
 | `io.site_volumes.thin_volume(mesh, target_faces)` | dalla 2.1.0: un volume di unità sfoltito per il sito, chiuso e con il suo spessore: `(mesh, how)`, `how` fra `"kept"`, `"quadric"`, `"regrid"`, `"dropped"` (mesh None); `VOLUME_FACES` (20.000), `CHUNK_VOLUME_FACES` (600.000) |
-| `PyArchInit.us_rows(sites)` | dalla 2.1.0: le righe di `us_table` dei `sites` (ognuno letto una volta, senza spazi; uno vuoto lasciato fuori), mai una richiesta senza sito |
+| `PyArchInit.us_rows(sites)` | dalla 2.1.0: le righe di `us_table` dei `sites` (ognuno letto una volta, senza spazi; uno vuoto lasciato fuori; un solo testo è un sito), mai una richiesta senza sito |
 | `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
 **La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,

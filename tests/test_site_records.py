@@ -426,6 +426,8 @@ def test_rows_of_the_sites_only(pa_db):
     assert pa.us_rows([]) == []
     assert pa.us_rows([None, "", "  "]) == []
     assert pa.us_rows(["Nessun sito"]) == []
+    assert sorted(str(r["us"]) for r in pa.us_rows("Saggio")) == ["1", "2", "3"]  # one site, not its letters
+    assert pa.us_rows("") == []
 
 
 def test_unit_sites_and_report(tmp_path):
