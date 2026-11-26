@@ -803,7 +803,22 @@ calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covaria
 si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
 block gave no covariance`) e nel log c'è un avviso. Una focale tenuta così resta alla stima dell'allineamento:
 nessuna deviazione standard non è un verdetto che il blocco non la conosca, e nulla viene pesato contro il valore
-dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`).
+dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`). Un caso è comunque un
+verdetto: su un blocco che nulla colloca, la cui focale viene interrogata a parte lasciandola libera, una matrice
+normale che si inverte con la focale ferma (ogni gruppo giudicato dal controllo ha il suo scarto) e fallisce
+appena è libera viene interrogata di nuovo con libera solo quella focale - ferma ogni altra intrinseca di ogni
+camera, con le pose e i punti di legame (`sfm._confirmed_focals`). Un pivot non positivo lì dice che la focale non
+ha limite - singolare fino agli ultimi bit, cosa che una piattaforma fattorizza con uno scarto centinaia di volte
+la focale e un'altra no (la griglia nadirale dei test: macOS e il runner Windows di GitHub): va proprio sul valore
+dell'obiettivo, con `sd` None in `lens_prior` e una nota che nomina il pivot (`the block holding nothing of its
+estimate ... singular with only its focal length free`). Dove quella domanda si inverte decide il suo scarto:
+sopra lo 0,5 % - uno scarto condizionato, mai maggiore di quello marginale, già oltre la soglia di una focale che
+il blocco non determina (il runner Windows di GitHub su quella griglia: 6,65 %, con i termini radiali fermi) - la
+focale è anch'essa senza limite e va proprio sul valore dell'obiettivo (`the block does not determine it: sd ...
+with only its focal length free`), dove arriva macOS con il suo scarto di 570 volte; sotto, il fallimento veniva
+dagli altri gruppi e la focale resta alla stima dell'allineamento, con l'avviso. Due focali singolari solo insieme - due
+sensori sulla stessa griglia piatta di cui il blocco determina il rapporto ma non la scala comune - si invertono
+ciascuna da sola con uno scarto piccolo, ed entrambe restano alla stima.
 
 Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
 più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti
