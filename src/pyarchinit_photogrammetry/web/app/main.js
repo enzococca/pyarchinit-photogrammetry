@@ -288,6 +288,11 @@ function modelList(box) {
 // no group, named by the page), else a row for each volume (its colour, its label) once the view has read them
 function volumeLegend(box, model, index) {
   const def = model.def;
+  const loaded = state.view3d ? state.view3d.models[index] : null;
+  if (loaded && loaded.failed) { // its files could not be read: the view goes on without them
+    box.append(el('p', word('volumesFailed'), 'note'));
+    return;
+  }
   if (def.groups && def.groups.length) {
     for (const group of def.groups) {
       const key = `${def.url}|${group.name}`;
@@ -306,7 +311,6 @@ function volumeLegend(box, model, index) {
     }
     return;
   }
-  const loaded = state.view3d ? state.view3d.models[index] : null;
   for (const volume of (loaded && loaded.data && loaded.data.volumes) || []) {
     const sub = el('div', null, 'layer group');
     sub.dataset.volume = volume.key;

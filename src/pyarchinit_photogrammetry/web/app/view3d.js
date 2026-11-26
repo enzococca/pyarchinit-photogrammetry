@@ -119,18 +119,29 @@ export async function createView(container, models) {
   const loaded = [];
   for (const model of models) {
     if (model.def.type === 'volumes') {
-      const answer = await fetch(model.def.data);
-      if (!answer.ok) throw new Error(`${model.def.data}: HTTP ${answer.status}`);
-      const data = await answer.json();
-      const gltf = await new GLTFLoader().loadAsync(model.def.url);
       const holder = new THREE.Group();
       const origin = model.def.origin || [0, 0, 0];
       holder.position.set(origin[0] - centre.x, origin[1] - centre.y, origin[2] - centre.z);
-      gltf.scene.rotation.x = Math.PI / 2; // Y up of glTF to the Z up of the site
-      holder.add(gltf.scene);
       holder.visible = model.def.visible !== false;
       scene.add(holder);
-      loaded.push({...model, holder, data, volumes: volumesOf(gltf, data), hiddenGroups: new Set(),
+      // a volumes file that cannot be read leaves the volumes out, never the models and clouds of the view
+      let data = null;
+      let volumes = new Map();
+      let failed = false;
+      try {
+        const answer = await fetch(model.def.data);
+        if (!answer.ok) throw new Error(`${model.def.data}: HTTP ${answer.status}`);
+        data = await answer.json();
+        const gltf = await new GLTFLoader().loadAsync(model.def.url);
+        gltf.scene.rotation.x = Math.PI / 2; // Y up of glTF to the Z up of the site
+        holder.add(gltf.scene);
+        volumes = volumesOf(gltf, data);
+      } catch (error) {
+        console.warn(`${model.def.url}: ${error && error.message}`);
+        data = null;
+        failed = true;
+      }
+      loaded.push({...model, holder, data, volumes, failed, hiddenGroups: new Set(),
         shown: model.def.visible !== false});
       continue;
     }
@@ -215,8 +226,10 @@ export async function createView(container, models) {
     }
   }
 
-  // the point of the model under a pixel of the page (clientX, clientY), in the frame of the site; null if none
-  function pick(clientX, clientY) {
+  // the point of the model under a pixel of the page (clientX, clientY), in the frame of the site; null if none.
+  // ``preferVolumes``: a unit volume hit by the ray is taken whatever lies in front of it (to name a unit: the
+  // volumes are usually under the surface of the model); else the nearest hit (to measure).
+  function pick(clientX, clientY, {preferVolumes = true} = {}) {
     const rect = renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1);
@@ -226,7 +239,6 @@ export async function createView(container, models) {
     const pixel = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
       * camera.position.distanceTo(controls.target) / Math.max(1, rect.height);
     ray.params.Points.threshold = PICK_PIXELS * pixel;
-    // a volume first, whatever lies in front of it: the volumes are usually under the surface of the model
     let volume = null;
     for (const m of loaded) {
       if (!m.volumes || !m.holder.visible) continue;
@@ -237,19 +249,19 @@ export async function createView(container, models) {
         volume = {hit: hits[0], model: m, item};
       }
     }
-    if (volume) {
+    let best = null;
+    for (const m of loaded) {
+      if (!m.holder.visible || m.volumes) continue;
+      const hits = ray.intersectObject(m.tiles.group, true);
+      if (hits.length && (!best || hits[0].distance < best.hit.distance)) best = {hit: hits[0], model: m};
+    }
+    if (volume && (preferVolumes || !best || volume.hit.distance < best.hit.distance)) {
       const p = volume.hit.point;
       const d = volume.item.data;
       const properties = {label: d.label, us: d.us, area: d.area, tipo: d.tipo, volume_m3: d.volume_m3};
       if (d.record) properties.record = d.record;
       return {x: p.x + centre.x, y: p.y + centre.y, z: p.z + centre.z, chunk: volume.model.chunk,
         feature: {properties, chunk: volume.model.chunk}, volume: volume.item};
-    }
-    let best = null;
-    for (const m of loaded) {
-      if (!m.holder.visible || m.volumes) continue;
-      const hits = ray.intersectObject(m.tiles.group, true);
-      if (hits.length && (!best || hits[0].distance < best.hit.distance)) best = {hit: hits[0], model: m};
     }
     if (!best) return null;
     const p = best.hit.point;
@@ -362,7 +374,7 @@ export async function createView(container, models) {
       if (view.onMeasure) view.onMeasure(view.finish(), true);
       return;
     }
-    const point = pick(event.clientX, event.clientY);
+    const point = pick(event.clientX, event.clientY, {preferVolumes: !view.mode});
     if (!point) return;
     if (view.mode) {
       view.points.push(point);

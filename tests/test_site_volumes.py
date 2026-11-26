@@ -477,8 +477,9 @@ def _on_volume(site, key, n=12):
 def test_volumes_in_the_page(volumes_doc, tmp_path):
     """The 3D tab draws the volumes over the model: a click on a volume opens the record of its unit (the volume
     wins over the surface of the model in front of it) and marks it; the legend has a switch a group, the last one
-    named by the page; a group switched off is no longer picked; a record selected marks its volume; a site with
-    volumes alone opens on the 3D tab with a legend of the volumes."""
+    named by the page; a group switched off is no longer picked; a record selected marks its volume; a measure
+    takes the nearest surface (the model where it is in front); an unreadable volumes file leaves the model shown;
+    a site with volumes alone opens on the 3D tab with a legend of the volumes."""
     import json
 
     from test_site import Browser, _serving, find_browser
@@ -537,6 +538,39 @@ def test_volumes_in_the_page(volumes_doc, tmp_path):
                     assert browser.js(pick.format(*at)) == "12", at
             assert both >= 3, both
 
+            # a measure takes the nearest surface: where the model is in front of the volume, the point of the model
+            z_of = ("((p) => p ? [p.z, Boolean(p.feature)] : null)"
+                    "(ppgSite.state.view3d.pick(...ppgSite.state.view3d.project({}, {}, {}), {}))")
+            front = []
+            for at in on12:
+                browser.js(f"ppgSite.state.view3d.setVisible({index}, false)")
+                on_model = browser.js(z_of.format(*at, "{}"))
+                browser.js(f"ppgSite.state.view3d.setVisible({index}, true)")
+                on_volume = browser.js(z_of.format(*at, "{}"))
+                nearest = browser.js(z_of.format(*at, "{preferVolumes: false}"))
+                if on_model and on_volume[1]:
+                    in_front = on_model if on_model[0] > on_volume[0] else on_volume
+                    assert nearest[1] == in_front[1] and nearest[0] == pytest.approx(in_front[0], abs=1e-9), \
+                        (at, on_model, on_volume, nearest)
+                    if on_model[0] > on_volume[0] + 1e-4:
+                        front.append((on_model[0] - on_volume[0], at))
+            assert front, "no point of US 12 with the model in front"
+            at = max(front)[1]
+            mx, my = (round(v) for v in browser.js("ppgSite.state.view3d.project({}, {}, {})".format(*at)))
+            browser.js(f"ppgSite.state.view3d.setVisible({index}, false)")
+            z_model = browser.js(f"ppgSite.state.view3d.pick({mx}, {my}).z")
+            browser.js(f"ppgSite.state.view3d.setVisible({index}, true)")
+            z_volume = browser.js(f"ppgSite.state.view3d.pick({mx}, {my}).z")
+            assert z_model > z_volume, (z_model, z_volume)
+            browser.js("document.getElementById('distance').click()")
+            for kind in ("mousePressed", "mouseReleased"):
+                browser.call("Input.dispatchMouseEvent", {"type": kind, "x": mx, "y": my, "button": "left",
+                                                          "clickCount": 1})
+            assert browser.js("ppgSite.state.view3d.points.length") == 1
+            assert browser.js("ppgSite.state.view3d.points[0].z") == pytest.approx(z_model, abs=1e-9)
+            browser.js("document.getElementById('clear').click()")
+            assert browser.js("ppgSite.state.view3d.mode") is None
+
             legend = browser.js("[...document.querySelectorAll('#layers [data-group]')]"
                                 ".map((r) => [r.dataset.group, r.innerText.trim()])")
             assert [g for g, _t in legend] == ["fase-1", "fase-2", ""], legend
@@ -554,6 +588,26 @@ def test_volumes_in_the_page(volumes_doc, tmp_path):
             assert not browser.errors, browser.errors
             outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
             assert not outside, outside
+        finally:
+            browser.close()
+
+    # a volumes file that cannot be read: the model is shown all the same, the layer list says so
+    (site / "data" / "proxies.glb").write_bytes(b"glTF this is not a model")
+    with _serving(site) as port:
+        browser = Browser(executable, tmp_path / "profilo3", size=(1200, 800))
+        try:
+            browser.call("Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            browser.js("ppgSite.setTab('3d')")
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.model)", 60)
+            assert browser.js("document.documentElement.dataset.model") == "ready", browser.errors
+            browser.wait("ppgSite.state.view3d.ready()", 60)
+            assert browser.js("ppgSite.state.view3d.models.map((m) => [m.def.id, Boolean(m.failed)])") == [
+                ["model", False], ["volumes", True]]
+            assert browser.js("ppgSite.state.view3d.models[0].tiles.visibleTiles.size") > 0
+            assert "Volumi delle US non leggibili." in browser.js("document.getElementById('layers').innerText")
+            assert browser.js(pick_any.format(*c12)) in ("model", None)  # never a volume
+            assert not browser.errors, browser.errors
         finally:
             browser.close()
 

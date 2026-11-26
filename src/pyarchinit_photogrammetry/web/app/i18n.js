@@ -29,7 +29,7 @@ export const WORDS = {
     drawingSvg: 'Disegno (SVG)', downloadCloud: 'Scarica la nuvola (COPC)', dates: 'Date',
     nothingThisDate: 'Niente a questa data.',
     record: 'Scheda', relations: 'Rapporti stratigrafici', noRecord: 'Nessuna scheda per questa unità.',
-    volumes: 'Volumi delle US', noGroup: 'Senza gruppo',
+    volumes: 'Volumi delle US', noGroup: 'Senza gruppo', volumesFailed: 'Volumi delle US non leggibili.',
   },
   en: {
     layers: 'Layers', measure: 'Measure', distance: 'Distance', area: 'Area', stop: 'Done',
@@ -59,7 +59,7 @@ export const WORDS = {
     drawingSvg: 'Drawing (SVG)', downloadCloud: 'Download the cloud (COPC)', dates: 'Dates',
     nothingThisDate: 'Nothing at this date.',
     record: 'Record', relations: 'Stratigraphic relations', noRecord: 'No record for this unit.',
-    volumes: 'Unit volumes', noGroup: 'No group',
+    volumes: 'Unit volumes', noGroup: 'No group', volumesFailed: 'Unit volumes not readable.',
   },
 };
 
