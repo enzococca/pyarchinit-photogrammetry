@@ -271,7 +271,7 @@ dataset pubblici WorldView-3.
 * **Disegni sui prospetti e sulle sezioni** (1.7.0): le US, le linee, le quote, i punti e le pietre disegnati su un
   prospetto tenuti con lui nelle sue (u, v), esportati con lui sviluppati e in 3D sul rilievo, aperti in QGIS,
   mandati a PyArchInit come suoi media. Vedi
-  [Disegni sui prospetti e sulle sezioni](gui/processing.md#disegni-sui-prospetti-e-sulle-sezioni).
+  [Disegni sui prospetti e sulle sezioni](gui/processing.it.md#disegni-sui-prospetti-e-sulle-sezioni).
 
 ## Fatto nelle 1.7.1 - 1.11.0
 
@@ -296,7 +296,7 @@ dataset pubblici WorldView-3.
 
 ## Prossimi passi
 
-* **2.0.0 - Motore nativo** (in corso): il motore fotogrammetrico portato in Rust (GPU
+* **2.0.0 - Motore nativo** (fatto, rilasciato come 2.0.0): il motore fotogrammetrico portato in Rust (GPU
   e CPU, ogni sistema) un passo alla volta. La milestone 0 misura la 1.10 (scelta del motore, tempi delle fasi,
   cache delle foto commisurata alla memoria, un volo sintetico ad anello, `ppg bench`); la milestone 1 il bundle
   adjustment nativo; la milestone 2 punti, coppie e abbinamento nativi; la milestone 3 un mapper globale nativo con
@@ -313,7 +313,7 @@ dataset pubblici WorldView-3.
   gli spigoli o curva, la sua linea cliccata o seguita sulla pianta e agganciata alla faccia, disteso girando gli
   spigoli; lo stesso muro in più campagne su una griglia sola, la scheda di confronto, il composito delle campagne, la
   finitura per una pubblicazione, le foto in controluce lasciate fuori
-  ([un muro tracciato in pianta](gui/processing.md#un-muro-tracciato-in-pianta)).
+  ([un muro tracciato in pianta](gui/processing.it.md#un-muro-tracciato-in-pianta)).
 * **Verifiche su dati veri** (senza versione per ora): l'import da WebODM, una scena satellitare propria, `ppg
   remote` su una macchina remota, i nodi di rete su due computer veri, un volo MicaSense intero fino all'ortofoto
   di riflettanza.
