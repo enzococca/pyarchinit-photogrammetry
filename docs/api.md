@@ -775,12 +775,17 @@ without having been judged: its note says so in its own words (`not judged, the 
 the log has a warning. A focal length held so stays at the alignment's estimate: no sd is no verdict that the
 block does not know it, and nothing is weighed against the lens prior (`kept at the alignment's estimate, not
 moved towards the lens prior`). One case is a verdict all the same: on a block nothing places, whose focal
-length is asked apart with it free, a normal matrix that inverts with the focal length held and finds a pivot
-that is not positive once it is free says that the focal length is unbounded - singular to the last bits, which
-one platform factors with an sd hundreds of times the focal length and another does not (the nadir grid of the
-tests: macOS and GitHub's Windows runner). That focal length goes to the lens prior itself, its `sd` None in
-`lens_prior` and its note naming the pivot (`the block holding nothing of its estimate`); with several cameras
-each is asked again with only its own focal length free (`sfm._unbounded_focals`).
+length is asked apart with it free, a normal matrix that inverts with the focal length held (every group the
+check judged has its sd) and fails once it is free is asked again with only that focal length free - every other
+intrinsic of every camera held, the poses and tie points with it (`sfm._confirmed_focals`). A pivot that is not
+positive there says the focal length is unbounded - singular to the last bits, which one platform factors with an
+sd hundreds of times the focal length and another does not (the nadir grid of the tests: macOS and GitHub's
+Windows runner): it goes to the lens prior itself, its `sd` None in `lens_prior` and its note naming the pivot
+(`the block holding nothing of its estimate ... singular with only its focal length free`). Where that question
+inverts, its sd decides: above 0.5 % the focal length is weighed against the lens prior with it, below it the
+failure came from the other groups and the focal length is kept at the alignment's estimate with the warning.
+Two focal lengths singular only together - two sensors on one flat grid whose ratio the block determines and
+whose common scale it does not - each invert alone with a small sd, and both are kept at the estimate.
 
 On a nadir grid over flat ground the radial terms trade with a dome of the block - the middle higher or lower
 than the edges -, which control points at its corners do not see: a dome passes through them all (a synthetic

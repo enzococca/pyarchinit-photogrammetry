@@ -805,12 +805,17 @@ block gave no covariance`) e nel log c'è un avviso. Una focale tenuta così res
 nessuna deviazione standard non è un verdetto che il blocco non la conosca, e nulla viene pesato contro il valore
 dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`). Un caso è comunque un
 verdetto: su un blocco che nulla colloca, la cui focale viene interrogata a parte lasciandola libera, una matrice
-normale che si inverte con la focale ferma e trova un pivot non positivo appena è libera dice che la focale non
+normale che si inverte con la focale ferma (ogni gruppo giudicato dal controllo ha il suo scarto) e fallisce
+appena è libera viene interrogata di nuovo con libera solo quella focale - ferma ogni altra intrinseca di ogni
+camera, con le pose e i punti di legame (`sfm._confirmed_focals`). Un pivot non positivo lì dice che la focale non
 ha limite - singolare fino agli ultimi bit, cosa che una piattaforma fattorizza con uno scarto centinaia di volte
-la focale e un'altra no (la griglia nadirale dei test: macOS e il runner Windows di GitHub). Quella focale va
-proprio sul valore dell'obiettivo, con `sd` None in `lens_prior` e una nota che nomina il pivot (`the block
-holding nothing of its estimate`); con più camere ognuna viene interrogata di nuovo con libera solo la propria
-focale (`sfm._unbounded_focals`).
+la focale e un'altra no (la griglia nadirale dei test: macOS e il runner Windows di GitHub): va proprio sul valore
+dell'obiettivo, con `sd` None in `lens_prior` e una nota che nomina il pivot (`the block holding nothing of its
+estimate ... singular with only its focal length free`). Dove quella domanda si inverte decide il suo scarto:
+sopra lo 0,5 % la focale viene pesata con esso contro il valore dell'obiettivo, sotto il fallimento veniva dagli
+altri gruppi e la focale resta alla stima dell'allineamento, con l'avviso. Due focali singolari solo insieme - due
+sensori sulla stessa griglia piatta di cui il blocco determina il rapporto ma non la scala comune - si invertono
+ciascuna da sola con uno scarto piccolo, ed entrambe restano alla stima.
 
 Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
 più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti

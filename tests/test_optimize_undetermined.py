@@ -1504,7 +1504,8 @@ def test_the_notes_of_the_walk(caplog):
         "sensor 2: focal left at 3909.22 px: the block does not follow to 1017.99 px, between its estimate "
         "3909.22 px (sd 6.49 %) and the lens prior 1000.00 px (sd 2.00 %) (reprojection 0.179 -> 0.512 px)",
         "sensor 3: focal walked to 1000.00 px, the lens prior, the block holding nothing of its estimate 1300.00 px "
-        "(its normal matrix singular with it free: pivot 7 of the reduced system is not positive), in 3 steps "
+        "(its normal matrix singular with only its focal length free: pivot 7 of the reduced system is not "
+        "positive), in 3 steps "
         "(reprojection 0.771 -> 0.500 px)",
         "sensor 0: focal held: undetermined, sd 9.70 %"]
     assert record["lens_prior"] == [
@@ -1643,21 +1644,32 @@ def test_a_block_nothing_places_weighs_its_focal_length_against_the_lens_as_any_
     assert _calibration(ch)[0][:2] == [pytest.approx(target, rel=1e-12)] * 2
 
 
-def _singular_with_the_focal_free(monkeypatch, why: str = "pivot 7 of the reduced system is not positive") -> list:
-    """``bundle.intrinsics_covariance`` as a platform whose factorisation of the nadir grid's normal matrix finds a
-    pivot that is not positive once a focal length is free (GitHub's Windows runner: ``why``), the matrix with the
-    focal lengths held as every platform has it. Returns the free intrinsics of each call."""
+SINGULAR = "pivot 7 of the reduced system is not positive"
+TANGENTIAL = {6, 7}  # p1, p2 of the OPENCV model of the block
+
+
+def _platform(monkeypatch, fails) -> list:
+    """``bundle.intrinsics_covariance`` as a platform whose factorisation of the nadir grid's normal matrix fails
+    where ``fails`` says - ``fails(free)``, ``free`` the set of the free intrinsics of the one camera, returns the
+    error (a RuntimeError of the core) or None, where the real covariance is taken. Returns the free intrinsics of
+    each call."""
     real, calls = bundle.intrinsics_covariance, []
 
     def covariance(pb, *args, **kwargs):
         calls.append([list(f) for f in pb.free_intrinsics])
-        if any(k in bundle.intrinsic_groups(model)["focal"] for (model, *_rest), free in
-               zip(pb.cameras, pb.free_intrinsics) for k in free):
+        why = fails(set(pb.free_intrinsics[0]))
+        if why is not None:
             raise RuntimeError(why)
         return real(pb, *args, **kwargs)
 
     monkeypatch.setattr(bundle, "intrinsics_covariance", covariance)
     return calls
+
+
+def _singular_with_the_focal_free(monkeypatch, why: str = SINGULAR) -> list:
+    """The platform of GitHub's Windows runner on the nadir grid: a pivot that is not positive (``why``) whenever
+    the focal length is free, the matrix with it held as every platform has it."""
+    return _platform(monkeypatch, lambda free: why if free & {0, 1} else None)
 
 
 def _nadir_grid_nothing_places(folder):
@@ -1674,24 +1686,63 @@ def test_a_focal_length_singular_with_it_free_goes_to_the_lens_prior_on_every_pl
     """The nadir grid that nothing places is singular to the last bits with its focal length free: macOS factors
     its normal matrix (an sd of 570 times the focal length), GitHub's Windows runner finds a pivot that is not
     positive (CI runs 45290319162 and 45391469522: the focal length kept at 1.3 times the true one). Both say the
-    same: the matrix with the focal length held inverts (the radial terms are judged from it), so a pivot that is
-    not positive once it is free is a variance of the focal length that has no bound - nothing of the estimate is
-    known, and the focal length goes to the lens prior, as the sd of 570 times sends it there."""
+    same: the matrix with the focal length held inverts (every group of the check has its sd), and the focal
+    length alone free - every other intrinsic held, the poses and the tie points with it - still meets a pivot that
+    is not positive: a variance that has no bound, nothing of the estimate known, and the focal length goes to the
+    lens prior, as the sd of 570 times sends it there."""
     ch = _nadir_grid_nothing_places(tmp_path)
     calls = _singular_with_the_focal_free(monkeypatch)
     ch.optimize_cameras(engine="ppg")
     rep = ch.meta["sfm"]["optimize"]
     assert rep["focal_held"] == sfm.FOCAL_HELD_NO_REFERENCES
-    assert any(0 in free[0] for free in calls)  # the focal length was asked free, and the platform failed it
+    assert [[0, 1]] in calls  # confirmed with the focal length alone free
     walked, = rep["intrinsics"]["lens_prior"]
     assert (walked["sensor"], walked["estimate"], walked["sd"], walked["prior"]) == (0, pytest.approx(1.3 * F), None, F)
     assert walked["target"] == F and walked["steps"] == 3
     assert _calibration(ch)[0][:2] == [F, F]
     notes = rep["intrinsics"]["notes"]
     assert notes[0].startswith(f"sensor 0: focal walked to {F:.2f} px, the lens prior, the block holding nothing of "
-                               f"its estimate {1.3 * F:.2f} px (its normal matrix singular with it free: pivot 7 of "
-                               "the reduced system is not positive), in 3 steps (reprojection ")
+                               f"its estimate {1.3 * F:.2f} px (its normal matrix singular with only its focal length "
+                               f"free: {SINGULAR}), in 3 steps (reprojection ")
     assert not any("gave no covariance" in note for note in notes)
+
+
+@needs_core
+def test_a_pivot_the_focal_length_alone_does_not_meet_weighs_it_by_its_sd_alone(tmp_path, monkeypatch):
+    """A matrix that fails with the focal length free together with the rest it is asked with (here the tangential
+    terms) and inverts with the focal length alone free: the failure is not proved the focal length's, and its sd
+    with only it free (a conditional sd, never above the marginal one) decides - above the line of the check
+    (``bundle.FOCAL_SD_HOLD``) it is weighed against the lens prior as on any platform that factors the matrix."""
+    ch = _nadir_grid_nothing_places(tmp_path)
+    calls = _platform(monkeypatch, lambda free: SINGULAR if free & {0, 1} and free & TANGENTIAL else None)
+    ch.optimize_cameras(engine="ppg")
+    intr = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert [[0, 1]] in calls
+    walked, = intr["lens_prior"]
+    assert walked["sd"] > bundle.FOCAL_SD_HOLD
+    assert walked["target"] == pytest.approx(sfm.lens_target(walked["estimate"], walked["sd"], F), rel=1e-12)
+    assert intr["notes"][0].startswith(f"sensor 0: focal walked to {walked['target']:.2f} px, between its estimate "
+                                       f"{1.3 * F:.2f} px (sd ")
+    assert not any("gave no covariance" in note for note in intr["notes"])
+
+
+@needs_core
+def test_a_focal_length_is_not_called_unbounded_for_a_group_the_check_could_not_judge(tmp_path, monkeypatch):
+    """The review's I1: a block whose tangential terms the observations do not hold at all - the first matrix of
+    the check fails, the tangential terms are held without a verdict, the rest is judged from the matrix without
+    them - and whose focal-free question fails for the same tangential terms. The matrix with every focal length
+    held and every other group free did not invert: nothing proves the focal length unbounded, and it is kept at the
+    alignment's estimate with the warning, as before."""
+    ch = _nadir_grid_nothing_places(tmp_path)
+    _platform(monkeypatch, lambda free: SINGULAR if free & TANGENTIAL else None)
+    ch.optimize_cameras(engine="ppg")
+    intr = ch.meta["sfm"]["optimize"]["intrinsics"]
+    assert intr["held"]["tangential"] == [0]
+    assert any(note.startswith("sensor 0: tangential held: not judged, the block gave no covariance")
+               for note in intr["notes"])
+    assert intr["lens_prior"] == []
+    assert f"sensor 0: focal: the block gave no covariance; {sfm.FOCAL_KEPT_NO_COVARIANCE}" in intr["notes"]
+    assert _calibration(ch)[0][:2] == [pytest.approx(1.3 * F)] * 2
 
 
 @needs_core
@@ -1699,13 +1750,12 @@ def test_a_focal_length_singular_with_it_free_goes_to_the_lens_prior_on_every_pl
                                  "a matrix that is not positive everywhere"])
 def test_a_focal_length_without_a_covariance_for_another_reason_stays_where_the_alignment_put_it(
         tmp_path, monkeypatch, why):
-    """Only a matrix that inverts with the focal length held and not with it free says that the focal length is
-    unbounded. Another failure (conjugate gradients that stop, or a matrix that does not invert even with the focal
-    length held) is no verdict: the focal length is kept at the alignment's estimate and the log warns (I3)."""
+    """Only a matrix that inverts with the focal length held and not with it alone free says that the focal length
+    is unbounded. Another failure (conjugate gradients that stop, or a matrix that does not invert even with the
+    focal length held) is no verdict: the focal length is kept at the alignment's estimate and the log warns (I3)."""
     ch = _nadir_grid_nothing_places(tmp_path)
     if why.startswith("a matrix"):
-        monkeypatch.setattr(bundle, "intrinsics_covariance",
-                            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("pivot 3 of it is not positive")))
+        _platform(monkeypatch, lambda free: "pivot 3 of it is not positive")
     else:
         _singular_with_the_focal_free(monkeypatch, why)
     ch.optimize_cameras(engine="ppg")
@@ -1715,34 +1765,64 @@ def test_a_focal_length_without_a_covariance_for_another_reason_stays_where_the_
     assert _calibration(ch)[0][:2] == [pytest.approx(1.3 * F)] * 2
 
 
-def test_an_unbounded_focal_length_of_one_camera_among_several_is_told_by_that_camera_alone(monkeypatch):
-    """With several cameras a pivot that is not positive once all their focal lengths are free names none of
-    them: each camera whose focal length fails is asked again with only its own free (the others held - a
-    conditional variance, never larger than the marginal one): unbounded only where that fails too."""
+def _cameras(n: int) -> bundle.Problem:
     none = np.zeros((0, 3))
-    pb = bundle.Problem(rotations=np.zeros((0, 3, 3)), centres=none, image_camera=np.zeros(0, int),
-                        cameras=[("OPENCV", [F, F, 0, 0, 0, 0, 0, 0], 1, 1)] * 2, points=none,
-                        obs_image=np.zeros(0, int), obs_point=np.zeros(0, int), obs_xy=np.zeros((0, 2)),
-                        free_intrinsics=[[4, 5], [4, 5]])
-    asked = [[0, 1, 4, 5], [0, 1, 4, 5]]
-    lone = ("no covariance", "pivot 9 of the reduced system is not positive")
+    return bundle.Problem(rotations=np.zeros((0, 3, 3)), centres=none, image_camera=np.zeros(0, int),
+                          cameras=[("OPENCV", [F, F, 0, 0, 0, 0, 0, 0], 1, 1)] * n, points=none,
+                          obs_image=np.zeros(0, int), obs_point=np.zeros(0, int), obs_xy=np.zeros((0, 2)),
+                          free_intrinsics=[[4, 5]] * n)
+
+
+def test_each_focal_length_without_a_covariance_is_asked_again_alone(monkeypatch):
+    """``sfm._confirmed_focals``: each camera whose focal length had no covariance is asked again with only that
+    focal length free (every other intrinsic of every camera held): a pivot that is not positive there is an
+    unbounded focal length (the poses alone are a part of every matrix the check inverted); an sd above the line of
+    the check is one to weigh against the prior; a small sd or another failure is no verdict (kept, with the
+    warning)."""
+    pb = _cameras(4)
+    asked = [[0, 1, 4, 5]] * 4
+    failed = ("no covariance", "pivot 9 of the reduced system is not positive")
+    alone = {0: ("no covariance", SINGULAR), 1: ("sd", 0.3), 2: ("sd", 0.001),
+             3: ("no covariance", "the conjugate gradients did not converge in 5000 iterations")}
     asks = []
 
     def judge(problem, only=None, **_kwargs):
         assert only == ("focal",)
-        asks.append([list(f) for f in problem.free_intrinsics])
-        if problem.free_intrinsics == asked:
-            return [{}, {}], [{"focal": lone}, {"focal": lone}], 1.0
-        # camera 0 alone still fails, camera 1 alone has a variance
-        return ([{}, {}], [{"focal": lone}, {}], 1.0) if 0 in problem.free_intrinsics[0] else \
-            ([{}, {"focal": 0.3}], [{}, {"focal": ("sd", 0.3)}], 1.0)
+        free = [list(f) for f in problem.free_intrinsics]
+        asks.append(free)
+        c, = (o for o, f in enumerate(free) if f)
+        kind, value = alone[c]
+        sds = [dict.fromkeys(bundle.JUDGED) for _c in free]
+        if kind == "sd":
+            sds[c]["focal"] = value
+        return sds, [{"focal": alone[c]} if o == c else {} for o in range(len(free))], 1.0
 
     monkeypatch.setattr(bundle, "judge_intrinsics", judge)
-    verdicts = judge(dataclasses.replace(pb, free_intrinsics=asked), only=("focal",))[1]
-    assert sfm._unbounded_focals(pb, asked, [0, 1], verdicts) == {0: lone[1]}
-    assert asks[1:] == [[[0, 1, 4, 5], [4, 5]], [[4, 5], [0, 1, 4, 5]]]
-    assert sfm._unbounded_focals(pb, asked, [0], [{"focal": lone}, {}]) == {0: lone[1]}  # one camera: no question
-    assert len(asks) == 3
+    singular, undetermined = sfm._confirmed_focals(pb, asked, [0, 1, 2, 3], [{"focal": failed}] * 4)
+    assert singular == {0: SINGULAR} and undetermined == {1: 0.3}
+    assert asks == [[[0, 1] if o == c else [] for o in range(4)] for c in range(4)]
+    # a camera whose focal length had its covariance is not asked again
+    asks.clear()
+    assert sfm._confirmed_focals(pb, asked, [0, 1], [{"focal": ("sd", 0.2)}, {}]) == ({}, {})
+    assert asks == []
+
+
+def test_two_focal_lengths_singular_only_together_stay_where_the_alignment_put_them(monkeypatch):
+    """The review's M1: two sensors on the same flat grid whose ratio of focal lengths the block determines and
+    whose common scale it does not - all focal lengths free, the matrix fails; each alone free, the other held, it
+    inverts with a small sd. Neither is proved unbounded: both are kept at the alignment's estimate, with the
+    warning, as before."""
+    pb = _cameras(2)
+    failed = ("no covariance", SINGULAR)
+
+    def judge(problem, only=None, **_kwargs):
+        c, = (o for o, f in enumerate(problem.free_intrinsics) if f)
+        sds = [dict.fromkeys(bundle.JUDGED) for _c in problem.cameras]
+        sds[c]["focal"] = 0.002
+        return sds, [{} for _c in problem.cameras], 1.0
+
+    monkeypatch.setattr(bundle, "judge_intrinsics", judge)
+    assert sfm._confirmed_focals(pb, [[0, 1, 4, 5]] * 2, [0, 1], [{"focal": failed}] * 2) == ({}, {})
 
 
 # ------------------------------------------------------------------- the option, at every door

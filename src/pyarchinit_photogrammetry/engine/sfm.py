@@ -3123,35 +3123,37 @@ def lens_target(estimate: float, sd: float | None, prior: float) -> float:
     return estimate + (prior - estimate) * own / (own + lens)
 
 
-def _unbounded_focals(pb, asked: list, refined: list, verdicts: list) -> dict:
-    """The cameras among ``refined`` (indices in ``pb``) whose focal length has a variance without a bound, with
-    why: ``verdicts`` are those of :func:`bundle.judge_intrinsics` on ``pb`` with the intrinsics ``asked`` free
-    (``only=("focal",)``), and the caller knows that the normal matrix with every focal length held
-    (``pb.free_intrinsics``) inverts. A focal length whose verdict is a pivot (or a curvature) that is not positive
-    is then the column that makes the matrix singular: its information, once the rest is accounted for, is nil to
-    the last bits, and where one platform factors such a matrix with an sd hundreds of times the focal length
-    another finds that pivot negative (the nadir grid nothing places: macOS and GitHub's Windows runner). With
-    several cameras the failure of all their focal lengths free together names none of them: each is asked again
-    with only its own focal length free - a variance conditional on the others held, never larger than the
-    marginal one - and is unbounded where that fails too. Conjugate gradients that stop, or any other failure, are
-    no verdict (:data:`FOCAL_KEPT_NO_COVARIANCE`)."""
+def _confirmed_focals(pb, asked: list, refined: list, verdicts: list) -> tuple[dict, dict]:
+    """The focal lengths among ``refined`` (indices in ``pb``) that had no covariance with the intrinsics ``asked``
+    free (``verdicts`` of :func:`bundle.judge_intrinsics` with ``only=("focal",)``), each asked again with only
+    its own focal length free - every other intrinsic of every camera held, the poses and the tie points with it.
+    The caller knows that the matrix with every focal length held and every other group asked free inverts, so the
+    one of the poses alone, a part of it, does too. Returns ``(singular, undetermined)``: ``{index: why}`` where
+    that question still meets a pivot (or a curvature) that is not positive - the focal length's own information
+    is nil to the last bits, which one platform factors with an sd hundreds of times the focal length and another
+    finds negative (the nadir grid nothing places: macOS and GitHub's Windows runner) -, and ``{index: sd}`` where
+    it inverts with a relative sd above :data:`bundle.FOCAL_SD_HOLD` (a conditional sd, never above the marginal
+    one: a focal length the block does not determine, weighed against the lens prior as anywhere else). A small sd
+    there says the failure came from the other groups (or from focal lengths that are singular only together:
+    two sensors whose ratio the block determines and whose common scale it does not); it and any other failure
+    are no verdict - the focal length is kept at the alignment's estimate (:data:`FOCAL_KEPT_NO_COVARIANCE`)."""
     from dataclasses import replace
 
     from . import bundle
 
-    def singular(verdict) -> str | None:
-        kind, why = verdict.get("focal", (None, None))
-        return str(why) if kind == "no covariance" and "not positive" in str(why) else None
-
-    out = {}
+    singular, undetermined = {}, {}
     for c in refined:
-        why = singular(verdicts[c])
-        if why is not None and len(refined) > 1:
-            alone = [list(asked[o]) if o == c else list(pb.free_intrinsics[o]) for o in range(len(pb.cameras))]
-            why = singular(bundle.judge_intrinsics(replace(pb, free_intrinsics=alone), only=("focal",))[1][c])
-        if why is not None:
-            out[c] = why
-    return out
+        if verdicts[c].get("focal", (None,))[0] != "no covariance":
+            continue
+        focal = bundle.intrinsic_groups(pb.cameras[c][0])["focal"]
+        alone = [[k for k in asked[c] if k in focal] if o == c else [] for o in range(len(pb.cameras))]
+        sds, again, _factor = bundle.judge_intrinsics(replace(pb, free_intrinsics=alone), only=("focal",))
+        kind, why = again[c].get("focal", (None, None))
+        if kind == "no covariance" and "not positive" in str(why):
+            singular[c] = str(why)
+        elif sds[c]["focal"] is not None and sds[c]["focal"] > bundle.FOCAL_SD_HOLD:
+            undetermined[c] = float(sds[c]["focal"])
+    return singular, undetermined
 
 
 def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, sds: dict, unbounded: dict | None = None) -> dict:
@@ -3159,7 +3161,7 @@ def _off_the_lens_prior(chunk: Chunk, sensors: list, pb, sds: dict, unbounded: d
     relative marginal sd of its focal length, None without one: left where it is}: ``{sensor key: {"estimate", "sd", "prior",
     "target"}}`` for those whose sensor has a lens prior (:func:`lens_prior`) and whose focal length is not at its
     target (:func:`lens_target`). ``unbounded``: {index: why} of the cameras whose focal length has no bound
-    (:func:`_unbounded_focals`): nothing of the estimate is known, and the target is the prior itself (``sd`` None,
+    (:func:`_confirmed_focals`): nothing of the estimate is known, and the target is the prior itself (``sd`` None,
     ``singular`` why). A focal length that is where an optimisation before this one put it
     (``Sensor.focal_target``) is left there: it is no estimate of the block any more, and weighing it against
     the prior again would bring it nearer the prior at every run."""
@@ -3287,9 +3289,9 @@ def _note_lens_prior(record: dict, walked: list) -> None:
     notes = []
     for w in walked:
         before, after = w["reprojection"]
-        if w.get("singular"):  # an unbounded focal length (:func:`_unbounded_focals`): the prior is the target
+        if w.get("singular"):  # an unbounded focal length (:func:`_confirmed_focals`): the prior is the target
             where = (f"the lens prior, the block holding nothing of its estimate {w['estimate']:.2f} px (its normal "
-                     f"matrix singular with it free: {w['singular']})")
+                     f"matrix singular with only its focal length free: {w['singular']})")
         elif w["sd"] is None:  # nothing known of the estimate: the prior is the target
             where = f"the lens prior, its estimate {w['estimate']:.2f} px being without an sd"
         else:
@@ -3520,10 +3522,14 @@ def _optimize_own(chunk: Chunk, fit_principal_point: bool, use_markers: bool, gn
             # sd it has with the focal length free - and weighed against the lens prior as anywhere else
             sds, verdicts, _factor = bundle.judge_intrinsics(replace(pb, free_intrinsics=asked), only=("focal",))
             sensors = _camera_sensors(chunk, rec, ids["cameras"])
-            # the check has just inverted the matrix with the focal lengths held (it has an sd): one that does not
-            # invert once a focal length is free says that focal length is unbounded, not that nothing is known
-            inverted = any(sd is not None for group in bundle.JUDGED for _sensor, sd in check[f"{group}_sd"])
-            unbounded = _unbounded_focals(pb, asked, refined, verdicts) if inverted else {}
+            # the check inverted the matrix with the focal lengths held and every other group free when every group
+            # it judged has an sd (a group held for want of a covariance has none): a focal length without one is
+            # then asked again alone, which tells an unbounded focal length from a failure of the other groups
+            held_sds = [sd for group in bundle.JUDGED for _sensor, sd in check[f"{group}_sd"]]
+            inverted = bool(held_sds) and all(sd is not None for sd in held_sds)
+            unbounded, alone = _confirmed_focals(pb, asked, refined, verdicts) if inverted else ({}, {})
+            for c, sd in alone.items():
+                sds[c]["focal"] = sd
             for c in refined:
                 if sds[c]["focal"] is None and sensors[c] is not None and c not in unbounded:
                     note = f"sensor {sensors[c]}: focal: the block gave no covariance; {FOCAL_KEPT_NO_COVARIANCE}"

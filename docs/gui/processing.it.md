@@ -99,8 +99,8 @@ della calibrazione che il blocco non determina* per rifinire tutto comunque (`pp
 in un batch, la stessa spunta nel passo). Il controllo gira sul core nativo; senza, la calibrazione viene rifinita
 come prima e il log lo dice. Quando il blocco non dà una covarianza con cui misurare una parte, quella parte resta
 ferma senza essere stata misurata, e nel log c'è un avviso; una focale tenuta così resta dove l'ha messa
-l'allineamento, senza avvicinarla al valore delle foto. Un blocco che nulla colloca e che non si può misurare solo
-quando la sua focale è libera (lì è singolare) non conosce affatto la focale: quella va al valore delle foto.
+l'allineamento, senza avvicinarla al valore delle foto. Un blocco che nulla colloca e che non si può misurare
+con libera la sola focale (lì è singolare) non conosce affatto la focale: quella va al valore delle foto.
 
 **Punti di controllo solo agli angoli di un blocco piatto.** Un blocco di foto nadirali su terreno piatto può
 piegarsi a cupola - il centro più alto o più basso dei bordi - mentre la distorsione radiale compensa nelle
