@@ -641,7 +641,9 @@ radial terms are judged with the focal length held: free where the sd of the dis
 corner of the photo is 0.5 px at most, held above; a freed round that moves the focal length by more than 20 %,
 or the corner by more than a quarter of the half diagonal through the radial terms, is run again with them
 held; `report["focal_sd"]`, `report["intrinsics_held"]` (the focal length held), `report["radial_sd"]`,
-`report["radial_held"]` and the notes say so). After the rounds every track of three photos or more is
+`report["radial_held"]` and the notes say so; radial terms freed with the focal length held are provisional,
+`meta["sfm"]["native_mapper"]["radial_provisional"]`, judged again by the camera optimisation). After the rounds
+every track of three photos or more is
 triangulated again and the block adjusted once more with all of them, filtered before and after in pixels as
 COLMAP's retriangulation filters (an observation more than 4 px off, a point whose rays meet at less than
 1.5 degrees: the options `final_max_reprojection_px` and `final_min_triangulation_deg` of the mapper, the C++
@@ -786,9 +788,16 @@ px) keeps its figure over the walk (0.39 px at most). The weak ring then holds i
 alignment put them (1.3 px along the valley with COLMAP's formulation, 2.4 px with ours; the true error of k1 over
 the five renderings spreads 1.8 px at the corner), k1 within 0.006 of the true one, the control targets at 1 mm
 and the check targets at 5 mm. The native alignment still frees them on such a block (0.26 px, its own judgement,
-without a walk). An order by how far each group is beyond its limit, tried before the walk, gave up the radial
-terms in place of the tangential ones of our formulation (3.1 px while those are free) and left the check targets
-at 17 mm. Oblique photos
+taken after its first round with the radial terms at their starting values, without a walk), and the record of the
+alignment keeps that freeing as provisional (`meta["sfm"]["native_mapper"]["radial_provisional"]`, `[camera, sd]`,
+only when there is one; the log says so): this optimisation is what judges them. Freeing them there is still
+right: held at zero they leave the check targets at 17 mm, and the free estimate is the one the tie points prefer
+(the true lens lies about 10 above it in chi-square on the two renderings walked). Holding the weak ring's k1 at the true lens instead of the estimate
+changes neither error beyond the spread of the renderings (check 4.6 against 4.9 mm, control 1.8 against 1.6 mm,
+mean of five), a centre of the valley moves k1 by 0.1 to 0.5 px at the corner for no measurable gain, and a prior
+towards zero pulls it the wrong way. An order by how far each group is beyond its limit, tried before the walk,
+gave up the radial terms in place of the tangential ones of our formulation (3.1 px while those are free) and left
+the check targets at 17 mm. Oblique photos
 around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole calibration is
 refined as before. A group that has no covariance at all (a normal matrix that cannot be inverted) is held
 without having been judged: its note says so in its own words (`not judged, the block gave no covariance`) and
