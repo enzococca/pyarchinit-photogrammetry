@@ -500,8 +500,8 @@ class Chunk:
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
                       use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
-                      ba_global_ratio: float | None = None, ba_global_refinements: int | None = None, *,
-                      engine: str | None = None, gps_height_by_flight: bool | None = None) -> int:
+                      ba_global_ratio: float | None = None, ba_global_refinements: int | None = None,
+                      gps_height_by_flight: bool | None = None, *, engine: str | None = None) -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
         ``mapper``: ``incremental``, ``global`` or ``auto``; ``use_gps`` (None: when the photos
         have them): the GPS positions of the photos hold the block during the incremental
