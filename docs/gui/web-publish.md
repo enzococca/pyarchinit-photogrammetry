@@ -107,6 +107,91 @@ The r2.dev address is meant for trying: for a site that stays online, connect a 
 dashboard (*R2 > the bucket > Settings > Custom Domains*; the domain must be on Cloudflare) and write its `https://`
 address in **Address of the data**: the program then leaves r2.dev alone.
 
+## Unit records and volumes
+
+Since 2.1.0 a site can carry the **records of the stratigraphic units** kept in PyArchInit and the **volumes of the
+units** made by the program (or modelled in Blender and brought back by the blender-em plugin).
+
+**What the visitor gets.** A click on a unit - its polygon on the plan, its outline on an elevation, its volume in
+the 3D view - opens its record in the side panel: the title (`US 12 - Strato`), then the fields by group as the US
+form of PyArchInit groups them (identification, definition, location, description, chronology, formation and
+features, excavation, measures, heights, masonry) and the stratigraphic relations. Empty fields are not shown; the
+names of the fields are in the languages of the page, the values as written in the database. Each relation toward a
+unit that the site has is a button: it selects that unit (on the plan its polygons drawn over and in view, in the 3D
+view its volume marked) and opens its record; a relation toward a unit the site does not have stays plain text. A
+unit with no record says *No record for this unit*. The 3D view gets the layer **Unit volumes**: a translucent solid
+for each unit, the selected one more opaque with its edges, and a legend; a click on a volume gives the same record,
+also when the volume lies behind the model. While measuring (*Distance*, *Area*) a click takes the nearest surface,
+the model or a volume, so that a volume under the ground does not change the measure. A chunk with volumes and no
+model gets a 3D view with the volumes alone.
+
+**The two boxes** in step 1 of the pane, under the products:
+
+- **Unit records from PyArchInit** (off by default) can be ticked once PyArchInit is connected (*PyArchInit* menu);
+  until then its tooltip says so. Ticked, the pane says beside it how many units of the ticked chunks have their
+  record (*12 units of 15 with their record*), counted as the build will match them and following the products
+  ticked; its tooltip lists the units without a record with the reason (*no number*, *no site*, *no record with this
+  number*, *several possible records*) and those whose record was found ignoring the type or the area. A database
+  that cannot be read is said in red beside the box (*PyArchInit cannot be read*, the error in its tooltip).
+- **Names of people** (off by default): see [Names of people](#names-of-people).
+
+**What becomes public** with the records: the record of each unit of the site that matches exactly one row of
+`us_table` - the columns that describe the unit (identification, definitions, place, texts, chronology, formation,
+excavation, measures, heights, relations, the masonry tab), 101 in all, with the texts as they are written
+(descriptions, interpretations, observations). Never published: the system and administrative columns, the accounts
+of whoever wrote a record, the catalogue numbers and the lists of documents and places that mean nothing outside the
+database (27 columns), and any column that a newer PyArchInit adds and the program does not know. The three columns
+with the names of people (`schedatore`, `direttore_us`, `responsabile_us`) only with the box **Names of people**. No
+photograph of a unit goes to the site. Step 4 lists the records under what becomes public (**Check**, and
+`--dry-run` on the command line), and **Publish...** says it in its confirmation: *the records of 12 stratigraphic
+units become public too, their texts included: names typed in a text are not looked for*. A name written inside a
+description, an interpretation or a note is published as it is written, with the box **Names of people** on or off:
+read the texts before publishing, or leave the box of the records off.
+
+**How a unit finds its record.** The site of a unit is the `sito` of its polygon, else the site of the project; a
+unit with no site or no number has no record, and the units of another site are never read. Among the rows of that
+site with the same number (compared as text, spaces trimmed): those with the same area and type; none, those with
+the same area whatever the type (a polygon is `US` until someone sets its type); a polygon without an area, the
+same two steps over every area. A step gives the record only when exactly one row is left: with several rows the
+unit has none - never a guess. A volume takes the record of the polygon of its chunk with the same type and number
+(and area, when both have one), else it is matched in the same way with the site of the project. The relations come
+from `rapporti` of the record.
+
+**A snapshot.** The records are those of the moment the site is built: the published site is files and never
+talks to the database. A record changed in PyArchInit reaches the site when the site is built and published again.
+
+**Heights in a local frame.** In the local frame (the default) the site does not say where the survey is, and the
+heights of its DEM are lowered by a whole number of metres. The absolute heights of a record (`quota_abs`,
+`quota_max_abs`, `quota_min_abs`) are lowered by the same amount, so that they agree with what the visitor reads on
+the DEM; when nothing in the site fixes that amount (no DEM, model, cloud, volume or drawn height) they are left
+out, since publishing them would tell the true heights. The relative heights (`quota_relativa`, `quota_max_rel`,
+`quota_min_rel`) go as written. A height written with a comma (`245,30`) is read; a text with anything else in it
+(`245,30 m s.l.m.`) is left out in a local frame. With **Real coordinates** every height goes as written.
+
+**Heights of the masonry units.** The form of PyArchInit does not say whether `quota_min_usm` and `quota_max_usm`
+are absolute or relative: it depends on how they were taken, so the program asks whoever publishes. The choice
+**Heights of the masonry units** under the box of the records: *do not publish* (the default: neither a true
+height published nor a relative one made wrong without a word from you), *relative* (published as written, like
+`quota_relativa`) or *absolute* (lowered like `quota_abs`, left out when nothing fixes the amount). With **Real
+coordinates** the choice is hidden: both go as written, which is right either way. The two boxes and the choice are
+kept with the other settings of the pane, in the project.
+
+**The volumes** are the product **Unit volumes** (`proxies`), ticked by default for a chunk that has them: all the
+volumes of the chunk (`chunk.meta["proxies"]`). A volume of the program has four faces for
+each cell of the DEM; for the site each one is thinned to about 20,000 faces, a chunk to about 600,000, keeping
+each solid closed and its thickness (a layer three centimetres thick does not collapse), and `proxies.glb` stays
+under the 25 MiB of a Pages file. A volume whose file is missing or unreadable, or that cannot be thinned, is left
+out and said in the notes of the build. In a local frame the volumes join the chain that fixes the base of the heights (after the DEM,
+the model and the cloud), so a chunk with volumes alone does not publish their true heights. No file path, no
+internal id and not the `sito` written with a volume go to the site. Colours: those of the program, unless a plugin
+groups the units (for instance the epochs of the blender-em plugin, [plugins](../plugins.md#on-the-web-site-of-a-survey)):
+then the legend has a switch for each group, the volumes in no group in a last group *No group*.
+
+**Without PyArchInit.** When the box is ticked but PyArchInit is not connected, or its database cannot be read at
+the moment of the build, the pane builds the site without the records and says so in the Log pane (*Site without
+the unit records: ...*); the build is not stopped. The command line instead stops: `ppg web build --pyarchinit`
+ends with code 1 and builds nothing when the database cannot be read (below).
+
 ## Names of people
 
 Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps the name of a person:
@@ -119,8 +204,18 @@ Since 2.0.0 the site does not publish the attributes in which PyArchInit keeps t
 
 Nor those in which it keeps the account of whoever wrote a record: `last_modified_by`, `created_by`, `updated_by`,
 `editing_by`. They are left out of everything the site publishes - units, spot heights, drawings (a layer imported
-among them brings its columns), sections and elevations, what the plugins add (their layers, tables and legends).
-Nothing changes in the project or in PyArchInit: the names stay there.
+among them brings its columns), sections and elevations, the records of the units, what the plugins add (their
+layers, tables and legends). Nothing changes in the project or in PyArchInit: the names stay there.
+
+**The box Names of people** (since 2.1.0, step 1 of the pane, off by default; `ppg web build --people`,
+`export_site(people=True)`): ticked, the names go to the site - the attributes above wherever the site would publish
+them, and in the records of the units the group *People* with `schedatore`, `direttore_us` and `responsabile_us`.
+The accounts of whoever wrote a record are never published, ticked or not. A site built with the names says so in
+`site.json` (`"people": true`), step 4 lists them under what becomes public and **Publish...** says it in its
+confirmation (*the names of people of the records and drawings become public*). If the site is built again between
+**Check** and **Publish...** with more records or with the names, the publication stops and asks for a new check.
+The box decides only the attributes named here: a name typed inside a text is not looked for, whether the box is
+on or off (below).
 
 An attribute is recognised by its name, whatever the case of its letters and whatever stands between them
 (`Disegnatore`, `Direttore US`, `direttore-us`, `nomeCompilatore`), also as a shapefile cuts a long name: to its
@@ -232,6 +327,22 @@ to go on. The wrangler commands, in order: `pages project delete NAME --yes`, `r
 last `r2 bucket delete BUCKET` (when asked and allowed). A project or a bucket that wrangler does not find in its
 account is written as `not found in this Cloudflare account (it counts as removed)`, with a `note:` line naming the
 address to check.
+
+The site itself is built by `ppg web build` ([A survey as a web site](../api.md#a-survey-as-a-web-site)). Since
+2.1.0, with the records of the units and the names of people:
+
+    ppg web build PROJECT.ppg SITE_FOLDER --pyarchinit                         # the records, database of config.cfg
+    ppg web build PROJECT.ppg SITE_FOLDER --pyarchinit --url DATABASE          # a SQLite path or an SQLAlchemy URL
+    ppg web build PROJECT.ppg SITE_FOLDER --pyarchinit --usm-heights relative  # none (default), relative, absolute
+    ppg web build PROJECT.ppg SITE_FOLDER --people                             # the names of people too
+
+`--pyarchinit` reads the rows of `us_table` of the sites of the units (the database of PyArchInit's `config.cfg`,
+or `--url`), prints `records: N of M units` and, for each unit without a record, its chunk and the reason (`no
+number`, `no site`, `no row`, `several rows`). When the database cannot be read it prints `PyArchInit cannot be
+read: ...` and ends with code 1, building nothing - unlike the pane, which builds the site without the records and
+says so in the Log pane. `--usm-heights` is the choice of the heights of the masonry units
+([above](#unit-records-and-volumes)); with `--frame crs` both heights go as written, whatever it says; `--people` works with or without `--pyarchinit`
+(the names of the drawings too). `--product proxies` is the unit volumes, among the products taken by default.
 
 ## Other hostings
 

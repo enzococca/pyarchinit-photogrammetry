@@ -1517,14 +1517,20 @@ and the page asks nothing outside its own folder (no CDN).
 
 | Call | Description |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | the site of the chunks (objects, keys or labels, or chunk objects of other projects; default every chunk with something to publish); returns the path of `site.json`. Since 1.10.0 the cloud, the sections, the dates, the budget (below) |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None, people=False, unit_records=None, usm_heights="none")` | the site of the chunks (objects, keys or labels, or chunk objects of other projects; default every chunk with something to publish); returns the path of `site.json`. Since 1.10.0 the cloud, the sections, the dates, the budget (below); since 2.1.0 the names of people (`people`), the records of the units (`unit_records`, `usm_heights`) and the product `proxies` (below) |
 | `io.site.build_notes(manifest)` | since 1.10.0: what the build reduced or left out (`build.notes` of `site.json`, published with the site; since 2.0.0 they give the kind alone of the error of a plugin, whose text is in the log of the program) |
 | `io.site.chunk_date(chunk)` | since 1.10.0: the date of a survey, `YYYY-MM-DD`: the one set on the chunk (`archaeo.timeline.set_phase_date`), else the earliest of its photos |
 | `io.site.export_site(document, folder, ...)` | the same as a module function |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | a static server with HTTP range requests for a site folder, not started (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` a free port, in `server_address`; `ranges=False` answers with whole files, as a host without range requests |
 | `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | the same server in a thread of its own: `.start()`, `.url`, `.port`, `.stop()` (the thread joined, the port freed); the window's preview |
 | `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | the site built last kept in `document.meta["web_site"]` (folder relative to the project when it lies there, options, time, size, the state of its products from `site_sources(document, chunks, products)` taken before the build); `site_stale` lists the products built again or changed since |
-| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=YYYY-MM-DD]... [--label CHUNK=TEXT]... [--timeline]` | command line: the site written, and what the build reduced; `--chunk OTHER.ppg:LABEL` takes a chunk of another project |
+| `ppg web build project.ppg FOLDER [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections\|proxies]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=YYYY-MM-DD]... [--label CHUNK=TEXT]... [--timeline] [--pyarchinit [--url URL]] [--people] [--usm-heights none\|relative\|absolute]` | command line: the site written, and what the build reduced; `--chunk OTHER.ppg:LABEL` takes a chunk of another project; since 2.1.0 `--pyarchinit` the records of the units from the database of PyArchInit's `config.cfg` (or `--url`: a SQLite path or an SQLAlchemy URL), with `records: N of M units` and the units without one printed - exit code 1, nothing built, when the database cannot be read; `--people` the names of people; `--usm-heights` the heights of the masonry units (default `none`) |
+| `io.site_records.published_columns(people=False)` | since 2.1.0: the columns of `us_table` a site publishes (101, then `schedatore`, `direttore_us`, `responsabile_us` with `people`); `RECORD_FIELDS` (the groups), `PEOPLE_COLUMNS`, `NEVER_COLUMNS` (27), `USM_HEIGHTS` (`"none"`, `"relative"`, `"absolute"`) |
+| `io.site_records.match_unit(rows, sito, area, tipo, us)` | since 2.1.0: the row of `us_table` a unit stands for, as a `Found` (`row`, `step`: 0 none, 1 area and type, 2 area only, 3 every area; `reason`: `"no number"`, `"no site"`, `"no row"`, `"several rows"`; `ignored`) |
+| `io.site_records.unit_sites(document, chunks=None)` | since 2.1.0: the sites whose rows the units of the chunks may stand for (that of each polygon and outline, else `document.meta["sito"]`); never an empty one |
+| `io.site_records.match_report(document, chunks, rows, read=True, products=None)`, `summary(report)` | since 2.1.0: how the units match the rows, without writing anything (one dict a unit: `chunk`, `what`, `label`, `step`, `reason`, `ignored`; `read=False` the volumes not read, as the pane counts); `summary` gives `(matched, total)` |
+| `io.site_volumes.thin_volume(mesh, target_faces)` | since 2.1.0: a unit volume thinned for the site, closed and with its thickness: `(mesh, how)`, `how` among `"kept"`, `"quadric"`, `"regrid"`, `"dropped"` (mesh None); `VOLUME_FACES` (20,000), `CHUNK_VOLUME_FACES` (600,000) |
+| `PyArchInit.us_rows(sites)` | since 2.1.0: the rows of `us_table` of the `sites` (each read once, trimmed; an empty one left out), never a query without a site |
 | `ppg web serve FOLDER [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | command line: the site served to look at it, on this computer alone unless `--host` says otherwise; `--no-ranges` to see the page as on a host without range requests |
 
 **The folder**: `index.html`, `site.json` (the manifest: format `ppg-site` version 1, title, languages,
@@ -1536,9 +1542,10 @@ chunks): `ortho.tif` (Cloud Optimized GeoTIFF, WebP with its alpha), `dem.tif` (
 (spot heights, break lines, measuring points and the free drawings, each feature with its `layer`),
 `model/` (the 3D model as 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`), since 1.10.0
 `cloud/` and `cloud.copc.laz` (the point cloud), `sections/` and `sections.geojson` (the sections and elevations)
-and `plugins/<plugin>/` (what plugins add).
+and `plugins/<plugin>/` (what plugins add), since 2.1.0 `records.json` (the records of the units) and `proxies.glb`
+with `proxies.json` (the volumes of the units).
 `products` chooses among `"orthomosaic"`, `"dem"` (with its relief), `"units"`, `"drawings"`, `"model"`, `"cloud"`,
-`"sections"`; by default all the chunk has but the cloud, which goes only when asked for.
+`"sections"`, `"proxies"` (since 2.1.0); by default all the chunk has but the cloud, which goes only when asked for.
 `model_texture` is the largest side of a texture page of the model (default 4096: a few MB of JPEG a page,
 so that a normal trench stays within a few hundred MB; `None` or `--model-texture 0` for vertex colours
 alone); `model_faces` the faces of a tile. A chunk without a model has no 3D view.
@@ -1567,7 +1574,9 @@ plugins give, also inside a value that is a dict or a list. `assistant.privacy.i
 between them (`Direttore US`, `nomeCompilatore`), or what a shapefile keeps of it (`responsabi`, `nomeCompil`,
 `responsa_1`); a name that says more (`disegnatore2`) is another attribute. A name written elsewhere (a title, a description, a label,
 a note, another attribute) is published as it is written. Versions 1.9.0 to 1.10.2 published those attributes with
-the others ([Names of people](gui/web-publish.md#names-of-people)).
+the others ([Names of people](gui/web-publish.md#names-of-people)). Since 2.1.0 `people=True` (`--people`, the box
+*Names of people*) publishes them, in the records of the units too; `site.json` says which (`"people"`). The
+accounts are never published.
 The chunks of one site must share one reference system, in metres (a system in degrees is refused).
 
 **The folder is never someone else's**: a folder that holds anything but a site built by this program
@@ -1629,6 +1638,42 @@ kept: `export_3dtiles(..., max_total_faces=N)`), and the cloud gets fewer points
 never above 4 million faces at full detail, 8192 pixels a texture page or 500 000 faces a tile, nor a cloud above
 `cloud_points`. What was reduced is in `site.json` (`build`: `budget`, `size`, `reduced` - chunk, product, what,
 from, to, why - and `notes`), printed by `ppg web build` and written in the Log pane.
+
+**Unit records** (since 2.1.0, `unit_records`): the rows of PyArchInit's `us_table` - read by the caller, the
+site never connects to a database: `PyArchInit.us_rows(io.site_records.unit_sites(doc))` - and each unit of the
+plan, each unit outline of a section or elevation and each volume that matches exactly one of them gets its record
+in `data/[<n>/]records.json` (`{key: {"title", "groups": [{"name", "fields": [[column, value], ...]}], "relations":
+[[kind, us, area, key or null]]}}`), and `record` (its key) on its feature; `site.json` gives each chunk with
+records `records` (`url`, `count`) and the titles of the groups (`record_groups`). The site of a unit is its own,
+else `document.meta["sito"]`; the matching (`io.site_records.match_unit`) never guesses: several rows, no record. The
+columns are those of `published_columns(people)`; a column the program does not know is never published. The
+relations come from `rapporti`; a relation toward a unit of the site carries its key. Heights: in the local frame the
+absolute ones lowered by the base of the heights of the site, as the DEM, and left out when nothing fixes it; the
+relative ones as written; `quota_min_usm` and `quota_max_usm` by `usm_heights` - `"none"` (default, left out),
+`"relative"` (as written) or `"absolute"` (as the absolute ones); in the `crs` frame all as written. The records are
+a snapshot of the build: build again to update them. `None` (the default): no record, and a site built again without
+them has no `records.json`, no `record` and no `records` in `site.json`. What the pane shows and asks:
+[Unit records and volumes](gui/web-publish.md#unit-records-and-volumes).
+
+**Unit volumes** (since 2.1.0, `"proxies"`, on by default for a chunk that has them): the volumes of
+`chunk.meta["proxies"]` thinned to about 20,000 faces each and 600,000 a chunk (each solid kept closed, a thin layer
+kept thick), in `proxies.glb` (one node a unit, named by its key, in the frame and axes of the model tiles, under
+25 MiB) and `proxies.json` (label, unit, volume, area, top and bottom in the frame of the site, colour, group,
+`record`); no file path, no id, not the `sito` of an entry. A volume takes the record of the polygon of its chunk
+with the same type and number. A volume whose file is missing or unreadable, or that cannot be thinned, is left out
+with a note. In the local frame the volumes fix the base of the heights after the DEMs, the models and the clouds.
+The 3D tab has the layer *Unit volumes* with its legend; a plugin can group the units (`unit_groups`, site hook 3,
+[Plugins](plugins.md#on-the-web-site-of-a-survey)). Since 2.1.0 a volume made from drawn units records the site of
+its unit, else the project's (no longer the first site of the database).
+
+```python
+from pyarchinit_photogrammetry.io import site_records
+from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+rows = PyArchInit.connect().us_rows(site_records.unit_sites(doc))
+print(site_records.summary(site_records.match_report(doc, None, rows)))   # (matched, total)
+doc.export_site("site_records", unit_records=rows, usm_heights="relative")
+```
 
 **What plugins add** (since 1.10.0): a plugin registers `context.add_site_contributions(provider)` (see
 [Plugins](plugins.md#on-the-web-site-of-a-survey)); its layers are drawn on the plan with a legend and their

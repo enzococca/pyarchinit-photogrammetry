@@ -103,7 +103,9 @@ are not published ([Names of people](web-publish.md#names-of-people)). Four step
    reduced), the **Points of the cloud** at most (3 million) and **One date at a time** (the chunks as surveys of
    different dates - the date of the chunk or of its photos -, shown one at a time with a selector of the dates).
    The **Point cloud** is a product to tick (not ticked by default: it weighs), **Sections and elevations** go with
-   their orthophotos and drawings in a tab of their own. The folder of the site
+   their orthophotos and drawings in a tab of their own. Since 2.1.0 **Unit volumes** go to the 3D view, and the
+   boxes **Unit records from PyArchInit** and **Names of people** with the choice **Heights of the masonry units**
+   add the records of the units and the names ([Unit records and volumes](web-publish.md#unit-records-and-volumes)). The folder of the site
    (by default `<project>_sito_web` beside the project file) must be new, empty or a site built before: a folder with
    other files is refused and never touched.
 2. **Build**: in the background, with its progress and *Cancel*; the steps in the Log pane, the size of the site at

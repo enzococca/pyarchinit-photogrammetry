@@ -285,7 +285,7 @@ sito non pubblica nemmeno nomi di persone: un attributo di `assistant.privacy.PE
 `last_modified_by`, `created_by`, `updated_by`, `editing_by`), riconosciuto dal nome come dice
 [Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone), resta fuori dalle proprietà di un elemento e dalle
 righe di una tabella, a qualsiasi profondità, e non ha colonna, nome in `fields` né legenda - una legenda su un campo
-così scriverebbe i suoi valori, i nomi, in `site.json`. Quello che un plugin scrive altrove viene pubblicato com'è -
+così scriverebbe i suoi valori, i nomi, in `site.json`. Dalla 2.1.0 un sito costruito con i nomi delle persone (la casella *Nomi delle persone*, `export_site(people=True)`) tiene anche gli attributi di `PEOPLE_FIELDS` che dà un plugin, con lo stesso filtro di quelli del programma; quelli di `ACCOUNT_FIELDS` mai. Quello che un plugin scrive altrove viene pubblicato com'è -
 un nome sotto un'altra chiave, in un titolo, nel testo di una pagina `html`, nell'`id`, nel `kind` o nell'`elevation` di un
 contributo (un rifiuto del programma li cita nelle note): tieni fuori i nomi delle persone. L'`id` è fatto di lettere minuscole, cifre, `-` e `_`, una volta per
 plugin.
@@ -362,6 +362,48 @@ def sito_con_sistema(self, chunk, site):
 
 Anche di questa forma i test ne contengono uno (`tests/test_site_more.py`, classe `OnElevation`).
 
+**Gruppi delle unità, per i loro volumi** (dalla 2.1.0, `site_hook` 3). Un contributo del tipo `"unit_groups"`
+raggruppa le unità stratigrafiche; i gruppi colorano i volumi delle unità nella vista 3D del sito (prodotto
+`proxies`, [Schede e volumi delle US](gui/web-publish.it.md#schede-e-volumi-delle-us)) e ne danno la legenda, con un
+interruttore per gruppo:
+
+```python
+{"kind": "unit_groups", "id": "epoche", "title": {"it": "Epoche", "en": "Epochs"},
+ "groups": [{"name": "e1", "title": "Epoca I", "colour": "#d62728",
+             "units": [{"tipo": "US", "us": "12", "area": "1"}, {"us": 14}]},
+            {"name": "e2", "title": {"it": "Epoca II", "en": "Epoch II"}, "colour": "#1f77b4",
+             "units": [{"tipo": "USM", "us": "3"}]}]}
+```
+
+Un'unità si nomina con il tipo (`"US"` quando manca) e il numero, confrontati come testo, senza spazi ai lati; con
+l'area quando il plugin la conosce, e allora l'area del volume deve coincidere quando ne ha una. Un'unità nominata da
+due gruppi appartiene al primo; un'unità senza volume viene ignorata; i volumi che non sono in nessun gruppo tengono i
+colori del programma, in un ultimo gruppo *Senza gruppo* / *No group*. Un `colour` che non è `#rrggbb` prende il
+colore del programma secondo l'indice del gruppo; un gruppo senza `name` resta fuori. Un solo insieme di gruppi per
+chunk: un secondo contributo `unit_groups` per lo stesso chunk resta fuori con una nota; i gruppi per un chunk senza
+volumi vengono ignorati. Nomi e titoli sono puliti come ogni testo, e niente di tutto questo viene scritto sotto
+`data/plugins/`: i gruppi vanno in `proxies.json` e nel livello dei volumi in `site.json`. In questo passo i gruppi
+colorano solo i volumi: i poligoni della pianta tengono il loro stile. Il plugin blender-em lo usa per le epoche del
+suo `em.json`.
+
+Un programma più vecchio non conosce questo tipo e lascia fuori il contributo con una nota, quindi un plugin che può
+girarci lo dà solo quando l'aggancio lo dice:
+
+```python
+def activate(self, context):
+    self.context = context
+    hook = getattr(context, "site_hook", 1) if hasattr(context, "add_site_contributions") else 0
+    if hook >= 2:
+        context.add_site_contributions(self.sito_con_sistema, with_site=True)
+
+def sito_con_sistema(self, chunk, site):
+    out = [...]  # layer, tabelle, pagine come sopra
+    if getattr(self.context, "site_hook", 1) >= 3:  # dalla 2.1.0: i gruppi delle unità
+        out.append({"kind": "unit_groups", "id": "epoche", "title": {"it": "Epoche", "en": "Epochs"},
+                    "groups": epoche_di(chunk)})
+    return out
+```
+
 ### Compatibilità
 
 `Plugin.api` è l'API dei plugin per cui il plugin è stato scritto (`pyarchinit_photogrammetry.plugins.API_VERSION`,
@@ -369,7 +411,7 @@ ora 1): un programma con un'API più vecchia rifiuta il plugin con un messaggio.
 versione più vecchia del programma con cui un plugin funziona (`min_app`): un plugin che usa i metodi
 indicati "dalla 1.3.2" chiede `min_app` 1.3.2, uno che usa `on_refresh` 1.3.3, uno che usa quelli "dalla 1.3.4"
 1.3.4, `add_rasters` e `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` e `free_drawings` 1.7.2, `add_rail_group` e `add_action` dopo `activate` 1.7.4, `add_site_contributions` 1.10.0 (la 1.7.3 e le
-precedenti ignorano un'azione aggiunta dopo), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` e `add_units(elevation=)` 1.10.0, `add_units(elevation=Context.PLAN)` (US della pianta mentre è mostrato un prospetto: sono disegnate quando si torna alla pianta) e `supports(feature)` 1.10.1 - `Context.FEATURES`: `elevation-drawings`, `elevation-removal-takes-drawings` (togliere un prospetto toglie i disegni tenuti con lui), `plan-units-while-elevation`; con un programma precedente `getattr(context, "supports", None)` è None. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
+precedenti ignorano un'azione aggiunta dopo), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` e `add_units(elevation=)` 1.10.0, `add_units(elevation=Context.PLAN)` (US della pianta mentre è mostrato un prospetto: sono disegnate quando si torna alla pianta) e `supports(feature)` 1.10.1, i contributi al sito del tipo `unit_groups` (`site_hook` 3) 2.1.0 - `Context.FEATURES`: `elevation-drawings`, `elevation-removal-takes-drawings` (togliere un prospetto toglie i disegni tenuti con lui), `plan-units-while-elevation`; con un programma precedente `getattr(context, "supports", None)` è None. I plugin scritti prima della 1.3.4 mettono il loro pannello fra le schede della
 finestra con `window.left_tabs.addTab(pane, icon, title)`, lo mostrano con
 `window.left_tabs.setCurrentWidget(pane)` seguito da `window.d_work.show()` e `window.d_work.raise_()`,
 e lo tolgono con `removeTab(indexOf(pane))`: dalla 1.3.4 ogni pannello è un dock a sé, e queste

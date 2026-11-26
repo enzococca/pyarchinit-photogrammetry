@@ -283,7 +283,7 @@ the site publishes no name of people either: an attribute of `assistant.privacy.
 `last_modified_by`, `created_by`, `updated_by`, `editing_by`), told by its name as
 [Names of people](gui/web-publish.md#names-of-people) says, is left out of the properties of a feature and of the
 rows of a table, at any depth, and gets no column, no name in `fields` and no legend - a legend on such a field
-would write its values, the names, in `site.json`. What a plugin writes elsewhere is published as given - a name
+would write its values, the names, in `site.json`. Since 2.1.0 a site built with the names of people (the box *Names of people*, `export_site(people=True)`) keeps the attributes of `PEOPLE_FIELDS` that a plugin gives too, by the same filter as the program's own; those of `ACCOUNT_FIELDS` never. What a plugin writes elsewhere is published as given - a name
 under another key, in a title, in the text of an `html` page, in the `id`, the `kind` or the `elevation` of a
 contribution (a refusal of the program quotes them in the notes): keep the names of people out of it. The `id` is lowercase letters, digits, `-` and `_`, once per plugin.
 
@@ -357,6 +357,47 @@ def site_with_frame(self, chunk, site):
 
 The tests carry one of this form too (`tests/test_site_more.py`, class `OnElevation`).
 
+**Groups of the units, for their volumes** (since 2.1.0, `site_hook` 3). A contribution of the kind
+`"unit_groups"` groups the stratigraphic units; the groups colour the volumes of the units in the 3D view of the
+site (product `proxies`, [Unit records and volumes](gui/web-publish.md#unit-records-and-volumes)) and give their
+legend, with a switch per group:
+
+```python
+{"kind": "unit_groups", "id": "epochs", "title": {"it": "Epoche", "en": "Epochs"},
+ "groups": [{"name": "e1", "title": "Epoca I", "colour": "#d62728",
+             "units": [{"tipo": "US", "us": "12", "area": "1"}, {"us": 14}]},
+            {"name": "e2", "title": {"it": "Epoca II", "en": "Epoch II"}, "colour": "#1f77b4",
+             "units": [{"tipo": "USM", "us": "3"}]}]}
+```
+
+A unit is named by its type (`"US"` when not given) and its number, compared as text, spaces trimmed; with its
+area when the plugin knows it, and then the area of the volume must agree when it has one. A unit named by two
+groups belongs to the first; a unit with no volume is ignored; the volumes in no group keep the colours of the
+program, in a last group *Senza gruppo* / *No group*. A `colour` that is not `#rrggbb` takes the colour of the
+program by the index of the group; a group without a `name` is left out. One set of groups a chunk: a second
+`unit_groups` contribution for the same chunk is left out with a note; groups for a chunk without volumes are
+ignored. The names and titles are cleaned as every text, and nothing of it is written under `data/plugins/`: the
+groups go into `proxies.json` and the layer of the volumes in `site.json`. In this step the groups colour only the
+volumes: the polygons of the plan keep their style. The blender-em plugin uses it for the epochs of its `em.json`.
+
+An older program does not know this kind and leaves the contribution out with a note, so a plugin that may run on
+one gives it only when the hook says so:
+
+```python
+def activate(self, context):
+    self.context = context
+    hook = getattr(context, "site_hook", 1) if hasattr(context, "add_site_contributions") else 0
+    if hook >= 2:
+        context.add_site_contributions(self.site_with_frame, with_site=True)
+
+def site_with_frame(self, chunk, site):
+    out = [...]  # layers, tables, pages as above
+    if getattr(self.context, "site_hook", 1) >= 3:  # 2.1.0 and later: the groups of the units
+        out.append({"kind": "unit_groups", "id": "epochs", "title": {"it": "Epoche", "en": "Epochs"},
+                    "groups": epochs_of(chunk)})
+    return out
+```
+
 ### Compatibility
 
 `Plugin.api` is the plugin API the plugin was written for (`pyarchinit_photogrammetry.plugins.API_VERSION`,
@@ -364,7 +405,7 @@ now 1): a program with an older API refuses the plugin with a message. The index
 oldest version of the program a plugin works with (`min_app`): a plugin that uses the methods marked
 "since 1.3.2" asks for `min_app` 1.3.2, one that uses `on_refresh` 1.3.3, one that uses those "since 1.3.4"
 1.3.4, `add_rasters` and `rasters` 1.4.0, `add_units` 1.5.0, `orient`, `on_transform_changed` and `free_drawings` 1.7.2, `add_rail_group` and `add_action` after `activate` 1.7.4, `add_site_contributions` 1.10.0 (1.7.3 and older
-ignore an action added later), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` and `add_units(elevation=)` 1.10.0, `add_units(elevation=Context.PLAN)` (units of the plan while an elevation is shown: they are drawn when the plan is shown again) and `supports(feature)` 1.10.1 - `Context.FEATURES`: `elevation-drawings`, `elevation-removal-takes-drawings` (removing an elevation removes the drawings kept with it), `plan-units-while-elevation`; with an older program `getattr(context, "supports", None)` is None. The plugins written before 1.3.4 put their pane among the tabs of the window with
+ignore an action added later), `shown_elevation`, `show_elevation`, `elevations`, `elevation_drawings` and `add_units(elevation=)` 1.10.0, `add_units(elevation=Context.PLAN)` (units of the plan while an elevation is shown: they are drawn when the plan is shown again) and `supports(feature)` 1.10.1, the site contributions of the kind `unit_groups` (`site_hook` 3) 2.1.0 - `Context.FEATURES`: `elevation-drawings`, `elevation-removal-takes-drawings` (removing an elevation removes the drawings kept with it), `plan-units-while-elevation`; with an older program `getattr(context, "supports", None)` is None. The plugins written before 1.3.4 put their pane among the tabs of the window with
 `window.left_tabs.addTab(pane, icon, title)`, show it with `window.left_tabs.setCurrentWidget(pane)`
 followed by `window.d_work.show()` and `window.d_work.raise_()`, and take it away with
 `removeTab(indexOf(pane))`: since 1.3.4 every pane is a dock of its own, and these calls still work -
