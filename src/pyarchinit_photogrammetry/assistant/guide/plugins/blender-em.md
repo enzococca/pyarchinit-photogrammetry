@@ -10,7 +10,7 @@ written: the em.json of the site, exported by PyArchInit or written by EMStudio 
 plugin reads it, gives every proxy the name of its unit in the matrix - the name EMtools pairs a proxy
 with - and writes the files where an EM project keeps them.
 
-This page describes version 0.1.2 of the plugin, which needs pyarchinit-photogrammetry 1.3.4 or later.
+This page describes version 0.2.0 of the plugin, which needs pyarchinit-photogrammetry 2.1.0 or later.
 Its README and source code are in the
 [plugin repository](https://github.com/enzococca/pyarchinit-photogrammetry-plugins/tree/main/plugins/blender-em).
 
@@ -300,6 +300,17 @@ DEM; else EMtools puts it at the 3D cursor. Model it, then send it back with *In
 The button is active while the sync is connected, unless EMtools says it refuses commands: in Blender,
 tick **Accept commands from EMStudio** in the sync panel of EMtools (it is off by default). A unit that already has a proxy in
 Blender is said, and left alone.
+
+## On the web site of a survey { #web-site }
+
+With version 0.2.0 (it needs pyarchinit-photogrammetry 2.1.0) the plugin gives the
+[web site of a survey](../gui/web-publish.md#unit-records-and-volumes) the epochs of the units as groups of their
+volumes: for each epoch of the em.json linked to the chunk that holds units, its name, its colour and its units
+(number, type and area, when known), each unit in the epoch where it first appears; the groups follow the start of
+the epochs. The viewer shows them in the legend of *Unit volumes*, coloured by epoch, with a switch per group; the
+volumes in no group go under *No group*, with the program's colours. Only names, colours and unit numbers are sent:
+nothing of the Blender scene (paths, reference system, shift) reaches the site, and without a readable em.json the
+site is built without groups.
 
 ## Real time: how it works { #realtime }
 

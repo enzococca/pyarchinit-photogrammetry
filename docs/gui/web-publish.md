@@ -125,6 +125,8 @@ also when the volume lies behind the model. While measuring (*Distance*, *Area*)
 the model or a volume, so that a volume under the ground does not change the measure. A chunk with volumes and no
 model gets a 3D view with the volumes alone.
 
+![A unit's record in the published site: the fields by group and the relations as buttons](../img/gui/web-site-record.png)
+
 **The two boxes** in step 1 of the pane, under the products:
 
 - **Unit records from PyArchInit** (off by default) can be ticked once PyArchInit is connected (*PyArchInit* menu);
@@ -134,6 +136,8 @@ model gets a 3D view with the volumes alone.
   number*, *several possible records*) and those whose record was found ignoring the type or the area. A database
   that cannot be read is said in red beside the box (*PyArchInit cannot be read*, the error in its tooltip).
 - **Names of people** (off by default): see [Names of people](#names-of-people).
+
+![Step 1 of the pane Publish on the web: Unit records from PyArchInit ticked with the count of the units matched, Heights of the masonry units and Names of people](../img/gui/web-pane-records.png){ width=420 }
 
 **What becomes public** with the records: the record of each unit of the site that matches exactly one row of
 `us_table` - the columns that describe the unit (identification, definitions, place, texts, chronology, formation,
@@ -147,6 +151,8 @@ photograph of a unit goes to the site. Step 4 lists the records under what becom
 units become public too, their texts included: names typed in a text are not looked for*. A name written inside a
 description, an interpretation or a note is published as it is written, with the box **Names of people** on or off:
 read the texts before publishing, or leave the box of the records off.
+
+![The confirmation of Publish...: the records of the units and the names of people become public](../img/gui/web-publish-consent.png){ width=360 }
 
 **How a unit finds its record.** The site of a unit is the `sito` of its polygon, else the site of the project; a
 unit with no site or no number has no record, and the units of another site are never read. Among the rows of that
@@ -186,6 +192,8 @@ the model and the cloud), so a chunk with volumes alone does not publish their t
 internal id and not the `sito` written with a volume go to the site. Colours: those of the program, unless a plugin
 groups the units (for instance the epochs of the blender-em plugin, [plugins](../plugins.md#on-the-web-site-of-a-survey)):
 then the legend has a switch for each group, the volumes in no group in a last group *No group*.
+
+![The 3D view of the published site: the unit volumes grouped by epoch (blender-em plugin), the model hidden, a selected volume with its record](../img/gui/web-site-volumes.png)
 
 **Without PyArchInit.** When the box is ticked but PyArchInit is not connected, or its database cannot be read at
 the moment of the build, the pane builds the site without the records and says so in the Log pane (*Site without

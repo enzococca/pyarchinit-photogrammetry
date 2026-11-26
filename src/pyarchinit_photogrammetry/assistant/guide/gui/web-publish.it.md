@@ -131,6 +131,8 @@ legenda; un clic su un volume dà la stessa scheda, anche quando il volume sta d
 (*Distanza*, *Area*) un clic prende la superficie più vicina, il modello o un volume, così un volume sotto il terreno
 non cambia la misura. Un chunk con i volumi e senza modello ha una vista 3D con i soli volumi.
 
+![La scheda di un'unità nel sito pubblicato: i campi per gruppo e i rapporti come pulsanti](../img/gui/web-site-record.png)
+
 **Le due caselle** nel passo 1 del pannello, sotto i prodotti:
 
 - **Schede US da PyArchInit** (spenta in partenza) si può spuntare quando PyArchInit è collegato (menu *PyArchInit*);
@@ -141,6 +143,8 @@ non cambia la misura. Un chunk con i volumi e senza modello ha una vista 3D con 
   l'area. Un database che non si legge è segnalato in rosso accanto alla casella (*PyArchInit non leggibile*,
   l'errore nel suggerimento).
 - **Nomi delle persone** (spenta in partenza): vedi [Nomi delle persone](#nomi-delle-persone).
+
+![Il passo 1 del pannello Pubblica sul web: Schede US da PyArchInit spuntata con il conto delle unità trovate, Quote delle USM e Nomi delle persone](../img/gui/web-pane-records.png){ width=420 }
 
 **Che cosa diventa pubblico** con le schede: la scheda di ogni unità del sito che corrisponde a una sola riga di
 `us_table` - le colonne che descrivono l'unità (identificazione, definizioni, localizzazione, testi, cronologia,
@@ -155,6 +159,8 @@ pubblico (**Controlla**, e `--dry-run` dalla riga di comando), e **Pubblica...**
 vengono cercati*. Un nome scritto dentro una descrizione, un'interpretazione o una nota viene pubblicato com'è
 scritto, con la casella **Nomi delle persone** spuntata o no: leggi i testi prima di pubblicare, oppure lascia
 spenta la casella delle schede.
+
+![La conferma di Pubblica...: diventano pubbliche le schede delle unità e i nomi delle persone](../img/gui/web-publish-consent.png){ width=360 }
 
 **Come un'unità trova la sua scheda.** Il sito di un'unità è il `sito` del suo poligono, altrimenti il sito del
 progetto; un'unità senza sito o senza numero non ha scheda, e le unità di un altro sito non vengono mai lette. Tra le
@@ -197,6 +203,8 @@ id interno e non il `sito` scritto con un volume vanno nel sito. Colori: quelli 
 raggruppi le unità (per esempio le epoche del plugin blender-em, [plugin](../plugins.it.md#nel-sito-web-di-un-rilievo)):
 allora la legenda ha un interruttore per ogni gruppo, e i volumi che non sono in nessun gruppo stanno in un ultimo
 gruppo *Senza gruppo*.
+
+![La vista 3D del sito pubblicato: i volumi delle US raggruppati per epoca (plugin blender-em), il modello nascosto, un volume selezionato con la sua scheda](../img/gui/web-site-volumes.png)
 
 **Senza PyArchInit.** Quando la casella è spuntata ma PyArchInit non è collegato, o il suo database non si legge al
 momento della costruzione, il pannello costruisce il sito senza le schede e lo dice nel pannello Log (*Sito senza le
