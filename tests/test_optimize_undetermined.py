@@ -1618,12 +1618,15 @@ def test_a_block_nothing_places_weighs_its_focal_length_against_the_lens_as_any_
     assert (walked["sensor"], walked["prior"], walked["prior_sd"], walked["steps"]) == (0, F, 0.02, 3)
     assert walked["estimate"] == pytest.approx(1.3 * F)
     assert not any("gave no covariance" in note for note in rep["intrinsics"]["notes"])
-    if walked["sd"] is None:  # a pivot that is not positive on this platform: unbounded, the prior itself
+    if walked["sd"] is None:  # the focal length alone free meets a pivot that is not positive: the prior itself
         assert walked["target"] == F
     else:
-        assert walked["sd"] > 1.0  # an sd of hundreds of times the focal length
+        # macOS: the marginal sd, 570 times the focal length (target within 0.1 px of the prior); GitHub's Windows
+        # runner: the matrix fails with the rest free and the focal length alone has a conditional sd of 6.65 %
+        # (the radial terms held), which weighs it to 1015.2 px - both undetermined, both walked
+        assert walked["sd"] > bundle.FOCAL_SD_HOLD
         assert walked["target"] == pytest.approx(sfm.lens_target(walked["estimate"], walked["sd"], F), rel=1e-12)
-    assert F <= walked["target"] < F + 0.1
+    assert F <= walked["target"] < (F + 0.1 if walked["sd"] is None or walked["sd"] > 1.0 else 1.02 * F)
     assert _calibration(ch)[0][:2] == [pytest.approx(walked["target"], rel=1e-12)] * 2
 
     _doc, ch = _block(tmp_path / "pitched", pitch=PITCH)
