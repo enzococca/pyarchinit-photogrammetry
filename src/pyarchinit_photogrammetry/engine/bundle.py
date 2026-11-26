@@ -83,6 +83,24 @@ GROUP_SD_HOLD_PX = 0.5
 JUDGED = ("focal", "tangential", "principal_point", "radial")
 FOCAL_MOVE_HOLD = 0.2
 K1_MOVE_HOLD = 0.5
+# the radial terms of a flat block trade with a bend of the block, and only to second order: the covariance at the
+# flat block (the true lens) puts them at pixels, but off it the block is bent to suit them and the bend itself tells
+# them apart - the covariance taken there gives a fraction of a pixel, the less the further off (engine-m3b Task C:
+# the rendered weak ring, 0.4-0.5 px reported at the corner for estimates 1.6-2.2 px off the true lens on its seeds
+# 0-4; a numeric ring of white noise, 5.9 px at the true lens and 0.35 px at 2 px from it). Every radial group is
+# walked along that valley before it is judged: its first term moved so that the corner of the photo
+# shifts by VALLEY_STEP_PX at a time, up to VALLEY_STEPS steps each way, the block adjusted with the group held
+# there, its covariance taken again; a way stops where the observations reject the shift (the chi-square of the
+# adjustment, variance factor included, above the optimum by more than VALLEY_CHI2, three sigmas). Where the
+# largest sd met is more than VALLEY_FACTOR times the sd at the parameters of the problem, the covariance there does
+# not describe the block, and the group is judged by that largest sd: the block determines it only where it does so
+# anywhere the observations allow. A smaller change is the ordinary dependence of a covariance on where it is taken
+# (a pitched or oblique block: a few per cent over the whole walk), and the sd of the problem stands
+VALLEY_STEP_PX = 0.5
+VALLEY_STEPS = 6
+VALLEY_CHI2 = 9.0
+VALLEY_FACTOR = 1.5
+WALKED = ("radial",)
 # the size of a block nothing places is held, for its covariance, by a position of one photo whose sigma is this
 # many times the extent of the block: a gauge that adds no information the block has (the sd of a focal length is
 # the same to four digits from a tenth of the extent to a hundred times it). Not looser than the extent itself:
@@ -628,6 +646,9 @@ def adjust(pb: Problem, max_iterations: int = 100, progress: Progress | None = N
     return res
 
 
+_adjust_for_the_walk = adjust  # the walk of a valley (judge_intrinsics) adjusts with this one, whatever replaces adjust
+
+
 def evaluate(pb: Problem, loss: str = "none", loss_scale: float = 1.0) -> Evaluation:
     """``pb`` evaluated at the parameters it holds by the native engine (API 12; RuntimeError without
     it): the cost, the residual vector of the reference (:meth:`_Model.residuals`), the gradient of the
@@ -878,6 +899,12 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
     what a flat block cannot tell, not because a lens can do without it: it is given up for the radial terms
     alone, when nothing else is enough, and never for the tangential terms or the principal point.
 
+    The radial terms are walked along their valley first (:data:`VALLEY_STEP_PX`): on a flat block the covariance
+    at radial terms off the true lens is taken on a block bent to suit them and finds them determined by that bend;
+    where the largest sd met along the valley, as far as the observations allow, is more than
+    :data:`VALLEY_FACTOR` times the sd at the parameters of the problem, the radial terms are judged - and their sd
+    given - by it (engine-m3b Task C).
+
     ``together``: a group held for one camera is held for every camera that would refine it (COLMAP's adjustment
     refines a group for all its cameras or for none), and a later group is refined only where giving up the
     earlier groups of every camera lets it pass for all of them. Without a covariance (a normal matrix that
@@ -956,12 +983,56 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
                     continue
                 kept = [columns[(c, k)] for k in refined(c, group)]
                 sd, limit = judged(c, group, _conditional_covariance(matrix, kept, gone))
+                if np.isfinite(sd) and sd <= limit and group in WALKED:
+                    sd = walked(c, group, sd, {o: given for o in owners})
                 if np.isfinite(sd) and sd <= limit:
                     trial[c] = (list(given), sd)
             if together and len(trial) < len(pending):
                 continue  # not for every camera: more is given up, or the group is held
             saved.update(trial)
         return saved
+
+    def walked(c: int, group: str, sd: float, gone: dict) -> float:
+        """The largest sd of ``group`` of camera ``c`` along its valley (:data:`VALLEY_STEP_PX`), ``sd`` the one at
+        the parameters of the problem, ``gone`` ({camera: groups}) what is held besides what is held already."""
+        now = [[k for k in free[o] if not any(k in groups[o][g] for g in gone.get(o, ()))] for o in range(n)]
+        terms = [k for k in now[c] if k in groups[c][group]]
+        model, params, width, height = pb.cameras[c]
+        gain = max(float(np.linalg.norm(jac[:, 0]))
+                   for jac in corner_jacobians(model, params, float(width), float(height), terms[:1]))
+        held_here = [[k for k in now[o] if o != c or k not in terms] for o in range(n)]
+        try:
+            best = _adjust_for_the_walk(replace(probe, free_intrinsics=now))
+        except (RuntimeError, ValueError):
+            return sd
+        if not best.success or gain <= 0.0:
+            return sd
+        start = problem_at(replace(probe, free_intrinsics=now), best)
+        worst = sd
+        for sign in (-1.0, 1.0):
+            for step in range(1, VALLEY_STEPS + 1):
+                moved = [list(p) for p in best.camera_params]
+                moved[c][terms[0]] += sign * step * VALLEY_STEP_PX / gain
+                trial = _problem_at(replace(start, free_intrinsics=held_here), start.rotations, start.centres, moved,
+                                    start.points, start.markers)
+                try:
+                    res = _adjust_for_the_walk(trial)
+                except (RuntimeError, ValueError):
+                    break
+                if not res.success or 2.0 * (res.cost - best.cost) > VALLEY_CHI2:
+                    break
+                there = replace(problem_at(trial, res), free_intrinsics=now)
+                try:
+                    cov, _counts = intrinsics_covariance(there, reference_flight=flight)
+                except RuntimeError:
+                    break
+                index = {(o, k): j for j, (o, k) in enumerate((o, k) for o in range(n) for k in now[o])}
+                block = cov[np.ix_(*[[index[(c, k)] for k in terms]] * 2)]
+                m, p, w, h = there.cameras[c]
+                value = corner_sd(m, p, float(w), float(h), terms, block)
+                if np.isfinite(value):
+                    worst = max(worst, value)
+        return worst if worst > VALLEY_FACTOR * sd else sd
 
     matrix, columns = covariance()  # without a covariance: None and the reason in place of the columns
     for position, group in enumerate(JUDGED):
@@ -980,6 +1051,8 @@ def judge_intrinsics(pb: Problem, together: bool = False, marker_weight: float |
             if not np.isfinite(sd):
                 held[c][group] = ("no covariance", "its variance is not a number")
                 continue
+            if group in WALKED:  # also beyond the line: the sd it is held at is the one of its valley
+                sd = walked(c, group, sd, {})
             sds[c][group] = sd
             if sd > limit:
                 failing[c] = sd

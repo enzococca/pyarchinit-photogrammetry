@@ -226,6 +226,55 @@ def cases() -> dict[str, Problem]:
     return {name: case(name) for name in CASES}
 
 
+# ---------------------------------------------------------------- a ring flown once over flat ground
+RING_K1 = -0.04  # the radial term of the lens of the ring of :func:`flat_ring`, as the rendered weak ring has it
+
+
+def flat_ring(seed, n: int = 80, n_points: int = 6000, noise: float = 0.2) -> Problem:
+    """The weak ring as numbers: ``n`` nadir photos of the OPENCV lens of 1000 px with ``k1`` :data:`RING_K1` on a
+    circle 60 m across, 15 m above nearly flat ground (the small relief of the synthetic scenes, 8 cm), as
+    :func:`..testing.synthetic.weak_ring_poses` flies it; ``n_points`` tie points drawn by ``seed`` in the band
+    under the strip, seen with Gaussian ``noise`` (px) where they fall; twelve markers on the circle under it,
+    measured to 0.05 px, those of even number control points at 5 mm. Every observation is white noise around the
+    truth: what the ring does not determine comes from its geometry alone. The problem starts at the truth, with
+    the focal length held (the ring cannot tell it from its height) and the radial terms free."""
+    import pycolmap
+
+    from .synthetic import weak_ring_poses
+
+    rng = np.random.default_rng(seed)
+    poses = weak_ring_poses(n, 60.0, 15.0)
+    rotations = np.array([p[:3, :3].T for p in poses])
+    centres = np.array([p[:3, 3] for p in poses])
+    angle, radius = rng.uniform(0, 2 * np.pi, n_points), rng.uniform(21.0, 39.0, n_points)
+    xy = np.column_stack([radius * np.cos(angle), radius * np.sin(angle)])
+    points = np.column_stack([xy, 0.08 * np.sin(xy[:, 0] * 1.7) * np.cos(xy[:, 1] * 2.1)])
+    along = np.radians(np.arange(12) * 30.0)
+    markers = np.column_stack([30.0 * np.cos(along), 30.0 * np.sin(along), np.zeros(12)])
+    params = [F, F, W / 2, H / 2, RING_K1, 0.0, 0.0, 0.0]
+    cam = pycolmap.Camera(model="OPENCV", width=W, height=H, params=params)
+
+    def observe(world):
+        img, idx, out = [], [], []
+        for i in range(n):
+            cam_pts = (world - centres[i]) @ rotations[i].T
+            px = np.asarray(cam.img_from_cam(cam_pts))[:, :2]
+            inside = (px[:, 0] > 5) & (px[:, 0] < W - 5) & (px[:, 1] > 5) & (px[:, 1] < H - 5) & (cam_pts[:, 2] > 0)
+            img += [i] * int(inside.sum())
+            idx += list(np.flatnonzero(inside))
+            out.append(px[inside])
+        return np.array(img), np.array(idx), np.vstack(out)
+
+    oi, op, oxy = observe(points)
+    mi, mm, mxy = observe(markers)
+    pb = Problem(rotations, centres, np.zeros(n, int), [("OPENCV", params, W, H)], points, oi, op,
+                 oxy + rng.normal(0, noise, oxy.shape), markers=markers.copy(), mobs_image=mi, mobs_marker=mm,
+                 mobs_xy=mxy + rng.normal(0, 0.05, mxy.shape), free_intrinsics=[[4, 5]])
+    pb = bundle._without_held(pb, np.bincount(op, minlength=n_points) >= 2)
+    pb.gcps = [(k, markers[k].copy(), np.full(3, 0.005)) for k in range(0, 12, 2)]
+    return pb
+
+
 # ---------------------------------------------------------------- two results apart
 def parameter_gap(pb: Problem, a: Result, b: Result) -> np.ndarray:
     """``a - b`` in the columns of the parameter vector of ``pb`` (:class:`bundle._Layout`): for each free
