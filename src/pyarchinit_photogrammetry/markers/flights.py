@@ -224,18 +224,25 @@ def residual_sd(transform, src, dst, flight, offsets: dict) -> float:
 
 
 def off_flights(offsets: dict[int, float], photos: dict[int, int], sd_within: float) -> list[int]:
-    """The flights whose height offset - from the joint model (:func:`joint_fit`: against the datum flight, the
-    biggest, or against the control points when they take part) or measured against control points - is larger
-    than ``max(NOTE_FACTOR x sd_within, NOTE_FLOOR)``: a flight whose GPS heights were measured from another zero.
+    """The flights whose height offset - from the joint model (:func:`joint_fit`) or measured against control points
+    - is more than ``max(NOTE_FACTOR x sd_within, NOTE_FLOOR)`` away from the level of most flights: the median of
+    the offsets, one vote per flight (with an even number of flights, of the two in the middle the one with more
+    photos). Not the datum: the biggest flight may be the one whose GPS heights started from another zero.
     ``sd_within`` is the scatter of the heights within the flights once the offsets are applied
     (:func:`residual_sd`), not the one of all the photos, which the offset itself inflates; the floor keeps the
     normal drift of a consumer GPS between batteries quiet. Only flights of :data:`MIN_PHOTOS` photos or more, with
     two flights or more."""
-    timed = [f for f in offsets if f != NO_TIME]
+    timed = sorted((f for f in offsets if f != NO_TIME), key=lambda f: offsets[f])
     if len(timed) < 2:
         return []
+    middle = len(timed) // 2
+    if len(timed) % 2:
+        level = offsets[timed[middle]]
+    else:
+        lower, upper = timed[middle - 1], timed[middle]
+        level = offsets[max((lower, upper), key=lambda f: (photos.get(f, 0), -f))]
     limit = max(NOTE_FACTOR * sd_within, NOTE_FLOOR)
-    return sorted(f for f in timed if photos.get(f, 0) >= MIN_PHOTOS and abs(offsets[f]) > limit)
+    return sorted(f for f in timed if photos.get(f, 0) >= MIN_PHOTOS and abs(offsets[f] - level) > limit)
 
 
 def camera_offsets(chunk) -> dict[int, float]:
@@ -292,17 +299,32 @@ def record(chunk, option: bool, datum: int | None, offsets: dict[int, float], ke
 
 
 def current(chunk) -> dict:
-    """``chunk.meta["gps_flights"]`` when it belongs to the transform the chunk has now, else an empty dict: a
-    transform set outside the georeference (ties, the alignment of chunks, a hand orientation) leaves no stale
-    offset applied."""
+    """``chunk.meta["gps_flights"]`` when it belongs to the transform the chunk has now
+    (:func:`..core.stamps.same_transform`), else an empty dict: a transform set outside the georeference (ties, the
+    alignment of chunks, a hand orientation) leaves no stale offset applied."""
+    from ..core import stamps
+
     rec = chunk.meta.get(RECORD) or {}
     stamp = rec.get("transform")
     if stamp is None:
         return rec  # written before the stamps (a project of this branch): taken as it is
-    here = np.asarray(chunk.transform, float).reshape(-1)
-    if len(stamp) != len(here) or not np.allclose(here, np.asarray(stamp, float), rtol=1e-12, atol=1e-9):
+    if len(stamp) != 16 or not stamps.same_transform(np.asarray(stamp, float).reshape(4, 4), chunk.transform):
         return {}
     return rec
+
+
+def rebase(chunk, old, new) -> bool:
+    """The record of the offsets stamped with ``new`` when it belonged to ``old``: the transform changed while the
+    cameras did not move in the coordinate system (the georeference following the internal frame of an
+    optimisation, as :func:`..core.stamps.rebase` does for the rasters). Returns whether it was."""
+    from ..core import stamps
+
+    rec = chunk.meta.get(RECORD) or {}
+    stamp = rec.get("transform")
+    if stamp is None or len(stamp) != 16 or not stamps.same_transform(np.asarray(stamp, float).reshape(4, 4), old):
+        return False
+    rec["transform"] = np.asarray(new, float).reshape(-1).tolist()
+    return True
 
 
 def summary_lines(rec: dict | None) -> list[str]:

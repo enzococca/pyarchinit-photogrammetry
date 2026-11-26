@@ -63,8 +63,10 @@ Dopo ogni georeferenziazione sulle posizioni delle foto `update_transform` resti
 `chunk.meta["gps_flights"]`, l'errore per volo: `flights` con `flight`, `photos`, `start`, `mean` (dX, dY, dZ,
 stimata meno riferimento), `sd`, `rmse` e `offset`. Con due voli o più gli offset sono sempre stimati sul modello
 congiunto qui sotto, anche con l'opzione spenta (la sua trasformazione viene allora scartata e il fit è quello
-semplice, identico bit per bit), e `suggest` elenca i voli il cui offset supera sia 3 volte la dispersione delle
-quote dentro un volo sia 1 m: lo dicono il report, il pannello Riferimenti e il log, suggerendo l'opzione. La nota
+semplice, identico bit per bit), e `suggest` elenca i voli il cui offset si scosta dal livello della maggior parte
+dei voli (la mediana degli offset, un voto per volo, non il volo di riferimento: il volo più grande può essere quello
+spostato) di più sia di 3 volte la dispersione delle quote dentro un volo sia di 1 m; un errore di questa diagnosi
+non fa mai fallire la georeferenziazione. Lo dicono il report, il pannello Riferimenti e il log, suggerendo l'opzione. La nota
 non viene mai dai residui del fit semplice, che inclina il blocco per assorbire un volo fatto su una sua striscia.
 
 `gps_height_by_flight=True` (anche `ppg align --gps-height-by-flight` e `ppg reference --gps-height-by-flight`;
@@ -91,7 +93,9 @@ L'offset è di quanto le quote GPS di un volo stanno sopra il punto in cui il fi
 camere (`markers.gcp.camera_reference_errors`, con `"offset"`, anche una colonna del pannello Riferimenti e della
 tabella delle camere della cartella Excel) sono misurati sul riferimento meno l'offset. Il record porta la
 trasformazione su cui è stato calcolato: una trasformazione cambiata altrove (legami, allineamento dei chunk,
-orientamento a mano) lo fa cadere, e i suoi offset non si applicano più. Gli offset arrivano solo alla
+orientamento a mano) lo fa cadere, e i suoi offset non si applicano più; un'ottimizzazione la cui
+georeferenziazione segue il suo sistema interno (le camere non si sono mosse nel sistema di riferimento) lo
+aggiorna, e una georeferenziazione che fallisce lo lascia com'era. Gli offset arrivano solo alla
 georeferenziazione: con `use_gps` l'allineamento incrementale resta tenuto, con una perdita robusta, alle quote GPS
 grezze (un volo spostato di 13 m può piegarlo un po'), e le posizioni GNSS che tengono un'ottimizzazione sono solo
 quelle accurate (RTK, PPK).

@@ -304,7 +304,8 @@ def test_the_note_names_the_off_flight_when_each_battery_flies_its_own_strip():
     """I1: the plain fit tilts the block to take up the bias of a strip; the note comes from the joint model."""
     ch, _truth = _survey(sizes=(180, 180, 180), bias=tuple(-v for v in DHUHUR), layout="strips")
     off = _note(ch)
-    assert 3 in off and 1 not in off
+    # dz -2.1 / +0.9 / +10.8 m: against the middle flight both the others are off (by 3 m and by 9.9 m)
+    assert off == [1, 3]
     assert ch.meta["gps_flights"]["offsets"] == {}  # option off: nothing applied
     ch, _truth = _survey(sizes=(180, 180, 180), bias=(0.0, 0.0, BIAS), layout="strips")
     assert _note(ch) == [3]
@@ -505,3 +506,66 @@ def test_the_tick_asks_for_the_fit_and_writes_nothing_itself(qapp):
     pane.set_chunk(ch)
     pane.c_by_flight.setChecked(True)
     assert asked == [True] and "gps_height_by_flight" not in ch.meta
+
+
+# --- re-review: a failed fit keeps the record, the note never fails a fit, the biggest flight off, frame followed --
+
+def test_a_failed_fit_keeps_the_record_of_the_last_one(monkeypatch):
+    """N1: the georeference raises: the offsets of the previous fit stay with the transform they belong to."""
+    from pyarchinit_photogrammetry.markers import gcp
+
+    ch, _truth = _survey()
+    ch.update_transform(gps_height_by_flight=True)
+    before = dict(ch.meta["gps_flights"])
+
+    def broken(*_a, **_k):
+        raise RuntimeError("the grid of a geoid is missing")
+
+    monkeypatch.setattr(gcp, "_camera_reference_pairs", broken)
+    with pytest.raises(RuntimeError):
+        ch.update_transform()
+    assert ch.meta["gps_flights"] == before and flights.camera_offsets(ch)
+
+
+def test_the_diagnosis_never_fails_the_georeference(monkeypatch):
+    """N2: an error of the joint fit: option off, the plain fit as on main; option on, the plain fit and why."""
+    ch, _truth = _survey()
+    plain = _survey()[0]
+    plain.update_transform()
+
+    def broken(*_a, **_k):
+        raise FloatingPointError("overflow")
+
+    monkeypatch.setattr(flights, "joint_fit", broken)
+    rep = ch.update_transform()
+    assert rep["method"] == "cameras" and np.array_equal(ch.transform, plain.transform)
+    assert rep["gps_flights"]["suggest"] == []
+    rep = ch.update_transform(gps_height_by_flight=True)
+    assert rep["method"] == "cameras" and np.array_equal(ch.transform, plain.transform)
+    assert rep["gps_flights"]["by_flight_failed"].startswith("error")
+
+
+def test_the_note_names_the_biggest_flight_when_it_is_the_one_off():
+    """N3: the datum is the biggest flight; the note does not take it as the truth."""
+    ch, _truth = _survey(sizes=(180, 180, 400), bias=(0.0, 0.0, BIAS), layout="strips")
+    assert _note(ch) == [3]
+    ch, _truth = _survey(sizes=(300, 100), bias=(0.0, BIAS), layout="strips")
+    assert _note(ch) == [2]  # two flights: the bigger one is taken as right
+
+
+def test_offsets_survive_an_optimisation_that_moves_the_internal_frame():
+    """N4: the georeference follows the internal frame of a free adjustment: the cameras did not move in the CRS,
+    their offsets stay."""
+    from pyarchinit_photogrammetry.engine import sfm
+
+    ch, _truth = _survey()
+    ch.update_transform(gps_height_by_flight=True)
+    offsets = flights.camera_offsets(ch)
+    frame = {"transform": np.array(ch.transform), "crs": ch.crs,
+             "centres": {c.key: np.array(c.center) for c in ch.cameras}}
+    move = geometry.compose_similarity(1.3, np.eye(3), np.array([5.0, -2.0, 1.0]))  # the adjustment's own gauge
+    for c in ch.cameras:
+        c.transform = move @ c.transform
+    out = sfm._follow_internal_frame(ch, frame)
+    assert out["followed"]
+    assert flights.camera_offsets(ch) == pytest.approx(offsets)

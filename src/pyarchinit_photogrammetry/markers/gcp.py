@@ -732,7 +732,22 @@ def update_transform(chunk, use_cameras: bool | None = None, gps_height_by_fligh
     and ``by_flight_failed`` says why. The choice is written only when the fit succeeds. The errors per flight, the
     offsets and the flights whose height looks off (from the joint model, with the option off too) are in
     ``report["gps_flights"]`` and ``meta["gps_flights"]``.
+
+    A fit that raises leaves the chunk's record of the last georeference (``meta["gps_flights"]``) as it was.
     """
+    from . import flights as flights_mod
+
+    previous = chunk.meta.get(flights_mod.RECORD)
+    try:
+        return _update_transform(chunk, use_cameras, gps_height_by_flight)
+    except BaseException:
+        if previous is not None:  # the transform did not change: its offsets still belong to it
+            chunk.meta[flights_mod.RECORD] = previous
+        raise
+
+
+def _update_transform(chunk, use_cameras: bool | None, gps_height_by_flight: bool | None) -> dict:
+    """The fit of :func:`update_transform`."""
     from . import flights as flights_mod
 
     if crs_mod.is_geographic(chunk.crs):
@@ -781,7 +796,11 @@ def update_transform(chunk, use_cameras: bool | None = None, gps_height_by_fligh
                 if not len(ctrl):
                     sizes = {f: int(np.sum(flight == f)) for f in timed}
                     datum = max(timed, key=lambda f: (sizes[f], -f))
-                joint = flights_mod.joint_fit(src, dst, w, flight, datum, d, dist, wb)
+                try:
+                    joint = flights_mod.joint_fit(src, dst, w, flight, datum, d, dist, wb)
+                except Exception as exc:  # noqa: BLE001 - the diagnosis never fails a fit the plain one makes
+                    log.warning("GPS offsets per flight not computed: %s", exc)
+                    joint = {"transform": None, "offsets": {}, "condition": float("nan"), "reason": f"error: {exc}"}
                 joint.update(src=src[len(ctrl):], dst=dst[len(ctrl):], flight=flight[len(ctrl):])
             if by_flight and joint is not None and joint["reason"] is None:
                 chunk.transform, offsets = joint["transform"], joint["offsets"]
