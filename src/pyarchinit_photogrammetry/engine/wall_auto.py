@@ -27,7 +27,8 @@ WINDOW_MARGIN = 10.0  # m around the box of the clicked points: the DEM read to 
 MAX_CELLS = 4_000_000  # cells at most in what is read: coarser cells over this
 EVEN_FROM = 1.0  # m: the path is evened out on tops this wide at least (narrower ones keep it on their middle)
 EVEN = 0.5  # the followed path evened out along it over this times the width of its top (:func:`_evened`)
-TOP_CLOSE = 0.2  # m: the crests closed by a disc of this radius into the tops of the walls (:func:`_tops`)
+TOP_CLOSE = 0.1  # m: the crests closed by a disc of this radius into the tops of the walls (:func:`_tops`; a gap of
+#                 0.3 m between two walls stays open)
 SIMPLIFY = 0.10  # m: the line found simplified within this (a trace of a few vertices, not one per cell)
 SPECK = 0.05  # m: half the width of the specks and threads of crest opened away before proposals are thinned
 SPECK_UP_TO = 0.10  # m: the specks are opened away on cells up to this (a plan read coarser keeps its thin crests)
@@ -230,9 +231,10 @@ def _filled(m: np.ndarray, cell: float) -> np.ndarray:
 
 
 def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS, progress=None):
-    """``(strength, ridge)``: the strength of :func:`strength_map` and the cells on a crest (bool, the ``on_ridge``
+    """``(strength, ridge, core)``: the strength of :func:`strength_map`, the cells on a crest (bool, the ``on_ridge``
     of :func:`follow`: ``height`` over :data:`RIDGE` x :data:`RIDGE_HEIGHT` - on both sides, or on the open side of a
-    top against a taller structure - or inside ``mask``)."""
+    top against a taller structure - or inside ``mask``) and the crests standing free on the DEM alone (bool: those over
+    :data:`RIDGE`, not against a structure, the mask aside)."""
     z = np.asarray(dem, np.float64)
     if z.ndim != 2:
         raise ValueError("the DEM must be a 2D array")
@@ -261,7 +263,8 @@ def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS,
             raise ValueError("the mask must be on the grid of the DEM")
         s = np.where(m, np.maximum(s, MASK_STRENGTH * _graded(m, resolution)), s)
         ridge = ridge | m
-    return s, ridge | (walled & (tall > RIDGE))  # a top against a tower is on the wall too: the line is not weak
+    core = (tall > RIDGE) & ~walled  # the tops standing free, from the DEM alone
+    return s, ridge | (walled & (tall > RIDGE)), core  # a top against a tower is on the wall too: not weak
 
 
 def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = None, mask: np.ndarray | None = None,
@@ -459,16 +462,21 @@ def _tops(ridge: np.ndarray, cell: float) -> np.ndarray:
     return _filled(m, cell)
 
 
-def _half_widths(ridge: np.ndarray, cell: float) -> np.ndarray:
-    """For each cell, half the width of the top of the wall it is on (m): the largest distance from the edge of the
-    crests within :data:`GRADE_REACH`; 0 off them."""
-    from scipy.ndimage import distance_transform_edt, maximum_filter
+def _half_widths(tops: np.ndarray, cell: float) -> np.ndarray:
+    """For each cell, half the width of the top of the wall it is on (m): the largest distance from the edge of that
+    top met within :data:`GRADE_REACH`, step by step inside the top (a wide block or tower beside a narrow wall does
+    not lend it its width); 0 off the tops."""
+    import cv2
+    from scipy.ndimage import distance_transform_edt
 
-    if not ridge.any():
-        return np.zeros(ridge.shape)
-    d = distance_transform_edt(ridge) * float(cell)
-    reach = 2 * max(1, int(round(GRADE_REACH / float(cell)))) + 1
-    return np.where(ridge, maximum_filter(d, size=reach), 0.0)
+    if not tops.any():
+        return np.zeros(tops.shape)
+    d = (distance_transform_edt(tops) * float(cell)).astype(np.float32)
+    top = d.copy()
+    kernel = np.ones((3, 3), np.uint8)
+    for _ in range(max(1, int(round(GRADE_REACH / float(cell))))):
+        top = np.where(tops, cv2.dilate(top, kernel), 0.0).astype(np.float32)
+    return top.astype(np.float64)
 
 
 def _evened(points: np.ndarray, half: np.ndarray, on: np.ndarray) -> np.ndarray:
@@ -528,12 +536,12 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
         raise FollowRefused("outside", f"point {k} is outside the DEM", point=k)
     progress(0.0, "Relief of the DEM around the wall")
     lo, hi = p.min(axis=0) - WINDOW_MARGIN, p.max(axis=0) + WINDOW_MARGIN
-    strength, ridge, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius,
+    strength, ridge, core, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius,
                                                       progress.sub(0.0, 0.3))
     h, w = strength.shape
     progress(0.3, "The path along the wall")
     graph = _grid_graph(strength, cell)  # once for all the legs
-    tops = _tops(ridge, cell)
+    tops = _tops(core, cell)
     half = _half_widths(tops, cell)
     cols, rows = ~transform @ (p[:, 0], p[:, 1])
     cells = np.column_stack([np.clip(np.floor(rows), 0, h - 1), np.clip(np.floor(cols), 0, w - 1)]).astype(np.int64)
