@@ -714,7 +714,8 @@ Oltre ai clic, il passo *Linea del muro sulla pianta* ha due modi di trovare la 
   clic per finire. La linea segue il mezzo della cresta del muro sul DEM (e i bordi dell'ortofoto): una cresta è ciò che
   sta più in alto del terreno da tutte e due le parti entro 2 m, cercando il terreno solo fino alla prima cosa più alta,
   così che il crollo contro una faccia, il bordo di una trincea accanto al muro o un muro parallelo a 0,5 m non vengano
-  presi per il muro; la cima di un muro addossato a una torre vale metà. È mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
+  presi per il muro; la cima di un muro addossato a una torre vale metà. Su una cima larga e irregolare la linea è
+  regolarizzata lungo il muro, così che non vada a zig-zag da un lato all'altro della cima fra le pietre. È mostrata come proposta: "Linea proposta: N vertici, L m, P % sulla cresta". Con meno di metà sulla cresta è debole,
   e il pannello lo dice: **Aggiungi punti di passaggio** (un clic dove passa il muro; la linea viene cercata di nuovo
   passando di lì), oppure spunta **Usa SAM dove il muro è basso** (SAM 2.1 ritaglia il muro sull'ortofoto a partire
   dai clic, quando è installato). **Tieni** fa della proposta la linea del muro, con il suo aggancio proposto e le sue

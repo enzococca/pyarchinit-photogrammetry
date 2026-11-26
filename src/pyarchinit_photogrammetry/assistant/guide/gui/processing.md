@@ -696,7 +696,8 @@ Besides the clicks, the step *Line of the wall on the plan* has two ways to find
   order), double click to end. The line follows the middle of the crest of the wall on the DEM (and the edges of the
   orthophoto): a crest is what stands higher than the ground on both sides within 2 m, the ground looked for only up to
   the first thing higher, so that rubble against a face, the edge of a trench beside the wall or a parallel wall 0.5 m
-  away are not taken for it; the top of a wall against a tower counts at half strength. It is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
+  away are not taken for it; the top of a wall against a tower counts at half strength. On a wide, rough top the line
+  is evened out along the wall, so that it does not zig-zag across the top between the stones. It is shown as a proposal: "Proposed line: N vertices, L m, P % on the crest". Under half on the
   crest it is weak, and the pane says so: **Add via points** (one click where the wall passes; the line is looked for
   again through it), or tick **Use SAM where the wall is low** (SAM 2.1 cuts the wall out of the orthophoto from the
   clicks, when it is installed). **Keep** makes the proposal the line of the wall, with its snap proposed and its heights
