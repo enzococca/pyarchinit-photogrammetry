@@ -129,6 +129,7 @@ FIELDS = {  # the attributes the viewer names in both languages (the others keep
     "z_min": {"it": "Quota minima (m)", "en": "Lowest height (m)"},
     "z_max": {"it": "Quota massima (m)", "en": "Highest height (m)"},
     "area_m2": {"it": "Superficie (m²)", "en": "Surface (m²)"},
+    "volume_m3": {"it": "Volume (m³)", "en": "Volume (m³)"},  # of a unit volume (proxies.json), as in the program
 }
 _TECHNICAL = ("ppg_id", "ppg_sig", "ppg_parte", "basis")  # identities of the program: of no use on a page
 # ``record`` is the build's own key of a unit record: an attribute so named (of a drawing, an imported layer, a
