@@ -762,13 +762,21 @@ again without the earlier groups that are still free (the tangential terms first
 are held in its place. The focal length goes this way for the radial terms alone, when nothing else is enough:
 it stands first for what a flat block cannot tell, not because a lens can do without it (a grid pitched a
 little: the focal length passes at 0.4 %, the tangential terms fail at 0.57 px with it free; they are held, and
-the focal length is refined). That ring does not determine its radial terms while its focal
-length is free (1.6 px at the corner) and determines them once it is held (0.12 px): they are refined, the radial
-term found within 0.0003 of the true one, the control targets at 1 mm and the check targets at 9 mm. It does not
-determine the tangential terms of our own formulation (1.6 px), which are held; on a block of many tie points
-they pass (0.5 px) while the radial terms, with them free, fail (0.9 px), and they are held all the same, for
-the radial terms. An order by how far each group is beyond its limit would have given up the radial terms in
-their place (3.1 px while the tangential terms are free) and left the check targets at 17 mm. Oblique photos
+the focal length is refined). The radial terms are walked along their valley before they are judged: on a flat block they
+trade with a bend of the block, and only to second order, so the covariance taken at radial terms that are off
+the true lens - with the block bent to suit them - finds them determined because of that bend (the weak ring:
+0.4 to 0.5 px at the corner, for estimates 1.6 to 2.2 px off the true lens on five renderings; a numeric ring of
+white noise: 5.9 px at the true lens, 0.35 px at 2 px from it). The first radial term is moved so that the corner
+of the photo shifts by half a pixel at a time (`bundle.VALLEY_STEP_PX`, up to 3 px each way), the block adjusted
+with the radial terms held there and their covariance taken again, as far as the observations allow (the
+chi-square at most 9 above the optimum, `bundle.VALLEY_CHI2`); where the largest sd met is more than half as
+large again as the first (`bundle.VALLEY_FACTOR`) the radial terms are judged by it. A pitched or oblique block
+changes by a few per cent over the walk and keeps its figures. That ring then holds its radial terms where the
+native alignment put them (1.3 px along the valley with COLMAP's formulation, 2.4 px with ours; the true error of
+k1 over the five renderings spreads 1.8 px at the corner), k1 within 0.006 of the true one, the control targets
+at 1 mm and the check targets at 5 mm. An order by how far each group is beyond its limit, tried before the walk, gave up the radial
+terms in place of the tangential ones of our formulation (3.1 px while those are free) and left the check targets
+at 17 mm. Oblique photos
 around relief determine every group (the synthetic trench: 0.02 % and 0.05 px), and the whole calibration is
 refined as before. A group that has no covariance at all (a normal matrix that cannot be inverted) is held
 without having been judged: its note says so in its own words (`not judged, the block gave no covariance`) and
