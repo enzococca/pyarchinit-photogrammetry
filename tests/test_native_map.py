@@ -497,6 +497,9 @@ def test_the_reduced_weak_ring(matched_ring, tmp_path):
     # the notes number the cameras of the mapper (from 0), the report the cameras of the model: one note each
     said = {note.split(":")[0] for note in report["notes"] if ": focal held: " in note}
     assert len(said) == len(report["intrinsics_held"]), report["notes"]
+    # the radial terms freed with the focal length held: provisional, one each (the optimisation judges them again)
+    freed = [note for note in report["notes"] if ": radial free: " in note]
+    assert len(native.get("radial_provisional", [])) == len(freed), (native.get("radial_provisional", []), report["notes"])
     if not reference:
         return
     assert report["intrinsics_held"] == [cam[0] for cam in report["focal_sd"]]  # the flat ring: focal held (R16)

@@ -332,6 +332,28 @@ def _keep_report(report: dict, mapper) -> None:
         report["report"] = _plain(mapper.report())
     except Exception as exc:  # noqa: BLE001 - the report is for the record only
         report["report"] = {"error": type(exc).__name__}
+    provisional = provisional_radial(report["report"])
+    if provisional:  # kept only when there is one: the record of every other block as it was
+        report["radial_provisional"] = provisional
+        log.info("native mapper: radial terms freed with the focal length held, provisionally (the camera "
+                 "optimisation judges them along their valley): %s", provisional)
+
+
+def provisional_radial(report) -> list:
+    """The radial terms the native mapper freed with the focal length of their camera held (ruling R-B1), from its
+    ``report``: ``[[camera, sd]]`` (the cameras of the model, as the report numbers them; ``sd`` the mapper's, in
+    pixels at the corner of the photo). Provisional: the mapper judges them after its first round, at their starting
+    values, and on a flat nadir block the covariance there is the self-confirming one of a block bent to suit them
+    (0.14-0.25 px on the weak ring, over 1 px along their valley, :func:`.bundle._radial_walk`); the camera
+    optimisation judges them again along their valley. Still freed in the mapper: held at zero they leave the weak
+    ring's check targets at 17 mm, and its free estimate is the one the tie points prefer (the true lens lies about 10
+    above it in chi-square). Empty for a report without the figures (an older core, a broken report)."""
+    if not isinstance(report, dict):
+        return []
+    focal_held = set(report.get("intrinsics_held") or [])
+    radial_held = set(report.get("radial_held") or [])
+    return [[cam, sd] for cam, sd in report.get("radial_sd") or []
+            if cam in focal_held and cam not in radial_held and sd is not None]
 
 
 def _stages(chunk: Chunk, mapper, arrays: dict, relay: _Relay, stages: timing.Stages, report: dict, root: str,

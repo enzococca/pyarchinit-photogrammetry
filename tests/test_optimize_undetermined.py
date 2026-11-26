@@ -371,6 +371,25 @@ def test_a_flat_ring_whose_optimum_is_off_the_true_lens_holds_its_radial_terms(m
     assert set(calls[1:]) == {bundle.RADIAL_WALK_STEP_ITERATIONS} and len(calls) <= 1 + 2 * bundle.RADIAL_WALK_STEPS
 
 
+def test_the_radial_terms_the_native_mapper_freed_with_the_focal_held_are_provisional():
+    """The native mapper judges the radial terms of a camera whose focal length it holds (ruling R-B1) after its
+    first round, where they are still at their starting values (zero for a lens the photos do not describe): on a
+    flat block that covariance is the self-confirming one the walk of the optimisation sees through (0.14-0.25 px
+    on the weak ring, 1.3-4.1 px along the valley). The record of the alignment keeps such a freeing as provisional,
+    ``[camera, sd]`` (the cameras of the model, as the mapper reports them): the optimisation judges it again along
+    its valley. Radial terms the mapper held, those of a focal length it freed, a report without the figures (an
+    older core, a broken report) give none."""
+    from pyarchinit_photogrammetry.engine import native_map
+
+    report = {"intrinsics_held": [1, 2, 3], "radial_sd": [[1, 0.25], [2, 0.8], [3, None], [4, None]],
+              "radial_held": [2, 3], "notes": []}
+    assert native_map.provisional_radial(report) == [[1, 0.25]]
+    assert native_map.provisional_radial({**report, "radial_held": [1, 2, 3]}) == []
+    assert native_map.provisional_radial({**report, "intrinsics_held": []}) == []
+    for broken in ({}, {"error": "RuntimeError"}, {"intrinsics_held": [1]}, None):
+        assert native_map.provisional_radial(broken) == []
+
+
 @needs_core
 @pytest.mark.parametrize("seed", [1, 2, 3])
 @pytest.mark.parametrize("offset", [-4.0, 2.0])
@@ -2084,6 +2103,9 @@ def test_the_weak_ring_keeps_the_focal_length_of_its_alignment(weak_ring, tmp_pa
     mapper = ch.meta["sfm"]["native_mapper"]["report"]
     radial_free = [n for n in mapper["notes"] if ": radial free: " in n]
     assert all(": focal held: " in n or ": radial " in n for n in mapper["notes"]), mapper["notes"]
+    # each freeing of the mapper with the focal length held kept as provisional, with the mapper's own sd
+    provisional = ch.meta["sfm"]["native_mapper"].get("radial_provisional", [])
+    assert len(provisional) == len(radial_free) and all(cam in mapper["intrinsics_held"] for cam, _ in provisional)
     if radial_free:  # R-B1: the focal length held, the radial terms freed where the block determines them
         assert before[0][4] != 0.0
     else:
