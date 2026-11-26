@@ -317,8 +317,8 @@ SITE = "Sito di prova"
 
 
 class FakePyArchInit:
-    """What the pane reads of the bridge: ``us_rows`` of the sites asked (US 1 and US 2 of the trench; US 3 has
-    none), or the error of a database that cannot be read."""
+    """What the pane reads of the bridge: ``us_rows`` of the sites asked (US 1 of the trench, and US 2 recorded as a
+    USM - found ignoring the type; US 3 has none), or the error of a database that cannot be read."""
 
     def __init__(self, error: Exception | None = None):
         self.error = error
@@ -328,9 +328,9 @@ class FakePyArchInit:
         self.asked.append(list(sites))
         if self.error is not None:
             raise self.error
-        return [{"sito": SITE, "area": "1", "us": n, "unita_tipo": "US", "d_stratigrafica": f"Strato {n}",
+        return [{"sito": SITE, "area": "1", "us": n, "unita_tipo": kind, "d_stratigrafica": f"Strato {n}",
                  "descrizione": f"Descrizione {n}", "schedatore": "Mario Schedatore"}
-                for n in ("1", "2") if SITE in sites]
+                for n, kind in (("1", "US"), ("2", "USM")) if SITE in sites]
 
 
 def _units(w, qapp):
@@ -372,6 +372,7 @@ def test_records_box_off_by_default_and_needs_pyarchinit(win, qapp):
 
 def test_records_note_counts_the_units(win, qapp):
     pane = _units(win, qapp)
+    pane.products["units"].setChecked(True)
     fake = FakePyArchInit()
     pane.set_pa(fake)
     assert not pane.records_note.isVisibleTo(pane)
@@ -379,7 +380,13 @@ def test_records_note_counts_the_units(win, qapp):
     assert fake.asked[-1] == [SITE]
     assert pane.records_note.isVisibleTo(pane)
     assert pane.records_note.text() == "2 unità su 3 con la scheda"
-    assert "US 3" in pane.records_note.toolTip()
+    tip = pane.records_note.toolTip()
+    assert "Senza scheda" in tip and "US 3" in tip
+    assert "US 2 (ignorando il tipo)" in tip  # matched at a looser step: what it ignored is said (spec 3.2)
+    pane.products["units"].setChecked(False)  # the build matches the polygons only with the units
+    assert pane.records_note.text() == "0 unità su 0 con la scheda"
+    pane.products["units"].setChecked(True)
+    assert pane.records_note.text() == "2 unità su 3 con la scheda"
     for i in range(pane.chunks.count()):  # no chunk: no unit
         pane.chunks.item(i).setCheckState(pane.chunks.item(i).checkState().Unchecked)
     assert pane.records_note.text() == "0 unità su 0 con la scheda"
@@ -414,7 +421,7 @@ def test_build_with_records_writes_them(win, qapp, tmp_path):
     _build(w, qapp, pane, tmp_path / "sito", products=("dem", "units"))
     site_dir = tmp_path / "sito"
     records = json.loads((site_dir / "data" / "records.json").read_text(encoding="utf-8"))
-    assert sorted(r["title"] for r in records.values()) == ["US 1 - Strato 1", "US 2 - Strato 2"]
+    assert sorted(r["title"] for r in records.values()) == ["US 1 - Strato 1", "USM 2 - Strato 2"]
     manifest = json.loads((site_dir / "site.json").read_text(encoding="utf-8"))
     assert manifest["people"] is False
     assert "Mario Schedatore" not in (site_dir / "data" / "records.json").read_text(encoding="utf-8")
@@ -432,6 +439,12 @@ def test_build_without_pyarchinit_says_so(win, qapp, tmp_path, caplog):
         _build(w, qapp, pane, tmp_path / "sito", products=("dem", "units"))
     assert not (tmp_path / "sito" / "data" / "records.json").exists()
     assert any("database is locked" in r.getMessage() for r in caplog.records)
+    assert w.doc.meta["web_site"]["options"]["records"] is False  # recorded as not there
+    pane.set_pa(None)  # no bridge: the box kept but the contents do not promise the records
+    assert pane.records.isChecked() and not pane.records.isEnabled()
+    assert "schede US" not in pane.states["contents"].text()
+    pane.set_pa(FakePyArchInit())  # PyArchInit back: the site lacks the records the box asks
+    assert "Le scelte del passo 1 sono cambiate" in pane.states["build"].text()
 
 
 def test_options_kept_with_the_project(win, qapp, tmp_path):

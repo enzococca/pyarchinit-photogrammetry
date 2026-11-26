@@ -401,6 +401,9 @@ def test_unit_sites_and_report(tmp_path):
     assert R.summary(report) == (2, 3)
     assert R.summary([]) == (0, 0)
     assert R.summary(R.match_report(doc, None, [])) == (0, 3)
+    # as the build matches them: the polygons only with the units product
+    assert R.match_report(doc, None, _unit_rows(), products=("dem", "proxies", "sections")) == []
+    assert R.summary(R.match_report(doc, None, _unit_rows(), products=("units",))) == (2, 3)
 
 
 def test_record_in_the_page(tmp_path):

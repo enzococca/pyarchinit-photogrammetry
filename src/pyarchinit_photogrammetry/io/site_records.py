@@ -589,19 +589,26 @@ def unit_sites(document, chunks=None) -> list[str]:
     return sorted(sites)
 
 
-def match_report(document, chunks, rows: list[dict], *, read: bool = True) -> list[dict]:
+def match_report(document, chunks, rows: list[dict], *, read: bool = True, products=None) -> list[dict]:
     """How the units of ``chunks`` (default all) match ``rows`` of ``us_table`` (:func:`chunk_records`, the
     project's site for a unit without one; the volumes a site can read, :func:`.site_volumes.load`): the
     ``report`` of each chunk, every entry with ``"chunk"``, the label of its chunk. Matching only: no value of a
     record is written for it. ``read`` False: the volumes whose file is there (:func:`.site_volumes.listed`),
-    their meshes not read - what a pane counts at once (an unreadable file still counts)."""
-    from . import site_volumes
+    their meshes not read - what a pane counts at once (an unreadable file still counts). ``products``: those of
+    the site (:data:`.site.PRODUCTS`), as the build matches them - the polygons with ``units``, the outlines with
+    ``sections``, the volumes with ``proxies``; None: every unit."""
+    from . import site_sections, site_volumes
 
     project = (document.meta or {}).get("sito")
     out = []
     for chunk in _document_chunks(document, chunks):
-        volumes = [e for e, _m in site_volumes.load(chunk, [])] if read else site_volumes.listed(chunk)
-        for entry in chunk_records(chunk, rows, project, volumes=volumes).report:
+        if products is not None and "proxies" not in products:
+            volumes = []
+        else:
+            volumes = [e for e, _m in site_volumes.load(chunk, [])] if read else site_volumes.listed(chunk)
+        units = products is None or "units" in products
+        sections = None if products is None else (site_sections.entries(chunk) if "sections" in products else [])
+        for entry in chunk_records(chunk, rows, project, volumes=volumes, units=units, sections=sections).report:
             out.append({"chunk": chunk.label, **entry})
     return out
 

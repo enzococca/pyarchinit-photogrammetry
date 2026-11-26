@@ -4127,7 +4127,11 @@
   "Senza scheda:": "Without a record:",
   "nomi delle persone": "names of people",
   "schede US di PyArchInit": "unit records of PyArchInit",
-  "Sito senza le schede US: PyArchInit non leggibile ({0})": "Site without the unit records: PyArchInit cannot be read ({0})"
+  "Sito senza le schede US: PyArchInit non leggibile ({0})": "Site without the unit records: PyArchInit cannot be read ({0})",
+  "il tipo": "the type",
+  "l'area": "the area",
+  "Con la scheda trovata ignorando qualcosa:": "With the record found ignoring something:",
+  "ignorando {0}": "ignoring {0}"
  },
  "formats": {
   "{0:.1f} mm": "{0:.1f} mm",

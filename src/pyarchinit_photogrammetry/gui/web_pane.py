@@ -47,6 +47,11 @@ def match_reasons() -> dict[str, str]:
             site_records.SEVERAL: tr("più schede possibili")}
 
 
+def ignored_names() -> dict[str, str]:
+    """What a looser step of the matching ignored (:attr:`..io.site_records.Found.ignored`)."""
+    return {"type": tr("il tipo"), "area": tr("l'area")}
+
+
 def data_modes() -> dict[str, str]:
     """Where the data of a published site go (:data:`..io.site_publish.DATA_MODES`)."""
     return {"auto": tr("Automatico: Pages, R2 se serve"), "pages": tr("Tutto su Pages"),
@@ -388,7 +393,7 @@ class WebPane(QWidget):
         for key, name in product_names().items():
             c = QCheckBox(name)
             c.setChecked(True)
-            c.toggled.connect(lambda _on: self.update_states())
+            c.toggled.connect(lambda _on: self._records_changed())  # the units a site matches follow the products
             self.products[key] = c
             bar.addWidget(c)
         form.addWidget(products)
@@ -754,7 +759,8 @@ class WebPane(QWidget):
         chunks = self.chosen_chunks()
         try:
             rows = self.pa.us_rows(site_records.unit_sites(self.document, chunks))
-            report = site_records.match_report(self.document, chunks, rows, read=False)
+            report = site_records.match_report(self.document, chunks, rows, read=False,
+                                               products=self.options()["products"])
         except Exception as exc:  # noqa: BLE001 - any error of the database: said, the box stays ticked
             log.warning("Schede US non lette: %s", exc)
             note.setText(tr("PyArchInit non leggibile"))
@@ -767,9 +773,15 @@ class WebPane(QWidget):
         reasons = match_reasons()
         missing = [f"{r['chunk']}: {r['label']} ({reasons.get(r['reason'], r['reason'])})"
                    for r in report if not r.get("step")]
-        if len(missing) > 30:
-            missing = missing[:30] + ["..."]
-        note.setToolTip(tr("Senza scheda:") + "\n" + "\n".join(missing) if missing else "")
+        words = ignored_names()
+        loose = [f"{r['chunk']}: {r['label']} "
+                 f"({tr('ignorando {0}', ' e '.join(words.get(i, i) for i in r['ignored']))})"
+                 for r in report if r.get("step") and r.get("ignored")]
+        parts = []
+        for title, lines in ((tr("Senza scheda:"), missing), (tr("Con la scheda trovata ignorando qualcosa:"), loose)):
+            if lines:
+                parts.append(title + "\n" + "\n".join(lines[:30] + (["..."] if len(lines) > 30 else [])))
+        note.setToolTip("\n\n".join(parts))
 
     def chosen_chunks(self) -> list:
         """The chunks ticked, in the order of the project."""
@@ -989,7 +1001,7 @@ class WebPane(QWidget):
             text = " ".join(problems)
         else:
             frame = tr("coordinate vere") if o["frame"] == "crs" else tr("sistema locale")
-            extras = [frame] + ([tr("schede US di PyArchInit")] if o["records"] else []) + \
+            extras = [frame] + ([tr("schede US di PyArchInit")] if o["records"] and self.pa is not None else []) + \
                 ([tr("nomi delle persone")] if o["people"] else [])
             text = tr("{0} chunk, {1}; {2}.", len(o["chunks"]), ", ".join(names[p] for p in o["products"]),
                       ", ".join(extras))
@@ -1195,7 +1207,9 @@ class WebPublishing(QObject):
         def done(result):
             self._building = False
             path, size = result
-            site.record_site(doc, path, o, sources)
+            # the records asked but not read (no bridge, a database not readable): recorded as not there, so the pane
+            # says the choices changed once PyArchInit is back
+            site.record_site(doc, path, dict(o, records=rows is not None), sources)
             pane.failure = ""
             log.info(tr("Sito web: {0}, {1}", path.parent, size_text(size)))
             for note in site.build_notes(path):  # what the build reduced or left out
