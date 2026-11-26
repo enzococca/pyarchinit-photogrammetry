@@ -27,4 +27,4 @@ jobs:
         run: |
           export GLOG_minloglevel=2
           python -c "import numpy; numpy.show_config()" 2>&1 | head -40
-          python -m pytest -q -s -rfEs tests/test_probe_windows_covariance.py tests/test_optimize_undetermined.py -k "probe or places_weighs or walk or lens or no_covariance" 2>&1 | grep -v "^INFO" | tail -150
+          python -m pytest -q -s -rfEs tests/test_probe_windows_covariance.py tests/test_optimize_undetermined.py -k "probe or places_weighs or walk or lens or no_covariance or singular_with_it_free or another_reason or among_several" 2>&1 | grep -v "^INFO" | tail -150
