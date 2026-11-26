@@ -803,7 +803,14 @@ calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covaria
 si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
 block gave no covariance`) e nel log c'è un avviso. Una focale tenuta così resta alla stima dell'allineamento:
 nessuna deviazione standard non è un verdetto che il blocco non la conosca, e nulla viene pesato contro il valore
-dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`).
+dell'obiettivo (`kept at the alignment's estimate, not moved towards the lens prior`). Un caso è comunque un
+verdetto: su un blocco che nulla colloca, la cui focale viene interrogata a parte lasciandola libera, una matrice
+normale che si inverte con la focale ferma e trova un pivot non positivo appena è libera dice che la focale non
+ha limite - singolare fino agli ultimi bit, cosa che una piattaforma fattorizza con uno scarto centinaia di volte
+la focale e un'altra no (la griglia nadirale dei test: macOS e il runner Windows di GitHub). Quella focale va
+proprio sul valore dell'obiettivo, con `sd` None in `lens_prior` e una nota che nomina il pivot (`the block
+holding nothing of its estimate`); con più camere ognuna viene interrogata di nuovo con libera solo la propria
+focale (`sfm._unbounded_focals`).
 
 Su una griglia nadirale su terreno piatto i termini radiali si scambiano con una cupola del blocco - il centro
 più alto o più basso dei bordi -, che i punti di controllo agli angoli non vedono: una cupola passa per tutti

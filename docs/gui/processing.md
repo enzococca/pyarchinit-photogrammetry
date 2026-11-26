@@ -96,7 +96,9 @@ and it is refined as before. Clear *Keep the parts of the calibration that the b
 refine everything anyway (`ppg optimize --free-undetermined`; in a batch, the same tick in the step). The check
 runs on the native core; without it the calibration is refined as before and the log says so. When the block
 gives no covariance to measure a part by, that part is kept without having been measured, and the log has a
-warning; a focal length kept so stays where the alignment put it, not moved towards the value of the photos.
+warning; a focal length kept so stays where the alignment put it, not moved towards the value of the photos. A
+block that nothing places and that cannot be measured only once its focal length is free (singular there) does
+not know its focal length at all: that one goes to the value of the photos.
 
 **Control points only at the corners of a flat block.** A block of nadir photos over flat ground can bend into a
 dome - its middle higher or lower than its edges - while the radial distortion makes up for it in the photos.
