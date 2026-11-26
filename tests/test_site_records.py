@@ -470,3 +470,56 @@ def test_record_in_the_page(tmp_path):
             assert not outside, outside
         finally:
             browser.close()
+
+
+def test_web_build_with_pyarchinit(pa_db, tmp_path):
+    """``ppg web build --pyarchinit``: the rows of the sites of the units are read from the database (``--url``,
+    else the one of PyArchInit's configuration) and published as the records; the match report goes to the output
+    (a unit without a record with its reason), never a name of a person; without the flag no record."""
+    import json
+
+    from shapely.geometry import box
+    from typer.testing import CliRunner
+
+    import pyarchinit_photogrammetry as ppg
+    from pyarchinit_photogrammetry.archaeo.stratigraphy import UnitPolygon
+    from pyarchinit_photogrammetry.cli import app
+
+    doc = ppg.Document()
+    doc.meta["sito"] = "Saggio"
+    ch = doc.add_chunk("Saggio 1")
+    ch.crs = "EPSG:32633"
+    ch.meta["drawings"] = {"units": [UnitPolygon(box(1000.0 + 3 * i, 5000.0, 1002.0 + 3 * i, 5002.0), us=str(i + 1),
+                                                 area="1", sito="Saggio").to_dict() for i in range(3)]}
+    project = tmp_path / "progetto.ppg"
+    doc.save(project)
+    run = CliRunner()
+    base = ["web", "build", str(project)]
+    units = ["--product", "units", "--product", "drawings"]
+
+    r = run.invoke(app, base + [str(tmp_path / "site"), *units, "--pyarchinit", "--url", str(pa_db)])
+    assert r.exit_code == 0, r.output
+    assert "records: 3 of 3 units" in r.output
+    site = tmp_path / "site"
+    records = json.loads((site / "data" / "records.json").read_text(encoding="utf-8"))
+    assert sorted(r["title"].split(" - ")[0] for r in records.values()) == ["US 1", "US 2", "US 3"]
+    assert json.loads((site / "site.json").read_text(encoding="utf-8"))["people"] is False
+
+    # the database of the configuration; a unit of no row said with its reason; heights and people passed
+    ch.meta["drawings"]["units"].append(UnitPolygon(box(1010.0, 5000.0, 1012.0, 5002.0), us="15", area="1",
+                                                    sito="Saggio").to_dict())
+    doc.save(project)
+    r = run.invoke(app, base + [str(tmp_path / "other"), *units, "--pyarchinit", "--people",
+                                "--usm-heights", "relative"])
+    assert r.exit_code == 0, r.output
+    assert "records: 3 of 4 units" in r.output
+    assert "  US 15 (Saggio 1): no row" in r.output
+    assert json.loads((tmp_path / "other" / "site.json").read_text(encoding="utf-8"))["people"] is True
+
+    r = run.invoke(app, base + [str(tmp_path / "plain"), *units])
+    assert r.exit_code == 0, r.output
+    assert "records:" not in r.output
+    assert not (tmp_path / "plain" / "data" / "records.json").exists()
+
+    r = run.invoke(app, base + [str(tmp_path / "bad"), *units, "--usm-heights", "all"])
+    assert r.exit_code == 2
