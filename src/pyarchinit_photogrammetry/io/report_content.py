@@ -164,7 +164,14 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
                        "GPS height by flight: one vertical offset per flight estimated with the georeference ({0}); "
                        "the errors are measured after the offset."),
     "gps_flights_datum": ("volo di riferimento: {0}", "datum flight: {0}"),
-    "gps_flights_markers": ("le quote le danno i punti di controllo", "the control points give the heights"),
+    "gps_flights_markers": ("ogni volo libero: le quote le danno i punti di controllo",
+                            "every flight free: the control points give the heights"),
+    "gps_flights_measured": ("Quota GPS per volo: i punti di controllo collocano il rilievo; l'offset di ogni volo è "
+                             "misurato sulle camere, non stimato, e gli errori sono misurati dopo l'offset.",
+                             "GPS height by flight: the control points place the survey; the offset of every flight "
+                             "is measured on the cameras, not estimated, and the errors are measured after it."),
+    "gps_flights_failed": ("Quota GPS per volo: offset non determinati ({0}); resta il fit semplice.",
+                           "GPS height by flight: offsets not determined ({0}); the plain fit is kept."),
     "plus_flights": (", con un offset di quota per volo", ", with a height offset per flight"),
     "gps_rmse": ("Errore delle camere (RMSE X / Y / Z / totale)", "Camera error (RMSE X / Y / Z / total)"),
     "no_reference": ("Nessun riferimento: il rilievo è in coordinate locali.",
@@ -1602,13 +1609,17 @@ def _gps_flights(chunk, w: Words, cam_refs: dict) -> Section | None:
     part = Section(w("gps_by_flight"), level=2)
     part.blocks.append(Table([w("h_flight"), w("h_start"), w("h_photos"), w("h_mean_dxyz"), w("h_sd_xyz"),
                               w("h_rmse_m"), w("h_height_offset")], table, align=["L", "L"] + ["R"] * 5))
-    record = chunk.meta.get(flights_mod.RECORD) or {}
+    record = flights_mod.current(chunk)
     part.blocks.append(Paragraph(w("gps_flights_note", int(flights_mod.GAP_S)), note=True))
-    if record.get("offsets"):
+    if record.get("by_flight_failed"):
+        part.blocks.append(Paragraph(w("gps_flights_failed", record["by_flight_failed"]), note=True))
+    elif record.get("offsets") and record.get("measured"):
+        part.blocks.append(Paragraph(w("gps_flights_measured"), note=True))
+    elif record.get("offsets"):
         datum = record.get("datum")
         part.blocks.append(Paragraph(w("gps_flights_on", w("gps_flights_datum", datum) if datum is not None
                                        else w("gps_flights_markers")), note=True))
-    off = flights_mod.off_flights(rows)
+    off = record.get("suggest") or []
     if off and not record.get("by_flight"):
         part.blocks.append(Paragraph(w("gps_flights_off", ", ".join(map(str, off))), note=True))
     return part
@@ -1632,7 +1643,7 @@ def _method(chunk, w: Words, markers: list[dict], cam_refs: dict) -> str:
         return ""
     from ..markers import flights as flights_mod
 
-    record = chunk.meta.get(flights_mod.RECORD) or {}
+    record = flights_mod.current(chunk)
     by_flight = gps and len(ctrl) < 3 and record.get("by_flight") and record.get("offsets")
     return text + (w("plus_flights") if by_flight else "") + (w("plus_scalebars") if bars else "")
 

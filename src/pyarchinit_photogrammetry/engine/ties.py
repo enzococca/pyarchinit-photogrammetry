@@ -1893,6 +1893,9 @@ def apply(doc: "Document", solution: Solution) -> dict:
             _convert_references(ch, ch.crs, solution.crs)
         ch.transform = np.asarray(solution.transforms[key], float).copy()
         ch.crs = solution.crs
+        # the GPS offsets per flight belong to the old transform (markers.flights.RECORD); the undo puts the
+        # transform back, and markers.flights.current() takes them again only for that transform
+        changed["chunks"][key]["gps_flights"] = ch.meta.pop("gps_flights", None)
         ch.meta["chunk_alignment"] = {"method": "ties", "kind": kind, "rmse": solution.rms,
                                       "redundancy": solution.redundancy}
         if crs_mod.is_local(solution.crs):
@@ -1926,7 +1929,7 @@ def restore(doc: "Document", changed: dict) -> None:
                     c.meta.pop("reference_crs", None)
                 else:
                     c.meta["reference_crs"] = before["camera_reference_crs"][c.key]
-        for meta_key in ("chunk_alignment", "levelled"):
+        for meta_key in ("chunk_alignment", "levelled", "gps_flights"):
             if before.get(meta_key) is None:
                 ch.meta.pop(meta_key, None)
             else:

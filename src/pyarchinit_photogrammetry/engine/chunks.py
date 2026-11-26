@@ -949,8 +949,7 @@ def align_chunks(doc: "Document", reference, chunks=None, method: str = "markers
     for ch, T, info in results:
         if not crs_mod.is_local(ch.crs) and not crs_mod.is_local(ref.crs) and ch.crs != ref.crs:
             _convert_references(ch, ch.crs, ref.crs)
-        ch.transform = T
-        ch.crs = ref.crs
+        _placed(ch, T, ref.crs)
         if ref.meta.get("levelled"):
             ch.meta["levelled"] = True
         else:
@@ -1533,6 +1532,16 @@ def duplicate_label(doc: "Document", chunk: "Chunk") -> str:
         n += 1
         label = f"{chunk.label} (copia {n})"
     return label
+
+
+def _placed(ch: "Chunk", transform, crs: str) -> None:
+    """``ch`` placed by the alignment of chunks: its transform and system, and the GPS offsets per flight of its
+    last georeference dropped (they belong to the transform it had: :mod:`..markers.flights`)."""
+    from ..markers import flights
+
+    ch.transform = transform
+    ch.crs = crs
+    ch.meta.pop(flights.RECORD, None)
 
 
 def _cameras_of(chunk: "Chunk", cameras) -> list[Camera]:
