@@ -462,3 +462,114 @@ def test_apply_groups():
     legend = site_volumes.apply_groups(volumes, groups)
     assert [(v["group"], v["colour"]) for v in volumes] == [("b", "#020202"), ("b", "#020202")]
     assert [(g["name"], g["count"]) for g in legend] == [("a", 0), ("b", 2)]  # no "Senza gruppo" row: none left
+
+
+def _on_volume(site, key, n=12):
+    """``n`` points of the surface of the volume ``key`` of ``proxies.glb`` well inside its outline, in the frame of
+    the site: a ray toward one of them meets the volume."""
+    xyz = _glb_meshes(site / "data" / "proxies.glb")[key][0]
+    lo, hi = xyz.min(axis=0), xyz.max(axis=0)
+    inside = xyz[(xyz[:, 0] > lo[0] + 0.08) & (xyz[:, 0] < hi[0] - 0.08) & (xyz[:, 1] > lo[1] + 0.08)
+                 & (xyz[:, 1] < hi[1] - 0.08)]
+    return [tuple(float(v) for v in p) for p in inside[np.linspace(0, len(inside) - 1, n).astype(int)]]
+
+
+def test_volumes_in_the_page(volumes_doc, tmp_path):
+    """The 3D tab draws the volumes over the model: a click on a volume opens the record of its unit (the volume
+    wins over the surface of the model in front of it) and marks it; the legend has a switch a group, the last one
+    named by the page; a group switched off is no longer picked; a record selected marks its volume; a site with
+    volumes alone opens on the 3D tab with a legend of the volumes."""
+    import json
+
+    from test_site import Browser, _serving, find_browser
+
+    from pyarchinit_photogrammetry.io import site_plugins
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    doc, _ch = volumes_doc
+    rows = [{"sito": SITE, "area": "1", "us": "12", "unita_tipo": "US", "d_stratigrafica": "Strato"},
+            {"sito": SITE, "area": "1", "us": "14", "unita_tipo": "US", "d_stratigrafica": "Riempimento"}]
+    entry = site_plugins.register(_groups_provider, owner="em", with_site=True)
+    try:
+        site, _manifest = _site(doc, tmp_path / "site", products=("dem", "model", "units", "proxies"),
+                                unit_records=rows, model_faces=8000)
+    finally:
+        site_plugins.unregister(entry)
+    data = json.loads((site / "data" / "proxies.json").read_text(encoding="utf-8"))
+    volumes = {v["us"]: v for v in data["volumes"]}
+    k12, k14 = volumes["12"]["record"], volumes["14"]["record"]
+    on12 = _on_volume(site, "US12")
+    c12, c14 = on12[len(on12) // 2], _on_volume(site, "US14")[6]
+    pick = ("((p) => p && p.feature ? p.feature.properties.us : null)"
+            "(ppgSite.state.view3d.pick(...ppgSite.state.view3d.project({}, {}, {})))")
+    pick_any = ("((p) => p ? (p.feature ? p.feature.properties.us : 'model') : null)"
+                "(ppgSite.state.view3d.pick(...ppgSite.state.view3d.project({}, {}, {})))")
+    with _serving(site) as port:
+        origin = f"http://127.0.0.1:{port}"
+        browser = Browser(executable, tmp_path / "profilo", size=(1200, 800))
+        try:
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            browser.js("ppgSite.setTab('3d')")
+            browser.wait("document.documentElement.dataset.model === 'ready' && ppgSite.state.view3d.ready()", 60)
+            assert browser.js("ppgSite.state.view3d.models.map((m) => m.def.id)") == ["model", "volumes"]
+            px, py = browser.js("ppgSite.state.view3d.project({}, {}, {})".format(*c12))
+            for kind in ("mousePressed", "mouseReleased"):
+                browser.call("Input.dispatchMouseEvent", {"type": kind, "x": px, "y": py, "button": "left",
+                                                          "clickCount": 1})
+            browser.wait("document.querySelector('#info .record') !== null", 10)
+            info = browser.js("document.getElementById('info').innerText")
+            assert "US 12 - Strato" in info, info
+            assert browser.js("document.documentElement.dataset.highlight") == k12
+            assert browser.js("ppgSite.state.view3d.selected()") == ["US12"]
+            # where the model is under the pointer too (it has holes), the volume is picked, not the model
+            index = browser.js("ppgSite.state.models.findIndex((m) => m.def.type === 'volumes')")
+            both = 0
+            for at in on12:
+                browser.js(f"ppgSite.state.view3d.setVisible({index}, false)")
+                model_here = browser.js(pick_any.format(*at))
+                browser.js(f"ppgSite.state.view3d.setVisible({index}, true)")
+                if model_here == "model":
+                    both += 1
+                    assert browser.js(pick.format(*at)) == "12", at
+            assert both >= 3, both
+
+            legend = browser.js("[...document.querySelectorAll('#layers [data-group]')]"
+                                ".map((r) => [r.dataset.group, r.innerText.trim()])")
+            assert [g for g, _t in legend] == ["fase-1", "fase-2", ""], legend
+            assert "Fase 1" in legend[0][1] and "Senza gruppo" in legend[2][1], legend
+            browser.js("document.getElementById('language').click()")
+            assert "No group" in browser.js("document.querySelector('#layers [data-group=\"\"]').innerText")
+
+            assert browser.js(pick.format(*c14)) == "14"
+            browser.js("document.querySelector('#layers [data-group=\"fase-1\"] input').click()")
+            assert browser.js(pick.format(*c12)) is None  # its group is off
+            assert browser.js(pick.format(*c14)) == "14"  # in no group: still there
+
+            browser.js(f"ppgSite.selectRecord(ppgSite.site.chunks[0], {k14!r})")
+            assert browser.js("ppgSite.state.view3d.selected()") == ["US14"]
+            assert not browser.errors, browser.errors
+            outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
+            assert not outside, outside
+        finally:
+            browser.close()
+
+    alone, manifest = _site(doc, tmp_path / "alone", products=("proxies",))
+    assert [x["id"] for x in manifest["chunks"][0]["layers"]] == ["volumes"]
+    with _serving(alone) as port:
+        browser = Browser(executable, tmp_path / "profilo2", size=(1200, 800))
+        try:
+            browser.call("Page.navigate", {"url": f"http://127.0.0.1:{port}/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            assert browser.js("ppgSite.state.tab") == "3d"
+            browser.wait("ppgSite.state.view3d.ready()", 30)
+            rows = browser.js("[...document.querySelectorAll('#layers [data-volume]')].map((r) => r.innerText.trim())")
+            assert rows == ["US 12", "US 14"], rows
+            assert browser.js(pick.format(*_on_volume(alone, "US14")[6])) == "14"
+            assert not browser.errors, browser.errors
+        finally:
+            browser.close()

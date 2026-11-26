@@ -99,6 +99,9 @@ function applyVisibility() {
   if (state.view3d) {
     state.models.forEach((model, index) => {
       state.view3d.setVisible(index, model.def.visible !== false && shown(model.chunk));
+      for (const group of model.def.groups || []) {
+        state.view3d.setGroupVisible(index, group.name, !state.hidden.has(`${model.def.url}|${group.name}`));
+      }
     });
   }
 }
@@ -271,6 +274,7 @@ function modelList(box) {
     if (model.def.faces) row.append(el('span', `${Math.round(model.def.faces / 1000)}k △`, 'count'));
     if (model.def.points) row.append(el('span', `${(model.def.points / 1e6).toFixed(2)} M`, 'count'));
     box.append(row);
+    if (model.def.type === 'volumes') volumeLegend(box, model, index);
     if (model.def.download) {
       const link = el('a', word('downloadCloud'), 'download');
       link.href = model.def.download;
@@ -278,6 +282,39 @@ function modelList(box) {
       box.append(link);
     }
   });
+}
+
+// the legend of the unit volumes: a row with a switch for each group a plugin gave (the last one, of the volumes in
+// no group, named by the page), else a row for each volume (its colour, its label) once the view has read them
+function volumeLegend(box, model, index) {
+  const def = model.def;
+  if (def.groups && def.groups.length) {
+    for (const group of def.groups) {
+      const key = `${def.url}|${group.name}`;
+      const sub = el('label', null, 'layer group');
+      sub.dataset.group = group.name;
+      const mark = check(!state.hidden.has(key), (on) => {
+        if (on) state.hidden.delete(key);
+        else state.hidden.add(key);
+        if (state.view3d) state.view3d.setGroupVisible(index, group.name, on);
+      });
+      const swatch = el('span', null, 'swatch');
+      swatch.style.background = colourOf(group.colour, '#888');
+      sub.append(mark, swatch, el('span', group.name ? title(group.title) : word('noGroup')),
+        el('span', group.count, 'count'));
+      box.append(sub);
+    }
+    return;
+  }
+  const loaded = state.view3d ? state.view3d.models[index] : null;
+  for (const volume of (loaded && loaded.data && loaded.data.volumes) || []) {
+    const sub = el('div', null, 'layer group');
+    sub.dataset.volume = volume.key;
+    const swatch = el('span', null, 'swatch');
+    swatch.style.background = colourOf(volume.colour, '#888');
+    sub.append(swatch, el('span', volume.label));
+    box.append(sub);
+  }
 }
 
 function sectionList(box) {
@@ -476,7 +513,9 @@ function showInfo() {
       .map(([k, v]) => [fieldName(k, fields), text(v)]));
     box.append(list);
     if (record) box.append(recordOf(chunk, record));
-    else if (chunk && chunk.records && def && def.id === 'units') box.append(el('p', word('noRecord'), 'note'));
+    else if (chunk && chunk.records && def && (def.id === 'units' || def.id === 'volumes')) {
+      box.append(el('p', word('noRecord'), 'note'));
+    }
   }
 }
 
@@ -545,6 +584,8 @@ function featuresAt(map, pixel, skip) {
 
 async function clicked(event) {
   if (state.draw) return;
+  state.highlight.getSource().clear(); // a unit selected before is no longer
+  delete document.documentElement.dataset.highlight;
   const [x, y] = event.coordinate;
   const features = featuresAt(state.map, event.pixel, [state.sketch, state.highlight]);
   const trace = features.find((f) => f.def && f.def.id === 'sections' && f.properties.section !== undefined);
@@ -662,8 +703,16 @@ async function openModel() {
     state.opening = import('./view3d.js').then(({createView}) => createView($('view3d'), state.models));
   }
   const view = await state.opening;
-  view.onPick = (point) => {
-    state.last = {x: point.x, y: point.y, height: point.z, features: [], tab: '3d', model: point.chunk.label};
+  view.onPick = async (point) => {
+    const features = [];
+    if (point.feature) { // a unit volume: its fields, its record
+      const def = (state.models.find((m) => m.chunk === point.chunk && m.def.type === 'volumes') || {}).def;
+      features.push({properties: point.feature.properties, fields: null, def, chunk: point.chunk});
+      await loadRecordsOf(features);
+      if (point.feature.properties.record) document.documentElement.dataset.highlight = point.feature.properties.record;
+      else delete document.documentElement.dataset.highlight;
+    } else delete document.documentElement.dataset.highlight;
+    state.last = {x: point.x, y: point.y, height: point.z, features, tab: '3d', model: point.chunk.label};
     showInfo();
   };
   view.onMeasure = (result, ended) => {
@@ -673,6 +722,7 @@ async function openModel() {
   };
   state.view3d = view;
   applyVisibility();
+  if (state.tab === '3d') layerList(); // the legend of the volumes, read with the view
   return view;
 }
 
@@ -894,11 +944,10 @@ async function start() {
   const layers = [];
   for (const chunk of site.chunks) {
     for (const def of [...chunk.layers].sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9))) {
-      if (def.type === 'tiles' || def.type === 'points') { // the model and the cloud: in the 3D tab
+      if (def.type === 'tiles' || def.type === 'points' || def.type === 'volumes') { // in the 3D tab
         state.models.push({chunk, def});
         continue;
       }
-      if (def.type === 'volumes') continue; // the unit volumes: the 3D view draws them (not yet)
       const cog = def.type === 'vector' ? null : await raster(chunk, def);
       if (def.type !== 'vector' && !cog) continue; // left out: the notice names it
       if (def.type === 'heights') {

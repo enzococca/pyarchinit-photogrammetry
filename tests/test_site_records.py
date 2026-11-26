@@ -310,6 +310,50 @@ def test_an_elevation_outline_carries_its_record(processed, tmp_path):
     assert records[outline["record"]]["title"] == "US 7 - Riempimento"
 
 
+def test_an_elevation_outline_opens_its_record(processed, tmp_path):
+    """On the tab of the sections a click on the outline of US 7 drawn on the section opens its record."""
+    import json
+    import shutil
+
+    import numpy as np
+    import pytest
+    from test_site import Browser, _serving, _with_drawings, find_browser
+    from test_site_more import _section
+
+    executable = find_browser()
+    if executable is None:
+        pytest.skip("no Chromium found (PPG_BROWSER names one)")
+    doc, ch, _facts = _with_drawings(processed, tmp_path / "progetto")
+    shutil.copytree(processed[0].path.parent / "photos", tmp_path / "progetto" / "photos")
+    _section(ch, np.array([2480000.0, 4500000.0, 100.0]))
+    doc.meta["sito"] = SITE
+    doc.save()
+    rows = [{"sito": SITE, "area": "3", "us": "7", "unita_tipo": "US", "d_stratigrafica": "Riempimento"}]
+    site = doc.export_site(tmp_path / "site", products=("sections",), unit_records=rows).parent
+    feats = json.loads((site / "data" / "sections" / "1" / "drawing.geojson").read_text(encoding="utf-8"))["features"]
+    outline = next(f for f in feats if f["properties"]["layer"] == "US")
+    ring = outline["geometry"]["coordinates"][0]
+    edge = [(ring[0][0] + ring[1][0]) / 2, (ring[0][1] + ring[1][1]) / 2]  # on the outline itself
+    with _serving(site) as port:
+        origin = f"http://127.0.0.1:{port}"
+        browser = Browser(executable, tmp_path / "profilo")
+        try:
+            browser.call("Page.navigate", {"url": origin + "/"})
+            browser.wait("['ready', 'error'].includes(document.documentElement.dataset.state)", 60)
+            assert browser.js("document.documentElement.dataset.state") == "ready", browser.errors
+            browser.js("ppgSite.setTab('sections')")
+            browser.wait("document.documentElement.dataset.section === '1'", 30)
+            box = browser.js("(() => { const r = document.getElementById('section-map').getBoundingClientRect();"
+                             " return [r.left, r.top]; })()")
+            px = browser.js(f"ppgSite.state.sectionMap.getPixelFromCoordinate([{edge[0]!r}, {edge[1]!r}])")
+            browser.click(box[0] + px[0], box[1] + px[1])
+            browser.wait("document.querySelector('#info .record') !== null", 10)
+            assert "US 7 - Riempimento" in browser.js("document.getElementById('info').innerText")
+            assert not browser.errors, browser.errors
+        finally:
+            browser.close()
+
+
 # --- the rows of the sites to read and the report of the matches ---
 
 def test_rows_of_the_sites_only(pa_db):
@@ -364,6 +408,7 @@ def test_record_in_the_page(tmp_path):
     description as text); a relation toward a unit of the site is a button that selects it, one toward a unit not
     in the site is text; the group titles follow the language."""
     import json
+    import time
 
     import pytest
     from test_site import Browser, _serving, find_browser
@@ -408,6 +453,15 @@ def test_record_in_the_page(tmp_path):
             info = browser.js("document.getElementById('info').innerText")
             assert "US 14" in info and "US 12 - Strato" not in info
             assert browser.js("ppgSite.state.highlight.getSource().getFeatures().length") == 1
+
+            # a click on the plan again: the unit selected before is no longer drawn over it
+            browser.js("document.getElementById('fit').click()")  # the map went to US 14: the whole plan again
+            time.sleep(0.5)
+            px = browser.js(f"ppgSite.map.getPixelFromCoordinate([{ux!r}, {uy!r}])")
+            browser.click(box[0] + px[0], box[1] + px[1])
+            browser.wait("document.getElementById('info').innerText.includes('US 12 - Strato')", 10)
+            assert browser.js("ppgSite.state.highlight.getSource().getFeatures().length") == 0
+            assert browser.js("document.documentElement.dataset.highlight") is None
             assert not browser.errors, browser.errors
             outside = [u for u in browser.requests if not u.startswith((origin, "about:", "blob:", "data:"))]
             assert not outside, outside
