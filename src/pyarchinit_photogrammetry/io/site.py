@@ -13,10 +13,13 @@
         units.geojson     the stratigraphic units of the plan with their attributes
         drawings.geojson  spot heights, break lines, measuring points and free drawings, each with its ``layer``
         model/            the 3D model as 3D Tiles 1.1 (tileset.json, tiles/*.glb, textures/*.jpg): the 3D view
+        proxies.glb       the volumes of the units (:mod:`.site_volumes`), one named node each, thinned
+        proxies.json      what the viewer shows of each volume: label, unit, volume, top and bottom, colour, record
 
 ``frame``: ``"local"`` (default) shifts every coordinate to an origin at the centre of the survey (whole metres; the
 heights to the whole metre under the lowest cell of the DEMs, read whole, so that no cell is under zero; under the
-lowest vertex of the models where there is no DEM, under the lowest drawn height where there is neither) and
+lowest vertex of the models where there is no DEM, then of the clouds, then of the unit volumes, under the lowest
+drawn height where there is none of them) and
 writes no reference system anywhere: nothing in the folder says where the site is. The origin is not written
 either. ``"crs"`` keeps the coordinates and the reference system of the chunks: an explicit choice. The model is in
 the same frame: in the local one its tiles are in the metres of the plan, with no transform to the globe, so that a
@@ -27,14 +30,15 @@ alone (a VRT), so no tag of the source files reaches the site, the photos and th
 text typed by the user - the attributes and their names, the names of chunks, layers and drawings, the title and the
 description - that holds the path of a computer is cut to its last name.
 
-The names of people are not published: an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew,
-who recorded, who filled in, who directed, who was in charge, the team) or the account of whoever wrote the record
-(``ACCOUNT_FIELDS``: who created it, who changed it last) is left out of every feature of the site - units, spot
-heights, lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of
-what the plugins give (:mod:`.site_plugins`), wherever the record keeps it and however its name is written
-(:func:`_attributes`; how a name is recognised: ``assistant.privacy.is_people_field``). Names are not looked for in
-the texts: one written elsewhere - a title, a description, a label, a note, another attribute - is published as
-written.
+The names of people are not published unless the build is asked for them (``people=True``; ``site.json`` says
+which, ``people``): an attribute that holds one (``assistant.privacy.PEOPLE_FIELDS``: who drew, who recorded, who
+filled in, who directed, who was in charge, the team) is left out of every feature of the site - units, spot heights,
+lines, points, free drawings and the layers imported among them, the drawings of the elevations - and of what the
+plugins give (:mod:`.site_plugins`), wherever the record keeps it and however its name is written (:func:`_attributes`,
+the one filter of them all; how a name is recognised: ``assistant.privacy.is_people_field``). The account of whoever
+wrote the record (``ACCOUNT_FIELDS``: who created it, who changed it last) never is, whatever the build. Names are
+not looked for in the texts: one written elsewhere - a title, a description, a label, a note, another attribute - is
+published as written.
 
 :func:`server` (``ppg web serve``) is a static server with HTTP range requests - the viewer reads the rasters by
 parts - bound to this computer alone unless another host is asked for; :class:`Preview` runs it in a thread of its
@@ -52,6 +56,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import math
 import os
 import re
@@ -71,12 +76,17 @@ import numpy as np
 from ..assistant.privacy import is_account_field, is_people_field
 from ..core import crs as crs_mod
 from ..core.progress import as_progress
+from . import site_records, site_volumes
+
+log = logging.getLogger(__name__)
 
 FORMAT = "ppg-site"
 FORMAT_VERSION = 1
 FRAMES = ("local", "crs")
-PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "cloud", "sections")  # the relief goes with the DEM
-DEFAULT_PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "sections")  # the cloud only when asked
+PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "cloud", "sections",  # the relief goes with the DEM
+            "proxies")
+DEFAULT_PRODUCTS = ("orthomosaic", "dem", "units", "drawings", "model", "sections",  # the cloud only when asked
+                    "proxies")
 MODEL_TEXTURE = 4096  # the side of a texture page of the model on the site: a trench stays within a few hundred MB
 MODEL_FACES = 150_000  # faces of a tile of the model
 BUDGET_MB = 500.0  # the size of a whole site the build keeps to by thinning the model and the cloud
@@ -103,6 +113,7 @@ TITLES = {  # the layers of the viewer, in the languages of the page
     "model": {"it": "Modello 3D", "en": "3D model"},
     "cloud": {"it": "Nuvola di punti", "en": "Point cloud"},
     "sections": {"it": "Sezioni e prospetti", "en": "Sections and elevations"},
+    "volumes": {"it": "Volumi delle US", "en": "Unit volumes"},
 }
 GROUPS = {  # the kinds of drawings of the plan: the name of their ``layer``, its title, its colour in the program
     "quote": ("Quote", {"it": "Quote", "en": "Spot heights"}, "#f59e0b"),
@@ -120,6 +131,9 @@ FIELDS = {  # the attributes the viewer names in both languages (the others keep
     "area_m2": {"it": "Superficie (m²)", "en": "Surface (m²)"},
 }
 _TECHNICAL = ("ppg_id", "ppg_sig", "ppg_parte", "basis")  # identities of the program: of no use on a page
+# ``record`` is the build's own key of a unit record: an attribute so named (of a drawing, an imported layer, a
+# plugin's feature) is never published, so only the build sets it, after the cleaning
+_RESERVED = _TECHNICAL + ("record",)
 
 
 # ------------------------------------------------------------------------------------------------ what goes out
@@ -185,7 +199,7 @@ def _has_content(chunk) -> bool:
     d = chunk.meta.get("drawings") or {}
     return bool(_raster(chunk, "orthomosaic") or _raster(chunk, "dem") or _model(chunk)
                 or any(d.get(k) for k in ("units", "quote", "lines", "points", "free"))
-                or site_sections.entries(chunk) or _cloud(chunk))
+                or site_sections.entries(chunk) or _cloud(chunk) or site_volumes.present(chunk))
 
 
 def _private_roots(document, others=()) -> list[str]:
@@ -226,34 +240,37 @@ def _scrub(value, roots: list[str]):
     return _scrub(str(value), roots)
 
 
-def _personal(name) -> bool:
-    """Whether an attribute named ``name`` holds the name of a person or the account of whoever wrote the record
-    (``assistant.privacy.PEOPLE_FIELDS``, ``ACCOUNT_FIELDS``), however the name is written."""
-    return is_people_field(name) or is_account_field(name)
+def _personal(name, people: bool = False) -> bool:
+    """Whether an attribute named ``name`` is left out of the site: the account of whoever wrote the record
+    (``assistant.privacy.ACCOUNT_FIELDS``) always, the name of a person (``PEOPLE_FIELDS``) unless the build is
+    asked for them (``people``), however the name is written."""
+    return is_account_field(name) or (not people and is_people_field(name))
 
 
-def _without_people(value):
-    """``value`` (JSON-like) without the attributes that hold the name of a person or an account, at any depth."""
+def _without_people(value, people: bool = False):
+    """``value`` (JSON-like) without the attributes that hold an account, nor the name of a person unless
+    ``people``, at any depth."""
     if isinstance(value, Mapping):
-        return {k: _without_people(v) for k, v in value.items() if not _personal(k)}
+        return {k: _without_people(v, people) for k, v in value.items() if not _personal(k, people)}
     if isinstance(value, (list, tuple)):
-        return [_without_people(v) for v in value]
+        return [_without_people(v, people) for v in value]
     return value
 
 
-def _attributes(values: dict, roots: list[str]) -> dict:
-    """The attributes of a feature as the page shows them: no private key, no identity, no empty value, no name
-    of a person and no account of whoever wrote the record (``assistant.privacy.PEOPLE_FIELDS`` and
-    ``ACCOUNT_FIELDS``, also inside a value: the site is public and they are names of other people). Everything
-    the site publishes of a record passes through here. The names of the attributes are judged as they are
-    published - after the cleaning of the paths, which cuts one to its last name."""
+def _attributes(values: dict, roots: list[str], people: bool = False) -> dict:
+    """The attributes of a feature as the page shows them: no private key, no identity, no empty value, no
+    account of whoever wrote the record (``assistant.privacy.ACCOUNT_FIELDS``) and - unless ``people``, the box
+    of the build - no name of a person (``PEOPLE_FIELDS``), also inside a value: the site is public and they are
+    names of other people. Everything the site publishes of a record passes through here. The names of the
+    attributes are judged as they are published - after the cleaning of the paths, which cuts one to its last
+    name."""
     out = {}
     for k, v in (values or {}).items():
-        if str(k).startswith("_") or k in _TECHNICAL or v is None or v == "":
+        if str(k).startswith("_") or k in _RESERVED or v is None or v == "":
             continue
         key = _scrub(str(k), roots)
-        if not _personal(key):
-            out[key] = _without_people(_scrub(v, roots))
+        if not _personal(key, people):
+            out[key] = _without_people(_scrub(v, roots), people)
     return out
 
 
@@ -286,7 +303,9 @@ class _Shift:
         return {"type": m["type"], "coordinates": walk(m["coordinates"])}
 
 
-def _unit_features(chunk, shift: _Shift, roots) -> list[dict]:
+def _unit_features(chunk, shift: _Shift, roots, people: bool = False, record_of=None) -> list[dict]:
+    """The unit polygons of the plan as features; ``record_of(unit)``: the key of the record of a unit
+    (:class:`.site_records.ChunkRecords`), None when it has none, written as ``record``."""
     from ..archaeo.stratigraphy import UnitPolygon
 
     feats = []
@@ -300,13 +319,16 @@ def _unit_features(chunk, shift: _Shift, roots) -> list[dict]:
         tipo = u.tipo or "US"
         props = {"label": f"{tipo} {u.us}" if u.us else tipo, "us": u.us, "area": u.area, "sito": u.sito,
                  "tipo": tipo, "area_m2": round(float(u.geometry.area), 3)}
-        props.update(_attributes(u.attributes, roots))
-        feats.append({"type": "Feature", "properties": _attributes(props, roots),
-                      "geometry": shift.geometry(u.geometry)})
+        props.update(_attributes(u.attributes, roots, people))
+        props = _attributes(props, roots, people)
+        key = record_of(u) if record_of is not None else None
+        if key:
+            props["record"] = key
+        feats.append({"type": "Feature", "properties": props, "geometry": shift.geometry(u.geometry)})
     return feats
 
 
-def _drawing_features(chunk, shift: _Shift, roots) -> tuple[list[dict], list[dict]]:
+def _drawing_features(chunk, shift: _Shift, roots, people: bool = False) -> tuple[list[dict], list[dict]]:
     """The other drawings of the plan as features, each with its ``layer``, and the layers met:
     ``{name, title, colour, count}``."""
     from ..archaeo import breaklines
@@ -319,7 +341,7 @@ def _drawing_features(chunk, shift: _Shift, roots) -> tuple[list[dict], list[dic
     def add(name: str, title: dict, colour: str, geometry: dict, props: dict) -> None:
         g = groups.setdefault(name, {"name": name, "title": title, "colour": colour, "count": 0})
         g["count"] += 1
-        feats.append({"type": "Feature", "properties": {"layer": name, **_attributes(props, roots)},
+        feats.append({"type": "Feature", "properties": {"layer": name, **_attributes(props, roots, people)},
                       "geometry": geometry})
 
     name, title, colour = GROUPS["quote"]
@@ -630,7 +652,7 @@ def _size(path: Path) -> int:
         (Path(path).stat().st_size if Path(path).exists() else 0)
 
 
-LAYER_ORDER = ("ortho", "hillshade", "dem", "model", "cloud", "sections", "units", "drawings")
+LAYER_ORDER = ("ortho", "hillshade", "dem", "model", "cloud", "volumes", "sections", "units", "drawings")
 
 
 def export_site(document, folder: str | os.PathLike, chunks=None, products=None, frame: str = "local",
@@ -638,7 +660,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 model_texture: int | None = MODEL_TEXTURE, model_faces: int = MODEL_FACES,
                 budget_mb: float | None = BUDGET_MB, cloud_points: int | None = CLOUD_POINTS,
                 cloud_copc: bool = True, labels: dict | None = None, dates: dict | None = None,
-                timeline: bool | None = None, progress=None) -> Path:
+                timeline: bool | None = None, people: bool = False, unit_records: list[dict] | None = None,
+                usm_heights: str = "none", progress=None) -> Path:
     """Build the web site of ``document`` in ``folder`` (see the module docstring) and return the path of its
     manifest, ``site.json``.
 
@@ -664,8 +687,16 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     projects) the name of a chunk on the page; ``dates``: ``{chunk: "YYYY-MM-DD"}`` (or pairs) the date of its
     survey. ``timeline``: the page shows one date at a time with a
     selector of the dates (default: when ``dates`` is given); every chunk needs a date then - given, set on the
-    chunk, or that of its photos (:func:`chunk_date`); chunks of one date are shown together. A folder that holds
-    anything but a site built here is refused."""
+    chunk, or that of its photos (:func:`chunk_date`); chunks of one date are shown together. ``people``: the
+    names of people of the records and of what the plugins give are published too (the module docstring; the
+    accounts of who wrote a record never are).
+
+    ``unit_records``: rows of PyArchInit's ``us_table`` (dicts, :meth:`..pyarchinit.PyArchInit.us_rows`); each unit
+    of the plan, of the sections and elevations that matches exactly one of them (:mod:`.site_records`; a unit
+    without a site takes ``document.meta["sito"]``) gets its record: ``data/[<n>/]records.json`` and ``record`` on
+    its features, the columns of :func:`.site_records.published_columns`. ``usm_heights``: among
+    :data:`.site_records.USM_HEIGHTS`, what the heights of a masonry unit are in a local frame. None: no record,
+    the site as without them. A folder that holds anything but a site built here is refused."""
     from ..archaeo.terrain import hillshade
     from . import site_cloud, site_plugins, site_sections
     from .web import export_3dtiles, export_cog
@@ -673,6 +704,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
     progress = as_progress(progress)
     if frame not in FRAMES:
         raise ValueError(f"frame: one of {', '.join(FRAMES)}")
+    if usm_heights not in site_records.USM_HEIGHTS:
+        raise ValueError(f"usm_heights: one of {', '.join(site_records.USM_HEIGHTS)}")
     languages = [language] if isinstance(language, str) else list(language or LANGUAGES)
     if not languages or any(x not in LANGUAGES for x in languages):
         raise ValueError(f"language: among {', '.join(LANGUAGES)}")
@@ -711,11 +744,12 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         ortho = _raster(ch, "orthomosaic") if "orthomosaic" in products else None
         dem = _raster(ch, "dem") if "dem" in products else None
         raw = _Shift()
-        units = _unit_features(ch, raw, roots) if "units" in products else []
-        drawn = _drawing_features(ch, raw, roots)[0] if "drawings" in products else []
+        units = _unit_features(ch, raw, roots, people) if "units" in products else []
+        drawn = _drawing_features(ch, raw, roots, people)[0] if "drawings" in products else []
         model = _model_info(ch) if "model" in products and _model(ch) is not None else None
         cloud = _cloud(ch) if "cloud" in products else None
         sections = site_sections.entries(ch) if "sections" in products else []
+        volumes = site_volumes.load(ch, notes) if "proxies" in products else []
         traces = []
         for entry in sections:
             from ..engine.elevation import bounds_of
@@ -724,7 +758,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             if g is not None:
                 traces.append({"type": "Feature", "properties": {}, "geometry": g})
         box = _union([_raster_info(p)["bounds"] for p in (ortho, dem) if p is not None]
-                     + [_bounds(units), _bounds(drawn), model[0] if model else None, _bounds(traces)])
+                     + [_bounds(units), _bounds(drawn), model[0] if model else None, _bounds(traces),
+                        site_volumes.bounds(volumes)])
         cloud_box = None
         if cloud is not None:
             pc = ch.point_cloud.transformed(ch.transform)
@@ -742,10 +777,12 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             raise ValueError(f"chunk {ch.label!r} has none of the products asked for")
         plan.append({"chunk": ch, "ortho": ortho, "dem": dem, "box": box, "model": model, "cloud": cloud,
                      "sections": sections, "heights": _dem_heights(dem) if dem is not None else None,
+                     "volumes": volumes, "volumes_low": site_volumes.lowest(volumes),
                      "lowest": _lowest(units + drawn)})
     if not plan:
         raise ValueError("nothing to publish: no chunk has the products asked for")
     shift = _Shift()
+    lows: list[float] = []
     if frame == "local":
         box = _union(p["box"] for p in plan) or (0.0, 0.0, 0.0, 0.0)
         # the heights start at the whole metre under the lowest cell of the DEMs: no cell is under zero and the
@@ -757,13 +794,18 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         if not lows:
             lows = [p["cloud"][1] for p in plan if p["cloud"]]
         if not lows:
+            lows = [p["volumes_low"] for p in plan if p["volumes_low"] is not None]
+        if not lows:
             lows = [p["lowest"] for p in plan if p["lowest"] is not None]
         shift = _Shift(round((box[0] + box[2]) / 2), round((box[1] + box[3]) / 2),
                        float(math.floor(min(lows))) if lows else 0.0)
     written_crs = crs if frame == "crs" else None
+    heights_fixed = frame == "crs" or bool(lows)  # the true heights of the records are lowered by dz, or left out
+    project_site = (document.meta or {}).get("sito")
+    with_records = False
 
-    def clean(values):
-        return _attributes(values, roots)
+    def clean(values):  # the one filter of every record of the site, the plugins' included
+        return _attributes(values, roots, people)
 
     def scrub(text):
         return _scrub(text, roots)
@@ -780,6 +822,15 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         data.mkdir(parents=True, exist_ok=True)
         item["rel"], item["data"] = rel, data
         layers, boxes = {}, []
+        records = None
+        # the volumes thinned and packed first: one left out (thinning, size) has no record and no match
+        volumes = site_volumes.prepare(ch, item["volumes"], shift, frame, scrub, notes) if item["volumes"] else None
+        item["volumes"] = None  # the meshes read are not needed any more
+        if unit_records is not None:
+            records = site_records.chunk_records(
+                ch, unit_records, project_site, frame=frame, dz=shift.dz, fixed=heights_fixed,
+                usm_heights=usm_heights, people=people, scrub=scrub, units="units" in products,
+                sections=item["sections"], volumes=[e for e, _m in volumes["kept"]] if volumes else [])
         with tempfile.TemporaryDirectory(prefix=".ppg-site-", dir=folder) as tmp:
             tmp = Path(tmp)
             if item["ortho"] is not None:
@@ -818,7 +869,9 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             sub(0.75, f"{ch.label}: sections")
             section_list, traces, _ = site_sections.write_sections(
                 ch, data, rel, shift, quality, clean, scrub, progress=sub.sub(0.75, 0.15),
-                prefix=f"{n + 1}-" if several else "")
+                prefix=f"{n + 1}-" if several else "",
+                record_of=None if records is None else
+                (lambda rec: records.key(rec.get("sito"), rec.get("area"), rec.get("tipo"), rec.get("us"))))
             if traces:
                 _write_geojson(data / "sections.geojson", traces, written_crs)
                 layers["sections"] = {"id": "sections", "type": "vector", "url": f"{rel}/sections.geojson",
@@ -827,7 +880,8 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                 boxes.append(_bounds(traces))
         sub(0.9, f"{ch.label}: drawings")
         if "units" in products:
-            feats = _unit_features(ch, shift, roots)
+            feats = _unit_features(ch, shift, roots, people, record_of=None if records is None else
+                                   (lambda u: records.key(u.sito, u.area, u.tipo, u.us)))
             if feats:
                 _write_geojson(data / "units.geojson", feats, written_crs)
                 layers["units"] = {"id": "units", "type": "vector", "url": f"{rel}/units.geojson",
@@ -835,20 +889,38 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
                                    "colour": UNIT_COLOUR}
                 boxes.append(_bounds(feats))
         if "drawings" in products:
-            feats, groups = _drawing_features(ch, shift, roots)
+            feats, groups = _drawing_features(ch, shift, roots, people)
             if feats:
                 _write_geojson(data / "drawings.geojson", feats, written_crs)
                 layers["drawings"] = {"id": "drawings", "type": "vector", "url": f"{rel}/drawings.geojson",
                                       "title": TITLES["drawings"], "visible": True, "count": len(feats),
                                       "groups": groups}
                 boxes.append(_bounds(feats))
+        unit_groups: list[dict] = []  # one set a chunk, for its volumes (ignored without volumes)
         plugin_layers, plugin_list, _ = site_plugins.write(
             ch, data, rel, shift, clean, scrub, notes, frame=frame, crs=written_crs, languages=languages,
-            sections=list(zip(item["sections"], section_list)))  # write_sections keeps the order of the entries
+            sections=list(zip(item["sections"], section_list)),  # write_sections keeps the order of the entries
+            unit_groups=unit_groups)
         for layer in plugin_layers:
             layers[layer["id"]] = layer
             path = folder / layer["url"]
             boxes.append(_bounds(json.loads(path.read_text(encoding="utf-8"))["features"]))
+        if volumes:
+            sub(0.95, f"{ch.label}: unit volumes")
+            polygons = site_records.chunk_polygons(ch)
+
+            def volume_record(entry, polygons=polygons, records=records):
+                unit = site_records.volume_unit(entry, polygons, project_site)
+                return records.key(*unit) if unit is not None else None
+
+            layer = site_volumes.write(ch, volumes, data, rel, shift, scrub,
+                                       None if records is None else volume_record,
+                                       unit_groups[0] if unit_groups else None, notes)
+            volumes = None
+            if layer is not None:
+                layers["volumes"] = layer
+                b = layer["box"]
+                boxes.append((b[0], b[1], b[3], b[4]))
         label = _lookup(labels, ch)
         entry = {"id": str(n + 1), "label": scrub(str(label if label else ch.label)), "layers": layers,
                  "boxes": boxes}
@@ -858,6 +930,18 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
             entry["sections"] = section_list
         if plugin_list:
             entry["plugins"] = plugin_list
+        if records is not None:
+            if records.records:
+                (data / "records.json").write_text(json.dumps(records.records, ensure_ascii=False,
+                                                              separators=(",", ":")), encoding="utf-8")
+                entry["records"] = {"url": f"{rel}/records.json", "count": len(records.records)}
+                with_records = True
+            if records.report:
+                notes.append(f"{entry['label']}: records of {records.matched} of {len(records.report)} units")
+            for r in records.report:  # the list goes to the log, not to the page (call 10)
+                how = f"step {r['step']}" + (f", {' and '.join(r['ignored'])} ignored" if r["ignored"] else "") \
+                    if r["step"] else r["reason"]
+                log.info("site records, %s: %s %s - %s", entry["label"], r["what"], r["label"], how)
         entries.append(entry)
 
     # then the model and the cloud, in what the budget leaves them
@@ -978,7 +1062,7 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         extent = _union(boxes) or _union([(s["trace"]["coordinates"][0][0], s["trace"]["coordinates"][0][1]) * 2
                                           for s in entry.get("sections", []) if "trace" in s]) or (-1, -1, 1, 1)
         entry["extent"] = [round(v, DECIMALS) for v in extent]
-        entry_keys = ["id", "label", "date", "extent", "layers", "sections", "plugins"]
+        entry_keys = ["id", "label", "date", "extent", "layers", "sections", "plugins", "records"]
         entries[n] = {k: entry[k] for k in entry_keys if k in entry}
 
     name = title or (document.meta or {}).get("sito") or (Path(document.path).stem if document.path else "Rilievo")
@@ -991,9 +1075,13 @@ def export_site(document, folder: str | os.PathLike, chunks=None, products=None,
         "title": _scrub(str(name), roots), "description": _scrub(str(description or ""), roots),
         "languages": languages,
         "frame": frame, "crs": written_crs, "unit": "m",
-        "fields": FIELDS,
-        "chunks": entries,
+        "people": bool(people),
+        "fields": FIELDS | site_records.COLUMN_TITLES if with_records else FIELDS,
     }
+    if with_records:
+        groups = list(site_records.RECORD_FIELDS) + ([site_records.PEOPLE_GROUP] if people else [])
+        manifest["record_groups"] = {gid: title for gid, title, _columns in groups}
+    manifest["chunks"] = entries
     if timeline:
         days: dict[str, list[str]] = {}
         for e in entries:
@@ -1196,7 +1284,7 @@ def chunk_products(chunk) -> list[str]:
     have = {"orthomosaic": _raster(chunk, "orthomosaic") is not None, "dem": _raster(chunk, "dem") is not None,
             "units": bool(d.get("units")), "drawings": any(d.get(k) for k in _DRAWN),
             "model": _model(chunk) is not None, "cloud": _cloud(chunk) is not None,
-            "sections": bool(_section_entries(chunk))}
+            "sections": bool(_section_entries(chunk)), "proxies": bool(site_volumes.present(chunk))}
     return [p for p in PRODUCTS if have[p]]
 
 
@@ -1223,8 +1311,9 @@ def _drawn_state(chunk, keys) -> str:
 
 def product_state(chunk, product: str):
     """What tells ``product`` of ``chunk`` from the same product built again or changed later: the name and the time
-    of change of its files (a raster, the cloud; the model with its texture pages; the orthophotos of the sections),
-    a digest of the records (units, drawings, the sections and their drawings)."""
+    of change of its files (a raster, the cloud; the model with its texture pages; the orthophotos of the sections;
+    the PLY of each volume, with a digest of their entries), a digest of the records (units, drawings, the sections
+    and their drawings)."""
     if product in ("orthomosaic", "dem"):
         return _file_state(_raster(chunk, product))
     if product == "cloud":
@@ -1242,6 +1331,13 @@ def product_state(chunk, product: str):
 
         model = _model(chunk)
         return None if model is None else [_file_state(model)] + [_file_state(Path(p)) for p in texture_pages(chunk)]
+    if product == "proxies":
+        import hashlib
+
+        found = site_volumes.entries(chunk)
+        bare = [{k: v for k, v in e.items() if k != "ppg_id"} for e in found]
+        digest = hashlib.sha1(json.dumps(bare, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        return [digest] + [_file_state(site_volumes.path(chunk, e)) for e in found]
     return _drawn_state(chunk, ("units",) if product == "units" else _DRAWN)
 
 

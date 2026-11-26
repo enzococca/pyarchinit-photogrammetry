@@ -434,7 +434,7 @@ def test_plugin_hook_through_the_context(tmp_path):
     context.add_site_contributions(lambda chunk: [])
     assert site_plugins.providers()[-1][0] == "prova-sito" and len(site_plugins.providers()) == before + 1
     context.add_site_contributions(lambda chunk, site: [], with_site=True)
-    assert Context.site_hook == site_plugins.HOOK == 2
+    assert Context.site_hook == site_plugins.HOOK == 3
     context.release()
     assert len(site_plugins.providers()) == before
 

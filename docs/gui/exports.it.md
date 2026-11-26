@@ -103,7 +103,10 @@ con il suo stato accanto al titolo (*da fare*, *fatto*, *da rifare*, *in corso*,
    stato ridotto), i **Punti della nuvola** al massimo (3 milioni) e **Una data alla volta** (i chunk come rilievi di
    date diverse - la data del chunk o delle sue foto -, mostrati uno alla volta con un selettore delle date). La
    **Nuvola di punti** è un prodotto da spuntare (non spuntata in partenza: pesa), **Sezioni e prospetti** vanno con le
-   loro ortofoto e i loro disegni in una scheda a sé. La cartella del sito (in
+   loro ortofoto e i loro disegni in una scheda a sé. Dalla 2.1.0 i **Volumi delle US** vanno nella vista 3D, e le
+   caselle **Schede US da PyArchInit** e **Nomi delle persone** con la scelta **Quote delle USM** aggiungono le
+   schede delle unità e i nomi ([Schede e volumi delle US](web-publish.it.md#schede-e-volumi-delle-us)). La cartella
+   del sito (in
    partenza `<progetto>_sito_web` accanto al file del progetto) dev'essere nuova, vuota o un sito costruito prima: una
    cartella con altri file viene rifiutata e non viene mai toccata.
 2. **Costruisci**: in background, con l'avanzamento e *Annulla*; i passi nel pannello Log, la dimensione del sito alla

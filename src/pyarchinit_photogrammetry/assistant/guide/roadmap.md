@@ -289,14 +289,19 @@ on the public WorldView-3 datasets.
 
 ## Next
 
-* **2.0.0 - Native engine and unit records from the site** (in progress): the photogrammetry engine moved to Rust
+* **2.0.0 - Native engine** (done, released as 2.0.0): the photogrammetry engine moved to Rust
   (GPU and CPU, every system) step by step. Milestone 0 measures 1.10 (engine switch, stage timings, photo cache
   sized on the memory, a synthetic ring flight, `ppg bench`); milestone 1 the native bundle adjustment; milestone 2
   native features, pairs and matching; milestone 3 a native global mapper with the GPS of the photos. A native
   step is chosen by `auto` only after it passes a measured gate against 1.10; the classic engine (pycolmap,
-  Open3D) stays behind it through 2.x. With it: the record of a stratigraphic unit opened from the published
-  site, the proxies of the blender-em plugin in the site, no names of people on a published site, the binaries
-  stated GPL-3.0-or-later.
+  Open3D) stays behind it through 2.x. With it: no names of people on a published site, the binaries stated
+  GPL-3.0-or-later.
+* **2.1.0 - Unit records and unit volumes on the published site** (built, in review): the record of a stratigraphic
+  unit from PyArchInit opened with a click on its polygon, its outline on an elevation or its volume in 3D, its
+  relations as buttons; the volumes of the units (the proxies, also those modelled in Blender with the blender-em
+  plugin) in the 3D view of the site, grouped by a plugin through site hook 3. A snapshot taken at build time, off
+  unless asked for (box **Unit records from PyArchInit**, `ppg web build --pyarchinit`); names of people only with their
+  own box ([unit records and volumes](gui/web-publish.md#unit-records-and-volumes)).
 * **Walls traced on the plan** (built, waiting for a check on a real wall): the elevation of a wall that turns
   corners or curves, its line clicked or followed on the plan and snapped onto the face, unrolled round its corners;
   the same wall in several campaigns on one grid, the comparison sheet, the composite of the campaigns, the finishing

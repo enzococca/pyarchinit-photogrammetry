@@ -5,6 +5,7 @@ pipeline and ``ppg run script.py`` to execute Python scripts against a project.
 """
 from __future__ import annotations
 
+import enum
 import json
 import runpy
 import sys
@@ -6211,6 +6212,39 @@ def _site_chunks(doc, names) -> list | None:
     return out
 
 
+class UsmHeights(str, enum.Enum):
+    """The choices of ``ppg web build --usm-heights`` (:data:`.io.site_records.USM_HEIGHTS`)."""
+
+    none = "none"
+    relative = "relative"
+    absolute = "absolute"
+
+
+def _site_unit_rows(doc, chunks, products, url) -> list[dict]:
+    """The rows of ``us_table`` for ``ppg web build --pyarchinit``, read from the database of ``url`` (default: that
+    of PyArchInit's configuration); prints how the units match them (the per-unit report is not published)."""
+    from .io import site, site_records
+    from .pyarchinit import PyArchInit
+
+    try:
+        chosen = site._chunks(doc, chunks)
+        sites = site_records.unit_sites(doc, chosen)
+        rows = PyArchInit.connect(url).us_rows(sites)
+        report = site_records.match_report(doc, chosen, rows, products=products or site.DEFAULT_PRODUCTS)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    except Exception as exc:  # noqa: BLE001 - any error of the database: said, no site built
+        typer.echo(f"PyArchInit cannot be read: {exc}", err=True)
+        raise typer.Exit(1) from None
+    matched, total = site_records.summary(report)
+    typer.echo(f"records: {matched} of {total} units")
+    for r in report:
+        if not r.get("step"):
+            typer.echo(f"  {r['label']} ({r['chunk']}): {r['reason']}")
+    return rows
+
+
 @web_app.command("build")
 def web_build(project: Path,
               folder: Path = typer.Argument(..., help="the folder of the site (new, empty, or a site built before)"),
@@ -6226,7 +6260,8 @@ def web_build(project: Path,
                                                            "languages of the page, the first shown first "
                                                            "(default it, en)"),
               product: Optional[list[str]] = typer.Option(None, "--product", help="orthomosaic, dem, units, "
-                                                          "drawings, model, cloud or sections, repeatable (default: "
+                                                          "drawings, model, cloud, sections or proxies (the unit "
+                                                          "volumes), repeatable (default: "
                                                           "all the chunk has but the cloud)"),
               quality: int = typer.Option(85, "--quality", help="quality of the WebP of the orthophoto"),
               model_texture: int = typer.Option(4096, "--model-texture", help="largest side in pixels of a texture "
@@ -6241,11 +6276,23 @@ def web_build(project: Path,
               label: Optional[list[str]] = typer.Option(None, "--label", help="CHUNK=TEXT, repeatable: the name of "
                                                         "a chunk on the page"),
               timeline: bool = typer.Option(False, "--timeline", help="one date at a time, the dates of the chunks "
-                                            "(set on them or of their photos) where --date gives none")):
+                                            "(set on them or of their photos) where --date gives none"),
+              pyarchinit: bool = typer.Option(False, "--pyarchinit", help="publish the records of the units "
+                                              "(PyArchInit's us_table) that the units of the site stand for"),
+              url: Optional[str] = typer.Option(None, "--url", help="the PyArchInit database of --pyarchinit "
+                                                "(SQLite path or SQLAlchemy URL); default: that of PyArchInit's "
+                                                "config.cfg"),
+              people: bool = typer.Option(False, "--people", help="publish the names of people too (who recorded, "
+                                          "who drew, who directed); the accounts never"),
+              usm_heights: UsmHeights = typer.Option(UsmHeights.none, "--usm-heights", help="the heights of a masonry unit (quota_min_usm, quota_max_usm) "
+                                              "of the records: none (left out), relative or absolute")):
     """Write the site of a project: site.json, data/ and the page (see ppg web serve to look at it)."""
     doc = Document.open(project)
     dates, labels = _site_pairs(date, "--date"), _site_pairs(label, "--label")
     chunks = _site_chunks(doc, chunk)
+    if url and not pyarchinit:
+        typer.echo("--url is read only with --pyarchinit: no records published", err=True)
+    rows = _site_unit_rows(doc, chunks, product, url) if pyarchinit else None
 
     def by_chunk(pairs):  # a name of --date/--label that is the label of a chunk of another project
         out = []
@@ -6260,7 +6307,8 @@ def web_build(project: Path,
                                model_texture=model_texture or None, progress=print_progress,
                                budget_mb=budget or None, cloud_points=cloud_points, cloud_copc=not no_copc,
                                labels=by_chunk(labels) or None, dates=by_chunk(dates) or None,
-                               timeline=True if timeline or dates else None)
+                               timeline=True if timeline or dates else None, unit_records=rows,
+                               people=people, usm_heights=usm_heights.value)
     except (ValueError, FileExistsError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from None

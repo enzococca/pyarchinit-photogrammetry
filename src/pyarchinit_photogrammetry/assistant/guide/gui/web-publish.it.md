@@ -113,6 +113,96 @@ L'indirizzo r2.dev serve per le prove: per un sito che resta in linea collega un
 (*R2 > il bucket > Settings > Custom Domains*; il dominio dev'essere su Cloudflare) e scrivi il suo indirizzo `https://`
 in **Indirizzo dei dati**: allora il programma non tocca r2.dev.
 
+## Schede e volumi delle US
+
+Dalla 2.1.0 un sito può portare le **schede delle unità stratigrafiche** tenute in PyArchInit e i **volumi delle
+unità** fatti dal programma (o modellati in Blender e riportati dal plugin blender-em).
+
+**Che cosa trova il visitatore.** Un clic su un'unità - il suo poligono sulla pianta, il suo contorno su un
+prospetto, il suo volume nella vista 3D - apre la sua scheda nel pannello laterale: il titolo (`US 12 - Strato`),
+poi i campi per gruppo come li raggruppa la scheda US di PyArchInit (identificazione, definizione, localizzazione,
+descrizione, cronologia, formazione e caratteri, scavo, misure, quote, muratura) e i rapporti stratigrafici. I campi
+vuoti non si vedono; i nomi dei campi sono nelle lingue della pagina, i valori come sono scritti nel database. Ogni
+rapporto verso un'unità che il sito contiene è un pulsante: seleziona quell'unità (sulla pianta i suoi poligoni
+evidenziati e inquadrati, nella vista 3D il suo volume segnato) e apre la sua scheda; un rapporto verso un'unità che
+il sito non ha resta testo. Un'unità senza scheda dice *Nessuna scheda per questa unità.* La vista 3D ha il livello
+**Volumi delle US**: un solido trasparente per ogni unità, quello selezionato più opaco e con i suoi spigoli, e una
+legenda; un clic su un volume dà la stessa scheda, anche quando il volume sta dietro il modello. Mentre si misura
+(*Distanza*, *Area*) un clic prende la superficie più vicina, il modello o un volume, così un volume sotto il terreno
+non cambia la misura. Un chunk con i volumi e senza modello ha una vista 3D con i soli volumi.
+
+**Le due caselle** nel passo 1 del pannello, sotto i prodotti:
+
+- **Schede US da PyArchInit** (spenta in partenza) si può spuntare quando PyArchInit è collegato (menu *PyArchInit*);
+  fino ad allora lo dice il suo suggerimento. Spuntata, il pannello scrive accanto quante unità dei chunk spuntati
+  hanno la scheda (*12 unità su 15 con la scheda*), contate come le abbinerà la costruzione e seguendo i prodotti
+  spuntati; il suo suggerimento elenca le unità senza scheda con il motivo (*senza numero*, *senza sito*, *nessuna
+  scheda con questo numero*, *più schede possibili*) e quelle la cui scheda è stata trovata ignorando il tipo o
+  l'area. Un database che non si legge è segnalato in rosso accanto alla casella (*PyArchInit non leggibile*,
+  l'errore nel suggerimento).
+- **Nomi delle persone** (spenta in partenza): vedi [Nomi delle persone](#nomi-delle-persone).
+
+**Che cosa diventa pubblico** con le schede: la scheda di ogni unità del sito che corrisponde a una sola riga di
+`us_table` - le colonne che descrivono l'unità (identificazione, definizioni, localizzazione, testi, cronologia,
+formazione, scavo, misure, quote, rapporti, la scheda della muratura), 101 in tutto, con i testi come sono scritti
+(descrizioni, interpretazioni, osservazioni). Mai pubblicate: le colonne di sistema e amministrative, gli account di
+chi ha scritto una scheda, i numeri di catalogo e gli elenchi di documenti e luoghi che fuori dal database non
+significano niente (27 colonne), e ogni colonna che un PyArchInit più nuovo aggiunge e il programma non conosce. Le
+tre colonne con i nomi delle persone (`schedatore`, `direttore_us`, `responsabile_us`) solo con la casella **Nomi
+delle persone**. Nessuna fotografia di un'unità va nel sito. Il passo 4 elenca le schede tra quello che diventa
+pubblico (**Controlla**, e `--dry-run` dalla riga di comando), e **Pubblica...** lo dice nella sua conferma:
+*diventano pubbliche anche le schede di 12 unità stratigrafiche, testi compresi: i nomi scritti dentro un testo non
+vengono cercati*. Un nome scritto dentro una descrizione, un'interpretazione o una nota viene pubblicato com'è
+scritto, con la casella **Nomi delle persone** spuntata o no: leggi i testi prima di pubblicare, oppure lascia
+spenta la casella delle schede.
+
+**Come un'unità trova la sua scheda.** Il sito di un'unità è il `sito` del suo poligono, altrimenti il sito del
+progetto; un'unità senza sito o senza numero non ha scheda, e le unità di un altro sito non vengono mai lette. Tra le
+righe di quel sito con lo stesso numero (confrontato come testo, senza spazi ai lati): quelle con la stessa area e lo
+stesso tipo; se non ce ne sono, quelle con la stessa area qualunque sia il tipo (un poligono è `US` finché qualcuno
+non ne imposta il tipo); un poligono senza area, gli stessi due passi su tutte le aree. Un passo dà la scheda solo
+quando resta una riga sola: con più righe l'unità non ne ha - mai un'ipotesi. Un volume prende la scheda del poligono
+del suo chunk con lo stesso tipo e numero (e area, quando l'hanno entrambi), altrimenti viene abbinato nello stesso
+modo con il sito del progetto. I rapporti vengono da `rapporti` della scheda.
+
+**Una fotografia del momento.** Le schede sono quelle del momento in cui si costruisce il sito: il sito pubblicato è
+fatto di file e non parla mai con il database. Una scheda cambiata in PyArchInit arriva nel sito quando il sito
+viene costruito e pubblicato di nuovo.
+
+**Quote in un sistema locale.** Nel sistema locale (quello predefinito) il sito non dice dove sta il rilievo, e le
+quote del suo DEM sono abbassate di un numero intero di metri. Le quote assolute di una scheda (`quota_abs`,
+`quota_max_abs`, `quota_min_abs`) sono abbassate della stessa quantità, così concordano con quello che il visitatore
+legge sul DEM; quando niente nel sito fissa quella quantità (nessun DEM, modello, nuvola, volume o quota disegnata)
+restano fuori, perché pubblicarle direbbe le quote vere. Le quote relative (`quota_relativa`, `quota_max_rel`,
+`quota_min_rel`) vanno come sono scritte. Una quota scritta con la virgola (`245,30`) viene letta; un testo con
+dentro altro (`245,30 m s.l.m.`) resta fuori in un sistema locale. Con le **Coordinate vere** ogni quota va com'è
+scritta.
+
+**Quote delle USM.** La scheda di PyArchInit non dice se `quota_min_usm` e `quota_max_usm` sono assolute o relative:
+dipende da come sono state prese, quindi il programma lo chiede a chi pubblica. La scelta **Quote delle USM** sotto
+la casella delle schede: *non pubblicare* (quella predefinita: né una quota vera pubblicata né una relativa resa
+sbagliata senza una tua parola), *relative* (pubblicate come sono scritte, come `quota_relativa`) o *assolute*
+(abbassate come `quota_abs`, lasciate fuori quando niente fissa la quantità). Con le **Coordinate vere** la scelta
+non si vede: le due quote vanno come sono scritte, che è giusto in entrambi i casi. Le due caselle e la scelta
+restano con le altre impostazioni del pannello, nel progetto.
+
+**I volumi** sono il prodotto **Volumi delle US** (`proxies`), spuntato in partenza per un chunk che li ha: tutti i
+volumi del chunk (`chunk.meta["proxies"]`). Un volume del programma ha quattro facce per ogni cella del DEM; per il
+sito ognuno viene sfoltito a circa 20.000 facce, un chunk a circa 600.000, tenendo ogni solido chiuso e il suo
+spessore (uno strato di tre centimetri non collassa), e `proxies.glb` resta sotto i 25 MiB di un file di Pages. Un
+volume il cui file manca o non si legge, o che non si riesce a sfoltire, resta fuori ed è detto nelle note della
+costruzione. In un sistema locale i volumi entrano nella catena che fissa la base delle quote (dopo il DEM, il
+modello e la nuvola), così un chunk con i soli volumi non pubblica le loro quote vere. Nessun percorso di file, nessun
+id interno e non il `sito` scritto con un volume vanno nel sito. Colori: quelli del programma, a meno che un plugin
+raggruppi le unità (per esempio le epoche del plugin blender-em, [plugin](../plugins.it.md#nel-sito-web-di-un-rilievo)):
+allora la legenda ha un interruttore per ogni gruppo, e i volumi che non sono in nessun gruppo stanno in un ultimo
+gruppo *Senza gruppo*.
+
+**Senza PyArchInit.** Quando la casella è spuntata ma PyArchInit non è collegato, o il suo database non si legge al
+momento della costruzione, il pannello costruisce il sito senza le schede e lo dice nel pannello Log (*Sito senza le
+schede US: ...*); la costruzione non si ferma. La riga di comando invece si ferma: `ppg web build --pyarchinit`
+termina con il codice 1 e non costruisce niente quando il database non si legge (sotto).
+
 ## Nomi delle persone
 
 Dalla 2.0.0 il sito non pubblica gli attributi in cui PyArchInit tiene il nome di una persona:
@@ -125,8 +215,18 @@ Dalla 2.0.0 il sito non pubblica gli attributi in cui PyArchInit tiene il nome d
 
 Né quelli in cui tiene l'account di chi ha scritto una scheda: `last_modified_by`, `created_by`, `updated_by`,
 `editing_by`. Restano fuori da tutto quello che il sito pubblica - unità, quote, disegni (un layer importato tra i
-disegni porta le sue colonne), sezioni e prospetti, quello che aggiungono i plugin (i loro layer, tabelle e legende).
-Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
+disegni porta le sue colonne), sezioni e prospetti, le schede delle unità, quello che aggiungono i plugin (i loro
+layer, tabelle e legende). Nel progetto e in PyArchInit non cambia niente: i nomi restano lì.
+
+**La casella Nomi delle persone** (dalla 2.1.0, passo 1 del pannello, spenta in partenza; `ppg web build --people`,
+`export_site(people=True)`): spuntata, i nomi vanno nel sito - gli attributi qui sopra dovunque il sito li
+pubblicherebbe, e nelle schede delle unità il gruppo *Persone* con `schedatore`, `direttore_us` e `responsabile_us`.
+Gli account di chi ha scritto una scheda non vengono mai pubblicati, spuntata o no. Un sito costruito con i nomi lo
+dice in `site.json` (`"people": true`), il passo 4 li elenca tra quello che diventa pubblico e **Pubblica...** lo
+dice nella sua conferma (*diventano pubblici i nomi delle persone delle schede e dei disegni*). Se il sito viene
+costruito di nuovo tra **Controlla** e **Pubblica...** con più schede o con i nomi, la pubblicazione si ferma e
+chiede un nuovo controllo. La casella decide solo gli attributi nominati qui: un nome scritto dentro un testo non
+viene cercato, con la casella spuntata o no (sotto).
 
 Un attributo si riconosce dal nome, maiuscole o minuscole e qualunque cosa ci sia tra le lettere (`Disegnatore`,
 `Direttore US`, `direttore-us`, `nomeCompilatore`), anche come uno shapefile taglia un nome lungo: ai primi dieci
@@ -239,6 +339,23 @@ BUCKET -y` (se l'indirizzo l'ha acceso il programma), `r2 object delete BUCKET/C
 dal programma, per ultimo `r2 bucket delete BUCKET` (se chiesto e permesso). Un progetto o un bucket che wrangler non
 trova nel suo account è scritto come `not found in this Cloudflare account (it counts as removed)`, con una riga
 `note:` che indica l'indirizzo da controllare.
+
+Il sito stesso si costruisce con `ppg web build` ([Il rilievo come sito web](../api.it.md#il-rilievo-come-sito-web)).
+Dalla 2.1.0, con le schede delle unità e i nomi delle persone:
+
+    ppg web build PROGETTO.ppg CARTELLA_SITO --pyarchinit                         # le schede, database di config.cfg
+    ppg web build PROGETTO.ppg CARTELLA_SITO --pyarchinit --url DATABASE          # un percorso SQLite o un URL SQLAlchemy
+    ppg web build PROGETTO.ppg CARTELLA_SITO --pyarchinit --usm-heights relative  # none (predefinito), relative, absolute
+    ppg web build PROGETTO.ppg CARTELLA_SITO --people                             # anche i nomi delle persone
+
+`--pyarchinit` legge le righe di `us_table` dei siti delle unità (il database del `config.cfg` di PyArchInit, o
+`--url`), scrive `records: N of M units` e, per ogni unità senza scheda, il suo chunk e il motivo (`no number`, `no
+site`, `no row`, `several rows`). Quando il database non si legge scrive `PyArchInit cannot be read: ...` e termina
+con il codice 1, senza costruire niente - a differenza del pannello, che costruisce il sito senza le schede e lo dice
+nel pannello Log. `--usm-heights` è la scelta delle quote delle USM ([sopra](#schede-e-volumi-delle-us)); con
+`--frame crs` le due quote vanno come sono scritte, qualunque cosa dica; `--people` funziona con o senza
+`--pyarchinit` (anche i nomi dei disegni). `--product proxies` sono i volumi delle US, tra i prodotti presi in
+partenza.
 
 ## Altri hosting
 

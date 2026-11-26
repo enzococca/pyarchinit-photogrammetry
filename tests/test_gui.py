@@ -164,6 +164,7 @@ def test_pyarchinit_publish_from_gui(window, qapp, tmp_path, monkeypatch):
     w.pyarchinit_connect(config=cfg)
     w.runner.wait()
     assert w.pa is not None and w.pa_pane.site_names() == ["Saggio dimostrativo"]
+    assert w.web_pane.pa is w.pa and w.web_pane.records.isEnabled()  # the records offered to the web site
     before = len(w.pa.us_polygons("Saggio dimostrativo"))  # the demo database already has unit polygons
     w.set_project_site("Saggio dimostrativo")  # the project's excavation among the sites of the database
     w.units = [UnitPolygon(box(2480001.7, 4500001.3, 2480002.3, 4500001.5), us="2", area="1", tipo="USM")]

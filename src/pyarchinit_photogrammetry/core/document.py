@@ -227,8 +227,9 @@ class Document:
         (``ppg web serve`` to look at it). ``frame``: ``"local"`` (default) shifts the coordinates to the centre of
         the survey and writes no reference system: the place of the site is not in the folder; ``"crs"`` keeps the
         real coordinates. ``model_texture``: the largest side of a texture page of the model (None: vertex colours).
-        ``options``: ``budget_mb``, ``cloud_points``, ``cloud_copc``, ``labels``, ``dates``, ``timeline`` of
-        :func:`io.site.export_site`. Returns the path of ``site.json``."""
+        ``options``: ``budget_mb``, ``cloud_points``, ``cloud_copc``, ``labels``, ``dates``, ``timeline``,
+        ``people`` and - the records of the units from PyArchInit's ``us_table`` - ``unit_records``, ``usm_heights``
+        of :func:`io.site.export_site`. Returns the path of ``site.json``."""
         from ..io.site import export_site
 
         return export_site(self, folder, chunks=chunks, products=products, frame=frame, title=title,

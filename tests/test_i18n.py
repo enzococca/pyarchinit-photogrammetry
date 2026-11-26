@@ -57,6 +57,12 @@ def test_tr_and_numbers(english):
     assert i18n.number(1234.5, 1) == "1.234,5"
 
 
+def test_words_joined_in_the_language(english):
+    assert i18n.tr(" e ").join(["il tipo", "l'area"]) == "il tipo and l'area"
+    i18n.set_current("it")
+    assert i18n.tr(" e ") == " e "
+
+
 def test_messages_already_written(english):
     """The engine and the logger write their messages complete: recognised from the templates."""
     t = i18n.translate

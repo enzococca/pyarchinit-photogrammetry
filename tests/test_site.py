@@ -80,6 +80,8 @@ def _with_drawings(processed, folder: Path):
     unit = UnitPolygon(box(cx - 0.4, cy - 0.3, cx + 0.4, cy + 0.3), us="12", area="1", sito="Sito di prova",
                        attributes={"d_stratigrafica": "Strato", "note": str(Path.home() / "scavi" / SECRET),
                                    "_private": "x", "ppg_id": "abc"})
+    # volumes other tests left on the shared project would add a layer: this site has none of its own
+    ch.meta.pop("proxies", None)
     d = ch.meta.setdefault("drawings", {})
     d["units"] = [unit.to_dict() | {"attributes": dict(unit.attributes)}]
     d["quote"] = [{"x": x, "y": y, "quota_q": z, "us_q": "12", "area_q": "1"}]
@@ -574,11 +576,9 @@ def test_the_tests_try_every_field_of_people_and_of_accounts():
     assert len(set(names)) == len(names) and not any(a in b for a in names for b in names if a is not b)
 
 
-def test_names_of_people_are_not_published(tmp_path):
-    """The names of the people of an excavation - who drew a unit or took a height, who filled in, directed or
-    answers for a record (``assistant.privacy.PEOPLE_FIELDS``) - and the accounts of who wrote a record
-    (``ACCOUNT_FIELDS``) do not reach the site, whatever the drawing that carries them and however the name of the
-    attribute is written; the other attributes do. The project keeps them all."""
+def _document_with_people(tmp_path):
+    """A project whose drawings carry the names of the people of an excavation and the accounts of who wrote the
+    records (:data:`PEOPLE`, :data:`ACCOUNTS`) under fields written in many ways, saved in ``tmp_path``."""
     from shapely.geometry import box
 
     import pyarchinit_photogrammetry as ppg
@@ -612,6 +612,16 @@ def test_names_of_people_are_not_published(tmp_path):
                                   "team_members": [people["team_members"]],
                                   "editing_by": accounts["editing_by"], "last_modif": accounts["last_modified_by"]})
     doc.save(tmp_path / "persone.ppg")
+    return doc
+
+
+def test_names_of_people_are_not_published(tmp_path):
+    """The names of the people of an excavation - who drew a unit or took a height, who filled in, directed or
+    answers for a record (``assistant.privacy.PEOPLE_FIELDS``) - and the accounts of who wrote a record
+    (``ACCOUNT_FIELDS``) do not reach the site, whatever the drawing that carries them and however the name of the
+    attribute is written; the other attributes do. The project keeps them all."""
+    people, accounts = PEOPLE, ACCOUNTS
+    doc = _document_with_people(tmp_path)
     saved = (tmp_path / "persone.ppg").read_text(encoding="utf-8")
     assert all(name in saved for name in (*people.values(), *accounts.values()))  # the project keeps them
     site = doc.export_site(tmp_path / "site").parent
@@ -794,8 +804,8 @@ def test_viewer_needs_nothing_from_the_network():
 
     page = (site_mod.VIEWER / "index.html").read_text(encoding="utf-8")
     assert "Content-Security-Policy" in page and "default-src 'self'" in page
-    for name in ("index.html", "app/main.js", "app/view3d.js", "app/cog.js", "app/i18n.js", "app/style.css",
-                 "app/vendor/ol.css"):
+    for name in ("index.html", "app/main.js", "app/view3d.js", "app/cog.js", "app/i18n.js", "app/records.js",
+                 "app/style.css", "app/vendor/ol.css"):
         text = (site_mod.VIEWER / name).read_text(encoding="utf-8")
         assert not re.search(r"https?://|//cdn|@import|innerHTML|eval\(", text), name
     notice = (site_mod.VIEWER / "app/THIRD_PARTY.txt").read_text(encoding="utf-8")

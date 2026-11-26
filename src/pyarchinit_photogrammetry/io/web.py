@@ -178,11 +178,12 @@ def _texture_colours(n: int, faces, texcoords, texnumber, pixels: list[np.ndarra
     return np.where(cnt[:, None] > 0, acc / np.maximum(cnt, 1)[:, None], 200).astype(np.uint8)
 
 
-def _glb(primitives: list[dict]) -> bytes:
+def _glb(primitives: list[dict], names: list[str] | None = None) -> bytes:
     """A binary glTF of meshes without lights (``KHR_materials_unlit``, both sides): every primitive a dict of
     ``position`` (n, 3, Y-up), ``index`` (m,), and ``uv`` (n, 2, glTF orientation) with its texture ``page`` -
     the image itself is not in the tile, the viewer puts the page on it (``extras.page`` of the material) so
-    that the tiles share one image - or ``colour`` (n, 3, 0-255)."""
+    that the tiles share one image - or ``colour`` (n, 3, 0-255). ``names``: one per primitive, each primitive
+    then its own mesh and its own node of that name (default: one node, one mesh of all the primitives)."""
     import struct
 
     blob = bytearray()
@@ -216,9 +217,16 @@ def _glb(primitives: list[dict]) -> bytes:
         index = add(np.asarray(p["index"], np.uint32).ravel(), "SCALAR", 5125, 34963)
         materials.append(material)
         meshes_p.append({"attributes": attrs, "indices": index, "material": len(materials) - 1, "mode": 4})
+    if names is None:
+        nodes, meshes = [{"mesh": 0}], [{"primitives": meshes_p}]
+    else:
+        if len(names) != len(meshes_p):
+            raise ValueError("names: one per primitive")
+        nodes = [{"mesh": k, "name": str(n)} for k, n in enumerate(names)]
+        meshes = [{"name": str(n), "primitives": [p]} for n, p in zip(names, meshes_p)]
     gltf = {"asset": {"version": "2.0", "generator": "pyarchinit-photogrammetry"},
-            "extensionsUsed": ["KHR_materials_unlit"], "scene": 0, "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0}], "meshes": [{"primitives": meshes_p}], "materials": materials,
+            "extensionsUsed": ["KHR_materials_unlit"], "scene": 0, "scenes": [{"nodes": list(range(len(nodes)))}],
+            "nodes": nodes, "meshes": meshes, "materials": materials,
             "accessors": accessors, "bufferViews": views, "buffers": [{"byteLength": len(blob)}]}
     text = json.dumps(gltf, separators=(",", ":")).encode()
     text += b" " * (-len(text) % 4)

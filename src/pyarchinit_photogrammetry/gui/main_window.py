@@ -12896,7 +12896,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                   "il DEM del progetto, quella inferiore la base scelta. Il volume è quello del computo.")
         if not v:
             return
-        from ..archaeo.proxies import proxies_for_units, save_proxy
+        from ..archaeo.proxies import entry_site, proxies_for_units, save_proxy
 
         base = {"plane": v["z"], "dem": v["dem"] or None, "min": None, "thickness": None}[v["base"]]
         thickness = v["thickness"] if v["base"] == "thickness" else None
@@ -12916,7 +12916,8 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
                 gid = px.attributes.get("gid")
                 pid = px.attributes.get(ID_FIELD) or (stable_id("pyarchinit", site, gid) if gid is not None else None)
                 # the base kept with its value: the proxy is built again the same way when its unit changes
-                entries.append({"name": px.name, "us": px.us, "area": px.area, "tipo": px.tipo, "sito": site,
+                entries.append({"name": px.name, "us": px.us, "area": px.area, "tipo": px.tipo, "sito": entry_site(
+                    px.sito, site if v["units"].startswith("pa:") else "", self.doc.meta.get("sito")),
                                 "file": str(path.relative_to(self.chunk.data_dir)), "volume_m3": px.volume_m3,
                                 "area_m2": px.area_m2, "z_top": list(px.z_top), "z_bottom": list(px.z_bottom),
                                 "base": v["base"], **({"base_z": float(v["z"])} if v["base"] == "plane" else {}),
@@ -18703,6 +18704,7 @@ class MainWindow(FreeDrawingActions, ElevationDrawingActions, ModelMeasureAction
         def done(pa):
             self.pa = pa
             self.pa_pane.set_connection(pa, pa.label)
+            self.web_pane.set_pa(pa)  # the records of the units offered to the web site
             if self._pottery_win is not None:
                 self._pottery_win.set_connected(True)
             log.info("PyArchInit connesso: %s", pa.label)

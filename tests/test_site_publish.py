@@ -132,6 +132,41 @@ def test_a_frame_not_written_counts_as_true_coordinates(tmp_path):
     assert sp.site_frame(folder) == "crs"
 
 
+def _with_records(folder: Path, counts=(2,), people=True) -> Path:
+    """The manifest of a site built with unit records: ``records`` per chunk, ``people`` at the top."""
+    data = json.loads((folder / "site.json").read_text())
+    chunks = data["chunks"]
+    while len(chunks) < len(counts):
+        chunks.append({"key": str(len(chunks)), "layers": []})
+    for i, (chunk, n) in enumerate(zip(chunks, counts)):
+        if n is not None:
+            (folder / "data" / f"records{i}.json").write_text("{}")
+            chunk["records"] = {"url": f"data/records{i}.json", "count": n}
+    data["people"] = people
+    (folder / "site.json").write_text(json.dumps(data))
+    return folder
+
+
+def test_plan_says_records_and_people(tmp_path):
+    folder = _with_records(fake.make_site(tmp_path / "sito"), counts=(2,), people=True)
+    p = sp.plan(folder, "scavo")
+    assert p.ok and p.records == 2 and p.people
+    assert any("the records of 2 stratigraphic units, their texts included; names typed in a text are not looked "
+               "for" in x for x in p.public)
+    assert any("the names of people of the records and drawings (who recorded, directed, drew)" in x
+               for x in p.public)
+
+
+def test_plan_counts_records_of_every_chunk_and_people_only_when_true(tmp_path):
+    folder = _with_records(fake.make_site(tmp_path / "sito"), counts=(2, None, 3), people="yes")
+    p = sp.plan(folder, "scavo")
+    assert p.records == 5 and not p.people
+    assert not any("names of people" in x for x in p.public)
+    bare = sp.plan(fake.make_site(tmp_path / "nudo"), "scavo")
+    assert bare.records == 0 and not bare.people
+    assert not any("records" in x or "names of people" in x for x in bare.public)
+
+
 def test_default_project_name():
     assert sp.default_project("Scavo è Tell 2024_sito_web") == "scavo-e-tell-2024-sito-web"
     assert sp.default_project("___") == "rilievo"

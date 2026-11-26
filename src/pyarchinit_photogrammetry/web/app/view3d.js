@@ -8,14 +8,22 @@
 // reference system are around the centre of each model (layer.origin), placed on the globe by the transform of
 // their root, which is undone here. The scene is drawn around the centre of all the models (`centre`), so that
 // single precision on the graphics card keeps the millimetres; every coordinate shown adds it back.
+//
+// The unit volumes of a chunk (layer "volumes") are one glTF file (proxies.glb: a mesh and a node a volume, the
+// node named by the key of the volume, Y up as the tiles) and what the page shows of each (proxies.json). They are
+// drawn translucent, each in its colour; a click on a volume gives that unit, even behind the surface of the model
+// (the volumes usually lie under it).
 
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 import {TilesRenderer} from './vendor/3d-tiles-renderer/index.three.js';
 
 const MARK = 0x0b6bcb;
 const POINT_SIZE = 2; // pixels of a point of a cloud
 const PICK_PIXELS = 6; // how near to the pointer a point of a cloud is picked
+const VOLUME_OPACITY = 0.45;
+const SELECTED_OPACITY = 0.8;
 
 // The area vector of a closed polygon (Newell): its length is the area on the mean plane, its z the plan area.
 export function areaVector(points) {
@@ -63,8 +71,32 @@ function boxOf(models) {
   return {lo, hi};
 }
 
-// models: [{chunk, def}] with def the "tiles" layer of site.json. Returns the view, or throws when the browser
-// has no WebGL.
+// The volumes of a "volumes" layer: {key: {mesh, data}} with the mesh of each node of the glTF ``gltf`` named by a
+// volume of ``data`` (proxies.json), each with its own translucent material.
+function volumesOf(gltf, data) {
+  const byKey = new Map((data.volumes || []).map((v) => [v.key, v]));
+  const nodes = (gltf.parser.json.nodes || []);
+  const found = new Map();
+  gltf.scene.traverse((object) => {
+    if (!object.isMesh) return;
+    // the name of the node as written (the loader makes the names of the objects safe for animations)
+    const link = gltf.parser.associations.get(object);
+    const name = link && link.nodes !== undefined && nodes[link.nodes] ? nodes[link.nodes].name : object.name;
+    const volume = byKey.get(name);
+    if (!volume) {
+      object.visible = false;
+      return;
+    }
+    object.material = new THREE.MeshBasicMaterial({color: new THREE.Color(volume.colour || '#888888'),
+      transparent: true, opacity: VOLUME_OPACITY, depthWrite: false, side: THREE.DoubleSide});
+    object.renderOrder = 1;
+    found.set(name, {mesh: object, data: volume, outline: null});
+  });
+  return found;
+}
+
+// models: [{chunk, def}] with def a "tiles", "points" or "volumes" layer of site.json. Returns the view, or throws
+// when the browser has no WebGL.
 export async function createView(container, models) {
   const renderer = new THREE.WebGLRenderer({antialias: true});
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -86,6 +118,33 @@ export async function createView(container, models) {
 
   const loaded = [];
   for (const model of models) {
+    if (model.def.type === 'volumes') {
+      const holder = new THREE.Group();
+      const origin = model.def.origin || [0, 0, 0];
+      holder.position.set(origin[0] - centre.x, origin[1] - centre.y, origin[2] - centre.z);
+      holder.visible = model.def.visible !== false;
+      scene.add(holder);
+      // a volumes file that cannot be read leaves the volumes out, never the models and clouds of the view
+      let data = null;
+      let volumes = new Map();
+      let failed = false;
+      try {
+        const answer = await fetch(model.def.data);
+        if (!answer.ok) throw new Error(`${model.def.data}: HTTP ${answer.status}`);
+        data = await answer.json();
+        const gltf = await new GLTFLoader().loadAsync(model.def.url);
+        gltf.scene.rotation.x = Math.PI / 2; // Y up of glTF to the Z up of the site
+        holder.add(gltf.scene);
+        volumes = volumesOf(gltf, data);
+      } catch (error) {
+        console.warn(`${model.def.url}: ${error && error.message}`);
+        data = null;
+        failed = true;
+      }
+      loaded.push({...model, holder, data, volumes, failed, hiddenGroups: new Set(),
+        shown: model.def.visible !== false});
+      continue;
+    }
     const answer = await fetch(model.def.url);
     if (!answer.ok) throw new Error(`${model.def.url}: HTTP ${answer.status}`);
     const tileset = await answer.json();
@@ -167,8 +226,10 @@ export async function createView(container, models) {
     }
   }
 
-  // the point of the model under a pixel of the page (clientX, clientY), in the frame of the site; null if none
-  function pick(clientX, clientY) {
+  // the point of the model under a pixel of the page (clientX, clientY), in the frame of the site; null if none.
+  // ``preferVolumes``: a unit volume hit by the ray is taken whatever lies in front of it (to name a unit: the
+  // volumes are usually under the surface of the model); else the nearest hit (to measure).
+  function pick(clientX, clientY, {preferVolumes = true} = {}) {
     const rect = renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1);
@@ -178,11 +239,29 @@ export async function createView(container, models) {
     const pixel = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))
       * camera.position.distanceTo(controls.target) / Math.max(1, rect.height);
     ray.params.Points.threshold = PICK_PIXELS * pixel;
+    let volume = null;
+    for (const m of loaded) {
+      if (!m.volumes || !m.holder.visible) continue;
+      const meshes = [...m.volumes.values()].filter((v) => v.mesh.visible).map((v) => v.mesh);
+      const hits = ray.intersectObjects(meshes, false);
+      if (hits.length && (!volume || hits[0].distance < volume.hit.distance)) {
+        const item = [...m.volumes.values()].find((v) => v.mesh === hits[0].object);
+        volume = {hit: hits[0], model: m, item};
+      }
+    }
     let best = null;
     for (const m of loaded) {
-      if (!m.holder.visible) continue;
+      if (!m.holder.visible || m.volumes) continue;
       const hits = ray.intersectObject(m.tiles.group, true);
       if (hits.length && (!best || hits[0].distance < best.hit.distance)) best = {hit: hits[0], model: m};
+    }
+    if (volume && (preferVolumes || !best || volume.hit.distance < best.hit.distance)) {
+      const p = volume.hit.point;
+      const d = volume.item.data;
+      const properties = {label: d.label, us: d.us, area: d.area, tipo: d.tipo, volume_m3: d.volume_m3};
+      if (d.record) properties.record = d.record;
+      return {x: p.x + centre.x, y: p.y + centre.y, z: p.z + centre.z, chunk: volume.model.chunk,
+        feature: {properties, chunk: volume.model.chunk}, volume: volume.item};
     }
     if (!best) return null;
     const p = best.hit.point;
@@ -233,12 +312,58 @@ export async function createView(container, models) {
   view.setVisible = (index, visible) => {
     loaded[index].holder.visible = visible;
   };
-  // the visible models and clouds, every tile they need loaded
+  // the volumes of the group ``name`` ('' or null: those in no group) of the volumes layer ``index`` shown or not
+  view.setGroupVisible = (index, name, visible) => {
+    const m = loaded[index];
+    if (!m || !m.volumes) return;
+    const group = name || '';
+    if (visible) m.hiddenGroups.delete(group);
+    else m.hiddenGroups.add(group);
+    for (const v of m.volumes.values()) v.mesh.visible = !m.hiddenGroups.has(v.data.group || '');
+  };
+
+  // the volumes marked: more opaque, with their edges drawn
+  const edgeMaterial = new THREE.LineBasicMaterial({color: 0x000000});
+  function mark(items) {
+    for (const m of loaded) {
+      if (!m.volumes) continue;
+      for (const v of m.volumes.values()) {
+        const on = items.includes(v);
+        v.mesh.material.opacity = on ? SELECTED_OPACITY : VOLUME_OPACITY;
+        if (on && !v.outline) {
+          v.outline = new THREE.LineSegments(new THREE.EdgesGeometry(v.mesh.geometry, 30), edgeMaterial);
+          v.outline.renderOrder = 2;
+          v.mesh.add(v.outline);
+        } else if (!on && v.outline) {
+          v.mesh.remove(v.outline);
+          v.outline.geometry.dispose();
+          v.outline = null;
+        }
+      }
+    }
+  }
+  // the volumes of the record ``key`` of the chunk ``chunkId`` marked (null: none)
+  view.highlight = (chunkId, key) => {
+    const items = [];
+    for (const m of loaded) {
+      if (!m.volumes || !key || m.chunk.id !== chunkId) continue;
+      for (const v of m.volumes.values()) if (v.data.record === key) items.push(v);
+    }
+    mark(items);
+  };
+  view.selected = () => loaded.flatMap((m) => (m.volumes ? [...m.volumes.values()] : []))
+    .filter((v) => v.outline).map((v) => v.data.key);
+
+  // the visible models and clouds, every tile they need loaded (the volumes are loaded with the view, their files
+  // read before the view was made): a volumes layer shown never stands for the tiles of a model or a cloud still on
+  // their way, the tiles shown must have some tile in view; volumes alone are ready at once
   view.ready = () => {
     const shown = loaded.filter((m) => m.holder.visible);
-    return shown.length > 0 && shown.every((m) => m.tiles.root && m.tiles.loadProgress === 1
+    const tiled = shown.filter((m) => m.tiles);
+    if (!tiled.length) return shown.length > 0;
+    return tiled.every((m) => m.tiles.root && m.tiles.loadProgress === 1
       && m.tiles.stats.downloading + m.tiles.stats.parsing + m.tiles.stats.queued === 0)
-      && shown.some((m) => m.tiles.visibleTiles.size > 0);
+      && tiled.some((m) => m.tiles.visibleTiles.size > 0);
   };
 
   // a click (not a drag) picks a point; the second click of a double click ends the measure
@@ -252,7 +377,7 @@ export async function createView(container, models) {
       if (view.onMeasure) view.onMeasure(view.finish(), true);
       return;
     }
-    const point = pick(event.clientX, event.clientY);
+    const point = pick(event.clientX, event.clientY, {preferVolumes: !view.mode});
     if (!point) return;
     if (view.mode) {
       view.points.push(point);
@@ -262,6 +387,7 @@ export async function createView(container, models) {
       view.points = [point];
       view.closed = false;
       draw();
+      mark(point.volume ? [point.volume] : []);
       if (view.onPick) view.onPick(point);
     }
   });
@@ -272,7 +398,7 @@ export async function createView(container, models) {
     renderer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    for (const m of loaded) m.tiles.setResolutionFromRenderer(camera, renderer);
+    for (const m of loaded) if (m.tiles) m.tiles.setResolutionFromRenderer(camera, renderer);
   }
   new ResizeObserver(resize).observe(container);
   resize();
@@ -284,7 +410,7 @@ export async function createView(container, models) {
       scene.updateMatrixWorld();
       camera.updateMatrixWorld();
       for (const m of loaded) {
-        if (m.holder.visible) m.tiles.update(); // a hidden model or cloud loads nothing
+        if (m.tiles && m.holder.visible) m.tiles.update(); // a hidden model or cloud loads nothing
       }
       renderer.render(scene, camera);
     }

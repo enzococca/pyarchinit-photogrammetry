@@ -253,6 +253,18 @@ def _manifest(folder: Path) -> dict:
     return data if isinstance(data, dict) and data.get("format") == FORMAT else {}
 
 
+def _records(manifest: dict) -> int:
+    """How many unit records the chunks of ``site.json`` publish (``records.count``; anything else counts 0)."""
+    chunks = manifest.get("chunks")
+    total = 0
+    for chunk in chunks if isinstance(chunks, list) else []:
+        rec = chunk.get("records") if isinstance(chunk, dict) else None
+        n = rec.get("count") if isinstance(rec, dict) else None
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            total += n
+    return total
+
+
 def site_frame(folder: str | os.PathLike) -> str:
     """``"local"`` or ``"crs"`` as ``site.json`` says; anything else counts as ``"crs"`` (the safe side)."""
     frame = _manifest(Path(folder)).get("frame")
@@ -288,6 +300,8 @@ class Plan:
     data_url: str | None  # the address of the data given by the user (a custom domain of the bucket)
     frame: str
     title: str = ""
+    records: int = 0  # unit records in the site (``records.count`` of the chunks of ``site.json``)
+    people: bool = False  # the names of people of the records and drawings are in the site
     pages_files: list[Entry] = field(default_factory=list)
     r2_files: list[Entry] = field(default_factory=list)
     upload: list[str] = field(default_factory=list)  # R2 keys to send (new or changed)
@@ -341,6 +355,11 @@ class Plan:
         else:
             out.append("coordinates in the local frame of the site (shifted, no reference system): the place of the "
                        "survey is not written")
+        if self.records:
+            out.append(f"the records of {self.records} stratigraphic units, their texts included; names typed in a "
+                       "text are not looked for")
+        if self.people:
+            out.append("the names of people of the records and drawings (who recorded, directed, drew)")
         return out
 
     def lines(self) -> list[str]:
@@ -422,7 +441,8 @@ def plan(folder: str | os.PathLike, project: str, bucket: str | None = None, dat
     data_url = str(data_url or "").strip().rstrip("/") or None
     manifest = _manifest(folder)
     p = Plan(folder=folder, project=project, bucket=bucket, data="pages", data_url=data_url,
-             frame=site_frame(folder), title=str(manifest.get("title") or ""))
+             frame=site_frame(folder), title=str(manifest.get("title") or ""),
+             records=_records(manifest), people=manifest.get("people") is True)
     if data not in DATA_MODES:
         p.add("problem", "data_mode", ", ".join(DATA_MODES))
         data = "auto"

@@ -1568,14 +1568,20 @@ installato nulla e la pagina non chiede niente fuori dalla propria cartella (nes
 
 | Chiamata | Descrizione |
 | --- | --- |
-| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None)` | il sito dei chunk (oggetti, chiavi o etichette, o chunk di altri progetti; predefinito ogni chunk con qualcosa da pubblicare); restituisce il percorso di `site.json`. Dalla 1.10.0 la nuvola, le sezioni, le date, il limite di dimensione (sotto) |
+| `document.export_site(folder, chunks=None, products=None, frame="local", title=None, description=None, language=("it", "en"), quality=85, model_texture=4096, model_faces=150000, progress=None, budget_mb=500, cloud_points=3000000, cloud_copc=True, labels=None, dates=None, timeline=None, people=False, unit_records=None, usm_heights="none")` | il sito dei chunk (oggetti, chiavi o etichette, o chunk di altri progetti; predefinito ogni chunk con qualcosa da pubblicare); restituisce il percorso di `site.json`. Dalla 1.10.0 la nuvola, le sezioni, le date, il limite di dimensione (sotto); dalla 2.1.0 i nomi delle persone (`people`), le schede delle unità (`unit_records`, `usm_heights`) e il prodotto `proxies` (sotto) |
 | `io.site.build_notes(manifest)` | dalla 1.10.0: quello che la costruzione ha ridotto o lasciato fuori (`build.notes` di `site.json`, pubblicate con il sito; dalla 2.0.0 dell'errore di un plugin danno solo il tipo, il suo testo è nel log del programma) |
 | `io.site.chunk_date(chunk)` | dalla 1.10.0: la data di un rilievo, `AAAA-MM-GG`: quella impostata sul chunk (`archaeo.timeline.set_phase_date`), altrimenti la prima delle sue foto |
 | `io.site.export_site(document, folder, ...)` | lo stesso come funzione di modulo |
 | `io.site.server(folder, host="127.0.0.1", port=0, ranges=True)` | un server statico con richieste HTTP a intervalli (range) per la cartella di un sito, non avviato (`serve_forever()`, `shutdown()`, `server_close()`); `port=0` una porta libera, in `server_address`; `ranges=False` risponde con i file interi, come un host senza richieste a intervalli |
 | `io.site.Preview(folder, host="127.0.0.1", port=0, ranges=True)` | lo stesso server in un suo thread: `.start()`, `.url`, `.port`, `.stop()` (il thread concluso, la porta liberata); l'anteprima della finestra |
 | `io.site.record_site(document, manifest, options, sources)`, `site_record(document)`, `site_stale(document, record)` | l'ultimo sito costruito tenuto in `document.meta["web_site"]` (cartella relativa al progetto quando sta lì, scelte, ora, dimensione, lo stato dei suoi prodotti da `site_sources(document, chunks, products)` preso prima della costruzione); `site_stale` elenca i prodotti ricostruiti o cambiati da allora |
-| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=AAAA-MM-GG]... [--label CHUNK=TESTO]... [--timeline]` | riga di comando: il sito scritto, e quello che la costruzione ha ridotto; `--chunk ALTRO.ppg:ETICHETTA` prende un chunk di un altro progetto |
+| `ppg web build project.ppg CARTELLA [--chunk C]... [--frame local\|crs] [--title T] [--description D] [--language it\|en]... [--product orthomosaic\|dem\|units\|drawings\|model\|cloud\|sections\|proxies]... [--quality Q] [--model-texture 4096] [--budget 500] [--cloud-points 3000000] [--no-copc] [--date CHUNK=AAAA-MM-GG]... [--label CHUNK=TESTO]... [--timeline] [--pyarchinit [--url URL]] [--people] [--usm-heights none\|relative\|absolute]` | riga di comando: il sito scritto, e quello che la costruzione ha ridotto; `--chunk ALTRO.ppg:ETICHETTA` prende un chunk di un altro progetto; dalla 2.1.0 `--pyarchinit` le schede delle unità dal database del `config.cfg` di PyArchInit (o `--url`: un percorso SQLite o un URL SQLAlchemy), con `records: N of M units` e le unità senza scheda stampate - codice di uscita 1, niente costruito, quando il database non si legge; `--people` i nomi delle persone; `--usm-heights` le quote delle USM (predefinito `none`) |
+| `io.site_records.published_columns(people=False)` | dalla 2.1.0: le colonne di `us_table` che un sito pubblica (101, poi `schedatore`, `direttore_us`, `responsabile_us` con `people`); `RECORD_FIELDS` (i gruppi), `PEOPLE_COLUMNS`, `NEVER_COLUMNS` (27), `USM_HEIGHTS` (`"none"`, `"relative"`, `"absolute"`) |
+| `io.site_records.match_unit(rows, sito, area, tipo, us)` | dalla 2.1.0: la riga di `us_table` di un'unità, come `Found` (`row`, `step`: 0 nessuna, 1 area e tipo, 2 solo area, 3 ogni area; `reason`: `"no number"`, `"no site"`, `"no row"`, `"several rows"`; `ignored`) |
+| `io.site_records.unit_sites(document, chunks=None)` | dalla 2.1.0: i siti delle cui righe possono essere le unità dei chunk (quello di ogni poligono e contorno, altrimenti `document.meta["sito"]`; anche quello del progetto quando un chunk ha volumi); mai uno vuoto |
+| `io.site_records.match_report(document, chunks, rows, *, read=True, products=None)`, `summary(report)` | dalla 2.1.0: come le unità corrispondono alle righe, senza scrivere niente (un dizionario per unità: `chunk`, `what`, `label`, `step`, `reason`, `ignored`; `read=False` i volumi non letti, come conta il pannello); `summary` dà `(abbinate, totale)` |
+| `io.site_volumes.thin_volume(mesh, target_faces)` | dalla 2.1.0: un volume di unità sfoltito per il sito, chiuso e con il suo spessore: `(mesh, how)`, `how` fra `"kept"`, `"quadric"`, `"regrid"`, `"dropped"` (mesh None); `VOLUME_FACES` (20.000), `CHUNK_VOLUME_FACES` (600.000) |
+| `PyArchInit.us_rows(sites)` | dalla 2.1.0: le righe di `us_table` dei `sites` (ognuno letto una volta, senza spazi; uno vuoto lasciato fuori; un solo testo è un sito), mai una richiesta senza sito |
 | `ppg web serve CARTELLA [--port 8765] [--host 127.0.0.1] [--open] [--no-ranges]` | riga di comando: il sito servito per guardarlo, su questo solo computer se `--host` non dice altro; `--no-ranges` per vedere la pagina come su un host senza richieste a intervalli |
 
 **La cartella**: `index.html`, `site.json` (il manifesto: formato `ppg-site` versione 1, titolo, lingue,
@@ -1587,9 +1593,10 @@ deflate), `dem_hillshade.tif` (il rilievo ombreggiato, COG a 8 bit, trasparente 
 `drawings.geojson` (quote, linee di rottura, punti di misura e i disegni liberi, ogni elemento con il suo
 `layer`), `model/` (il modello 3D in 3D Tiles 1.1: `tileset.json`, `tiles/*.glb`, `textures/*.jpg`), dalla 1.10.0
 `cloud/` e `cloud.copc.laz` (la nuvola di punti), `sections/` e `sections.geojson` (le sezioni e i prospetti) e
-`plugins/<plugin>/` (quello che aggiungono i plugin).
+`plugins/<plugin>/` (quello che aggiungono i plugin), dalla 2.1.0 `records.json` (le schede delle unità) e
+`proxies.glb` con `proxies.json` (i volumi delle unità).
 `products` sceglie fra `"orthomosaic"`, `"dem"` (con il suo rilievo), `"units"`, `"drawings"`, `"model"`, `"cloud"`,
-`"sections"`; in partenza tutto quello che il chunk ha tranne la nuvola, che va solo se richiesta.
+`"sections"`, `"proxies"` (dalla 2.1.0); in partenza tutto quello che il chunk ha tranne la nuvola, che va solo se richiesta.
 `model_texture` è il lato massimo di una pagina della texture del modello (predefinito 4096: pochi MB di
 JPEG a pagina, così uno scavo normale resta entro qualche centinaio di MB; `None` o `--model-texture 0` per
 i soli colori dei vertici); `model_faces` le facce di un tassello. Un chunk senza modello non ha la vista 3D.
@@ -1619,7 +1626,9 @@ qualunque cosa ci sia in mezzo (`Direttore US`, `nomeCompilatore`), o quello che
 (`responsabi`, `nomeCompil`, `responsa_1`); un nome che dice di più (`disegnatore2`) è un altro attributo. Un nome scritto altrove
 (un titolo, una descrizione, un'etichetta, una nota, un altro attributo) viene pubblicato com'è scritto. Le versioni
 dalla 1.9.0 alla 1.10.2 pubblicavano quegli attributi con gli altri
-([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)).
+([Nomi delle persone](gui/web-publish.it.md#nomi-delle-persone)). Dalla 2.1.0 `people=True` (`--people`, la casella
+*Nomi delle persone*) li pubblica, anche nelle schede delle unità; `site.json` dice quale (`"people"`). Gli account
+non vengono mai pubblicati.
 I chunk di un sito devono avere un solo sistema di riferimento, in metri (un sistema in gradi è
 rifiutato).
 
@@ -1683,6 +1692,44 @@ limite, un modello non supera mai 4 milioni di facce al dettaglio pieno, 8192 pi
 facce un tassello, né una nuvola `cloud_points`. Quello che è stato ridotto è in `site.json` (`build`: `budget`,
 `size`, `reduced` - chunk, prodotto, cosa, da, a, perché - e `notes`), stampato da `ppg web build` e scritto nel
 pannello Log.
+
+**Schede delle unità** (dalla 2.1.0, `unit_records`): le righe di `us_table` di PyArchInit - lette da chi chiama, il
+sito non si collega mai a un database: `PyArchInit.us_rows(io.site_records.unit_sites(doc))` - e ogni unità della
+pianta, ogni contorno di unità di una sezione o di un prospetto e ogni volume che corrisponde a una sola di esse ha la
+sua scheda in `data/[<n>/]records.json` (`{chiave: {"title", "groups": [{"name", "fields": [[colonna, valore],
+...]}], "relations": [[tipo, us, area, chiave o null]]}}`), e `record` (la sua chiave) sul suo elemento; `site.json`
+dà a ogni chunk con schede `records` (`url`, `count`) e i titoli dei gruppi (`record_groups`). Il sito di un'unità è
+il suo, altrimenti `document.meta["sito"]`; l'abbinamento (`io.site_records.match_unit`) non tira mai a indovinare:
+più righe, nessuna scheda. Le colonne sono quelle di `published_columns(people)`; una colonna che il programma non
+conosce non viene mai pubblicata. I rapporti vengono da `rapporti`; un rapporto verso un'unità del sito porta la sua
+chiave. Quote: nel sistema locale quelle assolute abbassate della base delle quote del sito, come il DEM, e lasciate
+fuori quando niente la fissa; quelle relative come sono scritte; `quota_min_usm` e `quota_max_usm` secondo
+`usm_heights` - `"none"` (predefinito, fuori), `"relative"` (come sono scritte) o `"absolute"` (come le assolute);
+nel sistema `crs` tutte come sono scritte. Le schede sono una fotografia della costruzione: si aggiornano costruendo
+di nuovo. `None` (il predefinito): nessuna scheda, e un sito costruito di nuovo senza non ha `records.json`, né
+`record`, né `records` in `site.json`. Quello che il pannello mostra e chiede:
+[Schede e volumi delle US](gui/web-publish.it.md#schede-e-volumi-delle-us).
+
+**Volumi delle unità** (dalla 2.1.0, `"proxies"`, preso in partenza per un chunk che li ha): i volumi di
+`chunk.meta["proxies"]` sfoltiti a circa 20.000 facce ciascuno e 600.000 per chunk (ogni solido tenuto chiuso, uno
+strato sottile tenuto spesso), in `proxies.glb` (un nodo per unità, con il nome della sua chiave, nel sistema e negli
+assi delle tile del modello, sotto i 25 MiB) e `proxies.json` (etichetta, unità, volume, area, sommità e base nel
+sistema del sito, colore, gruppo, `record`); nessun percorso di file, nessun id, non il `sito` di una voce. Un volume
+prende la scheda del poligono del suo chunk con lo stesso tipo e numero. Un volume il cui file manca o non si legge,
+o che non si riesce a sfoltire, resta fuori con una nota. Nel sistema locale i volumi fissano la base delle quote
+dopo i DEM, i modelli e le nuvole. La scheda 3D ha il livello *Volumi delle US* con la sua legenda; un plugin può
+raggruppare le unità (`unit_groups`, aggancio al sito 3, [Plugin](plugins.it.md#nel-sito-web-di-un-rilievo)). Dalla
+2.1.0 un volume fatto dalle unità disegnate registra il sito della sua unità, altrimenti quello del progetto (non più
+il primo sito del database).
+
+```python
+from pyarchinit_photogrammetry.io import site_records
+from pyarchinit_photogrammetry.pyarchinit import PyArchInit
+
+rows = PyArchInit.connect().us_rows(site_records.unit_sites(doc))
+print(site_records.summary(site_records.match_report(doc, None, rows)))   # (abbinate, totale)
+doc.export_site("sito_schede", unit_records=rows, usm_heights="relative")
+```
 
 **Quello che aggiungono i plugin** (dalla 1.10.0): un plugin registra `context.add_site_contributions(provider)` (vedi
 [Plugin](plugins.it.md#nel-sito-web-di-un-rilievo)); i suoi livelli sono disegnati in pianta con una legenda e i loro
