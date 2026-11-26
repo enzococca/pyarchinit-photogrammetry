@@ -128,7 +128,12 @@ I marker e le camere con le loro coordinate, come il pannello Reference di Metas
   georeferenziazione e nell'ottimizzazione (clic destro: *Usa* o *Non usare i riferimenti delle camere
   selezionate* - il clic destro seleziona la camera sotto il cursore - e *... di tutte le camere*);
 * le barre di scala sotto i marker ([barre di scala](photos-markers.md#barre-di-scala));
-* gli RMSE dei punti di controllo e di check e delle barre.
+* gli RMSE dei punti di controllo e di check e delle barre;
+* l'errore del GPS delle foto per volo, quando formano due gruppi o più: un volo inizia dopo una pausa di oltre
+  90 s tra due foto, le foto senza ora sono un gruppo a sé (*senza ora*); per volo le foto, dX, dY, dZ medi
+  (stimata meno riferimento), la loro deviazione standard, l'RMSE e l'offset di quota. La colonna *Volo* delle
+  camere dice il volo di ogni foto. Un volo il cui dZ medio si scosta dagli altri di oltre 3 volte la dispersione
+  dentro un volo è in rosso, e il riepilogo suggerisce *Quota GPS per volo*.
 
 Il suggerimento di un marker dice come è stato posizionato: triangolato da N foto, sulla superficie da una
 foto, o aggiunto sul modello o sull'ortofoto.
@@ -144,6 +149,7 @@ foto, o aggiunto sul modello o sull'ortofoto.
 | *Barra di scala...*, *Importa barre...* | una distanza nota tra due marker, o un elenco da un CSV |
 | *Coordinate stimate* | come *View Estimated* di Metashape: le colonne X, Y, Z mostrano le coordinate stimate invece di quelle di riferimento (attivo da solo quando nessun marker ha coordinate di riferimento) |
 | *Cerca picchetti...* | picchetti e capisaldi vicino a punti di coordinate note, proposti come legami a coordinate note ([capisaldi e picchetti](ties.md#capisaldi-e-picchetti)) |
+| *Quota GPS per volo* | la georeferenziazione sul GPS delle foto stima un offset verticale per volo (il volo più grande fa da riferimento): per un drone che riparte con la quota relativa a ogni batteria, così che un volo intero sta metri sopra o sotto gli altri. Tenuta nel progetto; la spunta rifà la georeferenziazione. Con i punti di controllo le quote le danno loro e gli offset sono solo misurati. Disponibile con due voli o più ([API](../api.md#quota-gps-per-volo)) |
 
 Il clic destro sui marker filtra le foto che li vedono, affina le loro bandierine blu, li unisce (un target
 codificato e il GCP messo a mano sopra), ne sposta uno nella vista 3D, crea una barra di scala tra due di loro e
