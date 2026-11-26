@@ -349,3 +349,23 @@ def holed(case: Case, holes: int = 40, seed: int = 0) -> Case:
     along, across = x * u[0] + y * u[1], -x * u[1] + y * u[0]
     dem[(along > 0.5) & (along < 1.5) & (np.abs(across) < 1.0)] = np.nan  # a strip of no data across the wall
     return Case(f"{case.name}_holed", dem, case.crest, case.clicks, case.cell)
+
+
+def tower_tangent(seed=14):
+    """Like S Nord at Khutm: a straight wall that runs tangent to the curved wall of a round tower (outer radius 6 m,
+    its wall 1.2 m thick and 1.5 m high, taller than this one) for a few metres, then leaves it."""
+    b = _Builder(seed)
+    line = [(4, 15), (28, 15)]
+    b.wall(line, 0.7, 0.9)
+    ring = np.hypot(b.x - 16.0, b.y - (15.35 + 6.0 + 0.05))
+    on = (ring <= 6.0) & (ring >= 4.8)
+    b.z = np.where(on, np.maximum(b.z, b.ground + 1.5 + _smooth_noise(b.rng, b.x.shape, 2.5, 0.03)), b.z)
+    return _case("tower_tangent", b, line)
+
+
+def wide_rough(seed=15, rough=0.08):
+    """A wall with a top 2 m wide, its stones +-``rough`` m."""
+    b = _Builder(seed)
+    line = [(8, 15), (24, 15)]
+    b.wall(line, 2.0, 1.0, top_rough=rough)
+    return _case("wide_rough", b, line)
