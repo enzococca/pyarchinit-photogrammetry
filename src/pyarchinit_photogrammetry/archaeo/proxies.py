@@ -52,14 +52,72 @@ def proxy_name(tipo: str | None, us: str | None) -> str:
     return f"{tipo or 'US'}{us}" if us else (tipo or "US")
 
 
+def surfaces(top: np.ndarray, bottom: np.ndarray, min_thickness: float = 0.002) -> tuple[np.ndarray, np.ndarray]:
+    """The upper and lower surfaces of a solid between ``top`` and ``bottom`` (in either order: a unit removed
+    later lies between the two), at least ``min_thickness`` apart so a thin layer never collapses."""
+    hi = np.maximum(top, bottom)
+    lo = np.minimum(top, bottom)
+    hi = np.where(hi - lo < min_thickness, lo + min_thickness, hi)
+    return hi, lo
+
+
+def prism_mesh(top: np.ndarray, bottom: np.ndarray, mask: np.ndarray, x0: float, y0: float,
+               dx: float, dy: float):
+    """The closed solid of the cells of ``mask`` between the grids ``top`` and ``bottom`` (``top >= bottom``,
+    as :func:`surfaces` gives them). Cell ``(r, c)`` spans ``x0 + c dx .. x0 + (c+1) dx`` and
+    ``y0 + r dy .. y0 + (r+1) dy``; corners are shared (each the mean of the inside cells around it), so the
+    solid is watertight and its volume is the sum of the cells'."""
+    import trimesh
+
+    h, w = mask.shape
+
+    # corner grid: each corner takes the mean of the inside cells around it
+    def corners(vals):
+        acc = np.zeros((h + 1, w + 1))
+        cnt = np.zeros((h + 1, w + 1))
+        v = np.where(mask, vals, 0.0)
+        m = mask.astype(float)
+        for dr in (0, 1):
+            for dc in (0, 1):
+                acc[dr:dr + h, dc:dc + w] += v
+                cnt[dr:dr + h, dc:dc + w] += m
+        with np.errstate(invalid="ignore"):
+            return acc / np.where(cnt > 0, cnt, np.nan), cnt > 0
+
+    ztop, used = corners(top)
+    zbot, _ = corners(bottom)
+    idx_t = -np.ones((h + 1, w + 1), np.int64)
+    idx_t[used] = np.arange(used.sum())
+    n = int(used.sum())
+    idx_b = np.where(used, idx_t + n, -1)
+    rr, cc = np.nonzero(used)
+    xs = x0 + cc * dx
+    ys = y0 + rr * dy
+    verts = np.vstack([np.column_stack([xs, ys, ztop[rr, cc]]), np.column_stack([xs, ys, zbot[rr, cc]])])
+    faces = []
+    for r, c in zip(*np.nonzero(mask)):
+        a, b, cr, d = (r, c), (r, c + 1), (r + 1, c + 1), (r + 1, c)
+        ta, tb, tc, td = idx_t[a], idx_t[b], idx_t[cr], idx_t[d]
+        ba, bb, bc, bd = idx_b[a], idx_b[b], idx_b[cr], idx_b[d]
+        faces += [(ta, td, tc), (ta, tc, tb), (ba, bb, bc), (ba, bc, bd)]
+        for (nr, nc), (p, q) in (((r - 1, c), (a, b)), ((r, c + 1), (b, cr)), ((r + 1, c), (cr, d)), ((r, c - 1), (d, a))):
+            if not (0 <= nr < h and 0 <= nc < w and mask[nr, nc]):
+                faces += [(idx_t[p], idx_b[q], idx_b[p]), (idx_t[p], idx_t[q], idx_b[q])]
+    # top faces are counter-clockwise seen from above for a north-up grid (dy < 0), bottom
+    # and wall faces follow, so the winding is consistent by construction; a south-up grid
+    # turns everything inside out, which the volume sign reveals
+    mesh = trimesh.Trimesh(verts, np.asarray(faces, np.int64), process=True)
+    if mesh.volume < 0:
+        mesh.invert()
+    return mesh
+
+
 def unit_proxy(dem_path: str | Path, polygon, base=None, thickness: float | None = None,
                top_dem: str | Path | None = None, us: str | None = None, area: str | None = None,
                tipo: str = "US", min_thickness: float = 0.002) -> UnitProxy:
     """Solid proxy of one unit. ``dem_path`` is the top surface (or ``top_dem`` when given);
     ``base``: None (lowest point), a float (plane elevation) or a DEM path (resampled);
     ``thickness`` instead of ``base``: constant depth below the top."""
-    import trimesh
-
     from ..engine.dem import read_dem
     from .terrain import _coverage, _resample_to
 
@@ -81,48 +139,8 @@ def unit_proxy(dem_path: str | Path, polygon, base=None, thickness: float | None
         full = _resample_to(Path(base), z.shape, tr)
         bottom = full[r0:r1, c0:c1]
         mask &= np.isfinite(bottom)
-    hi = np.maximum(top, bottom)  # a unit removed later lies between the two surfaces
-    lo = np.minimum(top, bottom)
-    hi = np.where(hi - lo < min_thickness, lo + min_thickness, hi)
-    h, w = mask.shape
-    # corner grid: each corner takes the mean of the inside cells around it
-    def corners(vals):
-        acc = np.zeros((h + 1, w + 1))
-        cnt = np.zeros((h + 1, w + 1))
-        v = np.where(mask, vals, 0.0)
-        m = mask.astype(float)
-        for dr in (0, 1):
-            for dc in (0, 1):
-                acc[dr:dr + h, dc:dc + w] += v
-                cnt[dr:dr + h, dc:dc + w] += m
-        with np.errstate(invalid="ignore"):
-            return acc / np.where(cnt > 0, cnt, np.nan), cnt > 0
-
-    ztop, used = corners(hi)
-    zbot, _ = corners(lo)
-    idx_t = -np.ones((h + 1, w + 1), np.int64)
-    idx_t[used] = np.arange(used.sum())
-    n = int(used.sum())
-    idx_b = np.where(used, idx_t + n, -1)
-    rr, cc = np.nonzero(used)
-    xs = tr.c + (c0 + cc) * tr.a
-    ys = tr.f + (r0 + rr) * tr.e
-    verts = np.vstack([np.column_stack([xs, ys, ztop[rr, cc]]), np.column_stack([xs, ys, zbot[rr, cc]])])
-    faces = []
-    for r, c in zip(*np.nonzero(mask)):
-        a, b, cr, d = (r, c), (r, c + 1), (r + 1, c + 1), (r + 1, c)
-        ta, tb, tc, td = idx_t[a], idx_t[b], idx_t[cr], idx_t[d]
-        ba, bb, bc, bd = idx_b[a], idx_b[b], idx_b[cr], idx_b[d]
-        faces += [(ta, td, tc), (ta, tc, tb), (ba, bb, bc), (ba, bc, bd)]
-        for (nr, nc), (p, q) in (((r - 1, c), (a, b)), ((r, c + 1), (b, cr)), ((r + 1, c), (cr, d)), ((r, c - 1), (d, a))):
-            if not (0 <= nr < h and 0 <= nc < w and mask[nr, nc]):
-                faces += [(idx_t[p], idx_b[q], idx_b[p]), (idx_t[p], idx_t[q], idx_b[q])]
-    # top faces are counter-clockwise seen from above for a north-up grid (e < 0), bottom
-    # and wall faces follow, so the winding is consistent by construction; a south-up grid
-    # turns everything inside out, which the volume sign reveals
-    mesh = trimesh.Trimesh(verts, np.asarray(faces, np.int64), process=True)
-    if mesh.volume < 0:
-        mesh.invert()
+    hi, lo = surfaces(top, bottom, min_thickness)
+    mesh = prism_mesh(hi, lo, mask, tr.c + c0 * tr.a, tr.f + r0 * tr.e, tr.a, tr.e)
     cell = abs(tr.a * tr.e)
     return UnitProxy(proxy_name(tipo, us), us, area, tipo, mesh, float(abs(mesh.volume)), float(mask.sum() * cell),
                      (float(np.nanmin(hi[mask])), float(np.nanmax(hi[mask]))),
