@@ -26,13 +26,15 @@ MIN_CELL = 0.05  # m: the DEM is looked at with cells this large at least
 WINDOW_MARGIN = 10.0  # m around the box of the clicked points: the DEM read to follow the wall
 MAX_CELLS = 4_000_000  # cells at most in what is read: coarser cells over this
 SIMPLIFY = 0.10  # m: the line found simplified within this (a trace of a few vertices, not one per cell)
+SPECK = 0.05  # m: half the width of the specks and threads of crest opened away before proposals are thinned
 HOLE = 0.25  # m2: a hole in the crests of a wall smaller than this is filled before they are thinned
 SPUR = 1.0  # m: a branch of a skeleton shorter than this, from a junction to a free end, is a spur, not a wall
 RIDGE = 0.5  # the strength over which a cell is on a ridge (``on_ridge`` of :func:`follow`)
 RIDGE_HEIGHT = 0.2  # m of local relief that make a crest at full strength (an absolute scale: a spoil heap or a
 #                     tower nearby does not flatten the low walls)
 SMOOTH = 0.10  # m: the DEM opened and closed by a disc of this radius before its crests are looked for (stones and
-#               joints of a top evened out, its faces kept sharp)
+#               joints of a top evened out, its faces kept sharp); round(SMOOTH / cell) cells: none on cells of 0.2 m
+#               or more, 5 cells across at 2 cm
 EDGE_STEP = 0.15  # m: the edge of a crest on a side is where the fall first reaches this, or half its height if lower
 STEP_RISE = 0.5  # m: a side that meets something this much higher before any edge stands against a structure
 MIN_TOP = 0.25  # m: a crest against a taller structure is that wide at least (not the foot of a face)
@@ -102,7 +104,7 @@ def _smoothed(z: np.ndarray, radius: int) -> np.ndarray:
     return np.where(finite, f.astype(np.float64) + base, np.nan)
 
 
-def crest_map(dem: np.ndarray, resolution: float, reach: float = RIDGE_RADIUS):
+def crest_map(dem: np.ndarray, resolution: float, reach: float = RIDGE_RADIUS, progress: Progress | None = None):
     """``(height, centred, walled)``: how much each cell of ``dem`` stands above the ground on both sides of it,
     how near the middle between its two edges it is, and whether one of those sides is a taller structure it stands
     against rather than ground.
@@ -130,7 +132,9 @@ def crest_map(dem: np.ndarray, resolution: float, reach: float = RIDGE_RADIUS):
     best_h, best_c = np.zeros(z.shape), np.zeros(z.shape)
     best_w = np.zeros(z.shape, bool)
     best = np.full(z.shape, -1.0)
-    for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
+    progress = as_progress(progress)
+    for i, (dr, dc) in enumerate(((0, 1), (1, 0), (1, 1), (1, -1))):
+        progress(i / 4.0)  # each direction a quarter; a cancel asked is honoured here
         n = max(1, int(np.ceil(float(reach) / (float(resolution) * float(np.hypot(dr, dc))))))
 
         def scan(sgn, thr=None):
@@ -220,13 +224,14 @@ def _filled(m: np.ndarray, cell: float) -> np.ndarray:
     return m | small[lab]
 
 
-def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS):
-    """``(strength, ridge)``: the strength of :func:`strength_map` and the cells on a ridge (bool: height over
-    :data:`RIDGE` x :data:`RIDGE_HEIGHT` on both sides, or inside ``mask``)."""
+def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS, progress=None):
+    """``(strength, ridge)``: the strength of :func:`strength_map` and the cells on a crest (bool, the ``on_ridge``
+    of :func:`follow`: ``height`` over :data:`RIDGE` x :data:`RIDGE_HEIGHT` - on both sides, or on the open side of a
+    top against a taller structure - or inside ``mask``)."""
     z = np.asarray(dem, np.float64)
     if z.ndim != 2:
         raise ValueError("the DEM must be a 2D array")
-    height, centred, walled = crest_map(z, float(resolution), float(radius))
+    height, centred, walled = crest_map(z, float(resolution), float(radius), progress)
     tall = np.clip(height / RIDGE_HEIGHT, 0.0, 1.0)
     ridge = (tall > RIDGE) & ~walled
     s = tall * centred * np.where(walled, STEP_WEIGHT, 1.0)
@@ -251,7 +256,7 @@ def _ridge_strength(dem, resolution, ortho=None, mask=None, radius=RIDGE_RADIUS)
             raise ValueError("the mask must be on the grid of the DEM")
         s = np.where(m, np.maximum(s, MASK_STRENGTH * _graded(m, resolution)), s)
         ridge = ridge | m
-    return s, ridge
+    return s, ridge | (walled & (tall > RIDGE))  # a top against a tower is on the wall too: the line is not weak
 
 
 def strength_map(dem: np.ndarray, resolution: float, ortho: np.ndarray | None = None, mask: np.ndarray | None = None,
@@ -388,7 +393,7 @@ def _on_grid(mask, transform, shape):
     return m
 
 
-def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
+def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS, progress=None):
     """The strength of the cells of the plan of ``chunk`` in ``bounds``: ``(strength, ridge, transform, cell)``."""
     dem_path = chunk.dem_path
     transform, shape, cell = _grid_of(dem_path, bounds, cell)
@@ -401,7 +406,7 @@ def _plan_strength(chunk, bounds, cell, mask=None, radius=RIDGE_RADIUS):
         except Exception:  # noqa: BLE001 - an orthophoto that cannot be read: the DEM alone
             grey = None
     m = _on_grid(mask, transform, shape) if mask is not None else None
-    return (*_ridge_strength(dem, cell, ortho=grey, mask=m, radius=radius), transform, cell)
+    return (*_ridge_strength(dem, cell, ortho=grey, mask=m, radius=radius, progress=progress), transform, cell)
 
 
 # ---------------------------------------------------------------- lines
@@ -444,7 +449,8 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
     ``max(its cell, MIN_CELL)`` (coarser over :data:`MAX_CELLS`); ``mask``, the wall on the orthophoto
     (``(array, transform)`` as :func:`sam_mask` gives it), raises the strength of its cells. The legs joined, each
     simplified within :data:`SIMPLIFY` with its clicked points kept. Returns ``{"points": (N, 2), "on_ridge": the
-    share of its length on cells of a ridge (strength over 0.5 before the grading, or in the mask), "cell"}``.
+    share of its length on cells of a crest (``height`` of :func:`crest_map` over :data:`RIDGE` x
+    :data:`RIDGE_HEIGHT`, the tops against a taller structure included, or in the mask), "cell"}``.
     ``RuntimeError`` without a DEM; :class:`FollowRefused` (a ``ValueError``) for fewer than two points, a point
     outside the DEM, no path."""
     import rasterio
@@ -465,7 +471,8 @@ def follow(chunk, points, mask=None, radius: float = RIDGE_RADIUS, progress: Pro
         raise FollowRefused("outside", f"point {k} is outside the DEM", point=k)
     progress(0.0, "Relief of the DEM around the wall")
     lo, hi = p.min(axis=0) - WINDOW_MARGIN, p.max(axis=0) + WINDOW_MARGIN
-    strength, ridge, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius)
+    strength, ridge, transform, cell = _plan_strength(chunk, (lo[0], lo[1], hi[0], hi[1]), MIN_CELL, mask, radius,
+                                                      progress.sub(0.0, 0.3))
     h, w = strength.shape
     progress(0.3, "The path along the wall")
     graph = _grid_graph(strength, cell)  # once for all the legs
@@ -628,11 +635,15 @@ def _prune(branches: list[list[int]], nb: dict, spur_px: float, w: int) -> list[
 
 
 def _clean_mask(high: np.ndarray, cell: float) -> np.ndarray:
-    """The cells of crests ``high`` (bool) cleaned before they are thinned: specks and threads a cell wide opened
-    away, holes smaller than :data:`HOLE` m2 filled (each would make a loop of the skeleton, cut into short branches)."""
+    """The cells of crests ``high`` (bool) cleaned before they are thinned: specks and threads under :data:`SPECK` m
+    opened away (by ``round(SPECK / cell)`` cells: none on cells of 0.1 m or more, where a wall is 2-3 cells wide),
+    holes smaller than :data:`HOLE` m2 filled (each would make a loop of the skeleton, cut into short branches)."""
     from scipy import ndimage
 
-    return _filled(ndimage.binary_opening(high, np.ones((3, 3), bool)), cell)
+    r = int(round(SPECK / float(cell)))
+    if r >= 1:
+        high = ndimage.binary_opening(high, np.ones((2 * r + 1, 2 * r + 1), bool))
+    return _filled(high, cell)
 
 
 def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: float = RIDGE_RADIUS,
@@ -640,8 +651,8 @@ def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: f
     """The walls of the plan of ``chunk`` as candidate traces: the cells of the DEM (at ``max(its cell,
     MIN_CELL)``, coarser over :data:`MAX_CELLS`) that stand over ``min_height`` above the ground on both sides
     within ``radius`` m (the ``height`` of :func:`crest_map`, the tops against a taller structure left out), specks
-    opened away and small holes filled, thinned to a skeleton, cut at its junctions (spurs shorter than :data:`SPUR` taken away and what then meets two
-    by two joined), each branch walked from an end into a polyline, simplified within :data:`SIMPLIFY` and kept
+    opened away and small holes filled (:func:`_clean_mask`), thinned to a skeleton, cut at its junctions (spurs
+    shorter than :data:`SPUR` taken away and what then meets two by two joined), each branch walked from an end into a polyline, simplified within :data:`SIMPLIFY` and kept
     when ``min_length`` m long at least; longest first, in the chunk's coordinates. ``RuntimeError`` without a
     DEM."""
     import cv2
@@ -655,7 +666,7 @@ def proposals(chunk, min_height: float = 0.3, min_length: float = 3.0, radius: f
     transform, shape, cell = _grid_of(chunk.dem_path, (b.left, b.bottom, b.right, b.top), MIN_CELL)
     progress(0.0, "Relief of the DEM")
     dem = _read_on(chunk.dem_path, transform, shape, bands=[1])[0]
-    height, _centred, walled = crest_map(dem, cell, float(radius))
+    height, _centred, walled = crest_map(dem, cell, float(radius), progress.sub(0.0, 0.5))
     high = _clean_mask((height > float(min_height)) & ~walled, cell)
     progress(0.5, "Crests of the walls")
     skeleton = cv2.ximgproc.thinning(high.astype(np.uint8) * 255) > 0
