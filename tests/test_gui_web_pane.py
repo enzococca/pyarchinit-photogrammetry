@@ -359,6 +359,7 @@ def test_records_box_off_by_default_and_needs_pyarchinit(win, qapp):
     assert not pane.people.isChecked() and pane.people.isEnabled()
     tip = pane.people.toolTip()
     assert all(c in tip for c in ("schedatore", "direttore_us", "responsabile_us", "disegnatore"))
+    assert "testi liberi non vengono cercati" in tip and "nessuno" not in tip  # names in free texts stay
     o = pane.options()
     assert (o["records"], o["people"], o["usm_heights"]) == (False, False, "none")
     assert [pane.usm_heights.itemData(i) for i in range(pane.usm_heights.count())] == ["none", "relative",

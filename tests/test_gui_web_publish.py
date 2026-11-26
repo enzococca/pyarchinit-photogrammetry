@@ -240,6 +240,8 @@ def test_names_of_people_added_after_the_consent_are_not_sent(make_window, home,
     _settle(w, qapp)
     assert "nomi delle persone" not in w.asked[0][1]
     assert not any(c[:2] == ["pages", "deploy"] for c in fake.calls(home))
+    errors = [s for s in w.said if s[0] == "error"]
+    assert errors and "Il sito è cambiato da quando è stato controllato" in errors[-1][1], errors  # Italian GUI
     assert "published" not in w.doc.meta["web_site"]
 
 

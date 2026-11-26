@@ -429,7 +429,8 @@ class WebPane(QWidget):
         self.people = QCheckBox(tr("Nomi delle persone"))
         self.people.setToolTip(tr("I nomi di chi ha schedato, diretto e di chi è responsabile (schedatore, "
                                   "direttore_us, responsabile_us) e di chi ha disegnato (disegnatore). Spenta, il "
-                                  "sito non scrive il nome di nessuno."))
+                                  "sito non scrive questi campi dei nomi delle persone; i nomi scritti nei testi "
+                                  "liberi non vengono cercati."))
         self.people.toggled.connect(lambda _on: self.update_states())
         form.addWidget(self.people)
         fields = QFormLayout()
@@ -775,7 +776,7 @@ class WebPane(QWidget):
                    for r in report if not r.get("step")]
         words = ignored_names()
         loose = [f"{r['chunk']}: {r['label']} "
-                 f"({tr('ignorando {0}', ' e '.join(words.get(i, i) for i in r['ignored']))})"
+                 f"({tr('ignorando {0}', tr(' e ').join(words.get(i, i) for i in r['ignored']))})"
                  for r in report if r.get("step") and r.get("ignored")]
         parts = []
         for title, lines in ((tr("Senza scheda:"), missing), (tr("Con la scheda trovata ignorando qualcosa:"), loose)):
@@ -1395,7 +1396,8 @@ class WebPublishing(QObject):
             fresh = site_publish.plan(folder, o["project"], bucket=o["bucket"], data=o["data"],
                                       data_url=o["data_url"])  # what is on the disk now
             if fresh.frame != plan.frame or fresh.records > plan.records or (fresh.people and not plan.people):
-                raise site_publish.ConsentError("the site changed since it was checked: check it again")
+                raise site_publish.ConsentError(tr("Il sito è cambiato da quando è stato controllato: "
+                                                  "controllalo di nuovo"))
             return site_publish.publish(fresh, public=public, coordinates=coordinates, wrangler=wrangler,
                                         progress=progress)
 
