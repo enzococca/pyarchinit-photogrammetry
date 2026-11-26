@@ -791,22 +791,34 @@ precedenti ancora liberi (prima i termini tangenziali), e dove allora passa sono
 posto. Alla focale si rinuncia così solo per i termini radiali, quando nient'altro basta: è la prima per quello
 che un blocco piatto non sa distinguere, non perché un obiettivo ne possa fare a meno (una griglia appena
 inclinata: la focale passa allo 0,4 %, i termini tangenziali con lei libera no, 0,57 px; restano fermi loro, e
-la focale viene rifinita). I termini radiali vengono percorsi lungo la loro valle prima di essere giudicati: su un blocco
-piatto si scambiano con una flessione del blocco, e solo al secondo ordine, così la covarianza presa a termini
-radiali lontani dall'obiettivo vero - con il blocco piegato per adattarsi a loro - li trova determinati proprio per
-quella flessione (l'anello debole: da 0,4 a 0,5 px all'angolo, per stime da 1,6 a 2,2 px lontane dall'obiettivo
-vero su cinque rese; un anello numerico di solo rumore bianco: 5,9 px all'obiettivo vero, 0,35 px a 2 px da
-lì). Il primo termine radiale viene spostato in modo che l'angolo della foto si muova di mezzo pixel alla volta
-(`bundle.VALLEY_STEP_PX`, fino a 3 px per parte), il blocco compensato con i termini radiali tenuti lì e la loro
-covarianza ripresa, finché le osservazioni lo consentono (il chi quadro al massimo 9 sopra l'ottimo,
-`bundle.VALLEY_CHI2`); dove lo scarto più grande incontrato supera di oltre la metà il primo
-(`bundle.VALLEY_FACTOR`) i termini radiali vengono giudicati con quello. Un blocco inclinato o obliquo cambia di
-pochi punti percentuali lungo il percorso e tiene i suoi valori. Quell'anello tiene allora i termini radiali dove
-li ha messi l'allineamento nativo (1,3 px lungo la valle con la formulazione di COLMAP, 2,4 px con la nostra;
-l'errore vero di k1 sulle cinque rese si sparge di 1,8 px all'angolo), k1 entro 0,006 da quello vero, i target di
-controllo a 1 mm e quelli di verifica a 5 mm. Un ordine secondo quanto ogni gruppo supera il suo limite, provato
-prima del percorso lungo la valle, rinunciava ai termini radiali al posto di quelli tangenziali della nostra
-formulazione (3,1 px finché quelli sono liberi) e lasciava i target di verifica a 17 mm.
+la focale viene rifinita).
+
+I termini radiali che passano vengono percorsi lungo la loro valle prima di essere liberati (il percorso radiale;
+non la valle della focale dell'allineamento nativo, né il percorso di una focale verso il valore dell'obiettivo
+descritto sopra). Su un blocco piatto si scambiano con una flessione del blocco, e solo al secondo ordine, così la
+covarianza presa a termini radiali lontani dall'obiettivo vero - con il blocco piegato per adattarsi a loro - li
+trova determinati proprio per quella flessione (l'anello debole: da 0,4 a 0,5 px all'angolo, per stime da 1,6 a
+2,2 px lontane dall'obiettivo vero su cinque rese; un anello numerico di solo rumore bianco: 5,9 px all'obiettivo
+vero, 0,35 px a 2 px da lì). Il blocco viene compensato con loro liberi, poi il primo termine radiale viene
+spostato in modo che l'angolo della foto si muova di mezzo pixel alla volta (`bundle.RADIAL_WALK_STEP_PX`, fino a 3
+px per parte; gli altri termini radiali restano dove li ha messi quella compensazione), il blocco compensato con i
+termini radiali tenuti lì e la loro covarianza ripresa, finché le osservazioni lo consentono (il chi quadro al
+massimo 9 sopra l'ottimo, `bundle.RADIAL_WALK_CHI2`). Dove lo scarto più grande incontrato supera di oltre la metà
+quello alla stima (`bundle.RADIAL_WALK_FACTOR`) i termini radiali vengono giudicati con quello: un rivelatore di
+una direzione debole più che uno scarto marginale, che sbaglia verso il tenerli fermi. La nota dà entrambi i
+valori (`radial held: undetermined along its valley, sd 1.33 px at the image corner (0.49 px at the estimate)`) e
+il resoconto li conserva (`radial_sd`, `radial_sd_plain`) con i passi di ogni percorso e perché si è fermato
+(`radial_walk`; un percorso la cui compensazione non converge lo dice lì e nel log). Vengono percorsi solo i
+termini radiali tra 0,1 px (`bundle.RADIAL_WALK_FLOOR_PX`: sotto, il primo passo è comunque respinto dal chi
+quadro) e la soglia: un blocco ben determinato non paga nulla, uno vicino alla soglia paga una compensazione e fino
+a 12 brevi per camera, annunciate nell'avanzamento e interrotte da un annullamento. Un anello convergente vicino
+alla soglia (0,37 px) tiene il suo valore lungo il percorso (al massimo 0,39 px). L'anello debole tiene allora i
+termini radiali dove li ha messi l'allineamento nativo (1,3 px lungo la valle con la formulazione di COLMAP, 2,4
+px con la nostra; l'errore vero di k1 sulle cinque rese si sparge di 1,8 px all'angolo), k1 entro 0,006 da quello
+vero, i target di controllo a 1 mm e quelli di verifica a 5 mm. L'allineamento nativo li libera ancora su un
+blocco così (0,26 px, il suo giudizio, senza percorso). Un ordine secondo quanto ogni gruppo supera il suo limite,
+provato prima del percorso lungo la valle, rinunciava ai termini radiali al posto di quelli tangenziali della
+nostra formulazione (3,1 px finché quelli sono liberi) e lasciava i target di verifica a 17 mm.
 Foto oblique intorno a un rilievo determinano ogni gruppo (la trincea sintetica: 0,02 % e 0,05 px), e l'intera
 calibrazione viene rifinita come prima. Un gruppo che non ha affatto una covarianza (una matrice normale che non
 si può invertire) resta fermo senza essere stato giudicato: la sua nota lo dice con parole sue (`not judged, the
