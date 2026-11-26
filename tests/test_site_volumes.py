@@ -526,6 +526,12 @@ def test_volumes_in_the_page(volumes_doc, tmp_path):
             browser.wait("document.querySelector('#info .record') !== null", 10)
             info = browser.js("document.getElementById('info').innerText")
             assert "US 12 - Strato" in info, info
+            # every field of the volume in the panel has its title, never the raw key of proxies.json
+            names = ("[...document.querySelectorAll('#info table tr')].filter((r) => !r.closest('.record'))"
+                     ".map((r) => r.cells[0].innerText.trim())")
+            shown = browser.js(names)
+            assert "Volume (m³)" in shown and "Tipo" in shown, shown
+            assert not set(shown) & set(volumes["12"]), shown
             assert browser.js("document.documentElement.dataset.highlight") == k12
             assert browser.js("ppgSite.state.view3d.selected()") == ["US12"]
             # where the model is under the pointer too (it has holes), the volume is picked, not the model
@@ -579,6 +585,12 @@ def test_volumes_in_the_page(volumes_doc, tmp_path):
             assert "Fase 1" in legend[0][1] and "Senza gruppo" in legend[2][1], legend
             browser.js("document.getElementById('language').click()")
             assert "No group" in browser.js("document.querySelector('#layers [data-group=\"\"]').innerText")
+            browser.js("(() => {{ const v = ppgSite.state.view3d; v.onPick(v.pick(...v.project({}, {}, {}))); }})()"
+                       .format(*c12))
+            browser.wait("document.querySelector('#info .record') !== null", 10)
+            shown = browser.js(names)
+            assert "Volume (m³)" in shown and "Type" in shown, shown
+            assert not set(shown) & set(volumes["12"]), shown
 
             assert browser.js(pick.format(*c14)) == "14"
             browser.js("document.querySelector('#layers [data-group=\"fase-1\"] input').click()")
