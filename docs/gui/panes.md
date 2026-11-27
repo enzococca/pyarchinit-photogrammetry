@@ -125,7 +125,14 @@ The markers and the cameras with their coordinates, as Metashape's Reference pan
   counts in the georeference and in the optimisation (right click: *Use* or *Do not use the references of the
   selected cameras* - a right click selects the camera under it - and *... of all the cameras*);
 * the scale bars below the markers ([scale bars](photos-markers.md#scale-bars));
-* the RMSE of the control and check points and of the bars.
+* the RMSE of the control and check points and of the bars;
+* the GPS error of the photos per flight, when they make two groups or more: a flight starts after a pause of more
+  than 90 s between two photos (not the 20-minute GNSS sessions of the GNSS quality table), the photos without a
+  time are one group (*no time*); per flight the photos, the mean dX, dY, dZ (estimated minus reference), their
+  standard deviation, the RMSE and the height offset. The *Flight* and *Z offset* columns of the cameras say the
+  flight of each photo and the offset its error is measured after. A flight whose height offset (estimated on the
+  joint model, also with the option off) is larger than 3 times the scatter within a flight and than 1 m is in
+  red, and the summary suggests *GPS height by flight*.
 
 The tooltip of a marker tells how it is placed: triangulated from N photos, on the surface from one photo,
 or added on the model or the orthophoto.
@@ -141,6 +148,7 @@ or added on the model or the orthophoto.
 | *Scale bar...*, *Import bars...* | a known distance between two markers, or a list of them from a CSV |
 | *Estimated coordinates* | as Metashape's *View Estimated*: the X, Y, Z columns show the estimated coordinates instead of the reference ones (on by itself when no marker has reference coordinates) |
 | *Find stakes...* | stakes and benchmarks near points of known coordinates, proposed as known ties ([benchmarks and stakes](ties.md#benchmarks-and-stakes)) |
+| *GPS height by flight* | the georeference on the GPS of the photos estimates one vertical offset per flight: for a drone that starts its relative altitude again with every battery, so that a whole flight sits metres above or below the others. GPS only: the biggest flight is the datum (heights relative to the main flight). 1-2 control points with the GPS: every flight free, the control points give the heights. 3 or more control points: they place the survey, the offsets are only measured. Ticking it georeferences the chunk again; the project keeps the choice when that succeeds. When the flights do not determine the offsets (one line per battery) the plain fit stays and the summary says why. Offered with two flights or more ([API](../api.md#gps-height-by-flight)) |
 
 The right click on the markers filters the photos on them, refines their blue flags, merges them (a coded
 target and the GCP placed by hand on it), moves one again in the 3D view, creates a scale bar between two of

@@ -708,6 +708,7 @@ GROUND_CELLS = 1024  # the DEM read for the ground under what was drawn on the p
 GEOREFERENCE = "the points over the extent of the chunk"  # converted for that similarity, as the warning names them
 # the keys of chunk.meta set_survey_crs writes: what was drawn, the region
 MOVED = ("drawings", "stones", "orthomosaic", "texture", "colour_chart", "region")
+_FLIGHTS = "gps_flights"  # markers.flights.RECORD: written again by every fit, put back after a preview
 
 
 def _finite(value) -> bool:
@@ -1232,10 +1233,10 @@ def _similarity(chunk, old: str, new: str, points: np.ndarray | None) -> dict | 
 def _snapshot(chunk) -> tuple:
     """What :func:`_put` and :func:`set_survey_crs` change on ``chunk``, for :func:`_restore`: its system and
     georeference, the references and positions of its markers, the photos without a system of their own, the keys of
-    :data:`MOVED`."""
+    :data:`MOVED` and the errors per flight the fit keeps (:data:`..markers.flights.RECORD`)."""
     return (chunk.crs, chunk.transform, chunk.transform.copy(), [(m, m.reference, m.position) for m in chunk.markers],
             [cam for cam in chunk.cameras if "reference_crs" not in cam.meta],
-            {key: chunk.meta[key] for key in MOVED if key in chunk.meta})
+            {key: chunk.meta[key] for key in (*MOVED, _FLIGHTS) if key in chunk.meta})
 
 
 def _restore(chunk, state: tuple) -> None:
@@ -1247,7 +1248,7 @@ def _restore(chunk, state: tuple) -> None:
         m.reference, m.position = reference, position
     for cam in unpinned:
         cam.meta.pop("reference_crs", None)
-    for key in MOVED:
+    for key in (*MOVED, _FLIGHTS):
         if key in meta:
             chunk.meta[key] = meta[key]
         else:

@@ -500,8 +500,8 @@ class Chunk:
 
     def align_cameras(self, progress: ProgressCallback | None = None, mapper: str = "auto", reset: bool = True,
                       use_gps: bool | None = None, adaptive_fitting: bool = False, tiepoint_limit: int | None = None,
-                      ba_global_ratio: float | None = None, ba_global_refinements: int | None = None, *,
-                      engine: str | None = None) -> int:
+                      ba_global_ratio: float | None = None, ba_global_refinements: int | None = None,
+                      gps_height_by_flight: bool | None = None, *, engine: str | None = None) -> int:
         """Estimate camera poses and sparse tie points. Returns the number of aligned photos.
         ``mapper``: ``incremental``, ``global`` or ``auto``; ``use_gps`` (None: when the photos
         have them): the GPS positions of the photos hold the block during the incremental
@@ -523,9 +523,13 @@ class Chunk:
 
         A new alignment lives in a new arbitrary frame: the chunk transform is reset and,
         when references exist (>= 3 GCPs or GNSS camera positions, or scale bars), the
-        chunk is georeferenced/scaled again automatically.
+        chunk is georeferenced/scaled again automatically; ``gps_height_by_flight`` (None: the
+        choice of the chunk) is passed to :meth:`update_transform`: one vertical offset per flight of
+        the photos in the fit on their GPS. The alignment itself does not take the offsets: with
+        ``use_gps`` the incremental mapper is still held, with a robust loss, to the raw GPS heights.
         """
         from ..engine import native_map, sfm, switch
+        from ..markers import flights as flights_mod
 
         choice = switch.resolve("align_cameras", engine)
         if choice.requested == "auto" and choice.used == "native" and not native_map.auto_takes(self, mapper):
@@ -548,13 +552,19 @@ class Chunk:
         self.meta["alignment_id"] = uuid.uuid4().hex
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
+        self.meta.pop(flights_mod.RECORD, None)  # offsets per flight of the old frame
         self.forget_precision()
         if any(m.projections for m in self.markers):
             self.triangulate_markers()
         has_refs = (sum(1 for m in self.markers if m.reference.location and m.position is not None) >= 3
                     or sum(1 for c in self.aligned_cameras if c.reference.location) >= 3 or self.scalebars)
         if has_refs:
-            self.update_transform()
+            self.update_transform(gps_height_by_flight=gps_height_by_flight)  # kept when the fit succeeds
+        elif gps_height_by_flight is not None:  # nothing to fit now: the choice kept for the first georeference
+            if gps_height_by_flight:
+                self.meta[flights_mod.OPTION] = True
+            else:
+                self.meta.pop(flights_mod.OPTION, None)
         return n
 
     def optimize_cameras(self, fit_principal_point: bool = False, use_markers: bool = True, marker_weight: int = 4,
@@ -614,6 +624,7 @@ class Chunk:
         self.meta["alignment_id"] = uuid.uuid4().hex
         self.transform = geometry.identity()
         self.meta.pop("levelled", None)
+        self.meta.pop("gps_flights", None)  # the offsets per flight of the frame dropped (markers.flights.RECORD)
         for c in self.cameras:
             c.transform = None
         for m in self.markers:
@@ -794,18 +805,23 @@ class Chunk:
 
         return gcp.export_reference(self, path)
 
-    def update_transform(self, use_cameras: bool | None = None) -> dict:
+    def update_transform(self, use_cameras: bool | None = None, gps_height_by_flight: bool | None = None) -> dict:
         """Georeference (or scale) the chunk from markers, scale bars and camera
         references. With scale bars and no control points the chunk stays in local coordinates
         (an object, a trench) unless the GPS of the photos covers a much larger area than its
-        accuracy; ``use_cameras`` forces the choice. Returns an accuracy report (see
-        :func:`markers.gcp.update_transform`). The free drawings follow the new transform
-        (:func:`core.free_drawings.follow`; not after a new alignment)."""
+        accuracy; ``use_cameras`` forces the choice. ``gps_height_by_flight``: one vertical offset
+        per flight of the photos estimated with the fit on their GPS (a drone that starts its
+        altitude again with every battery); None keeps the choice of the chunk
+        (``meta["gps_height_by_flight"]``, off by default), True or False sets it (see
+        :mod:`markers.flights`). Returns an accuracy report (see
+        :func:`markers.gcp.update_transform`; the errors per flight in ``report["gps_flights"]``).
+        The free drawings follow the new transform (:func:`core.free_drawings.follow`; not after a
+        new alignment)."""
         from ..markers import gcp
         from . import free_drawings
 
         self.forget_precision()
-        report = gcp.update_transform(self, use_cameras=use_cameras)
+        report = gcp.update_transform(self, use_cameras=use_cameras, gps_height_by_flight=gps_height_by_flight)
         free_drawings.follow(self)
         return report
 

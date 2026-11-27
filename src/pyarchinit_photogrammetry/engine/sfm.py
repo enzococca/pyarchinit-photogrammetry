@@ -3865,6 +3865,9 @@ def _follow_internal_frame(chunk: Chunk, frame: dict) -> dict | None:
             free_drawings.based(drawings, chunk.meta.get("alignment_id"), chunk.transform)
         # the rasters in the coordinate system did not move either: those current before are current now
         stamps.rebase(chunk, old, chunk.transform)
+        from ..markers import flights
+
+        flights.rebase(chunk, old, chunk.transform)  # the GPS offsets per flight, likewise
         # the products in the internal frame are no longer in it: marked until rebuilt (Chunk._set_product)
         inside = [name for name in INTERNAL_PRODUCTS if (chunk.products or {}).get(name)]
         out["stale_products"] = inside

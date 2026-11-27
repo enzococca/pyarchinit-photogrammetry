@@ -384,7 +384,12 @@ def camera_reference_errors(chunk) -> dict:
     georeferenced chunk, the estimated centre and ``estimated - reference`` in metres. A
     reference in ITRF2020 converts at its own epoch, one written before the frames as before
     (:func:`_converted`). Nothing of the chunk changes; references that cannot be compared yet
-    (a chunk still in local coordinates) are left out."""
+    (a chunk still in local coordinates) are left out. When the georeference estimated a vertical offset for the
+    flight of a photo (:mod:`.flights`, ``meta["gps_height_by_flight"]``) the entry has ``"offset"`` and the camera is
+    compared with its reference less that offset (``reference`` stays the position as read)."""
+    from .flights import camera_offsets
+
+    shifted = camera_offsets(chunk)
     groups: dict[str, list] = {}
     for cam in chunk.cameras:
         if cam.reference.location:
@@ -398,9 +403,13 @@ def camera_reference_errors(chunk) -> dict:
             locs = _converted(chunk, cams, locs, ref_crs, chunk.crs)
         for cam, loc in zip(cams, locs):
             entry = {"reference": loc}
+            target = loc
+            if cam.key in shifted:
+                entry["offset"] = shifted[cam.key]
+                target = loc - np.array([0.0, 0.0, shifted[cam.key]])
             if cam.aligned and not crs_mod.is_local(chunk.crs):
                 est = np.asarray(chunk.to_world(cam.center), float)
-                entry.update(estimated=est, delta=est - loc, error=float(np.linalg.norm(est - loc)))
+                entry.update(estimated=est, delta=est - target, error=float(np.linalg.norm(est - target)))
             out[cam.key] = entry
     return out
 
@@ -478,9 +487,9 @@ def _metric_crs(chunk, groups: dict[str, list]) -> str | None:
     return projected or projected_crs_for(real[0], groups[real[0]][0].reference.location)
 
 
-def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(internal centres, reference positions in chunk CRS, accuracies) of referenced cameras; a chunk still in
-    local coordinates takes the metric system of the references."""
+def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[int]]:
+    """(internal centres, reference positions in chunk CRS, accuracies, camera keys) of referenced cameras; a chunk
+    still in local coordinates takes the metric system of the references."""
     cams = [cam for cam in chunk.aligned_cameras if cam.reference.enabled and cam.reference.location]
     positions, crs = camera_references(chunk, cams, None if crs_mod.is_local(chunk.crs) else chunk.crs)
     if crs_mod.is_local(chunk.crs) and not crs_mod.is_local(crs):
@@ -488,7 +497,7 @@ def _camera_reference_pairs(chunk) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cams = [cam for cam in cams if cam.key in positions]
     return (np.asarray([cam.center for cam in cams]).reshape(-1, 3),
             np.asarray([positions[cam.key] for cam in cams]).reshape(-1, 3),
-            np.asarray([float(np.mean(cam.reference.accuracy)) for cam in cams]))
+            np.asarray([float(np.mean(cam.reference.accuracy)) for cam in cams]), [cam.key for cam in cams])
 
 
 def preflight(chunk, use_gps: bool | None = None) -> None:
@@ -695,7 +704,7 @@ def _orientation_fit(src, dst, weights, s: float, markers, origin) -> np.ndarray
     return geometry.compose_similarity(s, rot, t)
 
 
-def update_transform(chunk, use_cameras: bool | None = None) -> dict:
+def update_transform(chunk, use_cameras: bool | None = None, gps_height_by_flight: bool | None = None) -> dict:
     """Fit ``chunk.transform`` and return an accuracy report.
 
     Priority: control markers (>= 3) -> camera references (>= 3) -> scale bars
@@ -713,9 +722,43 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
     ``+orientation`` in ``method`` and sets ``meta["levelled"]``. In a real system, or with three or more other
     control markers, they step aside (:func:`orientation_set_aside`): left out of the fit, listed in
     ``orientation_not_used``.
+
+    Flights (:mod:`.flights`): ``gps_height_by_flight`` (None: the choice kept in ``meta["gps_height_by_flight"]``,
+    off by default; True or False is kept there for the next georeferences): when the camera positions place the
+    chunk and their photos make two flights or more, the fit estimates one vertical offset per flight with the
+    similarity (the biggest flight the datum, offset 0; every flight free when control points take part in the fit);
+    when control points place the chunk alone the offsets are measured on the cameras. ``method`` then says
+    ``+flights``; when the flights do not determine the offsets (:func:`.flights.joint_fit`) the plain fit is kept
+    and ``by_flight_failed`` says why. The choice is written only when the fit succeeds. The errors per flight, the
+    offsets and the flights whose height looks off (from the joint model, with the option off too) are in
+    ``report["gps_flights"]`` and ``meta["gps_flights"]``.
+
+    A fit that raises leaves the chunk's record of the last georeference (``meta["gps_flights"]``) as it was.
     """
+    from . import flights as flights_mod
+
+    previous = chunk.meta.get(flights_mod.RECORD)
+    try:
+        return _update_transform(chunk, use_cameras, gps_height_by_flight)
+    except BaseException:
+        if previous is not None:  # the transform did not change: its offsets still belong to it
+            chunk.meta[flights_mod.RECORD] = previous
+        raise
+
+
+def _update_transform(chunk, use_cameras: bool | None, gps_height_by_flight: bool | None) -> dict:
+    """The fit of :func:`update_transform`."""
+    from . import flights as flights_mod
+
     if crs_mod.is_geographic(chunk.crs):
         raise ValueError(f"chunk CRS {chunk.crs} is geographic; use a projected CRS (e.g. the UTM zone)")
+    # the choice is written into the chunk only once the fit succeeded (an error leaves the chunk as it was)
+    by_flight = bool(chunk.meta.get(flights_mod.OPTION) if gps_height_by_flight is None else gps_height_by_flight)
+    chunk.meta.pop(flights_mod.RECORD, None)  # the offsets of an earlier fit do not belong to this one
+    groups = flights_mod.flight_groups(chunk.cameras)
+    offsets: dict[int, float] | None = None
+    datum = None
+    joint: dict | None = None  # the joint fit with the offsets, run for the note also with the option off
     chunk.triangulate_markers()
     aside = orientation_set_aside(chunk)
     ctrl = [m for m in chunk.markers if not m.checkpoint and m.reference.enabled and m.reference.location
@@ -730,8 +773,9 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
             use_cameras = False  # an object, a trench: local coordinates scaled by the bars
     if use_cameras and ctrl and crs_mod.is_local(chunk.crs):
         use_cameras = False  # local marker frame: GNSS camera positions live in another frame
+    ckeys: list[int] = []
     if use_cameras:
-        cs, cd, ca = _camera_reference_pairs(chunk)
+        cs, cd, ca, ckeys = _camera_reference_pairs(chunk)
         src, dst, acc = np.vstack([src, cs]), np.vstack([dst, cd]), np.r_[acc, ca]
     bars = control_scalebars(chunk)
     oriented = [m for m in ctrl if m.orientation]
@@ -739,12 +783,32 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
         d, dist, wb = _bar_observations(chunk, bars)
         w = 1.0 / np.maximum(acc, 1e-6) ** 2
         s = _bar_scale(chunk, bars) if oriented and len(oriented) == len(ctrl) and not use_cameras else None
+        flight = np.r_[np.full(len(ctrl), -1), [groups.get(k, flights_mod.NO_TIME) for k in ckeys]].astype(int)
+        timed = flights_mod.timed_flights(groups, ckeys)
         if s:
             # the orientation markers keep the frame, the bars give the scale: the markers' distances do not
             chunk.transform = _orientation_fit(src, dst, w, s, ctrl, _orientation_origin(chunk))
         else:
-            chunk.transform = similarity_with_bars(src, dst, w, d, dist, wb)
+            plain = similarity_with_bars(src, dst, w, d, dist, wb)
+            if len(timed) >= 2:
+                # one vertical offset per flight solved with the similarity: the biggest flight is the datum, unless
+                # control points take part in the fit and give the heights themselves (every flight free)
+                if not len(ctrl):
+                    sizes = {f: int(np.sum(flight == f)) for f in timed}
+                    datum = max(timed, key=lambda f: (sizes[f], -f))
+                try:
+                    joint = flights_mod.joint_fit(src, dst, w, flight, datum, d, dist, wb)
+                except Exception as exc:  # noqa: BLE001 - the diagnosis never fails a fit the plain one makes
+                    log.warning("GPS offsets per flight not computed: %s", exc)
+                    joint = {"transform": None, "offsets": {}, "condition": float("nan"), "reason": f"error: {exc}"}
+                joint.update(src=src[len(ctrl):], dst=dst[len(ctrl):], flight=flight[len(ctrl):])
+            if by_flight and joint is not None and joint["reason"] is None:
+                chunk.transform, offsets = joint["transform"], joint["offsets"]
+            else:
+                chunk.transform = plain  # the option off: the plain fit, as before the flights
         method = "markers+cameras" if use_cameras and len(ctrl) else ("cameras" if use_cameras else "markers")
+        if offsets is not None:
+            method += "+flights"
         if len(d):
             method += "+scalebars"
         if oriented:
@@ -772,7 +836,13 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
             method = "scalebars"
             if not crs_mod.is_local(chunk.crs):  # a scale alone does not place the chunk in a CRS
                 chunk.crs = crs_mod.LOCAL
+    if gps_height_by_flight is not None:  # the fit succeeded: the choice kept for the next ones
+        if gps_height_by_flight:
+            chunk.meta[flights_mod.OPTION] = True
+        else:
+            chunk.meta.pop(flights_mod.OPTION, None)
     report = {"method": method, "crs": chunk.crs, "markers": marker_errors(chunk),
+              "gps_flights": _flights_record(chunk, method, by_flight, groups, offsets, datum, joint),
               "scalebars": scalebar_errors(chunk), "scale": float(chunk.scale),
               "orientation_not_used": [m.label for m in chunk.markers if aside and m.orientation]}
     for kind in ("control", "check"):
@@ -781,6 +851,51 @@ def update_transform(chunk, use_cameras: bool | None = None) -> dict:
         errs = [e["error"] for e in report["scalebars"] if e["type"] == kind and e["error"] is not None]
         report[f"scalebar_{kind}_rmse"] = float(np.sqrt(np.mean(np.square(errs)))) if errs else None
     return report
+
+
+def _flights_record(chunk, method, by_flight: bool, groups: dict, offsets: dict | None, datum,
+                    joint: dict | None = None) -> dict | None:
+    """The errors of the GPS of the photos per flight after a georeference (:func:`.flights.record`), kept in
+    ``meta["gps_flights"]``: with the offsets the fit estimated; when three or more control points placed the chunk
+    and the option is on, the offsets measured on the cameras against it. The note (``suggest``) comes from the joint
+    model - the offsets of :func:`.flights.joint_fit` (``joint``, run also with the option off) or, with the control
+    points in charge, those measured against them -, never from the residuals of the plain fit, which tilts the block
+    to take up a flight flown on its own strip. ``by_flight_failed``: why the option could not estimate the offsets
+    (the plain fit kept). None (nothing kept) for a chunk not placed in a real system or without aligned cameras
+    with a position."""
+    from . import flights as flights_mod
+
+    if method is None or crs_mod.is_local(chunk.crs) or method.startswith("scalebars"):
+        return None
+    cams = [c for c in chunk.aligned_cameras if c.reference.enabled and c.reference.location]
+    if not cams:
+        return None
+    check = None  # (offsets, transform, src, dst, flight) of the joint model, for the note
+    if joint is not None and joint["reason"] is None:
+        check = (joint["offsets"], joint["transform"], joint["src"], joint["dst"], joint["flight"])
+    elif joint is None and method.startswith("markers"):  # the control points placed the chunk: offsets measured
+        cs, cd, ca, ckeys = _camera_reference_pairs(chunk)
+        if len(flights_mod.timed_flights(groups, ckeys)) >= 2:
+            flight = np.array([groups.get(k, flights_mod.NO_TIME) for k in ckeys], int)
+            measured = flights_mod.offsets_against(chunk.transform, cs, cd, 1.0 / np.maximum(ca, 1e-6) ** 2, flight)
+            check = (measured, chunk.transform, cs, cd, flight)
+            if by_flight:
+                offsets = measured
+    suggest: list[int] = []
+    if check is not None:
+        found, transform, src, dst, flight = check
+        photos = {f: int(np.sum(flight == f)) for f in found}
+        sd_within = flights_mod.residual_sd(transform, src, dst, flight, found)
+        suggest = flights_mod.off_flights(found, photos, sd_within)
+    failed = joint["reason"] if by_flight and joint is not None and joint["reason"] else None
+    # every photo with a position takes the offset of its flight, also one switched off (its error is shown)
+    keys = {c.key: groups.get(c.key, flights_mod.NO_TIME) for c in chunk.cameras if c.reference.location}
+    rec = flights_mod.record(chunk, by_flight, datum if offsets else None, offsets or {}, keys)
+    rec["suggest"] = suggest
+    rec["measured"] = bool(offsets) and joint is None  # offsets measured against control points, not estimated
+    if failed:
+        rec["by_flight_failed"] = failed
+    return rec
 
 
 def marker_errors(chunk) -> list[dict]:

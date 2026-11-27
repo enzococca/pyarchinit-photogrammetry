@@ -23,14 +23,14 @@ longer explanations follow the table.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | the raw files of the photos developed again: missing copies, raws that changed, other settings; returns `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | markers `target <code>` with their projections |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | keypoints and matches, with the choices of Metashape's *Align Photos* (*Pairs*, below); SIFT or learned points (*Learned points*, below); the classic or the native engine (*The native matching*, below) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below) or by the global mapper of the native engine (*The native alignment*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, gps_height_by_flight=None, engine=None)` | the photos placed, by the global, the incremental or the hierarchical mapper (*Mappers*, below) or by the global mapper of the native engine (*The native alignment*, below), held to the GPS of the photos; the transform is reset and the georeference made again when references exist (`gps_height_by_flight`: as in `update_transform`) |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | bundle adjustment of poses, calibration and tie points, on the control points and scale bars when there are any, else held by the accurate GNSS positions of the photos (*Camera optimisation*, below); `engine="auto"` (the default, as for the other steps) is COLMAP's formulation for now (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` our own; each group of the intrinsics of a camera is refined only where the block determines it (`hold_undetermined`); returns the reprojection error (px) |
 | `import_reference(csv, crs, columns="nxyz")` | references of markers and cameras from a text file: `n` label, `x y z`, `a` accuracy, `-` skip |
 | `export_reference(csv)` | the references to a text file |
 | `add_marker(...)`, `add_marker_projection(...)` | markers by hand (how they are placed: *Scale bars*) |
 | `add_scalebar(marker_a, marker_b, distance)` | a scale bar between two markers (*Scale bars*) |
 | `triangulate_markers()` | the markers placed from their projections (two photos or more), or on the surface from one |
-| `update_transform(use_cameras=None)` | the similarity onto the references (weighted, 7 parameters); returns the control and check RMSE and the error of every marker and bar |
+| `update_transform(use_cameras=None, gps_height_by_flight=None)` | the similarity onto the references (weighted, 7 parameters); returns the control and check RMSE, the error of every marker and bar and the GPS error per flight (*GPS height by flight*, below) |
 | `build_depth_maps(quality, filter_mode, backend)` | depth maps; backends `auto`, `cpu`, `patchmatch`, `colmap`, `openmvs` |
 | `build_point_cloud()` | the dense cloud from the depth maps |
 | `build_model(source, surface, face_count, voxel_size, vertex_colors, classes, fill_holes)` | the mesh from `point_cloud`, `tie_points` or `depth_maps` (*Mesh from depth maps* and *Height field*, below) |
@@ -45,6 +45,63 @@ longer explanations follow the table.
 | `export_tables(path, language=None)` | every table of the chunk in an Excel workbook (*Reports and tables*) |
 
 Every processing method accepts `progress=callback(fraction, message)`.
+
+### GPS height by flight
+
+A drone without RTK flown on several batteries can carry a different height error on each flight: a DJI drone
+starts its relative altitude again with every battery, so a whole flight sits metres above or below the others
+while its horizontal positions agree. The alignment places the photos by what they see; the georeference on the
+GPS of the photos then meets flights that disagree in height, and the camera error grows by metres.
+
+The photos are grouped into flights by the time they were taken (`markers.flights.flight_groups`): in time order,
+a new flight after a pause of more than 90 s between two photos, whatever the camera; the photos without a time are
+one group (number 0, "no time"). This is not the grouping of the GNSS quality table and of the bias per flight of
+our own adjustment (`gnss="bias"`), which start a new GNSS session after 20 minutes, per sensor: with battery swaps
+a few minutes apart the Reference pane shows three flights where the GNSS table shows one.
+
+After every georeference on the photo positions `update_transform` returns, and keeps in
+`chunk.meta["gps_flights"]`, the error per flight: `flights` with `flight`, `photos`, `start`, `mean` (dX, dY, dZ,
+estimated minus reference), `sd`, `rmse` and `offset`. With two flights or more the offsets are always estimated
+on the joint model below, also with the option off (its transform is then thrown away and the fit is the plain one,
+bit for bit), and `suggest` lists the flights whose offset differs from the level of most flights (the median of
+the offsets, one vote per flight, not the datum: the biggest flight may be the one off) by more than both 3 times
+the scatter of the heights within a flight and 1 m; an error of that diagnosis never fails the georeference. The
+report, the Reference pane and the log say it and suggest the option. The note never
+comes from the residuals of the plain fit, which tilts the block to take up a flight flown on its own strip.
+
+`gps_height_by_flight=True` (also `ppg align --gps-height-by-flight` and `ppg reference --gps-height-by-flight`;
+kept in `chunk.meta["gps_height_by_flight"]` once the fit succeeds, `False` switches it off) applies the offsets:
+
+* GPS only: one vertical offset per flight solved together with the similarity (Gauss-Newton on scale, rotation,
+  translation and offsets at once, `markers.flights.joint_fit`). The biggest flight is the datum (offset 0): the
+  heights are those of the main flight, its own GPS bias included (absolute heights need control points anyway);
+  the photos without a time are never shifted. `method` says `cameras+flights`.
+* 1-2 control points with the GPS: no datum, every flight free, the control points give the heights
+  (`markers+cameras+flights`).
+* 3 or more control points: they place the chunk as before; the offset of every flight is only measured on the
+  cameras (`meta["gps_flights"]["measured"]`), reported and used for the camera errors.
+
+The offsets must be determined: some group of photos sharing one height (a flight, the datum, the photos never
+shifted) has to span an area in plan, and the condition number of the joint normal matrix scaled to unit diagonal
+must stay under 1000 (flights over the whole site give about 10, one strip per battery about 90; one line per
+battery with the lines parallel is a tilt about the lines that looks exactly like the offsets). Otherwise the plain
+fit is kept, `method` stays `cameras` and `meta["gps_flights"]["by_flight_failed"]` says why ("not determined:
+..."); the report, the pane and the log say "offsets not determined". One flight: no offsets.
+
+The offset is how far the GPS heights of a flight sit above where the fit puts its photos; the camera errors
+(`markers.gcp.camera_reference_errors`, with `"offset"`, also a column of the Reference pane and of the camera
+table of the workbook) are measured against the reference less the offset. The record carries the transform it
+was fitted in: a transform set elsewhere (ties, alignment of chunks, a hand orientation) drops it, and its offsets
+are no longer applied; an optimisation whose georeference follows its internal frame (the cameras did not move in
+the CRS) re-stamps it, and a georeference that fails leaves it as it was. The offsets reach the georeference only: with `use_gps` the incremental alignment is still
+held, with a robust loss, to the raw GPS heights (a flight 13 m off can bend it a little), and the GNSS positions
+that hold an optimisation are only the accurate ones (RTK, PPK).
+
+```python
+report = chunk.update_transform(gps_height_by_flight=True)
+for f in report["gps_flights"]["flights"]:
+    print(f["flight"], f["photos"], f["mean"][2], f["offset"])
+```
 
 ### Camera raw files
 
@@ -2696,6 +2753,7 @@ assistant ("limited for scripts" under 2).
 | Module | Main functions |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
+| `markers.flights` | `flight_groups`, `joint_fit`, `flight_errors`, `off_flights`, `current`, `summary_lines`, `GAP_S`, `OPTION`, `RECORD` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
 | `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |

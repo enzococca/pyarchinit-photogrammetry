@@ -897,6 +897,7 @@ def apply(chunk, m, move_aligned: bool = True, notify: bool = True, dry_run: boo
             for key, n in counts.items():
                 moved[key] = moved.get(key, 0) + n
             ch.transform = m @ np.asarray(ch.transform, float)
+            ch.meta.pop("gps_flights", None)  # GPS offsets per flight of the old transform (markers.flights)
             ch.meta["levelled"] = True
             if s == 1.0 or np.isclose(s, 1.0, rtol=stamps.STAMP_RTOL, atol=0.0):
                 ids = {e.get("id") for e in current}

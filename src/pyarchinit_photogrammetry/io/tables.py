@@ -256,6 +256,7 @@ TEXT: dict[str, tuple[str, str]] = {  # key: (Italian, English)
     "dy": ("dY (m)", "dY (m)"),
     "dz": ("dZ (m)", "dZ (m)"),
     "error_m": ("Errore (m)", "Error (m)"),
+    "height_offset": ("Offset di quota del volo (m)", "Height offset (m)"),
     "error_px": ("Errore (px)", "Error (px)"),
     "tie_points": ("Punti di legame", "Tie points"),
     "sx": ("Precisione X (m)", "Precision X (m)"),
@@ -456,11 +457,12 @@ def _cameras(chunk, h: Labels, align: dict) -> Sheet | None:
         tie = per_image.get(names.get(str(cam.key))) if names else None
         rows.append([cam.label, bool(cam.enabled), bool(cam.aligned), chunk.sensors[cam.sensor_key].label
                      if cam.sensor_key in chunk.sensors else cam.sensor_key,
-                     *est, *opk, *ref, *acc, *delta, entry.get("error"), tie, *prec, cam.path])
+                     *est, *opk, *ref, *acc, *delta, entry.get("error"), entry.get("offset"), tie, *prec, cam.path])
     headers = [h("label"), h("enabled"), h("aligned"), h("sensor"), h("x_est"), h("y_est"), h("z_est"), h("omega"),
                h("phi"), h("kappa"), h("x_ref"), h("y_ref"), h("z_ref"), h("acc_x"), h("acc_y"), h("acc_z"), h("dx"),
-               h("dy"), h("dz"), h("error_m"), h("tie_points"), h("sx"), h("sy"), h("sz"), h("file")]
-    dec = [None] * 4 + [3, 3, 3, 5, 5, 5, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 0, 4, 4, 4, None]
+               h("dy"), h("dz"), h("error_m"), h("height_offset"), h("tie_points"), h("sx"), h("sy"), h("sz"),
+               h("file")]
+    dec = [None] * 4 + [3, 3, 3, 5, 5, 5, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 3, 0, 4, 4, 4, None]
     return Sheet(headers, rows, dec)
 
 

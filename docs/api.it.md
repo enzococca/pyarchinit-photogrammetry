@@ -23,14 +23,14 @@ spiegazioni più lunghe seguono la tabella.
 | `develop_raw_photos(raw=None, cameras=None, force=False)` | i file raw delle foto sviluppati di nuovo: copie mancanti, raw cambiati, altre impostazioni; restituisce `{"developed", "missing"}` |
 | `detect_markers(target_type="aruco_4x4_50")` | marker `target <codice>` con le loro proiezioni |
 | `match_photos(quality, keypoint_limit, tiepoint_limit, generic=None, reference=None, apply_masks="keypoints", guided_matching=False, exclude_stationary=False, reset=True, gpu=None, matcher="sift", engine=None)` | punti chiave e corrispondenze, con le scelte di *Allinea foto* di Metashape (*Coppie*, sotto); SIFT o punti appresi (*Punti appresi*, sotto); il motore classico o quello nativo (*Il matching nativo*, sotto) |
-| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, engine=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto) o dal mapper globale del motore nativo (*L'allineamento nativo*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti |
+| `align_cameras(mapper="auto", use_gps=None, adaptive_fitting=False, reset=True, tiepoint_limit=None, ba_global_ratio=None, ba_global_refinements=None, gps_height_by_flight=None, engine=None)` | le foto collocate, dal mapper globale, da quello incrementale o da quello gerarchico (*Mapper*, sotto) o dal mapper globale del motore nativo (*L'allineamento nativo*, sotto), tenute al GPS delle foto; la trasformazione viene azzerata e la georeferenziazione rifatta quando ci sono riferimenti (`gps_height_by_flight`: come in `update_transform`) |
 | `optimize_cameras(fit_principal_point=False, use_markers=True, marker_weight=4, gnss="auto", engine="auto", hold_undetermined=True)` | compensazione di pose, calibrazione e punti di legame, sui punti di controllo e sulle barre di scala quando ce ne sono, altrimenti tenuta dalle posizioni GNSS accurate delle foto (*Ottimizzazione delle camere*, sotto); `engine="auto"` (il predefinito, come per gli altri passi) è per ora la formulazione di COLMAP (`engine.sfm.OPTIMIZE_AUTO_ENGINE`), `"ppg"` la nostra; ogni gruppo di intrinseci di una camera viene rifinito solo dove il blocco lo determina (`hold_undetermined`); restituisce l'errore di riproiezione (px) |
 | `import_reference(csv, crs, columns="nxyz")` | riferimenti di marker e camere da un file di testo: `n` etichetta, `x y z`, `a` accuratezza, `-` salta |
 | `export_reference(csv)` | i riferimenti in un file di testo |
 | `add_marker(...)`, `add_marker_projection(...)` | marker a mano (come vengono collocati: *Barre di scala*) |
 | `add_scalebar(marker_a, marker_b, distance)` | una barra di scala tra due marker (*Barre di scala*) |
 | `triangulate_markers()` | i marker collocati dalle loro proiezioni (due foto o più), o sulla superficie da una sola |
-| `update_transform(use_cameras=None)` | la similarità sui riferimenti (pesata, 7 parametri); restituisce l'RMSE di controllo e di verifica e l'errore di ogni marker e di ogni barra |
+| `update_transform(use_cameras=None, gps_height_by_flight=None)` | la similarità sui riferimenti (pesata, 7 parametri); restituisce l'RMSE di controllo e di verifica, l'errore di ogni marker e di ogni barra e l'errore del GPS per volo (*Quota GPS per volo*, sotto) |
 | `build_depth_maps(quality, filter_mode, backend)` | mappe di profondità; backend `auto`, `cpu`, `patchmatch`, `colmap`, `openmvs` |
 | `build_point_cloud()` | la nuvola densa dalle mappe di profondità |
 | `build_model(source, surface, face_count, voxel_size, vertex_colors, classes, fill_holes)` | la mesh da `point_cloud`, `tie_points` o `depth_maps` (*Mesh dalle mappe di profondità* e *Campo di altezze*, sotto) |
@@ -45,6 +45,66 @@ spiegazioni più lunghe seguono la tabella.
 | `export_tables(path, language=None)` | tutte le tabelle del chunk in un file Excel (*Rapporti e tabelle*) |
 
 Ogni metodo di elaborazione accetta `progress=callback(fraction, message)`.
+
+### Quota GPS per volo
+
+Un drone senza RTK che vola con più batterie può avere un errore di quota diverso in ogni volo: un drone DJI
+riparte con la quota relativa a ogni batteria, così un volo intero sta metri sopra o sotto gli altri mentre le sue
+posizioni in pianta tornano. L'allineamento colloca le foto per quello che vedono; la georeferenziazione sul GPS
+delle foto trova poi voli che non concordano in quota, e l'errore delle camere cresce di metri.
+
+Le foto sono divise in voli secondo l'ora di scatto (`markers.flights.flight_groups`): in ordine di tempo, un
+nuovo volo dopo una pausa di oltre 90 s tra due foto, qualunque sia la camera; le foto senza ora sono un gruppo a
+sé (numero 0, "senza ora"). Non è la divisione della tabella di qualità GNSS e del bias per volo della nostra
+compensazione (`gnss="bias"`), che aprono una nuova sessione GNSS dopo 20 minuti, per sensore: con cambi di
+batteria a pochi minuti di distanza il pannello Riferimenti mostra tre voli dove la tabella GNSS ne mostra uno.
+
+Dopo ogni georeferenziazione sulle posizioni delle foto `update_transform` restituisce, e tiene in
+`chunk.meta["gps_flights"]`, l'errore per volo: `flights` con `flight`, `photos`, `start`, `mean` (dX, dY, dZ,
+stimata meno riferimento), `sd`, `rmse` e `offset`. Con due voli o più gli offset sono sempre stimati sul modello
+congiunto qui sotto, anche con l'opzione spenta (la sua trasformazione viene allora scartata e il fit è quello
+semplice, identico bit per bit), e `suggest` elenca i voli il cui offset si scosta dal livello della maggior parte
+dei voli (la mediana degli offset, un voto per volo, non il volo di riferimento: il volo più grande può essere quello
+spostato) di più sia di 3 volte la dispersione delle quote dentro un volo sia di 1 m; un errore di questa diagnosi
+non fa mai fallire la georeferenziazione. Lo dicono il report, il pannello Riferimenti e il log, suggerendo l'opzione. La nota
+non viene mai dai residui del fit semplice, che inclina il blocco per assorbire un volo fatto su una sua striscia.
+
+`gps_height_by_flight=True` (anche `ppg align --gps-height-by-flight` e `ppg reference --gps-height-by-flight`;
+tenuto in `chunk.meta["gps_height_by_flight"]` quando il fit riesce, `False` lo spegne) applica gli offset:
+
+* solo GPS: un offset verticale per volo risolto insieme alla similarità (Gauss-Newton su scala, rotazione,
+  traslazione e offset insieme, `markers.flights.joint_fit`). Il volo più grande fa da riferimento (offset 0): le
+  quote sono quelle del volo principale, con il suo errore GPS (le quote assolute richiedono comunque punti di
+  controllo); le foto senza ora non vengono mai spostate. `method` dice `cameras+flights`.
+* 1-2 punti di controllo con il GPS: nessun volo di riferimento, ogni volo libero, le quote le danno i punti di
+  controllo (`markers+cameras+flights`).
+* 3 o più punti di controllo: collocano il chunk come prima; l'offset di ogni volo è solo misurato sulle camere
+  (`meta["gps_flights"]["measured"]`), riportato e usato per gli errori delle camere.
+
+Gli offset devono essere determinati: un gruppo di foto con la stessa quota (un volo, quello di riferimento, le
+foto mai spostate) deve coprire un'area in pianta, e il numero di condizione della matrice normale congiunta
+scalata a diagonale unitaria deve restare sotto 1000 (voli su tutto il sito danno circa 10, una striscia per
+batteria circa 90; una linea per batteria con le linee parallele è un'inclinazione attorno alle linee identica agli
+offset). Altrimenti resta il fit semplice, `method` resta `cameras` e `meta["gps_flights"]["by_flight_failed"]`
+dice perché ("not determined: ..."); il report, il pannello e il log dicono "offset non determinati". Un volo
+solo: nessun offset.
+
+L'offset è di quanto le quote GPS di un volo stanno sopra il punto in cui il fit mette le sue foto; gli errori delle
+camere (`markers.gcp.camera_reference_errors`, con `"offset"`, anche una colonna del pannello Riferimenti e della
+tabella delle camere della cartella Excel) sono misurati sul riferimento meno l'offset. Il record porta la
+trasformazione su cui è stato calcolato: una trasformazione cambiata altrove (legami, allineamento dei chunk,
+orientamento a mano) lo fa cadere, e i suoi offset non si applicano più; un'ottimizzazione la cui
+georeferenziazione segue il suo sistema interno (le camere non si sono mosse nel sistema di riferimento) lo
+aggiorna, e una georeferenziazione che fallisce lo lascia com'era. Gli offset arrivano solo alla
+georeferenziazione: con `use_gps` l'allineamento incrementale resta tenuto, con una perdita robusta, alle quote GPS
+grezze (un volo spostato di 13 m può piegarlo un po'), e le posizioni GNSS che tengono un'ottimizzazione sono solo
+quelle accurate (RTK, PPK).
+
+```python
+report = chunk.update_transform(gps_height_by_flight=True)
+for f in report["gps_flights"]["flights"]:
+    print(f["flight"], f["photos"], f["mean"][2], f["offset"])
+```
 
 ### File raw delle fotocamere
 
@@ -2782,6 +2842,7 @@ mostrata nelle impostazioni dell'assistente ("limitato per gli script" sotto 2).
 | Modulo | Funzioni principali |
 | --- | --- |
 | `markers.targets` | `generate_sheet`, `generate_turntable_mat`, `turntable_layout`, `generate_scale_bar`, `scale_bar_codes`, `detect` |
+| `markers.flights` | `flight_groups`, `joint_fit`, `flight_errors`, `off_flights`, `current`, `summary_lines`, `GAP_S`, `OPTION`, `RECORD` |
 | `markers.gcp` | `import_reference`, `export_reference`, `triangulate_markers`, `update_transform`, `similarity_with_bars`, `marker_errors`, `scalebar_errors`, `import_scalebars`, `resolve_marker`, `cameras_span_their_accuracy`, `orientation_set_aside` |
 | `engine.chunks` | `align_chunks`, `cloud_distances`, `DistanceSurface`, `preview_points`, `shown_in`, `merge_chunks`, `duplicate_chunk`, `cameras_in_area`, `common_markers`, `common_cameras`, `pose_similarity`, `icp`, `global_guesses`, `ransac_rigid`, `registration_quality` |
 | `archaeo.sections` | `section`, `sections_along`, `plan_slice`, `Section.to_dxf/to_svg`, `drawing_scale`, `grid_step` |

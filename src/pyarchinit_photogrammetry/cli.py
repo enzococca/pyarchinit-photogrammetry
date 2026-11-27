@@ -1587,6 +1587,11 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
           gps: Optional[bool] = typer.Option(None, "--gps/--no-gps",
                                              help="the GPS positions of the photos hold the block during the "
                                                   "incremental alignment (default: when they exist)"),
+          gps_height_by_flight: Optional[bool] = typer.Option(
+              None, "--gps-height-by-flight/--no-gps-height-by-flight",
+              help="the georeference on the GPS of the photos estimates one vertical offset per flight (photos more "
+                   "than 90 s apart start a new flight; a drone that starts its altitude again with every battery); "
+                   "kept in the project (default: the choice of the chunk, off)"),
           keep: bool = typer.Option(False, help="keep the current alignment and add the photos not yet in it"),
           mapper: str = typer.Option("auto", help="auto, incremental (one photo after the other), global (all at "
                                                   "once, much faster with many photos) or hierarchical (clusters of "
@@ -1619,10 +1624,21 @@ def align(project: Path, quality: str = typer.Option("high", help="the accuracy:
                     apply_masks=masks, guided_matching=guided, exclude_stationary=stationary, reset=not keep,
                     gpu=gpu, matcher=matcher, progress=print_progress, engine=engine)
     n = ch.align_cameras(progress=print_progress, mapper=mapper, reset=not keep, use_gps=gps, adaptive_fitting=adaptive,
-                         ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements, engine=engine)
+                         ba_global_ratio=ba_ratio, ba_global_refinements=ba_refinements, engine=engine,
+                         gps_height_by_flight=gps_height_by_flight)
     doc.save()
     typer.echo(f"aligned {n}/{len(ch.cameras)} photos")
+    _say_flights(ch)
     _say_stale_ends(doc)
+
+
+def _say_flights(ch) -> None:
+    """The error of the GPS of the photos per flight after a georeference, with the offsets and the note on a flight
+    whose height is off (:mod:`.markers.flights`); nothing with a single group of photos."""
+    from .markers import flights
+
+    for line in flights.summary_lines(ch.meta.get(flights.RECORD)):
+        typer.echo(line)
 
 
 def _say_stale_ends(doc) -> None:
@@ -1838,14 +1854,19 @@ def scalebar(project: Path,
 
 @app.command()
 def reference(project: Path, csv_file: Path, crs: Optional[str] = None, columns: str = "nxyz",
-              delimiter: Optional[str] = None, skip_rows: int = 0, chunk: Optional[str] = None):
+              delimiter: Optional[str] = None, skip_rows: int = 0, chunk: Optional[str] = None,
+              gps_height_by_flight: Optional[bool] = typer.Option(
+                  None, "--gps-height-by-flight/--no-gps-height-by-flight",
+                  help="one vertical offset per flight of the photos in the fit on their GPS (with control points "
+                       "they only measure it); kept in the project (default: the choice of the chunk, off)")):
     """Import marker coordinates (GCP) and georeference the chunk."""
     doc, ch = _open(project, chunk)
     n = ch.import_reference(csv_file, crs=crs, columns=columns, delimiter=delimiter, skip_rows=skip_rows)
-    report = ch.update_transform()
+    report = ch.update_transform(gps_height_by_flight=gps_height_by_flight)
     doc.save()
     typer.echo(f"{n} reference points, method {report['method']}, CRS {report['crs']}, "
                f"control RMSE {report['control_rmse']}, check RMSE {report['check_rmse']}")
+    _say_flights(ch)
 
 
 SKIP_HELP = "leave out the photos that cannot be read (e.g. kept online only by Dropbox) instead of stopping"
