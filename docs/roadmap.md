@@ -296,13 +296,17 @@ on the public WorldView-3 datasets.
   step is chosen by `auto` only after it passes a measured gate against 1.10; the classic engine (pycolmap,
   Open3D) stays behind it through 2.x. With it: no names of people on a published site, the binaries stated
   GPL-3.0-or-later.
-* **2.1.0 - Unit records and unit volumes on the published site** (built, in review): the record of a stratigraphic
+* **2.1.0 - Unit records and unit volumes on the published site** (done, released as 2.1.0): the record of a stratigraphic
   unit from PyArchInit opened with a click on its polygon, its outline on an elevation or its volume in 3D, its
   relations as buttons; the volumes of the units (the proxies, also those modelled in Blender with the blender-em
   plugin) in the 3D view of the site, grouped by a plugin through site hook 3. A snapshot taken at build time, off
   unless asked for (box **Unit records from PyArchInit**, `ppg web build --pyarchinit`); names of people only with their
-  own box ([unit records and volumes](gui/web-publish.md#unit-records-and-volumes)).
-* **Walls traced on the plan** (built, waiting for a check on a real wall): the elevation of a wall that turns
+  own box ([unit records and volumes](gui/web-publish.md#unit-records-and-volumes)). With it: the GPS error
+  flight by flight and one height offset per flight, the radial terms of flat blocks judged along their valley, a
+  focal the block does not determine taken to the lens on every system, automatic wall tracing beside other
+  structures.
+* **Walls traced on the plan** (done, released in 2.0.0; checked on four walls of a real site, automatic tracing
+  improved in 2.1.0): the elevation of a wall that turns
   corners or curves, its line clicked or followed on the plan and snapped onto the face, unrolled round its corners;
   the same wall in several campaigns on one grid, the comparison sheet, the composite of the campaigns, the finishing
   for a publication, backlit photos left out ([a wall traced on the plan](gui/processing.md#a-wall-traced-on-the-plan)).

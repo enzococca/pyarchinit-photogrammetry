@@ -303,13 +303,17 @@ dataset pubblici WorldView-3.
   il GPS delle foto. `auto` sceglie un passo nativo solo dopo che ha superato una soglia misurata rispetto alla
   1.10; il motore classico (pycolmap, Open3D) resta dietro per tutta la 2.x. Con lei: nessun nome di persona in un
   sito pubblicato, i binari dichiarati GPL-3.0-or-later.
-* **2.1.0 - Schede e volumi delle US nel sito pubblicato** (fatto, in revisione): la scheda di una unità
+* **2.1.0 - Schede e volumi delle US nel sito pubblicato** (fatto, pubblicato nella 2.1.0): la scheda di una unità
   stratigrafica di PyArchInit aperta con un clic sul suo poligono, sul suo contorno in un prospetto o sul suo volume
   in 3D, con i rapporti come pulsanti; i volumi delle US (i proxy, anche quelli modellati in Blender con il plugin
   blender-em) nella vista 3D del sito, raggruppati da un plugin con l'aggancio al sito 3. Una fotografia presa alla
   costruzione, spenta se non la si chiede (casella *Schede US da PyArchInit*, `ppg web build --pyarchinit`); i nomi
   delle persone solo con la loro casella ([schede e volumi delle US](gui/web-publish.it.md#schede-e-volumi-delle-us)).
-* **Muri tracciati in pianta** (fatto, in attesa di una verifica su un muro vero): il prospetto di un muro che gira
+  Con essa: l'errore GPS volo per volo e uno scarto di quota per volo, i termini radiali dei blocchi piatti giudicati
+  lungo la loro valle, una focale che il blocco non determina portata su quella dell'obiettivo su ogni sistema, il
+  tracciamento automatico dei muri accanto ad altre strutture.
+* **Muri tracciati in pianta** (fatto, pubblicato nella 2.0.0; verificato su quattro muri di un sito vero, tracciamento
+  automatico migliorato nella 2.1.0): il prospetto di un muro che gira
   gli spigoli o curva, la sua linea cliccata o seguita sulla pianta e agganciata alla faccia, disteso girando gli
   spigoli; lo stesso muro in più campagne su una griglia sola, la scheda di confronto, il composito delle campagne, la
   finitura per una pubblicazione, le foto in controluce lasciate fuori
